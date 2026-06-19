@@ -187,6 +187,7 @@ import type {
   ClusterMember,
   WatchdogRegistrySnapshot,
 } from "./signature-cluster.js";
+import { partitionByAdmission } from "./standing-plan-admission.js";
 import {
   type IgnoredSetupInstructionCollision,
   type SupervisionFinding,
@@ -824,6 +825,22 @@ export interface OrchestratorCoreOptions {
   planDrivenDispatch?: (
     input: PlanDrivenDispatchInput,
   ) => Promise<PlanDrivenDispatchDecision>;
+  /**
+   * No-ambient-control-surfaces admission guardrail (SYMPH-794). When wired
+   * (the operator opted in via queueTriage.admissionGuardrail.enabled), returns
+   * the issue identifiers an operator has EXPLICITLY admitted — the members of
+   * current-revision batches carrying an honored `approve` decision. The dispatch
+   * loop then HOLDS any candidate that is neither explicitly admitted nor in the
+   * plan-released set this tick, so a bare Linear `project` field alone never
+   * arms dispatch. Returns `null` when the guardrail is disabled this tick
+   * (inert — the runtime-host owns that policy, read dynamically from config so a
+   * live config flip takes effect), so an absent hook OR a null result is
+   * zero-diff. The read is disk-only (no model call); a thrown error fails CLOSED
+   * (admits nothing this tick) — an ENABLED guardrail must never fall open.
+   */
+  resolveAdmittedIdentifiers?: (input: {
+    candidates: readonly Issue[];
+  }) => Promise<ReadonlySet<string> | null>;
 }
 
 export interface PlanDrivenDispatchInput {
@@ -843,6 +860,7 @@ export class OrchestratorCore {
   private readonly spawnWorker: OrchestratorCoreOptions["spawnWorker"];
 
   private readonly planDrivenDispatch?: OrchestratorCoreOptions["planDrivenDispatch"];
+  private readonly resolveAdmittedIdentifiers?: OrchestratorCoreOptions["resolveAdmittedIdentifiers"];
   private readonly onIssueDropped?: OrchestratorCoreOptions["onIssueDropped"];
 
   private readonly stopRunningIssue?: OrchestratorCoreOptions["stopRunningIssue"];
@@ -1057,6 +1075,7 @@ export class OrchestratorCore {
     this.tracker = options.tracker;
     this.spawnWorker = options.spawnWorker;
     this.planDrivenDispatch = options.planDrivenDispatch;
+    this.resolveAdmittedIdentifiers = options.resolveAdmittedIdentifiers;
     this.onIssueDropped = options.onIssueDropped;
     this.stopRunningIssue = options.stopRunningIssue;
     this.runEnsembleGate = options.runEnsembleGate;
@@ -2802,6 +2821,11 @@ export class OrchestratorCore {
     // hot path. With no hook (the default) or a "degrade" decision, the
     // comparator order is used verbatim (graceful degradation / zero-diff).
     let dispatchList: readonly Issue[] = sortedIssues;
+    // Whether a fresh plan drove dispatch this tick. When true, `dispatchList`
+    // IS the plan-released set, so every member is admitted by release; when
+    // false (degrade / no hook), `dispatchList` is the full comparator frontier
+    // and the SYMPH-794 guardrail (below) must fall back to explicit approvals.
+    let planDroveThisTick = false;
     if (this.planDrivenDispatch !== undefined) {
       // The plan may only REORDER/SUBSET the comparator-eligible frontier — it
       // resolves identifiers from `sortedIssues` (post dispatch-fence,
@@ -2825,10 +2849,55 @@ export class OrchestratorCore {
           dispatchList = decision.orderedIssueIdentifiers
             .map((identifier) => eligibleByIdentifier.get(identifier))
             .filter((candidate): candidate is Issue => candidate !== undefined);
+          planDroveThisTick = true;
         }
       } catch {
         // Degrade to the comparator order already in `dispatchList`.
         dispatchList = sortedIssues;
+        planDroveThisTick = false;
+      }
+    }
+    // No-ambient-control-surfaces admission guardrail (SYMPH-794). When the
+    // operator has opted in (the hook is wired), an issue may dispatch ONLY via
+    // an explicit journaled admit signal: the plan-released set this tick, or a
+    // current-revision honored `approve` decision. A bare Linear `project` field
+    // alone never admits. Held candidates are journaled (gate verdict) and not
+    // dispatched. Fails CLOSED — a store error admits nothing this tick rather
+    // than falling open to bare-project dispatch.
+    if (this.resolveAdmittedIdentifiers !== undefined) {
+      let explicitlyAdmitted: ReadonlySet<string> | null;
+      try {
+        explicitlyAdmitted = await this.resolveAdmittedIdentifiers({
+          candidates: dispatchList,
+        });
+      } catch {
+        // An ENABLED guardrail that errors fails CLOSED — admit nothing this
+        // tick rather than fall open to bare-project dispatch. (A DISABLED
+        // guardrail returns null below without throwing.)
+        explicitlyAdmitted = new Set<string>();
+      }
+      // null ⇒ guardrail disabled this tick ⇒ inert (zero-diff). Otherwise:
+      // when the plan drove, every member of `dispatchList` is admitted by
+      // release; otherwise only the explicitly-approved identifiers are.
+      if (explicitlyAdmitted !== null) {
+        const admitted = planDroveThisTick
+          ? new Set<string>([
+              ...dispatchList.map((issue) => issue.identifier),
+              ...explicitlyAdmitted,
+            ])
+          : explicitlyAdmitted;
+        const { admit, held } = partitionByAdmission(dispatchList, admitted);
+        for (const heldIssue of held) {
+          this.recordDispatchVerdict({
+            issueId: heldIssue.id,
+            issueIdentifier: heldIssue.identifier,
+            disposition: "gate",
+            reasonCode: "admit_signal_required",
+            remedy:
+              "Release this issue's batch via the standing-plan control surface (operator approval), or disable queue_triage.admission_guardrail.",
+          });
+        }
+        dispatchList = admit;
       }
     }
     for (const issue of dispatchList) {

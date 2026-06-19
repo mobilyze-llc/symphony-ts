@@ -239,6 +239,7 @@ describe("decidePlanDrivenDispatch (hot-path composition)", () => {
       heartbeatMs: 900_000,
       autoReleaseFrontier: 1,
       controlDoc: { enabled: false, teamId: null },
+      admissionGuardrail: { enabled: false },
       envelope: ENVELOPE,
       ...over,
     };

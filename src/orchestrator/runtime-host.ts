@@ -239,6 +239,7 @@ import {
   type ClusterMember,
   formatWatchdogTicketBody,
 } from "./signature-cluster.js";
+import { approvedAdmittedIdentifiers } from "./standing-plan-admission.js";
 import { decidePlanDrivenDispatch } from "./standing-plan-consumer.js";
 import {
   ingestControlDocComments,
@@ -782,6 +783,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         await this.persistDispatcherRunJournalEntry(entry);
       },
       planDrivenDispatch: (input) => this.computePlanDrivenDispatch(input),
+      resolveAdmittedIdentifiers: () => this.computeAdmittedIdentifiers(),
       runContinuousFeedback,
       ...(this.tracker instanceof LinearTrackerClient
         ? {
@@ -3543,6 +3545,36 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         { outcome: "degraded", detail: toErrorMessage(error) },
       );
       return { mode: "degrade" };
+    }
+  }
+
+  /**
+   * No-ambient-control-surfaces admission guardrail (SYMPH-794). Returns the
+   * issue identifiers an operator has EXPLICITLY admitted — the members of
+   * current-revision batches carrying an honored `approve` decision — or null
+   * when the guardrail is disabled (inert; zero-diff). The store reads are
+   * disk-only (no model call); on a read error this fails CLOSED (returns an
+   * empty set → the dispatch loop holds everything this tick) rather than
+   * falling open to bare-project dispatch.
+   */
+  private async computeAdmittedIdentifiers(): Promise<ReadonlySet<string> | null> {
+    const cfg = this.config.queueTriage;
+    if (cfg === undefined || !cfg.admissionGuardrail.enabled) {
+      return null; // guardrail disabled → inert
+    }
+    try {
+      const root = this.workspaceManager.root;
+      const plan = await loadStandingPlan(root);
+      const honoredApprovals =
+        plan === null ? [] : await listHonoredDecisions(root);
+      return approvedAdmittedIdentifiers({ plan, honoredApprovals });
+    } catch (error) {
+      await this.logger?.warn(
+        "queue_triage_admission_degraded",
+        "Admission guardrail store read failed; failing closed (no admissions this tick).",
+        { outcome: "degraded", detail: toErrorMessage(error) },
+      );
+      return new Set<string>(); // fail closed
     }
   }
 

@@ -121,6 +121,9 @@ export const DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS = 900_000; // 15 minutes
 export const DEFAULT_QUEUE_TRIAGE_AUTO_RELEASE_FRONTIER = 1;
 // Control doc surface (SYMPH-790/791): off until an operator sets a team id.
 export const DEFAULT_QUEUE_TRIAGE_CONTROL_DOC_ENABLED = false;
+// Admission guardrail (SYMPH-794): off by default so a bare `project` field keeps
+// admitting until an operator opts into explicit-signal-only dispatch.
+export const DEFAULT_QUEUE_TRIAGE_ADMISSION_GUARDRAIL_ENABLED = false;
 
 // Watchdog L2 stuck-ticket triage defaults (SYMPH-399). Disabled until the
 // operator opts a product in (calibration gate).
