@@ -71,6 +71,7 @@ import {
   DEFAULT_OBSERVABILITY_RENDER_INTERVAL_MS,
   DEFAULT_PAUSE_TRIAGE_MAX_RESUMES,
   DEFAULT_POLL_INTERVAL_MS,
+  DEFAULT_QUEUE_TRIAGE_ADMISSION_GUARDRAIL_ENABLED,
   DEFAULT_QUEUE_TRIAGE_AUTO_RELEASE_FRONTIER,
   DEFAULT_QUEUE_TRIAGE_CONTROL_DOC_ENABLED,
   DEFAULT_QUEUE_TRIAGE_ENABLED,
@@ -503,6 +504,11 @@ function resolveQueueTriageConfig(
         readBoolean(asRecord(queueTriage.control_doc).enabled) ??
         DEFAULT_QUEUE_TRIAGE_CONTROL_DOC_ENABLED,
       teamId: readString(asRecord(queueTriage.control_doc).team_id),
+    },
+    admissionGuardrail: {
+      enabled:
+        readBoolean(asRecord(queueTriage.admission_guardrail).enabled) ??
+        DEFAULT_QUEUE_TRIAGE_ADMISSION_GUARDRAIL_ENABLED,
     },
     envelope: resolveStandingPlanEnvelope({
       version: readPositiveInteger(envelope.version) ?? 1,

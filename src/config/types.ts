@@ -431,12 +431,32 @@ export interface WorkflowQueueTriageConfig {
    * ingests operator comments as revision-bound plan-control intents.
    */
   controlDoc: WorkflowQueueTriageControlDocConfig;
+  /**
+   * No-ambient-control-surfaces admission guardrail (SYMPH-794). Default-DISABLED
+   * and separate from `enabled`: when on, a bare Linear `project` field no longer
+   * admits a ticket — dispatch requires an explicit, journaled, revocable admit
+   * signal (a current-revision honored `approve` decision's batch members, or the
+   * plan-released set this tick). Held candidates are journaled, never dispatched.
+   * Off by default so the live pipeline is unaffected until an operator opts in
+   * once the plan/control-surface is trusted to cover the queue.
+   *
+   * Operator note: while the standing plan is DEGRADING (no fresh plan), the
+   * guardrail holds every candidate that lacks an explicit current-revision
+   * `approve` — including issues a prior plan released but that had not yet
+   * dispatched. Explicit batch approval is the way to keep the pipeline moving
+   * during a Manager outage (council R1, Pi P3).
+   */
+  admissionGuardrail: WorkflowQueueTriageAdmissionGuardrailConfig;
 }
 
 export interface WorkflowQueueTriageControlDocConfig {
   enabled: boolean;
   /** Linear team UUID the team-level control doc attaches to. */
   teamId: string | null;
+}
+
+export interface WorkflowQueueTriageAdmissionGuardrailConfig {
+  enabled: boolean;
 }
 
 export interface ResolvedWorkflowConfig {

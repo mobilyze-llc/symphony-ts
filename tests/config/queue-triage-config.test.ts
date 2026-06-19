@@ -40,6 +40,26 @@ describe("config-resolver queue triage (SYMPH-784)", () => {
       enabled: false,
       teamId: null,
     });
+    // admission guardrail (SYMPH-794) off by default — a bare project field keeps
+    // admitting until an operator opts into explicit-signal-only dispatch.
+    expect(resolved.queueTriage?.admissionGuardrail).toEqual({
+      enabled: false,
+    });
+  });
+
+  it("honors an explicit admission_guardrail.enabled override (SYMPH-794)", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      config: {
+        queue_triage: {
+          enabled: true,
+          admission_guardrail: { enabled: true },
+        },
+      },
+      promptTemplate: "Prompt",
+    });
+
+    expect(resolved.queueTriage?.admissionGuardrail.enabled).toBe(true);
   });
 
   it("honors explicit queue_triage overrides", () => {

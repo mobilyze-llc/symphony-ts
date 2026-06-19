@@ -168,6 +168,50 @@ describe("selectDispatchableBatchMembers (posture-B)", () => {
     expect(result.dispatchIssueIdentifiers).toEqual([]);
     expect(result.heldBatchIds).toEqual(["b1"]);
   });
+
+  it("an operator reject revokes an approve and holds the batch (council R2, Codex P1)", () => {
+    // [approve(b1), reject(b1)] must NOT release b1 — a reject revokes the
+    // approve, parity with the admission guardrail (a rejected batch dispatching
+    // on the plan path would bypass the no-ambient-control-surfaces invariant).
+    const reject: PlanDecision = { ...approve("b1"), kind: "reject" };
+    const result = selectDispatchableBatchMembers({
+      plan: plan([batch("b1", ["SYMPH-1"])]),
+      honoredApprovals: [approve("b1"), reject],
+      runningIssueIdentifiers: new Set(),
+      autoReleaseFrontier: 0, // no auto-release; only an (unrevoked) approve releases
+      envelope: ENVELOPE,
+    });
+    expect(result.dispatchIssueIdentifiers).toEqual([]);
+    expect(result.heldBatchIds).toEqual(["b1"]);
+  });
+
+  it("an operator reject also blocks auto-release within the frontier", () => {
+    const reject: PlanDecision = { ...approve("b1"), kind: "reject" };
+    const result = selectDispatchableBatchMembers({
+      plan: plan([batch("b1", ["SYMPH-1"])]),
+      honoredApprovals: [reject],
+      runningIssueIdentifiers: new Set(),
+      autoReleaseFrontier: 1, // would auto-release, but the reject holds it
+      envelope: ENVELOPE,
+    });
+    expect(result.dispatchIssueIdentifiers).toEqual([]);
+    expect(result.heldBatchIds).toEqual(["b1"]);
+  });
+
+  it("a modify does NOT revoke an approved batch (only hold/reject revoke)", () => {
+    // modify is a re-plan signal, not a hold; an approved batch still releases
+    // (council R3, Pi P3 regression guard — parity with the admission guardrail).
+    const modify: PlanDecision = { ...approve("b1"), kind: "modify" };
+    const result = selectDispatchableBatchMembers({
+      plan: plan([batch("b1", ["SYMPH-1"])]),
+      honoredApprovals: [approve("b1"), modify],
+      runningIssueIdentifiers: new Set(),
+      autoReleaseFrontier: 0, // only the (unrevoked) approve can release it
+      envelope: ENVELOPE,
+    });
+    expect(result.dispatchIssueIdentifiers).toEqual(["SYMPH-1"]);
+    expect(result.releasedBatchIds).toEqual(["b1"]);
+  });
 });
 
 describe("shouldDegradeToComparator", () => {
@@ -239,6 +283,7 @@ describe("decidePlanDrivenDispatch (hot-path composition)", () => {
       heartbeatMs: 900_000,
       autoReleaseFrontier: 1,
       controlDoc: { enabled: false, teamId: null },
+      admissionGuardrail: { enabled: false },
       envelope: ENVELOPE,
       ...over,
     };
