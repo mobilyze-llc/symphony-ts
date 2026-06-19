@@ -152,6 +152,60 @@ describe("sanitizeForLinear", () => {
   });
 });
 
+describe("URL preservation vs. base64 redaction (SYMPH-822)", () => {
+  const docUrl =
+    "https://linear.app/mobilyze-llc/document/ticket-triage-controls-4f3e440e3df0";
+
+  it("does not shred a Linear doc URL with a long path (sanitizeForLinear)", () => {
+    expect(sanitizeForLinear(`see ${docUrl} for the plan`)).toBe(
+      `see ${docUrl} for the plan`,
+    );
+  });
+
+  it("does not shred a Linear doc URL on the Slack surface", () => {
+    expect(sanitizeForSlack(`updated ${docUrl}`)).toBe(`updated ${docUrl}`);
+  });
+
+  it("still redacts a bare base64 token that is not inside a URL", () => {
+    const blob = `${"QWxhZGRpbjpvcGVuIHNlc2FtZQ".repeat(3)}==`;
+    expect(sanitizeForLinear(`leaked ${blob}`)).toBe("leaked [REDACTED:token]");
+  });
+
+  it("still redacts a base64 token that follows a URL but is space-separated", () => {
+    const blob = `${"QWxhZGRpbjpvcGVuIHNlc2FtZQ".repeat(3)}==`;
+    expect(sanitizeForLinear(`see ${docUrl} then ${blob}`)).toBe(
+      `see ${docUrl} then [REDACTED:token]`,
+    );
+  });
+
+  it("still redacts a credential-shaped query param inside a URL", () => {
+    expect(
+      sanitizeForLinear(
+        "callback https://example.com/cb?token=supersecretvalue12345 ok",
+      ),
+    ).toContain("token=[REDACTED]");
+  });
+
+  it("still redacts a base64-shaped OAuth code/state value in a URL query (codex-review P2)", () => {
+    // Non-credential keys redactSecretAssignments does NOT cover; the lookbehind
+    // must spare only the URL PATH, not the query, or these leak.
+    const secret = "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx2Yz3_";
+    expect(
+      sanitizeForLinear(`https://example.com/cb?code=${secret}`),
+    ).toContain("[REDACTED:token]");
+    expect(
+      sanitizeForLinear(`https://example.com/cb?state=${secret}`),
+    ).toContain("[REDACTED:token]");
+  });
+
+  it("still redacts a base64-shaped token in a URL fragment (codex-review P2)", () => {
+    const secret = "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx2Yz3_";
+    expect(sanitizeForLinear(`https://example.com/cb#${secret}`)).toContain(
+      "[REDACTED:token]",
+    );
+  });
+});
+
 describe("sanitizeForReworkChannel", () => {
   it("neutralizes fences and redacts credentials while keeping diagnostics intact", () => {
     const sha = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";

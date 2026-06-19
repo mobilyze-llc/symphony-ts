@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type {
   PlanDecisionKind,
   StandingPlan,
@@ -52,22 +54,46 @@ export interface PublishControlDocDeps {
   };
   loadDocRef: () => Promise<LinearDocumentRef | null>;
   saveDocRef: (ref: LinearDocumentRef) => Promise<void>;
+  /**
+   * Hash of the doc content at the previous publish (persisted by the caller).
+   * When it equals the freshly-rendered content's hash, the update + Slack
+   * ping are skipped — the control-surface tick runs every poll but the doc
+   * only changes on a real re-plan/merge/in-flight delta (SYMPH-820).
+   */
+  lastPublishedContentHash?: string | null;
   notify?: (url: string) => void;
   log: LogFn;
 }
 
-export async function publishControlDoc(
-  deps: PublishControlDocDeps,
-): Promise<{ action: "created" | "updated"; ref: LinearDocumentRef }> {
+export async function publishControlDoc(deps: PublishControlDocDeps): Promise<{
+  action: "created" | "updated" | "unchanged";
+  ref: LinearDocumentRef;
+  contentHash: string;
+}> {
   const content = renderStandingPlanControlDoc({
     plan: deps.plan,
     recentlyShipped: deps.context.recentlyShipped,
     inFlight: deps.context.inFlight,
     changelog: deps.context.changelog,
   });
+  const contentHash = createHash("sha256").update(content).digest("hex");
 
   const existing = await deps.loadDocRef();
   if (existing !== null) {
+    // Throttle: skip the Linear write AND the Slack ping when the rendered
+    // doc is byte-identical to the last publish (SYMPH-820). Comment ingestion
+    // still runs every tick — only the noisy re-publish/re-ping is gated.
+    if (
+      deps.lastPublishedContentHash != null &&
+      deps.lastPublishedContentHash === contentHash
+    ) {
+      await deps.log(
+        "queue_triage_doc_unchanged",
+        "Control doc unchanged since last publish; skipped republish + ping.",
+        { outcome: "ok", action: "unchanged", revision: deps.plan.revision },
+      );
+      return { action: "unchanged", ref: existing, contentHash };
+    }
     await deps.docClient.update({
       documentId: existing.id,
       content,
@@ -84,7 +110,7 @@ export async function publishControlDoc(
         revision: deps.plan.revision,
       },
     );
-    return { action: "updated", ref: existing };
+    return { action: "updated", ref: existing, contentHash };
   }
 
   const ref = await deps.docClient.create({
@@ -104,7 +130,7 @@ export async function publishControlDoc(
       revision: deps.plan.revision,
     },
   );
-  return { action: "created", ref };
+  return { action: "created", ref, contentHash };
 }
 
 export interface IngestControlDocDeps {

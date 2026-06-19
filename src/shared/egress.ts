@@ -55,9 +55,20 @@ const JWT_REGEX =
  * best-effort defense-in-depth only (dotted shapes are handled by the
  * dedicated JWT_REGEX above); redactSecretAssignments is the primary
  * secret control.
+ *
+ * The leading negative lookbehind excludes runs that sit INSIDE an http(s)
+ * URL PATH (SYMPH-822): because `/` and `-` are token chars, a path like
+ * `linear.app/<ws>/document/<slug>-<id>` is otherwise one 40+ run and gets
+ * shredded to `[REDACTED:token]`, breaking every Linear/GitHub link. The
+ * lookbehind stops at `?` and `#` (`[^\s?#]`), so it spares only the PATH —
+ * query-param and fragment values (e.g. OAuth `code`/`state`, which
+ * redactSecretAssignments does not key on) are still redacted. It is bounded
+ * (`{0,2048}`, max practical URL length) to keep the backward scan linear; a
+ * base64 token that merely FOLLOWS a URL after whitespace is still redacted
+ * (the run cannot cross the space), and JWT_REGEX still applies inside URLs.
  */
 const BASE64_RUN_REGEX =
-  /\b(?=[A-Za-z0-9+/_-]*\d)(?=[A-Za-z0-9+/_-]*[+/=_-])[A-Za-z0-9+/_-]{40,}={0,2}/g;
+  /\b(?<!https?:\/\/[^\s?#]{0,2048})(?=[A-Za-z0-9+/_-]*\d)(?=[A-Za-z0-9+/_-]*[+/=_-])[A-Za-z0-9+/_-]{40,}={0,2}/g;
 
 /** Markdown links: `[label](url)` → `label (url)`. */
 const MARKDOWN_LINK_REGEX = /\[([^\]\n]*)\]\(([^)\n]*)\)/g;
@@ -256,6 +267,20 @@ export function sanitizeForReworkChannel(text: string): string {
 }
 
 /**
+ * Escape the three Slack mrkdwn control characters (`& < >`) so display text
+ * is preserved but link/mention syntax (`<url|label>`, `<!channel>`) is inert.
+ * Shared by sanitizeForSlack and by callers that build a structured link from
+ * fields that must NOT pass through secret redaction (e.g. a trusted URL whose
+ * long path would otherwise be shredded by BASE64_RUN_REGEX).
+ */
+export function escapeSlackControlChars(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+/**
  * Sanitize model/worker text bound for Slack (plain text or mrkdwn).
  *
  * Slack mrkdwn treats `<...>` as link/mention syntax (`<url|label>`,
@@ -267,9 +292,6 @@ export function sanitizeForSlack(
   options?: SanitizeOptions,
 ): string {
   const maxLen = options?.maxLen ?? DEFAULT_SLACK_MAX_LEN;
-  const cleaned = redactSecrets(text)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+  const cleaned = escapeSlackControlChars(redactSecrets(text));
   return capLength(cleaned, maxLen);
 }
