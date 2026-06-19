@@ -28,6 +28,7 @@ import type {
 import { AgentRunner } from "../agent/runner.js";
 import { runSpecFidelityJudge } from "../agent/spec-fidelity.js";
 import { runStuckTriage } from "../agent/stuck-triage.js";
+import { createCmuxPlannerRunner } from "../agent/triage-planner.js";
 import { publishVerdictStatus } from "../agent/verdict-status.js";
 import { validateDispatchConfig } from "../config/config-resolver.js";
 import {
@@ -217,6 +218,7 @@ import {
   type ClusterMember,
   formatWatchdogTicketBody,
 } from "./signature-cluster.js";
+import { runStandingPlanShadowTick } from "./standing-plan-shadow.js";
 import { createIssueSupervisionSnapshot } from "./supervision.js";
 import {
   type TrackFindingFilingRef,
@@ -5026,12 +5028,59 @@ export async function startRuntimeService(
     }, currentConfig.polling.intervalMs);
   };
 
+  // Queue Triage v2 shadow tick (SYMPH-784). Fire-and-forget AFTER the poll's
+  // dispatch decision so the dispatch path is byte-identical whether or not the
+  // feature is enabled (zero-diff). The in-flight guard prevents overlapping
+  // planner runs across fast polls; the heartbeat gate inside the tick keeps it
+  // to its own cadence. Inert unless `queueTriage.enabled`.
+  let standingPlanShadowTickInFlight = false;
+  const runStandingPlanShadowTickIfEnabled = (): void => {
+    if (standingPlanShadowTickInFlight) {
+      return;
+    }
+    if (currentConfig.queueTriage?.enabled !== true) {
+      return;
+    }
+    standingPlanShadowTickInFlight = true;
+    void runStandingPlanShadowTick({
+      config: currentConfig.queueTriage,
+      workspaceRoot: workspaceManager.root,
+      fetchCandidates: () => tracker.fetchCandidateIssues(),
+      getInFlight: () =>
+        Object.values(runtimeHost.getState().running).map((entry) => ({
+          issueIdentifier: entry.issue.identifier,
+          stage: entry.issue.state,
+        })),
+      createPlannerRunner: (model) =>
+        createCmuxPlannerRunner({
+          workspace: process.cwd(),
+          artifactDir: join(
+            workspaceManager.root,
+            ".symphony",
+            "standing-plan",
+          ),
+          model,
+        }),
+      log: (event, message, fields) => {
+        void logger.info(event, message, fields);
+      },
+      now: () => new Date(),
+    })
+      .catch(() => {
+        // The tick is already best-effort; guard the void promise itself.
+      })
+      .finally(() => {
+        standingPlanShadowTickInFlight = false;
+      });
+  };
+
   const runPollCycle = async () => {
     try {
       const pollStart = Date.now();
       const result = await runtimeHost.pollOnce();
       const durationMs = Date.now() - pollStart;
       await logPollCycleResult(logger, result, durationMs);
+      runStandingPlanShadowTickIfEnabled();
       scheduleNextPoll();
     } catch (error) {
       await logger.error("runtime_poll_failed", toErrorMessage(error), {

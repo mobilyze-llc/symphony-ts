@@ -355,7 +355,17 @@ async function rewriteDispatcherRunJournal(
   }
 }
 
-async function withDispatcherRunJournalWriteLock<T>(
+/**
+ * Run `write` while holding the dispatcher run-journal's single-writer lock.
+ *
+ * Exported so sibling journals that live in the same `.symphony/run-journals/`
+ * directory (e.g. the standing-plan journal, SYMPH-785) can share ONE writer
+ * boundary rather than duplicating the directory-lock + PID-liveness recovery
+ * logic. Plan writes are infrequent (re-plan only), so serializing them with
+ * dispatch-journal writes costs ~nothing and gives the two journals a single,
+ * consistent serialization point.
+ */
+export async function withDispatcherRunJournalWriteLock<T>(
   workspaceRoot: string,
   write: () => Promise<T>,
 ): Promise<T> {

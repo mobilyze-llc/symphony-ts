@@ -1,0 +1,385 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  type PlannerContext,
+  type PlannerRunResult,
+  buildPlanBody,
+  buildPlannerPrompt,
+  createCmuxPlannerRunner,
+  parsePlannerOutput,
+  runTriagePlanner,
+} from "../../src/agent/triage-planner.js";
+import type { ClaudeRunnerResult } from "../../src/claude-runner/cmux-claude-runner.js";
+import type { PlanEnvelope } from "../../src/domain/standing-plan.js";
+
+const ENVELOPE: PlanEnvelope = {
+  version: 1,
+  concurrencyCeiling: 3,
+  allowedRisk: "medium",
+  allowedModes: ["parallel-isolated", "canary-chain"],
+};
+
+function context(): PlannerContext {
+  return {
+    backlog: [
+      {
+        issueId: "u-1",
+        issueIdentifier: "SYMPH-1",
+        title: "First",
+        priority: 1,
+        state: "Todo",
+      },
+      {
+        issueId: "u-2",
+        issueIdentifier: "SYMPH-2",
+        title: "Second",
+        priority: 2,
+        state: "Todo",
+      },
+    ],
+    openPrs: [{ issueIdentifier: "SYMPH-9", prNumber: 42, title: "WIP" }],
+    recentlyMerged: [
+      { issueIdentifier: "SYMPH-8", prNumber: 41, title: "Done" },
+    ],
+    inFlight: [{ issueIdentifier: "SYMPH-7", stage: "implement" }],
+    envelope: ENVELOPE,
+  };
+}
+
+function artifact(jsonBody: unknown): string {
+  return `# Plan\n\nSome reasoning.\n\n\`\`\`json\n${JSON.stringify(
+    jsonBody,
+    null,
+    2,
+  )}\n\`\`\`\n`;
+}
+
+describe("buildPlannerPrompt", () => {
+  it("includes backlog, envelope constraints, context, and the JSON output contract", () => {
+    const prompt = buildPlannerPrompt(context());
+    expect(prompt).toContain("SYMPH-1");
+    expect(prompt).toContain("SYMPH-2");
+    expect(prompt).toContain("parallel-isolated");
+    expect(prompt).toContain("canary-chain");
+    // shared-surface is out of the envelope -> must be presented as disallowed
+    expect(prompt).not.toMatch(/allowed modes:.*shared-surface/i);
+    expect(prompt).toContain("3"); // concurrency ceiling
+    expect(prompt).toContain("SYMPH-7"); // in-flight
+    expect(prompt).toContain("SYMPH-8"); // recently merged
+    expect(prompt).toContain("SYMPH-9"); // open PR
+    expect(prompt.toLowerCase()).toContain("json");
+  });
+});
+
+describe("parsePlannerOutput", () => {
+  it("extracts and validates a fenced JSON plan", () => {
+    const md = artifact({
+      rationale: "top first",
+      batches: [
+        {
+          mode: "parallel-isolated",
+          issueIdentifiers: ["SYMPH-1"],
+          rationale: "highest priority",
+        },
+      ],
+    });
+    const result = parsePlannerOutput(md);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.batches).toHaveLength(1);
+    }
+  });
+
+  it("fails when there is no fenced JSON block", () => {
+    const result = parsePlannerOutput("# Plan\n\nNo json here.\n");
+    expect(result.ok).toBe(false);
+  });
+
+  it("fails when the JSON does not match the schema", () => {
+    const result = parsePlannerOutput(artifact({ rationale: "x" }));
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects a canary-chain with an empty head (a permanent deadlock)", () => {
+    const result = parsePlannerOutput(
+      artifact({
+        rationale: "x",
+        batches: [
+          {
+            mode: "canary-chain",
+            issueIdentifiers: ["SYMPH-1"],
+            rationale: "no head",
+            canary: {
+              headIssueIdentifiers: [],
+              contingentIssueIdentifiers: ["SYMPH-1"],
+            },
+          },
+        ],
+      }),
+    );
+    expect(result.ok).toBe(false);
+  });
+});
+
+describe("buildPlanBody", () => {
+  it("resolves identifiers, assigns batch ids + [opt-N] options + release intents", () => {
+    const body = buildPlanBody(
+      {
+        rationale: "plan",
+        batches: [
+          {
+            mode: "parallel-isolated",
+            issueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+            rationale: "two together",
+          },
+        ],
+      },
+      context(),
+    );
+    expect(body.source).toBe("planner");
+    expect(body.batches).toHaveLength(1);
+    const batch = body.batches[0];
+    expect(batch?.status).toBe("lookahead");
+    expect(batch?.members).toEqual([
+      { issueId: "u-1", issueIdentifier: "SYMPH-1" },
+      { issueId: "u-2", issueIdentifier: "SYMPH-2" },
+    ]);
+    expect(body.options[0]?.marker).toBe("[opt-1]");
+    expect(body.options[0]?.intent).toEqual({
+      verb: "release_batch",
+      batchId: batch?.batchId,
+    });
+  });
+
+  it("drops unknown identifiers and skips a batch left with no members", () => {
+    const body = buildPlanBody(
+      {
+        rationale: "plan",
+        batches: [
+          {
+            mode: "parallel-isolated",
+            issueIdentifiers: ["SYMPH-404"],
+            rationale: "ghost",
+          },
+          {
+            mode: "parallel-isolated",
+            issueIdentifiers: ["SYMPH-1", "SYMPH-404"],
+            rationale: "one real",
+          },
+        ],
+      },
+      context(),
+    );
+    expect(body.batches).toHaveLength(1);
+    expect(body.batches[0]?.members).toEqual([
+      { issueId: "u-1", issueIdentifier: "SYMPH-1" },
+    ]);
+  });
+
+  it("drops a batch whose mode is outside the envelope", () => {
+    const body = buildPlanBody(
+      {
+        rationale: "plan",
+        batches: [
+          {
+            mode: "shared-surface",
+            issueIdentifiers: ["SYMPH-1"],
+            rationale: "not allowed yet",
+          },
+          {
+            mode: "parallel-isolated",
+            issueIdentifiers: ["SYMPH-2"],
+            rationale: "ok",
+          },
+        ],
+      },
+      context(),
+    );
+    expect(body.batches.map((b) => b.mode)).toEqual(["parallel-isolated"]);
+  });
+
+  it("assigns content-derived batch ids: stable for identical content, distinct otherwise", () => {
+    const raw = {
+      rationale: "plan",
+      batches: [
+        {
+          mode: "parallel-isolated" as const,
+          issueIdentifiers: ["SYMPH-1"],
+          rationale: "a",
+        },
+      ],
+    };
+    const a = buildPlanBody(raw, context());
+    const b = buildPlanBody(raw, context());
+    expect(a.batches[0]?.batchId).toBe(b.batches[0]?.batchId);
+    expect(a.batches[0]?.batchId).toMatch(/^b-[0-9a-f]{12}$/);
+
+    const other = buildPlanBody(
+      {
+        rationale: "plan",
+        batches: [
+          {
+            mode: "parallel-isolated" as const,
+            issueIdentifiers: ["SYMPH-2"],
+            rationale: "b",
+          },
+        ],
+      },
+      context(),
+    );
+    expect(other.batches[0]?.batchId).not.toBe(a.batches[0]?.batchId);
+  });
+
+  it("filters canary identifiers to the batch's resolved members", () => {
+    const body = buildPlanBody(
+      {
+        rationale: "plan",
+        batches: [
+          {
+            mode: "canary-chain" as const,
+            issueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+            rationale: "chain",
+            canary: {
+              headIssueIdentifiers: ["SYMPH-1", "SYMPH-404"],
+              contingentIssueIdentifiers: ["SYMPH-2", "SYMPH-999"],
+            },
+          },
+        ],
+      },
+      context(),
+    );
+    expect(body.batches[0]?.canary).toEqual({
+      headIssueIdentifiers: ["SYMPH-1"],
+      contingentIssueIdentifiers: ["SYMPH-2"],
+    });
+  });
+
+  it("drops the canary entirely when no valid head member survives", () => {
+    const body = buildPlanBody(
+      {
+        rationale: "plan",
+        batches: [
+          {
+            mode: "canary-chain" as const,
+            issueIdentifiers: ["SYMPH-1"],
+            rationale: "chain",
+            canary: {
+              headIssueIdentifiers: ["SYMPH-404"],
+              contingentIssueIdentifiers: ["SYMPH-1"],
+            },
+          },
+        ],
+      },
+      context(),
+    );
+    expect(body.batches[0]?.canary).toBeNull();
+  });
+});
+
+describe("runTriagePlanner", () => {
+  it("returns a plan body on a good model artifact", async () => {
+    const deps = {
+      runClaude: async (): Promise<PlannerRunResult> => ({
+        status: "ok",
+        markdown: artifact({
+          rationale: "go",
+          batches: [
+            {
+              mode: "parallel-isolated",
+              issueIdentifiers: ["SYMPH-1"],
+              rationale: "first",
+            },
+          ],
+        }),
+      }),
+    };
+    const result = await runTriagePlanner(context(), deps);
+    expect(result.status).toBe("ok");
+    if (result.status === "ok") {
+      expect(result.body.batches).toHaveLength(1);
+    }
+  });
+
+  it("degrades gracefully when the model runner is unavailable", async () => {
+    const deps = {
+      runClaude: async (): Promise<PlannerRunResult> => ({
+        status: "unavailable",
+        detail: "cmux preflight failed",
+      }),
+    };
+    const result = await runTriagePlanner(context(), deps);
+    expect(result.status).toBe("unavailable");
+  });
+
+  it("reports invalid when the model output cannot be parsed", async () => {
+    const deps = {
+      runClaude: async (): Promise<PlannerRunResult> => ({
+        status: "ok",
+        markdown: "# Plan\n\nI refuse to emit JSON.\n",
+      }),
+    };
+    const result = await runTriagePlanner(context(), deps);
+    expect(result.status).toBe("invalid");
+  });
+});
+
+describe("createCmuxPlannerRunner", () => {
+  function cmuxResult(over: Partial<ClaudeRunnerResult>): ClaudeRunnerResult {
+    return {
+      status: "passed",
+      artifactPath: "/artifacts/plan.md",
+      message: "ok",
+      model: "opus",
+      ...over,
+    } as unknown as ClaudeRunnerResult;
+  }
+
+  it("invokes the version-floating opus alias and returns the artifact markdown on pass", async () => {
+    const calls: Array<{ model: string | undefined; promptFile: string }> = [];
+    const writes: Array<{ path: string; data: string }> = [];
+    const runner = createCmuxPlannerRunner({
+      workspace: "/ws",
+      artifactDir: "/artifacts",
+      artifactName: "plan",
+      runCmux: async (input) => {
+        calls.push({ model: input.model, promptFile: input.promptFile });
+        return cmuxResult({ artifactPath: "/artifacts/plan.md" });
+      },
+      fs: {
+        mkdir: async () => undefined,
+        writeFile: async (path, data) => {
+          writes.push({ path: String(path), data: String(data) });
+        },
+        readFile: async () => "# Plan\n```json\n{}\n```\n",
+      },
+    });
+
+    const result = await runner("PROMPT-BODY");
+    expect(result.status).toBe("ok");
+    if (result.status === "ok") {
+      expect(result.markdown).toContain("```json");
+    }
+    expect(calls[0]?.model).toBe("opus");
+    expect(writes[0]?.data).toBe("PROMPT-BODY");
+  });
+
+  it("degrades to unavailable when cmux does not pass", async () => {
+    const runner = createCmuxPlannerRunner({
+      workspace: "/ws",
+      artifactDir: "/artifacts",
+      artifactName: "plan",
+      runCmux: async () =>
+        cmuxResult({ status: "degraded", artifactPath: null }),
+      fs: {
+        mkdir: async () => undefined,
+        writeFile: async () => undefined,
+        readFile: async () => {
+          throw new Error("should not read");
+        },
+      },
+    });
+
+    const result = await runner("PROMPT-BODY");
+    expect(result.status).toBe("unavailable");
+  });
+});

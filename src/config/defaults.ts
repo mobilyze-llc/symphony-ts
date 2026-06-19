@@ -110,6 +110,13 @@ export const DEFAULT_WATCHDOG_MAX_FILINGS_PER_HOUR = 3;
 // Verdict-event defaults (SYMPH-405)
 export const DEFAULT_VERDICTS_PAGE_AFTER_TICKS = 10;
 
+// Queue Triage v2 Manager spine (SYMPH-784). Default-DISABLED; shadow-on so the
+// first enablement computes/logs plans without changing dispatch.
+export const DEFAULT_QUEUE_TRIAGE_ENABLED = false;
+export const DEFAULT_QUEUE_TRIAGE_SHADOW_MODE = true;
+export const DEFAULT_QUEUE_TRIAGE_PLANNER_MODEL = "opus";
+export const DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS = 900_000; // 15 minutes
+
 // Watchdog L2 stuck-ticket triage defaults (SYMPH-399). Disabled until the
 // operator opts a product in (calibration gate).
 export const DEFAULT_STUCK_TRIAGE_ENABLED = false;
