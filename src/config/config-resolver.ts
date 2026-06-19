@@ -9,6 +9,11 @@ import {
   type WorkflowDefinition,
   normalizeIssueState,
 } from "../domain/model.js";
+import {
+  type PlanBatchMode,
+  type PlanRiskTier,
+  resolveStandingPlanEnvelope,
+} from "../domain/standing-plan.js";
 import { ERROR_CODES } from "../errors/codes.js";
 import { normalizeAccountEmail } from "../shared/account-email.js";
 import {
@@ -66,6 +71,10 @@ import {
   DEFAULT_OBSERVABILITY_RENDER_INTERVAL_MS,
   DEFAULT_PAUSE_TRIAGE_MAX_RESUMES,
   DEFAULT_POLL_INTERVAL_MS,
+  DEFAULT_QUEUE_TRIAGE_ENABLED,
+  DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS,
+  DEFAULT_QUEUE_TRIAGE_PLANNER_MODEL,
+  DEFAULT_QUEUE_TRIAGE_SHADOW_MODE,
   DEFAULT_RATE_LIMIT_DEFER_JITTER_MS,
   DEFAULT_RATE_LIMIT_DEFER_UNTIL_RESET,
   DEFAULT_RATE_LIMIT_EXPECTED_UNIT_BURN_PCT,
@@ -99,6 +108,7 @@ import type {
   StagesConfig,
   WorkflowContinuousFeedbackEvent,
   WorkflowHardStopsConfigOverride,
+  WorkflowQueueTriageConfig,
   WorkflowStuckTriageConfig,
 } from "./types.js";
 import { GATE_TYPES, STAGE_TYPES } from "./types.js";
@@ -142,6 +152,10 @@ export function resolveWorkflowConfig(
   const notifications = asRecord(config.notifications);
   const observability = asRecord(config.observability);
   const contracts = asRecord(config.contracts);
+  const queueTriage = asRecord(config.queue_triage);
+  const maxConcurrentAgents =
+    readPositiveInteger(agent.max_concurrent_agents) ??
+    DEFAULT_MAX_CONCURRENT_AGENTS;
 
   return {
     workflowPath: workflow.workflowPath,
@@ -202,9 +216,7 @@ export function resolveWorkflowConfig(
         readPositiveInteger(hooks.timeout_ms) ?? DEFAULT_HOOK_TIMEOUT_MS,
     },
     agent: {
-      maxConcurrentAgents:
-        readPositiveInteger(agent.max_concurrent_agents) ??
-        DEFAULT_MAX_CONCURRENT_AGENTS,
+      maxConcurrentAgents,
       maxTurns: readPositiveInteger(agent.max_turns) ?? DEFAULT_MAX_TURNS,
       maxRetryBackoffMs:
         readPositiveInteger(agent.max_retry_backoff_ms) ??
@@ -455,6 +467,44 @@ export function resolveWorkflowConfig(
     contracts: {
       override: readBoolean(contracts.override) ?? false,
     },
+    queueTriage: resolveQueueTriageConfig(queueTriage, maxConcurrentAgents),
+  };
+}
+
+/**
+ * Queue Triage v2 Manager spine config (SYMPH-784). Default-DISABLED; shadow-on.
+ * The envelope is validated by resolveStandingPlanEnvelope (throws on an invalid
+ * envelope rather than silently widening the Manager's authority).
+ */
+function resolveQueueTriageConfig(
+  queueTriage: Record<string, unknown>,
+  maxConcurrentAgents: number,
+): WorkflowQueueTriageConfig {
+  const envelope = asRecord(queueTriage.envelope);
+  const allowedModes = readStringList(envelope.allowed_modes, []);
+  const allowedRisk = readString(envelope.allowed_risk);
+  return {
+    enabled: readBoolean(queueTriage.enabled) ?? DEFAULT_QUEUE_TRIAGE_ENABLED,
+    shadowMode:
+      readBoolean(queueTriage.shadow_mode) ?? DEFAULT_QUEUE_TRIAGE_SHADOW_MODE,
+    plannerModel:
+      readString(queueTriage.planner_model) ??
+      DEFAULT_QUEUE_TRIAGE_PLANNER_MODEL,
+    heartbeatMs:
+      readPositiveInteger(queueTriage.heartbeat_ms) ??
+      DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS,
+    envelope: resolveStandingPlanEnvelope({
+      version: readPositiveInteger(envelope.version) ?? 1,
+      concurrencyCeiling:
+        readPositiveInteger(envelope.concurrency_ceiling) ??
+        maxConcurrentAgents,
+      ...(allowedRisk === null
+        ? {}
+        : { allowedRisk: allowedRisk as PlanRiskTier }),
+      ...(allowedModes.length === 0
+        ? {}
+        : { allowedModes: allowedModes as PlanBatchMode[] }),
+    }),
   };
 }
 

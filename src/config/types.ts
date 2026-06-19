@@ -1,4 +1,5 @@
 import type { ReasoningEffort } from "../domain/model.js";
+import type { PlanEnvelope } from "../domain/standing-plan.js";
 import type { ContractViolation } from "./config-contracts.js";
 
 export interface WorkflowHooksConfig {
@@ -401,6 +402,23 @@ export interface StagesConfig {
   stages: Readonly<Record<string, StageDefinition>>;
 }
 
+/**
+ * Queue Triage v2 Manager spine (SYMPH-784). Default-DISABLED. When enabled in
+ * `shadowMode` (the default), the Opus@max planner computes and persists a
+ * standing plan and logs it WITHOUT changing dispatch (zero-diff). PR2 promotes
+ * the plan to drive dispatch. The envelope is the read contract the planner and
+ * (later) the consumer plan/dispatch within (SYMPH-793).
+ */
+export interface WorkflowQueueTriageConfig {
+  enabled: boolean;
+  shadowMode: boolean;
+  /** Version-floating planner model alias (do not pin). Default "opus". */
+  plannerModel: string;
+  /** Re-plan heartbeat cadence for the shadow/plan loop, in ms. */
+  heartbeatMs: number;
+  envelope: PlanEnvelope;
+}
+
 export interface ResolvedWorkflowConfig {
   workflowPath: string;
   promptTemplate: string;
@@ -452,6 +470,11 @@ export interface ResolvedWorkflowConfig {
    * resolveWorkflowConfig always sets it.
    */
   contracts?: WorkflowContractsConfig;
+  /**
+   * Queue Triage v2 Manager spine (SYMPH-784). Optional so existing hand-built
+   * fixtures keep compiling; resolveWorkflowConfig always sets it (default-off).
+   */
+  queueTriage?: WorkflowQueueTriageConfig;
 }
 
 /** See {@link ResolvedWorkflowConfig.contracts}. */
