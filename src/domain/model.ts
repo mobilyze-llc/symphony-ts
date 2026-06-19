@@ -1112,6 +1112,117 @@ export interface StageRecord {
 
 export type ExecutionHistory = StageRecord[];
 
+export const DELEGATED_STAGE_ATTEMPT_STATUSES = [
+  "pending",
+  "running",
+  "succeeded",
+  "failed",
+  "degraded",
+  "timed_out",
+  "canceled",
+  "ignored_late_result",
+] as const;
+
+export type DelegatedStageAttemptStatus =
+  (typeof DELEGATED_STAGE_ATTEMPT_STATUSES)[number];
+
+export type DelegatedStageMissingCapsulePolicy = "fail" | "degrade";
+
+export interface StageExecutionArtifactRef {
+  kind: string;
+  path: string;
+  sha256: string | null;
+}
+
+export interface StageExecutionUsageRef {
+  kind: string;
+  path: string;
+  sha256: string | null;
+}
+
+export interface StageExecutionCapsuleRef {
+  id: string;
+  path: string;
+  sha256: string | null;
+  required: boolean;
+  producedByStage: string | null;
+  consumedByStage: string | null;
+}
+
+export interface StageRunGroupRecord {
+  runGroupId: string;
+  issueId: string;
+  issueIdentifier: string;
+  baseSha: string;
+  targetHeadSha: string;
+  workspacePath: string;
+  profileId: string | null;
+  artifactRoot: string;
+  capsuleRoot: string;
+  promptPaths: readonly string[];
+  capsulePaths: readonly string[];
+  artifactPaths: readonly string[];
+  usageRefs: readonly StageExecutionUsageRef[];
+  createdAt: string;
+}
+
+export interface DelegatedStageAttemptRecord {
+  issueId: string;
+  issueIdentifier: string;
+  stageName: string;
+  stageAttempt: number;
+  runGroupId: string;
+  profileId: string | null;
+  baseSha: string;
+  targetHeadSha: string;
+  workspacePath: string;
+  executionRole: string;
+  executionPhase: string;
+  backend: string;
+  provider: string | null;
+  model: string | null;
+  reasoningEffort: ReasoningEffort | null;
+  promptPath: string | null;
+  capsules: readonly StageExecutionCapsuleRef[];
+  artifactPaths: readonly StageExecutionArtifactRef[];
+  usageRefs: readonly StageExecutionUsageRef[];
+  status: DelegatedStageAttemptStatus;
+  idempotencyKey: string;
+}
+
+export type DelegatedStageCapsuleReadiness =
+  | {
+      ok: true;
+      status: "ready";
+      missingCapsules: readonly string[];
+    }
+  | {
+      ok: false;
+      status: "failed" | "degraded";
+      missingCapsules: readonly string[];
+      reason: "missing_required_capsule_ref";
+    };
+
+export function evaluateDelegatedStageCapsuleReadiness(
+  attempt: DelegatedStageAttemptRecord,
+  policy: DelegatedStageMissingCapsulePolicy = "fail",
+): DelegatedStageCapsuleReadiness {
+  const missingCapsules = attempt.capsules
+    .filter((capsule) => capsule.required && capsule.path.trim() === "")
+    .map((capsule) => capsule.id);
+
+  if (missingCapsules.length === 0) {
+    return { ok: true, status: "ready", missingCapsules: [] };
+  }
+
+  return {
+    ok: false,
+    status: policy === "degrade" ? "degraded" : "failed",
+    missingCapsules,
+    reason: "missing_required_capsule_ref",
+  };
+}
+
 /**
  * Persistent description of a requires-explicit-resume mark (SYMPH-406).
  * Reduced from journal events on replay; never stored outside the journal.

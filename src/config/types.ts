@@ -360,6 +360,47 @@ export type StageType = (typeof STAGE_TYPES)[number];
 export const GATE_TYPES = ["ensemble", "human"] as const;
 export type GateType = (typeof GATE_TYPES)[number];
 
+export const STAGE_EXECUTION_ROLES = [
+  "classifier",
+  "investigator",
+  "planner",
+  "implementer",
+  "review",
+  "reviewer",
+  "verifier",
+  "qa",
+  "fallback",
+  "closeout",
+] as const;
+export type StageExecutionRole = (typeof STAGE_EXECUTION_ROLES)[number];
+
+export const STAGE_EXECUTION_PHASES = [
+  "classify",
+  "investigate",
+  "plan",
+  "implement",
+  "verify",
+  "review",
+  "qa",
+  "fallback",
+  "closeout",
+] as const;
+export type StageExecutionPhase = (typeof STAGE_EXECUTION_PHASES)[number];
+
+export const STAGE_EXECUTION_BACKENDS = [
+  "current-runner",
+  "crabrunner",
+  "manual",
+] as const;
+export type StageExecutionBackend = (typeof STAGE_EXECUTION_BACKENDS)[number];
+
+export const STAGE_EXECUTION_MISSING_CAPSULE_POLICIES = [
+  "fail",
+  "degrade",
+] as const;
+export type StageExecutionMissingCapsulePolicy =
+  (typeof STAGE_EXECUTION_MISSING_CAPSULE_POLICIES)[number];
+
 export interface StageTransitions {
   onComplete: string | null;
   onApprove: string | null;
@@ -371,6 +412,54 @@ export interface ReviewerDefinition {
   model: string | null;
   role: string;
   prompt: string | null;
+}
+
+export interface StageExecutionArtifactContract {
+  requires: readonly string[];
+  produces: readonly string[];
+}
+
+export interface StageExecutionBudgetPolicy {
+  maxTokens: number | null;
+  maxUsd: number | null;
+}
+
+export interface StageExecutionDependencyPolicy {
+  stages: readonly string[];
+  capsules: readonly string[];
+  missingCapsule: StageExecutionMissingCapsulePolicy;
+}
+
+export interface StageExecutionRunGroupIdentity {
+  id: string | null;
+  key: string | null;
+}
+
+export interface StageExecutionCapsulePaths {
+  consume: readonly string[];
+  produce: readonly string[];
+}
+
+export interface StageExecutionProfile {
+  role: StageExecutionRole | null;
+  phase: StageExecutionPhase | null;
+  backend: StageExecutionBackend;
+  provider: string | null;
+  model: string | null;
+  reasoningEffort: ReasoningEffort | null;
+  profile: string | null;
+  artifacts: StageExecutionArtifactContract;
+  timeoutMs: number | null;
+  budget: StageExecutionBudgetPolicy;
+  dependencies: StageExecutionDependencyPolicy;
+  runGroup: StageExecutionRunGroupIdentity;
+  capsules: StageExecutionCapsulePaths;
+}
+
+export interface StageExecutionValidationError {
+  path: string;
+  value: string;
+  message: string;
 }
 
 export interface StageDefinition {
@@ -388,6 +477,8 @@ export interface StageDefinition {
   reviewers: ReviewerDefinition[];
   transitions: StageTransitions;
   linearState: string | null;
+  execution?: StageExecutionProfile | null;
+  executionValidationErrors?: readonly StageExecutionValidationError[];
 }
 
 export interface FastTrackConfig {

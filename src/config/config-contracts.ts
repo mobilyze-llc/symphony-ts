@@ -220,6 +220,28 @@ function checkStageTransitionTargets(
   return violations;
 }
 
+function checkStageExecutionProfiles(
+  config: ResolvedWorkflowConfig,
+): ContractViolation[] {
+  const stages = config.stages;
+  if (stages === null) {
+    return [];
+  }
+
+  const violations: ContractViolation[] = [];
+  for (const stage of Object.values(stages.stages)) {
+    for (const error of stage.executionValidationErrors ?? []) {
+      violations.push({
+        rule: "stage_execution_profiles_valid",
+        key: error.path,
+        value: error.value,
+        message: error.message,
+      });
+    }
+  }
+  return violations;
+}
+
 /**
  * The declared-vs-consumed contract table. Future pairs (prompt variables vs
  * render context, verb→state view mappings) are added as entries here.
@@ -244,6 +266,13 @@ const CONTRACT_RULES: readonly ContractRule[] = [
     consumed:
       "stages.*.on_complete / on_approve / on_rework, stages.initial_stage, stages.fast_track.initial_stage",
     check: checkStageTransitionTargets,
+  },
+  {
+    id: "stage_execution_profiles_valid",
+    declared: "stages.<name>.execution",
+    consumed:
+      "delegated stage profile/run-group/capsule configuration consumed by future stage execution backends",
+    check: checkStageExecutionProfiles,
   },
 ];
 
@@ -298,6 +327,10 @@ export function validateStagesConfig(
 
   let hasTerminal = false;
   for (const [name, stage] of Object.entries(stagesConfig.stages)) {
+    for (const error of stage.executionValidationErrors ?? []) {
+      errors.push(error.message);
+    }
+
     if (stage.type === "terminal") {
       hasTerminal = true;
       continue;
