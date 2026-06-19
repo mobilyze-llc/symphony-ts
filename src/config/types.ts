@@ -439,6 +439,12 @@ export interface WorkflowQueueTriageConfig {
    * plan-released set this tick). Held candidates are journaled, never dispatched.
    * Off by default so the live pipeline is unaffected until an operator opts in
    * once the plan/control-surface is trusted to cover the queue.
+   *
+   * Operator note: while the standing plan is DEGRADING (no fresh plan), the
+   * guardrail holds every candidate that lacks an explicit current-revision
+   * `approve` — including issues a prior plan released but that had not yet
+   * dispatched. Explicit batch approval is the way to keep the pipeline moving
+   * during a Manager outage (council R1, Pi P3).
    */
   admissionGuardrail: WorkflowQueueTriageAdmissionGuardrailConfig;
 }

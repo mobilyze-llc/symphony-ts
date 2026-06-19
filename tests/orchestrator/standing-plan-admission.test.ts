@@ -119,6 +119,33 @@ describe("approvedAdmittedIdentifiers (SYMPH-794)", () => {
     });
     expect(admitted.size).toBe(0);
   });
+
+  it("revokes admission when a later hold targets an approved batch (council R1, Codex P1)", () => {
+    const hold: PlanDecision = { ...approve("b-app"), kind: "hold" };
+    const admitted = approvedAdmittedIdentifiers({
+      plan: plan(),
+      honoredApprovals: [approve("b-app"), hold],
+    });
+    expect(admitted.size).toBe(0); // approve + hold for the same batch ⇒ held
+  });
+
+  it("revokes admission when a reject targets an approved batch (council R1, Codex P1)", () => {
+    const reject: PlanDecision = { ...approve("b-app"), kind: "reject" };
+    const admitted = approvedAdmittedIdentifiers({
+      plan: plan(),
+      honoredApprovals: [approve("b-app"), reject],
+    });
+    expect(admitted.size).toBe(0);
+  });
+
+  it("a hold on one batch does not revoke a different approved batch", () => {
+    const holdOther: PlanDecision = { ...approve("b-other"), kind: "hold" };
+    const admitted = approvedAdmittedIdentifiers({
+      plan: plan(),
+      honoredApprovals: [approve("b-app"), holdOther],
+    });
+    expect([...admitted].sort()).toEqual(["SYMPH-1", "SYMPH-2"]);
+  });
 });
 
 describe("partitionByAdmission (SYMPH-794)", () => {

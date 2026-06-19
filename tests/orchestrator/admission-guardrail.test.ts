@@ -117,10 +117,10 @@ describe("admission guardrail (SYMPH-794)", () => {
   });
 
   it("admits a plan-RELEASED issue even when it is not in the explicit approval set", async () => {
-    // The plan drove dispatch and released SYMPH-1; the explicit-approval set is
-    // empty (auto-release frontier, no per-ticket operator approval). Released
-    // == admitted, so SYMPH-1 still dispatches; the un-released SYMPH-2 does not
-    // even reach the guardrail (the plan already subset it out).
+    // The plan drove dispatch and released SYMPH-1 (auto-release frontier, no
+    // per-ticket operator approval). On the plan path the guardrail is SKIPPED
+    // (dispatchList is already the released set), so SYMPH-1 dispatches and the
+    // un-released SYMPH-2 was already subset out by the plan.
     const { core, spawned } = createCore({
       candidates: [issue("1", "SYMPH-1"), issue("2", "SYMPH-2")],
       planDrivenDispatch: async () => ({
@@ -132,6 +132,60 @@ describe("admission guardrail (SYMPH-794)", () => {
     const result = await core.pollTick();
     expect(result.dispatchedIssueIds).toEqual(["1"]);
     expect(spawned).toEqual(["SYMPH-1"]);
+  });
+
+  it("on the plan path, a throwing approval hook does NOT block plan-released dispatch (guardrail skipped)", async () => {
+    // council R1 (Codex P1): when the plan drove, admission is enforced by
+    // release, so the guardrail is skipped entirely — a store error reading the
+    // EXTRA approvals can neither block a validly-released issue nor fall open.
+    const { core, spawned } = createCore({
+      candidates: [issue("1", "SYMPH-1")],
+      planDrivenDispatch: async () => ({
+        mode: "plan",
+        orderedIssueIdentifiers: ["SYMPH-1"],
+      }),
+      resolveAdmittedIdentifiers: async () => {
+        throw new Error("approve store read failed");
+      },
+    });
+    const result = await core.pollTick();
+    expect(result.dispatchedIssueIds).toEqual(["1"]);
+    expect(spawned).toEqual(["SYMPH-1"]);
+  });
+
+  it("on an explicit plan DEGRADE, a bare-project candidate is held (council R1, Pi P2)", async () => {
+    const { core, spawned } = createCore({
+      candidates: [issue("1", "SYMPH-1"), issue("2", "SYMPH-2")],
+      planDrivenDispatch: async () => ({ mode: "degrade" }),
+      resolveAdmittedIdentifiers: async () => new Set(["SYMPH-2"]),
+    });
+    const result = await core.pollTick();
+    expect(result.dispatchedIssueIds).toEqual(["2"]);
+    expect(spawned).toEqual(["SYMPH-2"]);
+    expect(core.getState().issueDispositions["1"]).toMatchObject({
+      disposition: "gate",
+      reasonCode: "admit_signal_required",
+    });
+  });
+
+  it("when the plan hook THROWS, the guardrail still gates the comparator frontier (council R1, Pi P2)", async () => {
+    // The plan hook throwing degrades to the comparator (planDroveThisTick=false),
+    // so the guardrail runs over the full frontier — a bare-project candidate is
+    // held, the explicitly-approved one dispatches.
+    const { core, spawned } = createCore({
+      candidates: [issue("1", "SYMPH-1"), issue("2", "SYMPH-2")],
+      planDrivenDispatch: async () => {
+        throw new Error("plan hook failed");
+      },
+      resolveAdmittedIdentifiers: async () => new Set(["SYMPH-2"]),
+    });
+    const result = await core.pollTick();
+    expect(result.dispatchedIssueIds).toEqual(["2"]);
+    expect(spawned).toEqual(["SYMPH-2"]);
+    expect(core.getState().issueDispositions["1"]).toMatchObject({
+      disposition: "gate",
+      reasonCode: "admit_signal_required",
+    });
   });
 });
 

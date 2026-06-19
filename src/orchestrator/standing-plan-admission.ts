@@ -36,11 +36,28 @@ export function approvedAdmittedIdentifiers(input: {
   const batchById = new Map(
     input.plan.batches.map((batch) => [batch.batchId, batch]),
   );
+  // The admit signal must be REVOCABLE within a revision: a `hold` or `reject`
+  // on a batch revokes any `approve` for it, so an operator who approves then
+  // changes their mind un-admits the batch (council R1, Codex P1). This is the
+  // safe direction (a revocation always wins) and mirrors the consumer's
+  // hold-is-sticky behavior on the plan-driven path.
+  const revoked = new Set<string>();
+  for (const decision of input.honoredApprovals) {
+    if (
+      (decision.kind === "hold" || decision.kind === "reject") &&
+      decision.batchId !== null
+    ) {
+      revoked.add(decision.batchId);
+    }
+  }
   for (const decision of input.honoredApprovals) {
     // Admission is batch-scoped: only an approve bound to a batch that exists in
     // the current plan admits, and only that batch's members.
     if (decision.kind !== "approve" || decision.batchId === null) {
       continue;
+    }
+    if (revoked.has(decision.batchId)) {
+      continue; // a hold/reject for this batch revokes the approve
     }
     const batch = batchById.get(decision.batchId);
     if (batch === undefined) {

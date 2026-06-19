@@ -2861,31 +2861,29 @@ export class OrchestratorCore {
     // operator has opted in (the hook is wired), an issue may dispatch ONLY via
     // an explicit journaled admit signal: the plan-released set this tick, or a
     // current-revision honored `approve` decision. A bare Linear `project` field
-    // alone never admits. Held candidates are journaled (gate verdict) and not
-    // dispatched. Fails CLOSED — a store error admits nothing this tick rather
-    // than falling open to bare-project dispatch.
-    if (this.resolveAdmittedIdentifiers !== undefined) {
-      let explicitlyAdmitted: ReadonlySet<string> | null;
+    // alone never admits.
+    //
+    // The guardrail runs ONLY on the degrade / no-plan path. When the plan drove
+    // this tick, `dispatchList` IS already the released set (the plan subset out
+    // every bare-project candidate), so admission is already enforced by release
+    // and the guardrail would be a no-op — skipping it keeps the fail-closed
+    // guarantee precise (an ENABLED guardrail that errors admits NOTHING on the
+    // degrade path) and avoids an unneeded store read (council R1, Codex P1).
+    if (this.resolveAdmittedIdentifiers !== undefined && !planDroveThisTick) {
+      let admitted: ReadonlySet<string> | null;
       try {
-        explicitlyAdmitted = await this.resolveAdmittedIdentifiers({
+        admitted = await this.resolveAdmittedIdentifiers({
           candidates: dispatchList,
         });
       } catch {
         // An ENABLED guardrail that errors fails CLOSED — admit nothing this
         // tick rather than fall open to bare-project dispatch. (A DISABLED
         // guardrail returns null below without throwing.)
-        explicitlyAdmitted = new Set<string>();
+        admitted = new Set<string>();
       }
-      // null ⇒ guardrail disabled this tick ⇒ inert (zero-diff). Otherwise:
-      // when the plan drove, every member of `dispatchList` is admitted by
-      // release; otherwise only the explicitly-approved identifiers are.
-      if (explicitlyAdmitted !== null) {
-        const admitted = planDroveThisTick
-          ? new Set<string>([
-              ...dispatchList.map((issue) => issue.identifier),
-              ...explicitlyAdmitted,
-            ])
-          : explicitlyAdmitted;
+      // null ⇒ guardrail disabled this tick ⇒ inert (zero-diff). Otherwise hold
+      // every candidate that lacks an explicit current-revision approval.
+      if (admitted !== null) {
         const { admit, held } = partitionByAdmission(dispatchList, admitted);
         for (const heldIssue of held) {
           this.recordDispatchVerdict({
