@@ -13,6 +13,7 @@ import {
   PLAN_BATCH_MODES,
   type PlanBatch,
   type PlanBatchMember,
+  type PlanBatchMode,
   type PlanCanaryStructure,
   type PlanEnvelope,
   type PlanOptionLine,
@@ -222,14 +223,22 @@ export function buildPlanBody(raw: RawPlan, context: PlannerContext): PlanBody {
     // drop out-of-backlog refs, and drop the whole canary if no valid head
     // survives (council R1, Codex P2 + Pi P1/P2).
     const canary = normalizeCanary(rawBatch.canary ?? null, members);
+    // A canary-chain batch with no valid canary structure can't honor
+    // contingent-release; downgrade it to parallel-isolated so its members still
+    // dispatch — never persist an unexecutable canary that would bypass the
+    // head/tail gate (council R2, Codex P1).
+    const mode: PlanBatchMode =
+      rawBatch.mode === "canary-chain" && canary === null
+        ? "parallel-isolated"
+        : rawBatch.mode;
     // Content-derived id: stable for identical content (preserves content-hash
     // idempotency across revisions) and unique for different content (so a new
     // lookahead batch never collides with a committed batch unless it IS the
     // same batch, in which case dedup is correct) — council R1, Codex P1.
-    const batchId = contentBatchId(rawBatch.mode, members, canary);
+    const batchId = contentBatchId(mode, members, canary);
     batches.push({
       batchId,
-      mode: rawBatch.mode,
+      mode,
       status: "lookahead",
       members,
       rationale: rawBatch.rationale,
@@ -237,7 +246,7 @@ export function buildPlanBody(raw: RawPlan, context: PlannerContext): PlanBody {
     });
     options.push({
       marker: `[opt-${batches.length}]`,
-      label: `Release ${batchId} (${rawBatch.mode}): ${members
+      label: `Release ${batchId} (${mode}): ${members
         .map((member) => member.issueIdentifier)
         .join(", ")}`,
       intent: { verb: "release_batch", batchId },

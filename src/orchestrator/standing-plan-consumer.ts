@@ -90,6 +90,14 @@ export function selectDispatchableBatchMembers(
       heldBatchIds.push(batch.batchId);
       continue;
     }
+    // A canary-chain batch with no canary structure can't honor contingent-
+    // release — HOLD it rather than fall through and dispatch the whole batch
+    // (which would bypass the head/tail gate). Defense-in-depth: buildPlanBody
+    // downgrades these to parallel-isolated at the source (council R1, Codex P1).
+    if (batch.mode === "canary-chain" && batch.canary === null) {
+      heldBatchIds.push(batch.batchId);
+      continue;
+    }
     const approved = approvedBatchIds.has(batch.batchId);
     const autoReleasable = autoReleaseRemaining > 0;
     if (!approved && !autoReleasable) {
@@ -103,7 +111,9 @@ export function selectDispatchableBatchMembers(
 
     // canary-chain dispatches only the head until EVERY head member has merged
     // (SYMPH-800 contingent-release); then the contingent tail releases. The
-    // head/tail validation reads recorded `merged` outcomes (SYMPH-803).
+    // head/tail validation reads recorded `merged` outcomes (SYMPH-803). NOTE: a
+    // head that fails/parks (never merges) holds the tail with no auto-replan —
+    // tracked as SYMPH-815 (a canary-head-stuck re-plan predicate).
     const merged = input.mergedIssueIdentifiers ?? EMPTY_IDENTIFIER_SET;
     let members = batch.members;
     if (batch.mode === "canary-chain" && batch.canary !== null) {

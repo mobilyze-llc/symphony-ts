@@ -159,6 +159,22 @@ describe("selectDispatchableBatchMembers (posture-B)", () => {
     expect(result.dispatchIssueIdentifiers).toEqual(["SYMPH-2"]);
   });
 
+  it("holds a canary-chain batch with no canary structure (defensive, SYMPH-800)", () => {
+    const malformed = batch("b1", ["SYMPH-1", "SYMPH-2"], {
+      mode: "canary-chain",
+      canary: null, // would otherwise fall through and dispatch the whole batch
+    });
+    const result = selectDispatchableBatchMembers({
+      plan: plan([malformed]),
+      honoredApprovals: [],
+      runningIssueIdentifiers: new Set(),
+      autoReleaseFrontier: 1,
+      envelope: ENVELOPE,
+    });
+    expect(result.dispatchIssueIdentifiers).toEqual([]);
+    expect(result.heldBatchIds).toEqual(["b1"]);
+  });
+
   it("does not re-dispatch an already-merged member of a parallel batch", () => {
     const result = selectDispatchableBatchMembers({
       plan: plan([batch("b1", ["SYMPH-1", "SYMPH-2"])]),
