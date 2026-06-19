@@ -6,7 +6,15 @@ import {
   mkdirSync,
   openSync,
 } from "node:fs";
-import { access, lstat, mkdir, readdir, realpath } from "node:fs/promises";
+import {
+  access,
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  realpath,
+  writeFile,
+} from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Writable } from "node:stream";
@@ -20,6 +28,7 @@ import type {
   ImplementationCommentDeltaContext,
   WorkpadRetryContext,
 } from "../agent/prompt-builder.js";
+import { fenceBacklogAuditBoundaryTags } from "../agent/prompt-fence.js";
 import type {
   AgentRunInput,
   AgentRunResult,
@@ -103,6 +112,7 @@ import {
   extractToolNameFromRaw,
   summarizeCodexEvent,
 } from "../logging/session-metrics.js";
+import { readStandingPlanJournal } from "../logging/standing-plan-journal.js";
 import {
   StructuredLogger,
   createJsonLineSink,
@@ -160,6 +170,12 @@ import {
   type LinearIssueComment,
   LinearTrackerClient,
 } from "../tracker/linear-client.js";
+import {
+  type LinearDocumentRef,
+  createLinearDocument,
+  fetchLinearDocumentComments,
+  updateLinearDocument,
+} from "../tracker/linear-documents.js";
 import {
   classifyActor,
   normalizeOperatorConfig,
@@ -223,6 +239,10 @@ import {
   formatWatchdogTicketBody,
 } from "./signature-cluster.js";
 import { decidePlanDrivenDispatch } from "./standing-plan-consumer.js";
+import {
+  ingestControlDocComments,
+  publishControlDoc,
+} from "./standing-plan-control-surface.js";
 import { runStandingPlanShadowTick } from "./standing-plan-shadow.js";
 import {
   listHonoredDecisions,
@@ -516,6 +536,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
   /** Queue Triage v2: a plan-control/predicate-driven re-plan request (SYMPH-787/789). */
   private standingPlanReplanRequested = false;
+
+  /** Per-process de-dup for unresolved control-doc comments (SYMPH-791). */
+  private readonly controlDocSeen = new Set<string>();
 
   private tracker: IssueTracker;
 
@@ -3286,6 +3309,163 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     };
   }
 
+  /**
+   * Control-surface tick (SYMPH-790/791): render+publish the living "🚦Ticket
+   * Triage Controls" doc and ingest operator comments as revision-bound
+   * plan-control decisions. Best-effort + gated (controlDoc.enabled + a team id);
+   * the live document API is verified at deploy (shadow). Delegates to the
+   * tested orchestration in standing-plan-control-surface.
+   */
+  async runControlSurfaceTick(): Promise<void> {
+    const cfg = this.config.queueTriage;
+    if (
+      cfg === undefined ||
+      !cfg.enabled ||
+      !cfg.controlDoc.enabled ||
+      cfg.controlDoc.teamId === null
+    ) {
+      return;
+    }
+    const apiKey = this.config.tracker.apiKey;
+    if (apiKey === null) {
+      return;
+    }
+    const root = this.workspaceManager.root;
+    try {
+      const plan = await loadStandingPlan(root);
+      if (plan === null) {
+        return;
+      }
+      const docDeps = {
+        endpoint: this.config.tracker.endpoint,
+        apiKey,
+        fetchFn: globalThis.fetch,
+      };
+      const inFlight = Object.values(this.orchestrator.getState().running).map(
+        (entry) => ({
+          issueIdentifier: entry.issue.identifier,
+          stage: entry.issue.state,
+        }),
+      );
+      const published = await publishControlDoc({
+        plan,
+        context: {
+          recentlyShipped: [],
+          inFlight,
+          changelog: await this.buildControlDocChangelog(root),
+        },
+        teamId: cfg.controlDoc.teamId,
+        docClient: {
+          create: (input) => createLinearDocument(docDeps, input),
+          update: (input) => updateLinearDocument(docDeps, input),
+        },
+        loadDocRef: () => this.loadControlDocRef(root),
+        saveDocRef: (ref) => this.saveControlDocRef(root, ref),
+        notify: (url) =>
+          this.notifier?.notify({
+            type: "info_alert",
+            issueIdentifier: "PLAN",
+            message: `🚦 Ticket Triage Controls updated → ${url}`,
+          }),
+        log: (event, message, fields) => {
+          void this.logger?.info(event, message, fields);
+        },
+      });
+      const operatorAllowlist = new Set(
+        (this.config.operatorAnchors?.operatorAllowlist ?? []).map((email) =>
+          email.trim().toLowerCase(),
+        ),
+      );
+      await ingestControlDocComments({
+        documentId: published.ref.id,
+        plan,
+        operatorAllowlist,
+        docClient: {
+          fetchComments: (input) => fetchLinearDocumentComments(docDeps, input),
+        },
+        fence: (text) => fenceBacklogAuditBoundaryTags(text),
+        recordDecision: (input) => recordPlanControlDecision(root, input),
+        requestReplan: () => this.requestStandingPlanReplan(),
+        log: (event, message, fields) => {
+          void this.logger?.info(event, message, fields);
+        },
+        seen: this.controlDocSeen,
+        now: this.now,
+      });
+    } catch (error) {
+      await this.logger?.warn(
+        "queue_triage_control_surface_failed",
+        "Control-surface tick failed (best-effort; dispatch unaffected).",
+        { outcome: "degraded", detail: toErrorMessage(error) },
+      );
+    }
+  }
+
+  private controlDocRefPath(root: string): string {
+    return join(root, ".symphony", "standing-plan-doc.json");
+  }
+
+  private async loadControlDocRef(
+    root: string,
+  ): Promise<LinearDocumentRef | null> {
+    try {
+      const parsed = JSON.parse(
+        await readFile(this.controlDocRefPath(root), "utf8"),
+      ) as Partial<LinearDocumentRef>;
+      if (
+        typeof parsed.id === "string" &&
+        typeof parsed.slugId === "string" &&
+        typeof parsed.url === "string"
+      ) {
+        return { id: parsed.id, slugId: parsed.slugId, url: parsed.url };
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async saveControlDocRef(
+    root: string,
+    ref: LinearDocumentRef,
+  ): Promise<void> {
+    await mkdir(join(root, ".symphony"), { recursive: true });
+    await writeFile(
+      this.controlDocRefPath(root),
+      `${JSON.stringify(ref)}\n`,
+      "utf8",
+    );
+  }
+
+  private async buildControlDocChangelog(
+    root: string,
+  ): Promise<
+    Array<{ revision: number; createdAt: string; rationale: string }>
+  > {
+    const journal = await readStandingPlanJournal(root);
+    return journal
+      .filter((entry) => entry.kind === "plan_revision")
+      .map(
+        (entry) =>
+          (
+            entry as {
+              revision: {
+                revision: number;
+                createdAt: string;
+                rationale: string;
+              };
+            }
+          ).revision,
+      )
+      .slice(-5)
+      .reverse()
+      .map((revision) => ({
+        revision: revision.revision,
+        createdAt: revision.createdAt,
+        rationale: revision.rationale,
+      }));
+  }
+
   /** Request a standing-plan re-plan on the next heartbeat (SYMPH-787/789). */
   requestStandingPlanReplan(): void {
     this.standingPlanReplanRequested = true;
@@ -5276,6 +5456,10 @@ export async function startRuntimeService(
       })
       .finally(() => {
         standingPlanShadowTickInFlight = false;
+        // Render/publish the living control doc + ingest operator comments
+        // (SYMPH-790/791). Best-effort + gated; runs after the plan tick so the
+        // doc reflects the freshest revision.
+        void runtimeHost.runControlSurfaceTick();
       });
   };
 

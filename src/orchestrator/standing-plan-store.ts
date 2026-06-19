@@ -6,6 +6,7 @@ import type {
   StandingPlanJournal,
 } from "../domain/standing-plan.js";
 import {
+  appendStandingPlanJournalEntriesWithLock,
   appendStandingPlanJournalEntry,
   appendStandingPlanJournalEntryToDisk,
   readStandingPlanJournal,
@@ -213,6 +214,46 @@ export async function recordPlanControlDecision(
     createdAt: input.createdAt,
     note: input.note,
   });
+}
+
+/**
+ * Record a batch outcome (merged / parked / failed) — the calibration substrate
+ * (SYMPH-792). Outcomes are facts, not revision-bound: they append regardless of
+ * the current revision so the digest can join decision → eventual outcome.
+ */
+export async function recordBatchOutcome(
+  workspaceRoot: string,
+  outcome: {
+    planId: string;
+    revision: number;
+    batchId: string;
+    result: string;
+    issueIdentifiers: string[];
+    outcomeId: string;
+    createdAt: string;
+  },
+): Promise<{ recorded: boolean }> {
+  const appended = await appendStandingPlanJournalEntriesWithLock(
+    workspaceRoot,
+    [
+      {
+        kind: "plan_outcome",
+        idempotencyKey: `${outcome.planId}:outcome:${outcome.outcomeId}`,
+        timestamp: outcome.createdAt,
+        planId: outcome.planId,
+        outcome: {
+          outcomeId: outcome.outcomeId,
+          planId: outcome.planId,
+          revision: outcome.revision,
+          batchId: outcome.batchId,
+          result: outcome.result,
+          issueIdentifiers: outcome.issueIdentifiers,
+          createdAt: outcome.createdAt,
+        },
+      },
+    ],
+  );
+  return { recorded: appended.appendedEntries.length > 0 };
 }
 
 /** Decisions bound to the current revision (the only ones still in force). */

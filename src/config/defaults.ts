@@ -119,6 +119,8 @@ export const DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS = 900_000; // 15 minutes
 // Posture-B: auto-dispatch only the plan's head batch unattended by default;
 // hold the rest for operator approval (SYMPH-789).
 export const DEFAULT_QUEUE_TRIAGE_AUTO_RELEASE_FRONTIER = 1;
+// Control doc surface (SYMPH-790/791): off until an operator sets a team id.
+export const DEFAULT_QUEUE_TRIAGE_CONTROL_DOC_ENABLED = false;
 
 // Watchdog L2 stuck-ticket triage defaults (SYMPH-399). Disabled until the
 // operator opts a product in (calibration gate).
