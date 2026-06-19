@@ -425,7 +425,8 @@ type DispatchIssueDisposition =
   | "circuit_breaker_open"
   | "merge_candidate_barrier"
   | "lease_unavailable"
-  | "spawn_failed";
+  | "spawn_failed"
+  | "admission_gate";
 
 type DispatchIssueResult =
   | {
@@ -2826,6 +2827,11 @@ export class OrchestratorCore {
     // false (degrade / no hook), `dispatchList` is the full comparator frontier
     // and the SYMPH-794 guardrail (below) must fall back to explicit approvals.
     let planDroveThisTick = false;
+    // SYMPH-825: the per-tick admit authority the dispatch chokepoint enforces.
+    // null ⇒ the gate is inert this tick (zero-diff). On the plan path it is the
+    // released set (release IS the admit authority); on the degrade path it is the
+    // SYMPH-794 honored-approval set computed below.
+    let chokepointAdmitted: ReadonlySet<string> | null = null;
     if (this.planDrivenDispatch !== undefined) {
       // The plan may only REORDER/SUBSET the comparator-eligible frontier — it
       // resolves identifiers from `sortedIssues` (post dispatch-fence,
@@ -2850,6 +2856,9 @@ export class OrchestratorCore {
             .map((identifier) => eligibleByIdentifier.get(identifier))
             .filter((candidate): candidate is Issue => candidate !== undefined);
           planDroveThisTick = true;
+          // Release IS the admit authority on the plan path (SYMPH-825): the
+          // chokepoint admits exactly the plan-released identifiers.
+          chokepointAdmitted = new Set(decision.orderedIssueIdentifiers);
         }
       } catch {
         // Degrade to the comparator order already in `dispatchList`.
@@ -2897,6 +2906,10 @@ export class OrchestratorCore {
         }
         dispatchList = admit;
       }
+      // The chokepoint backstop re-checks this SAME resolved set (no second store
+      // read). null ⇒ inert; otherwise the partition above already removed held
+      // issues, so the chokepoint never gates on the happy path (zero-diff).
+      chokepointAdmitted = admitted;
     }
     for (const issue of dispatchList) {
       if (this.availableSlots() <= 0) {
@@ -2967,7 +2980,11 @@ export class OrchestratorCore {
       if (reservationKey === false) {
         break;
       }
-      const dispatchResult = await this.dispatchIssue(issue, null);
+      const dispatchResult = await this.admitAndDispatch(
+        issue,
+        null,
+        chokepointAdmitted,
+      );
       if (!dispatchResult.dispatched) {
         this.releaseRateLimitAdmissionReservation(reservationKey);
       }
@@ -5742,6 +5759,11 @@ export class OrchestratorCore {
     // zero-diff legacy behavior. Fail closed on a store error (admit nothing).
     // No claim is held here yet (admitRetryResumeRequirement acquires it below),
     // so a hold simply re-defers — matching the other retry gate-deferrals.
+    // SYMPH-825: the admit authority for the chokepoint at the dispatch call below
+    // (null ⇒ gate inert ⇒ zero-diff legacy retry). Resolved ONCE here from the
+    // atomic snapshot; the pre-gate that follows re-defers an unadmitted retry, so
+    // the chokepoint only re-checks the same set (never gates on the happy path).
+    let retryAdmitted: ReadonlySet<string> | null = null;
     if (this.resolveAdmittedIdentifiers !== undefined) {
       let admitted: ReadonlySet<string> | null;
       try {
@@ -5749,6 +5771,7 @@ export class OrchestratorCore {
       } catch {
         admitted = new Set<string>(); // fail closed
       }
+      retryAdmitted = admitted;
       if (admitted !== null && !admitted.has(issue.identifier)) {
         this.recordDispatchVerdict({
           issueId,
@@ -5928,7 +5951,11 @@ export class OrchestratorCore {
       };
     }
 
-    const dispatchResult = await this.dispatchIssue(issue, retryEntry.attempt);
+    const dispatchResult = await this.admitAndDispatch(
+      issue,
+      retryEntry.attempt,
+      retryAdmitted,
+    );
     if (!dispatchResult.dispatched) {
       this.releaseRateLimitAdmissionReservation(reservationKey);
     }
@@ -11449,6 +11476,51 @@ export class OrchestratorCore {
       },
     );
     return true;
+  }
+
+  /**
+   * The single admission chokepoint (SYMPH-825): the SOLE caller of the
+   * worker-spawning dispatchIssue. EVERY dispatch flows through here, so the
+   * no-ambient-control-surfaces gate (SYMPH-794) cannot be bypassed by a new
+   * dispatch entry point forgetting to gate — the bug class the council found
+   * twice (P1 holes on the retry path and the plan-release path).
+   *
+   * `admitted` is the admit authority resolved ONCE from the atomic journal
+   * snapshot (SYMPH-823): the plan-released set on the plan path, the
+   * honored-approval set on the degrade path, or null when the gate is inert
+   * (project-scoped, zero-diff). null ⇒ dispatch freely (legacy behavior).
+   * Otherwise the issue MUST carry an explicit admit signal; an unadmitted issue
+   * reaching here is a bypass, so it fails CLOSED (never dispatches) and journals
+   * a gate verdict so the hole is observable.
+   *
+   * On every existing path the per-path pre-gate (pollTick's partitionByAdmission,
+   * onRetryTimer's single-issue check) has already held/re-deferred unadmitted
+   * issues, so this never gates on the happy path — zero behavior change. It is
+   * the structural backstop that makes the invariant "can't-not-gate".
+   */
+  private async admitAndDispatch(
+    issue: Issue,
+    attempt: number | null,
+    admitted: ReadonlySet<string> | null,
+  ): Promise<DispatchIssueResult> {
+    if (admitted !== null && !admitted.has(issue.identifier)) {
+      this.recordDispatchVerdict({
+        issueId: issue.id,
+        issueIdentifier: issue.identifier,
+        disposition: "gate",
+        reasonCode: "admit_signal_required",
+        remedy:
+          "Release this issue's batch via the standing-plan control surface (operator approval), or disable the admission gate.",
+        attempt,
+      });
+      return {
+        dispatched: false,
+        rightSizingDecision: null,
+        disposition: "admission_gate",
+        reasonCode: "admit_signal_required",
+      };
+    }
+    return this.dispatchIssue(issue, attempt);
   }
 
   private async dispatchIssue(
