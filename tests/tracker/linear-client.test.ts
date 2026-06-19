@@ -194,6 +194,350 @@ describe("LinearTrackerClient", () => {
     expect(fetchFn).not.toHaveBeenCalled();
   });
 
+  // --- SYMPH-824: team-scoped adjacent dispatch-path queries ---
+  // The candidate query was team-scoped in SYMPH-794; these three adjacent
+  // queries (by-states, ticket-feature provenance, halt-label) now mirror the
+  // same `team: { key: { in: $teamKeys } }` pattern so dispatch can run fully
+  // project-free in team-scope mode. The project-scoped path must stay intact.
+
+  it("fetches issues by states scoped to team keys (no project filter) when team_keys is set (SYMPH-824)", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          issues: {
+            nodes: [
+              issueNode({
+                id: "1",
+                identifier: "SYMPH-901",
+                title: "Active ticket",
+                createdAt: "2026-06-01T00:00:00.000Z",
+              }),
+            ],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      }),
+    );
+
+    const client = createClient({
+      fetchFn,
+      projectSlug: null,
+      teamKeys: ["SYMPH"],
+    });
+    const issues = await client.fetchIssuesByStates(["In Progress"]);
+
+    expect(issues.map((issue) => issue.identifier)).toEqual(["SYMPH-901"]);
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(request.query).toContain("team: { key: { in: $teamKeys } }");
+    expect(request.query).not.toContain("slugId");
+    expect(request.query).not.toContain("project:");
+    expect(request.variables).toEqual({
+      teamKeys: ["SYMPH"],
+      stateNames: ["In Progress"],
+      first: 50,
+      relationFirst: 50,
+      after: null,
+    });
+  });
+
+  it("fetchIssuesByStates supports multiple team keys via the `in` filter (SYMPH-824)", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          issues: {
+            nodes: [],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      }),
+    );
+    const client = createClient({
+      fetchFn,
+      projectSlug: null,
+      teamKeys: ["SYMPH", "MOB"],
+    });
+    await client.fetchIssuesByStates(["In Progress"]);
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(request.variables.teamKeys).toEqual(["SYMPH", "MOB"]);
+  });
+
+  it("keeps fetchIssuesByStates project-scoped when team_keys is unset (backward compat, SYMPH-824)", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          issues: {
+            nodes: [],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      }),
+    );
+    const client = createClient({ fetchFn });
+    await client.fetchIssuesByStates(["In Progress"]);
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(request.query).toContain("slugId");
+    expect(request.query).not.toContain("team: { key: { in: $teamKeys } }");
+    expect(request.variables).toEqual({
+      projectSlug: "ENG",
+      stateNames: ["In Progress"],
+      first: 50,
+      relationFirst: 50,
+      after: null,
+    });
+  });
+
+  it("fetches ticket-feature issues scoped to team keys (full provenance, no project) when team_keys is set (SYMPH-824)", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          issues: {
+            nodes: [
+              ticketFeatureIssueNode({
+                id: "issue-901",
+                identifier: "SYMPH-901",
+                title: "Off-project team ticket",
+              }),
+            ],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      }),
+    );
+
+    const client = createClient({
+      fetchFn,
+      projectSlug: null,
+      teamKeys: ["SYMPH"],
+    });
+    const issues = await client.fetchTicketFeatureIssuesByStates(["Backlog"]);
+
+    // Off-project team tickets get the SAME full TicketFeature provenance shape
+    // (creator, history, relationChanges) as project-scoped products.
+    expect(issues.map((issue) => issue.identifier)).toEqual(["SYMPH-901"]);
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(request.query).toContain("team: { key: { in: $teamKeys } }");
+    expect(request.query).toContain("history(first: $historyFirst)");
+    expect(request.query).toContain("relationChanges");
+    expect(request.query).toContain("creator");
+    expect(request.query).not.toContain("slugId");
+    expect(request.query).not.toContain("project: {");
+    expect(request.variables).toEqual({
+      teamKeys: ["SYMPH"],
+      stateNames: ["Backlog"],
+      first: 50,
+      relationFirst: 250,
+      historyFirst: 250,
+      after: null,
+    });
+  });
+
+  it("fetchTicketFeatureIssuesByStates supports multiple team keys via the `in` filter (SYMPH-824)", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          issues: {
+            nodes: [],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      }),
+    );
+    const client = createClient({
+      fetchFn,
+      projectSlug: null,
+      teamKeys: ["SYMPH", "MOB"],
+    });
+    await client.fetchTicketFeatureIssuesByStates(["Backlog"]);
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(request.variables.teamKeys).toEqual(["SYMPH", "MOB"]);
+  });
+
+  it("keeps fetchTicketFeatureIssuesByStates project-scoped when team_keys is unset (backward compat, SYMPH-824)", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          issues: {
+            nodes: [],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      }),
+    );
+    const client = createClient({ fetchFn });
+    await client.fetchTicketFeatureIssuesByStates(["Backlog"]);
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(request.query).toContain("slugId");
+    expect(request.query).not.toContain("team: { key: { in: $teamKeys } }");
+    expect(request.variables).toEqual({
+      projectSlug: "ENG",
+      stateNames: ["Backlog"],
+      first: 50,
+      relationFirst: 250,
+      historyFirst: 250,
+      after: null,
+    });
+  });
+
+  it("fetches open halt-label issues scoped to team keys (no project filter) when team_keys is set (SYMPH-824)", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          issues: {
+            nodes: [
+              issueNode({
+                id: "halt-1",
+                identifier: "SYMPH-999",
+                title: "pipeline-halt",
+                createdAt: "2026-06-01T00:00:00.000Z",
+              }),
+            ],
+          },
+        },
+      }),
+    );
+
+    const client = createClient({
+      fetchFn,
+      projectSlug: null,
+      teamKeys: ["SYMPH"],
+    });
+    const issues = await client.fetchOpenIssuesByLabels(
+      ["pipeline-halt"],
+      ["Done", "Canceled"],
+    );
+
+    expect(issues.map((issue) => issue.identifier)).toEqual(["SYMPH-999"]);
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(request.query).toContain("team: { key: { in: $teamKeys } }");
+    expect(request.query).not.toContain("slugId");
+    expect(request.query).not.toContain("project:");
+    expect(request.variables).toEqual({
+      teamKeys: ["SYMPH"],
+      labelNames: ["pipeline-halt"],
+      excludeStateNames: ["Done", "Canceled"],
+      first: 1,
+      relationFirst: 50,
+    });
+  });
+
+  it("fetchOpenIssuesByLabels supports multiple team keys via the `in` filter (SYMPH-824)", async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ data: { issues: { nodes: [] } } }));
+    const client = createClient({
+      fetchFn,
+      projectSlug: null,
+      teamKeys: ["SYMPH", "MOB"],
+    });
+    await client.fetchOpenIssuesByLabels(["pipeline-halt"], ["Done"]);
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(request.variables.teamKeys).toEqual(["SYMPH", "MOB"]);
+  });
+
+  it("keeps fetchOpenIssuesByLabels project-scoped when team_keys is unset (backward compat, SYMPH-824)", async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ data: { issues: { nodes: [] } } }));
+    const client = createClient({ fetchFn });
+    await client.fetchOpenIssuesByLabels(["pipeline-halt"], ["Done"]);
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(request.query).toContain("slugId");
+    expect(request.query).not.toContain("team: { key: { in: $teamKeys } }");
+    expect(request.variables).toEqual({
+      projectSlug: "ENG",
+      labelNames: ["pipeline-halt"],
+      excludeStateNames: ["Done"],
+      first: 1,
+      relationFirst: 50,
+    });
+  });
+
+  it("fetches issues by labels scoped to team keys (no project filter) when team_keys is set (SYMPH-824)", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          issues: {
+            nodes: [
+              issueNode({
+                id: "halt-1",
+                identifier: "SYMPH-999",
+                title: "pipeline-halt",
+                createdAt: "2026-06-01T00:00:00.000Z",
+              }),
+            ],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      }),
+    );
+
+    const client = createClient({
+      fetchFn,
+      projectSlug: null,
+      teamKeys: ["SYMPH"],
+    });
+    const issues = await client.fetchIssuesByLabels(["pipeline-halt"]);
+
+    expect(issues.map((issue) => issue.identifier)).toEqual(["SYMPH-999"]);
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(request.query).toContain("team: { key: { in: $teamKeys } }");
+    expect(request.query).not.toContain("slugId");
+    expect(request.query).not.toContain("project:");
+    expect(request.variables).toEqual({
+      teamKeys: ["SYMPH"],
+      labelNames: ["pipeline-halt"],
+      first: 50,
+      relationFirst: 50,
+      after: null,
+    });
+  });
+
+  it("fetchIssuesByLabels supports multiple team keys via the `in` filter (SYMPH-824)", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          issues: {
+            nodes: [],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      }),
+    );
+    const client = createClient({
+      fetchFn,
+      projectSlug: null,
+      teamKeys: ["SYMPH", "MOB"],
+    });
+    await client.fetchIssuesByLabels(["pipeline-halt"]);
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(request.variables.teamKeys).toEqual(["SYMPH", "MOB"]);
+  });
+
+  it("keeps fetchIssuesByLabels project-scoped when team_keys is unset (backward compat, SYMPH-824)", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          issues: {
+            nodes: [],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      }),
+    );
+    const client = createClient({ fetchFn });
+    await client.fetchIssuesByLabels(["pipeline-halt"]);
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(request.query).toContain("slugId");
+    expect(request.query).not.toContain("team: { key: { in: $teamKeys } }");
+    expect(request.variables).toEqual({
+      projectSlug: "ENG",
+      labelNames: ["pipeline-halt"],
+      first: 50,
+      relationFirst: 50,
+      after: null,
+    });
+  });
+
   it("fetches a full issue by identifier without constraining to project", async () => {
     const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
       jsonResponse({

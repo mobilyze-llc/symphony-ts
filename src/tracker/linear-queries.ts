@@ -220,6 +220,38 @@ export const LINEAR_ISSUES_BY_STATES_QUERY = `
   }
 `.trim();
 
+// Team-scoped variant of LINEAR_ISSUES_BY_STATES_QUERY (SYMPH-824). Selected
+// when `tracker.team_keys` is set so watchdog / active-issue reads work without
+// a project slug, mirroring the SYMPH-794 candidate-by-teams pattern. The `in`
+// filter keeps it multi-team-ready by construction.
+export const LINEAR_ISSUES_BY_STATES_BY_TEAMS_QUERY = `
+  query SymphonyIssuesByStatesByTeams(
+    $teamKeys: [String!]!
+    $stateNames: [String!]!
+    $first: Int!
+    $relationFirst: Int!
+    $after: String
+  ) {
+    issues(
+      first: $first
+      after: $after
+      filter: {
+        team: { key: { in: $teamKeys } }
+        state: { name: { in: $stateNames } }
+      }
+      orderBy: createdAt
+    ) {
+      nodes {
+        ${ISSUE_FIELDS}
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`.trim();
+
 export const LINEAR_ISSUE_BY_IDENTIFIER_QUERY = `
   query SymphonyIssueByIdentifier(
     $identifier: String!
@@ -245,6 +277,40 @@ export const LINEAR_TICKET_FEATURE_ISSUES_QUERY = `
       after: $after
       filter: {
         project: { slugId: { eq: $projectSlug } }
+        state: { name: { in: $stateNames } }
+      }
+      orderBy: createdAt
+    ) {
+      nodes {
+        ${TICKET_FEATURE_ISSUE_FIELDS}
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`.trim();
+
+// Team-scoped variant of LINEAR_TICKET_FEATURE_ISSUES_QUERY (SYMPH-824).
+// Off-project team tickets get the SAME full TicketFeature provenance
+// (creator, relation history, relationChanges) as project-scoped products, so
+// the comparator's advisory / operator-confirmed edges are complete in
+// team-scope mode rather than degrading to native `blockedBy` only.
+export const LINEAR_TICKET_FEATURE_ISSUES_BY_TEAMS_QUERY = `
+  query SymphonyTicketFeatureIssuesByTeams(
+    $teamKeys: [String!]!
+    $stateNames: [String!]!
+    $first: Int!
+    $relationFirst: Int!
+    $historyFirst: Int!
+    $after: String
+  ) {
+    issues(
+      first: $first
+      after: $after
+      filter: {
+        team: { key: { in: $teamKeys } }
         state: { name: { in: $stateNames } }
       }
       orderBy: createdAt
@@ -373,6 +439,39 @@ export const LINEAR_ISSUES_BY_LABELS_QUERY = `
       after: $after
       filter: {
         project: { slugId: { eq: $projectSlug } }
+        labels: { name: { in: $labelNames } }
+      }
+      orderBy: createdAt
+    ) {
+      nodes {
+        ${ISSUE_FIELDS}
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`.trim();
+
+// Team-scoped variant of LINEAR_ISSUES_BY_LABELS_QUERY (SYMPH-824). Backs the
+// fail-open fallback lane of the pipeline-halt check (checkPipelineHalt) so the
+// kill-switch fallback stays functional in team-scope mode — without it, the
+// fallback would throw on a missing project slug whenever the primary
+// team-scoped halt query errored.
+export const LINEAR_ISSUES_BY_LABELS_BY_TEAMS_QUERY = `
+  query SymphonyIssuesByLabelsByTeams(
+    $teamKeys: [String!]!
+    $labelNames: [String!]!
+    $first: Int!
+    $relationFirst: Int!
+    $after: String
+  ) {
+    issues(
+      first: $first
+      after: $after
+      filter: {
+        team: { key: { in: $teamKeys } }
         labels: { name: { in: $labelNames } }
       }
       orderBy: createdAt
@@ -596,6 +695,37 @@ export const LINEAR_OPEN_ISSUES_BY_LABELS_QUERY = `
       first: $first
       filter: {
         project: { slugId: { eq: $projectSlug } }
+        labels: { name: { in: $labelNames } }
+        state: { name: { nin: $excludeStateNames } }
+      }
+      orderBy: createdAt
+    ) {
+      nodes {
+        ${ISSUE_FIELDS}
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`.trim();
+
+// Team-scoped variant of LINEAR_OPEN_ISSUES_BY_LABELS_QUERY (SYMPH-824). Backs
+// the pipeline-halt kill-switch check in team-scope mode: the halt label is
+// honoured across the configured team(s) without requiring a project slug.
+export const LINEAR_OPEN_ISSUES_BY_LABELS_BY_TEAMS_QUERY = `
+  query SymphonyOpenIssuesByLabelsByTeams(
+    $teamKeys: [String!]!
+    $labelNames: [String!]!
+    $excludeStateNames: [String!]!
+    $first: Int!
+    $relationFirst: Int!
+  ) {
+    issues(
+      first: $first
+      filter: {
+        team: { key: { in: $teamKeys } }
         labels: { name: { in: $labelNames } }
         state: { name: { nin: $excludeStateNames } }
       }

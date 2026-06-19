@@ -558,10 +558,17 @@ export function validateDispatchConfig(
     );
   }
 
-  if (!config.tracker.projectSlug || config.tracker.projectSlug.trim() === "") {
+  // Dispatch needs a candidate scope: either a project slug (legacy) or at
+  // least one team key (SYMPH-794/824 team-scoped mode). The adjacent
+  // provenance/halt/by-states queries are team-scoped when team_keys is set, so
+  // a project slug is no longer mandatory — but one of the two must be present.
+  const hasProjectSlug =
+    !!config.tracker.projectSlug && config.tracker.projectSlug.trim() !== "";
+  const hasTeamKeys = (config.tracker.teamKeys?.length ?? 0) > 0;
+  if (!hasProjectSlug && !hasTeamKeys) {
     return invalid(
       ERROR_CODES.configInvalid,
-      "tracker.project_slug must be configured before dispatch.",
+      "tracker.project_slug or tracker.team_keys must be configured before dispatch.",
     );
   }
 
