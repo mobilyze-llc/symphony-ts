@@ -22,15 +22,12 @@ function batch(mode: PlanBatch["mode"]): PlanBatch {
 }
 
 describe("resolveStandingPlanEnvelope", () => {
-  it("applies spine defaults: shared-surface excluded until Track 2 ships execution", () => {
+  it("applies spine defaults: only parallel-isolated until other modes' execution ships", () => {
     const envelope = resolveStandingPlanEnvelope({ concurrencyCeiling: 3 });
     expect(envelope.version).toBe(1);
     expect(envelope.concurrencyCeiling).toBe(3);
     expect(envelope.allowedRisk).toBe("medium");
-    expect(envelope.allowedModes).toEqual([
-      "parallel-isolated",
-      "canary-chain",
-    ]);
+    expect(envelope.allowedModes).toEqual(["parallel-isolated"]);
   });
 
   it("honors explicit overrides", () => {

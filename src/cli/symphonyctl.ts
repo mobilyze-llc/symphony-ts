@@ -19,6 +19,9 @@ import {
   type AnchorPlacement,
   INTENT_VERBS,
   type IntentVerb,
+  PLAN_CONTROL_VERBS,
+  type PlanControlVerb,
+  isPlanControlVerb,
 } from "../orchestrator/intent.js";
 
 /** Dashboard port of the symphony product's own WORKFLOW config. */
@@ -38,10 +41,13 @@ export interface SymphonyctlCommand {
     | "unfence"
     | "help";
   baseUrl: string;
-  verb?: IntentVerb;
+  verb?: IntentVerb | PlanControlVerb;
   issue?: string;
   issueIdentifiers?: string[];
   reason?: string;
+  /** Plan-control intent payload (release_batch / hold / modify_plan). */
+  batchId?: string;
+  revision?: number;
   hint?: string;
   fence?: number;
   stage?: string;
@@ -236,12 +242,15 @@ export function parseSymphonyctlArgs(
 
   if (command === "intent") {
     const verb = positional[1];
+    if (verb !== undefined && isPlanControlVerb(verb)) {
+      return parsePlanControlIntent(verb, flags, baseUrl, operatorToken);
+    }
     if (
       verb === undefined ||
       !(INTENT_VERBS as readonly string[]).includes(verb)
     ) {
       throw new SymphonyctlUsageError(
-        `intent requires a verb: ${INTENT_VERBS.join(", ")}`,
+        `intent requires a verb: ${[...INTENT_VERBS, ...PLAN_CONTROL_VERBS].join(", ")}`,
       );
     }
     const issue = flags.get("issue");
@@ -280,6 +289,49 @@ export function parseSymphonyctlArgs(
   }
 
   throw new SymphonyctlUsageError(`Unknown command: ${command}`);
+}
+
+/**
+ * Parse a Queue Triage v2 plan-control intent (release_batch / hold /
+ * modify_plan, SYMPH-789). Batch-scoped, not issue-scoped: requires --revision
+ * (the plan revision being acted on) and, for release_batch/hold, --batch-id.
+ */
+function parsePlanControlIntent(
+  verb: PlanControlVerb,
+  flags: Map<string, string>,
+  baseUrl: string,
+  operatorToken: string | undefined,
+): SymphonyctlCommand {
+  const reason = flags.get("reason");
+  const revisionRaw = flags.get("revision");
+  if (reason === undefined || revisionRaw === undefined) {
+    throw new SymphonyctlUsageError(
+      `${verb} requires --revision <n> and --reason <text>.`,
+    );
+  }
+  if (!/^\d+$/.test(revisionRaw)) {
+    throw new SymphonyctlUsageError(
+      "--revision must be a non-negative integer.",
+    );
+  }
+  const batchId = flags.get("batch-id");
+  if ((verb === "release_batch" || verb === "hold") && batchId === undefined) {
+    throw new SymphonyctlUsageError(`${verb} requires --batch-id <id>.`);
+  }
+  const result: SymphonyctlCommand = {
+    command: "intent",
+    baseUrl,
+    verb,
+    reason,
+    revision: Number.parseInt(revisionRaw, 10),
+  };
+  if (batchId !== undefined) {
+    result.batchId = batchId;
+  }
+  if (operatorToken !== undefined && operatorToken !== "") {
+    result.operatorToken = operatorToken;
+  }
+  return result;
 }
 
 function parseAnchorPlacementFlags(
@@ -688,6 +740,29 @@ export async function runSymphonyctl(
               },
             }
           : {}),
+      },
+      { operatorToken: parsed.operatorToken },
+    );
+    log(
+      status === 200
+        ? JSON.stringify(payload, null, 2)
+        : formatHttpFailure("/api/v1/intents", status, payload),
+    );
+    return status === 200 ? 0 : 1;
+  }
+
+  // Plan-control intent (release_batch / hold / modify_plan): batch-scoped body.
+  if (parsed.verb !== undefined && isPlanControlVerb(parsed.verb)) {
+    const { status, payload } = await httpJson(
+      "POST",
+      `${parsed.baseUrl}/api/v1/intents`,
+      {
+        verb: parsed.verb,
+        reason: parsed.reason,
+        batch: {
+          revision: parsed.revision,
+          ...(parsed.batchId === undefined ? {} : { batchId: parsed.batchId }),
+        },
       },
       { operatorToken: parsed.operatorToken },
     );

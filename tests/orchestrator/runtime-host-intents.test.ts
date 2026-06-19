@@ -124,6 +124,29 @@ describe("OrchestratorRuntimeHost.requestIntent", () => {
     expect(intentEntries(host)).toHaveLength(0);
   });
 
+  it("rejects a plan-control verb from a non-operator actor (no ambient control surfaces)", async () => {
+    const { host } = createHost();
+    const result = await host.requestIntent({
+      verb: "release_batch",
+      reason: "sneaky self-approval",
+      actor: { kind: "interactive-agent", host: "pro14" },
+      batch: { revision: 1, batchId: "b-abc" },
+    });
+    expect(result.status).toBe("invalid_request");
+    expect(result.detail).toMatch(/operator actor/);
+  });
+
+  it("returns no_plan for an operator plan-control verb when no plan exists", async () => {
+    const { host } = createHost();
+    const result = await host.requestIntent({
+      verb: "release_batch",
+      reason: "release",
+      actor: { kind: "operator", host: "pro14" },
+      batch: { revision: 1, batchId: "b-abc" },
+    });
+    expect(result.status).toBe("no_plan");
+  });
+
   it("forwards a stale fence and reports rejected_stale", async () => {
     const { host } = createHost();
     const result = await host.requestIntent({

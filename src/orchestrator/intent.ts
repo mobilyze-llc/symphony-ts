@@ -55,6 +55,36 @@ export const INTENT_VERBS = [
 export type IntentVerb = (typeof INTENT_VERBS)[number];
 
 /**
+ * Queue Triage v2 plan-control verbs (SYMPH-789). These are plan/batch-scoped,
+ * NOT issue-scoped: they ride the same dashboard/symphonyctl intent surface but
+ * are handled at the host level (recorded as revision-bound PlanDecisions in the
+ * standing-plan store), so they never enter the issue-scoped writeIntent /
+ * applyIntentVerb path or the dispatcher-journal replay.
+ */
+export const PLAN_CONTROL_VERBS = [
+  "release_batch",
+  "hold",
+  "modify_plan",
+] as const;
+
+export type PlanControlVerb = (typeof PLAN_CONTROL_VERBS)[number];
+
+export function isPlanControlVerb(value: string): value is PlanControlVerb {
+  return (PLAN_CONTROL_VERBS as readonly string[]).includes(value);
+}
+
+/**
+ * Payload for a plan-control intent. `revision` binds the operator action to a
+ * specific plan revision (a re-plan rotates the revision → stale actions are
+ * void). `batchId` targets a batch (required for release_batch / hold; absent
+ * for the plan-scoped modify_plan).
+ */
+export interface PlanControlIntentPayload {
+  revision: number;
+  batchId?: string;
+}
+
+/**
  * Synthetic issue scope for pipeline-wide intents (SYMPH-408b). Pipeline
  * pause/resume has no Linear issue at journal time (the halt issue is the
  * VIEW created after the intent is journaled), so pipeline-scoped entries

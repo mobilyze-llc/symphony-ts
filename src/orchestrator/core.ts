@@ -814,7 +814,26 @@ export interface OrchestratorCoreOptions {
     confidence: string;
     caseText: string;
   }) => void;
+  /**
+   * Queue Triage v2 consumer hook (SYMPH-787/789). When provided AND it returns
+   * `{mode:"plan"}`, the standing plan drives this tick's dispatch order/subset
+   * instead of the deterministic comparator. ZERO model calls are made here —
+   * the plan was computed off the hot path. Absent, or `{mode:"degrade"}`, the
+   * comparator order is used verbatim (graceful degradation; default behavior).
+   */
+  planDrivenDispatch?: (
+    input: PlanDrivenDispatchInput,
+  ) => Promise<PlanDrivenDispatchDecision>;
 }
+
+export interface PlanDrivenDispatchInput {
+  candidates: readonly Issue[];
+  runningIssueIdentifiers: ReadonlySet<string>;
+}
+
+export type PlanDrivenDispatchDecision =
+  | { mode: "plan"; orderedIssueIdentifiers: string[] }
+  | { mode: "degrade" };
 
 export class OrchestratorCore {
   private config: ResolvedWorkflowConfig;
@@ -823,6 +842,7 @@ export class OrchestratorCore {
 
   private readonly spawnWorker: OrchestratorCoreOptions["spawnWorker"];
 
+  private readonly planDrivenDispatch?: OrchestratorCoreOptions["planDrivenDispatch"];
   private readonly onIssueDropped?: OrchestratorCoreOptions["onIssueDropped"];
 
   private readonly stopRunningIssue?: OrchestratorCoreOptions["stopRunningIssue"];
@@ -1036,6 +1056,7 @@ export class OrchestratorCore {
     this.config = options.config;
     this.tracker = options.tracker;
     this.spawnWorker = options.spawnWorker;
+    this.planDrivenDispatch = options.planDrivenDispatch;
     this.onIssueDropped = options.onIssueDropped;
     this.stopRunningIssue = options.stopRunningIssue;
     this.runEnsembleGate = options.runEnsembleGate;
@@ -2775,7 +2796,42 @@ export class OrchestratorCore {
     }
     const computedHeadIssue = sortedIssues[0] ?? null;
     let computedHeadReachedDispatchBoundary = false;
-    for (const issue of sortedIssues) {
+    // Queue Triage v2 consumer (SYMPH-787/789): when a fresh standing plan
+    // drives dispatch, iterate its releasable batch members instead of the
+    // comparator order. ZERO model calls here — the plan was computed off the
+    // hot path. With no hook (the default) or a "degrade" decision, the
+    // comparator order is used verbatim (graceful degradation / zero-diff).
+    let dispatchList: readonly Issue[] = sortedIssues;
+    if (this.planDrivenDispatch !== undefined) {
+      // The plan may only REORDER/SUBSET the comparator-eligible frontier — it
+      // resolves identifiers from `sortedIssues` (post dispatch-fence,
+      // hard-edge, and computed-order exclusions), NOT the raw tracker fetch.
+      // A plan can never dispatch an issue the comparator excluded (e.g. behind
+      // an operator dispatch fence) — council R1 (Codex P1). Any hook failure
+      // degrades to the comparator and never breaks the poll (Pi P1).
+      try {
+        const decision = await this.planDrivenDispatch({
+          candidates: sortedIssues,
+          runningIssueIdentifiers: new Set(
+            Object.values(this.state.running).map(
+              (entry) => entry.issue.identifier,
+            ),
+          ),
+        });
+        if (decision.mode === "plan") {
+          const eligibleByIdentifier = new Map(
+            sortedIssues.map((candidate) => [candidate.identifier, candidate]),
+          );
+          dispatchList = decision.orderedIssueIdentifiers
+            .map((identifier) => eligibleByIdentifier.get(identifier))
+            .filter((candidate): candidate is Issue => candidate !== undefined);
+        }
+      } catch {
+        // Degrade to the comparator order already in `dispatchList`.
+        dispatchList = sortedIssues;
+      }
+    }
+    for (const issue of dispatchList) {
       if (this.availableSlots() <= 0) {
         break;
       }

@@ -327,14 +327,15 @@ export function isCommittedBatchStatus(status: PlanBatchStatus): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * Spine default allowed modes: parallel-isolated (today's runner) plus
- * canary-chain (ordered isolated dispatch with a release gate, SYMPH-789).
- * shared-surface is intentionally EXCLUDED until Track 2 ships shared-branch
- * execution — the planner must not propose a mode the runner cannot execute.
+ * Spine default allowed mode: parallel-isolated only — the one mode whose
+ * execution path is complete. canary-chain (its contingent-release flow) and
+ * shared-surface (shared-branch execution, Track 2) are intentionally EXCLUDED
+ * by default until their execution paths ship, so the planner never proposes a
+ * mode the consumer cannot fully execute. The consumer + envelope already
+ * support these modes for when an operator opts in via config.
  */
 export const DEFAULT_ENVELOPE_ALLOWED_MODES: PlanBatchMode[] = [
   "parallel-isolated",
-  "canary-chain",
 ];
 
 export const DEFAULT_ENVELOPE_ALLOWED_RISK: PlanRiskTier = "medium";

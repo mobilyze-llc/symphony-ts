@@ -30,7 +30,7 @@ import {
   OrchestratorCore,
   type OrchestratorCoreOptions,
 } from "../../src/orchestrator/core.js";
-import type { IntentActor } from "../../src/orchestrator/intent.js";
+import type { IntentActor, IntentVerb } from "../../src/orchestrator/intent.js";
 import type { IssueTracker } from "../../src/tracker/tracker.js";
 
 const OPERATOR_AUTH = {
@@ -1162,7 +1162,9 @@ describe("authenticated intent actor binding (SYMPH-449)", () => {
           // into writeIntent, no extra semantics.
           requestIntent: async (input) => {
             const result = await orchestrator.writeIntent({
-              verb: input.verb,
+              // This mock mirrors only the issue-scoped path; plan-control verbs
+              // branch off before writeIntent in the real requestIntent.
+              verb: input.verb as IntentVerb,
               issueId: input.issueId ?? "1",
               issueIdentifier: input.issueIdentifier ?? "ISSUE-1",
               actor: input.actor,

@@ -42,7 +42,11 @@ import {
   type IntentFence,
   type IntentStatus,
   type IntentVerb,
+  PLAN_CONTROL_VERBS,
+  type PlanControlIntentPayload,
+  type PlanControlVerb,
   isPipelineSentinelValue,
+  isPlanControlVerb,
 } from "../orchestrator/intent.js";
 import { fetchClaudeUsageFromCli } from "./dashboard-claude-usage.js";
 import { toErrorMessage } from "./dashboard-format.js";
@@ -307,7 +311,7 @@ export interface DispatchFenceResponse {
  * adds no verb semantics of its own.
  */
 export interface IntentRequest {
-  verb: IntentVerb;
+  verb: IntentVerb | PlanControlVerb;
   issueId?: string;
   issueIdentifier?: string;
   reason: string;
@@ -316,13 +320,15 @@ export interface IntentRequest {
   hint?: string;
   stage?: string;
   anchor?: AnchorIntentPayload;
+  /** Plan-control payload (release_batch / hold / modify_plan), SYMPH-789. */
+  batch?: PlanControlIntentPayload;
 }
 
 export interface IntentRequestResult {
-  status: IntentStatus | "issue_not_found" | "invalid_request";
+  status: IntentStatus | "issue_not_found" | "invalid_request" | "no_plan";
   detail: string;
   sequence: number | null;
-  verb: IntentVerb;
+  verb: IntentVerb | PlanControlVerb;
   issue_id: string | null;
   issue_identifier: string | null;
 }
@@ -445,9 +451,16 @@ const anchorRequestSchema = z
   })
   .strict();
 
+const planControlBatchSchema = z
+  .object({
+    revision: z.number().int().nonnegative(),
+    batchId: z.string().min(1).max(256).optional(),
+  })
+  .strict();
+
 const intentRequestSchema = z
   .object({
-    verb: z.enum(INTENT_VERBS),
+    verb: z.union([z.enum(INTENT_VERBS), z.enum(PLAN_CONTROL_VERBS)]),
     issueId: z.string().min(1).max(256).optional(),
     issueIdentifier: z.string().min(1).max(256).optional(),
     reason: z.string().min(1).max(2048),
@@ -457,10 +470,14 @@ const intentRequestSchema = z
     hint: z.string().min(1).max(1024).optional(),
     stage: z.string().min(1).max(1024).optional(),
     anchor: anchorRequestSchema.optional(),
+    batch: planControlBatchSchema.optional(),
   })
   .refine(
+    // Issue-scoped verbs require an issue; plan-control verbs are batch-scoped.
     (value) =>
-      value.issueId !== undefined || value.issueIdentifier !== undefined,
+      isPlanControlVerb(value.verb) ||
+      value.issueId !== undefined ||
+      value.issueIdentifier !== undefined,
     { message: "Either issueId or issueIdentifier is required." },
   )
   .refine(
@@ -474,7 +491,22 @@ const intentRequestSchema = z
   )
   .refine((value) => value.verb !== "anchor" || value.anchor !== undefined, {
     message: "anchor intent requires anchor placement and expiry.",
-  });
+  })
+  .refine(
+    // plan-control verbs bind to a plan revision via the batch payload.
+    (value) => !isPlanControlVerb(value.verb) || value.batch !== undefined,
+    {
+      message:
+        "plan-control intents (release_batch/hold/modify_plan) require a batch payload with the plan revision.",
+    },
+  )
+  .refine(
+    // release_batch / hold target a specific batch by id.
+    (value) =>
+      (value.verb !== "release_batch" && value.verb !== "hold") ||
+      value.batch?.batchId !== undefined,
+    { message: "release_batch and hold require batch.batchId." },
+  );
 
 const dispatchFenceRequestSchema = z.object({
   issue_identifiers: z.array(z.string().min(1).max(256)).min(1).max(50),
@@ -674,6 +706,16 @@ function toIntentRequest(
     ...(data.fence === undefined ? {} : { fence: data.fence }),
     ...(data.hint === undefined ? {} : { hint: data.hint }),
     ...(data.stage === undefined ? {} : { stage: data.stage }),
+    ...(data.batch === undefined
+      ? {}
+      : {
+          batch: {
+            revision: data.batch.revision,
+            ...(data.batch.batchId === undefined
+              ? {}
+              : { batchId: data.batch.batchId }),
+          },
+        }),
     ...(data.anchor === undefined
       ? {}
       : {
@@ -1269,7 +1311,8 @@ export function createDashboardRequestHandler(
             ? 404
             : result.status === "invalid_request"
               ? 400
-              : result.status === "rejected_stale"
+              : result.status === "rejected_stale" ||
+                  result.status === "no_plan"
                 ? 409
                 : 200;
         writeJson(response, statusCode, result);

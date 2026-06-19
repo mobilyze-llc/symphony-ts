@@ -1,5 +1,6 @@
 import type {
   PlanDecision,
+  PlanDecisionKind,
   PlanRevision,
   StandingPlan,
   StandingPlanJournal,
@@ -34,7 +35,7 @@ export interface RecordPlanRevisionResult {
 
 export interface RecordPlanDecisionResult {
   recorded: boolean;
-  reason?: "no_plan" | "stale_revision";
+  reason?: "no_plan" | "stale_revision" | "batch_not_found";
 }
 
 /** Project the current plan from the journal (latest revision, decisions void on rotate). */
@@ -163,6 +164,54 @@ export async function recordPlanDecision(
       await appendStandingPlanJournalEntryToDisk(workspaceRoot, appended.entry);
     }
     return { recorded: appended.appended };
+  });
+}
+
+/**
+ * Record an operator plan-control decision (release_batch / hold / modify_plan
+ * → approve / hold / modify) from an intent. Resolves the planId from the
+ * current plan, then delegates to recordPlanDecision (which validates the
+ * revision binding under the single-writer lock). Returns no_plan when nothing
+ * has been planned yet.
+ */
+export async function recordPlanControlDecision(
+  workspaceRoot: string,
+  input: {
+    kind: PlanDecisionKind;
+    revision: number;
+    batchId: string | null;
+    actor: string;
+    note: string | null;
+    decisionId: string;
+    createdAt: string;
+  },
+): Promise<RecordPlanDecisionResult> {
+  const current = await loadStandingPlan(workspaceRoot);
+  if (current === null) {
+    return { recorded: false, reason: "no_plan" };
+  }
+  // A batch-scoped decision against the CURRENT revision must target a batch
+  // that exists in it; otherwise it would record false-positive control state
+  // the consumer can never honor (council R1, Codex P3). Revision binding takes
+  // precedence: a stale revision falls through to recordPlanDecision, which
+  // returns stale_revision regardless of the (old) batch id.
+  if (
+    input.batchId !== null &&
+    input.revision === current.revision &&
+    !current.batches.some((batch) => batch.batchId === input.batchId)
+  ) {
+    return { recorded: false, reason: "batch_not_found" };
+  }
+  return recordPlanDecision(workspaceRoot, {
+    decisionId: input.decisionId,
+    planId: current.planId,
+    revision: input.revision,
+    batchId: input.batchId,
+    kind: input.kind,
+    actor: input.actor,
+    optionMarker: null,
+    createdAt: input.createdAt,
+    note: input.note,
   });
 }
 

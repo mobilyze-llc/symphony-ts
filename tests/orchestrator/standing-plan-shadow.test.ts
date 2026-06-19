@@ -184,6 +184,7 @@ function triageConfig(
     shadowMode: true,
     plannerModel: "opus",
     heartbeatMs: 900_000,
+    autoReleaseFrontier: 1,
     envelope: ENVELOPE,
     ...over,
   };
@@ -267,6 +268,41 @@ describe("runStandingPlanShadowTick", () => {
       });
       expect(result.status).toBe("skipped");
       expect(plannerBuilt).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("force bypasses the heartbeat gate and re-plans now (SYMPH-787/789)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-"));
+    let plannerBuilt = false;
+    try {
+      // First tick records a plan.
+      await runStandingPlanShadowTick({
+        config: triageConfig(),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        createPlannerRunner: () => okPlanner().runClaude,
+        log: () => undefined,
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+      });
+      // 1 minute later (inside the heartbeat window) but FORCED → must run.
+      const result = await runStandingPlanShadowTick({
+        config: triageConfig(),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        createPlannerRunner: () => {
+          plannerBuilt = true;
+          return okPlanner().runClaude;
+        },
+        log: () => undefined,
+        now: () => new Date("2026-06-18T01:01:00.000Z"),
+        force: true,
+      });
+      expect(result.status).toBe("ok");
+      expect(plannerBuilt).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

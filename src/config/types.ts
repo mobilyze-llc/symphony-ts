@@ -416,6 +416,12 @@ export interface WorkflowQueueTriageConfig {
   plannerModel: string;
   /** Re-plan heartbeat cadence for the shadow/plan loop, in ms. */
   heartbeatMs: number;
+  /**
+   * Posture-B auto-release frontier (SYMPH-789): how many lookahead batches the
+   * consumer may auto-dispatch unattended (within the envelope). The rest are
+   * held until an operator approval releases them. Tunable; default 1.
+   */
+  autoReleaseFrontier: number;
   envelope: PlanEnvelope;
 }
 
