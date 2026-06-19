@@ -6363,6 +6363,97 @@ describe("runHeadlessCouncilGate", () => {
     });
   });
 
+  it("characterizes the review verdict downgrade ladder including routing guarantees", async () => {
+    const passHarness = await createHarness();
+    const passResult = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-804",
+        workspace: passHarness.workspace,
+        artifactDir: passHarness.artifactDir,
+        diffPath: passHarness.diffPath,
+        reviewerLanes: [piLane()],
+        codexLead: false,
+        provenance: [codexImplementerProvenance()],
+      },
+      { runCommand: passHarness.runCommand },
+    );
+
+    expect(passResult.verdict).toBe("pass");
+    expect(passResult.review_metadata.verdict).toBe("pass");
+
+    const failHarness = await createHarness({
+      laneBehavior: {
+        "pi-deepseek": {
+          artifact: "## Verdict\nFINDINGS\n\n## P1 Must Fix\n- Blocking bug",
+        },
+      },
+    });
+    const failResult = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-804",
+        workspace: failHarness.workspace,
+        artifactDir: failHarness.artifactDir,
+        diffPath: failHarness.diffPath,
+        reviewerLanes: [piLane()],
+        codexLead: false,
+        provenance: [codexImplementerProvenance()],
+      },
+      { runCommand: failHarness.runCommand },
+    );
+
+    expect(failResult.verdict).toBe("fail");
+    expect(failResult.review_metadata.verdict).toBe("fail");
+
+    const nonMergeLaneHarness = await createHarness();
+    const noAuthoritativeResult = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-804",
+        workspace: nonMergeLaneHarness.workspace,
+        artifactDir: nonMergeLaneHarness.artifactDir,
+        diffPath: nonMergeLaneHarness.diffPath,
+        reviewerLanes: [{ ...piLane(), mergeAuthoritative: false }],
+        codexLead: false,
+        provenance: [codexImplementerProvenance()],
+      },
+      { runCommand: nonMergeLaneHarness.runCommand },
+    );
+
+    expect(noAuthoritativeResult.verdict).toBe("error");
+    expect(noAuthoritativeResult.review_metadata.verdict).toBe("error");
+    expect(noAuthoritativeResult.lanes).toContainEqual(
+      expect.objectContaining({ laneId: "pi-deepseek", verdict: "pass" }),
+    );
+
+    const routingDowngradeHarness = await createHarness();
+    const routingDowngradeResult = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-804",
+        workspace: routingDowngradeHarness.workspace,
+        artifactDir: routingDowngradeHarness.artifactDir,
+        diffPath: routingDowngradeHarness.diffPath,
+        reviewerLanes: [piLane()],
+        codexLead: false,
+        provenance: [],
+      },
+      { runCommand: routingDowngradeHarness.runCommand },
+    );
+
+    expect(routingDowngradeResult.lanes).toContainEqual(
+      expect.objectContaining({ laneId: "pi-deepseek", verdict: "pass" }),
+    );
+    expect(routingDowngradeResult.verdict).toBe("error");
+    expect(routingDowngradeResult.review_metadata.verdict).toBe("error");
+    expect(routingDowngradeResult.degradedConditions).toEqual(
+      expect.arrayContaining([
+        "routing_absent_decorrelated_reviewer_artifact",
+        "routing_author_provenance_missing",
+      ]),
+    );
+    expect(routingDowngradeResult.summary).toContain(
+      "routing_absent_decorrelated_reviewer_artifact",
+    );
+  });
+
   it("returns fail when Codex lead triage alone reports findings", async () => {
     const harness = await createHarness({
       laneBehavior: {

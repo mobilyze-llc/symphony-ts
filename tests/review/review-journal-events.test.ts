@@ -1,14 +1,16 @@
-import { mkdir, mkdtemp, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 import {
   getDispatcherRunJournalLockPath,
+  getDispatcherRunJournalPath,
   readDispatcherRunJournal,
 } from "../../src/logging/run-journal.js";
 import { buildStateDelta } from "../../src/logging/runtime-snapshot.js";
+import { reduceMergeCandidates } from "../../src/orchestrator/merge-candidate.js";
 import type {
   HeadlessCouncilGateResult,
   StructuredReviewerArtifact,
@@ -300,6 +302,58 @@ describe("review journal events", () => {
     expect(serializedDelta).not.toContain("SECRET");
     expect(serializedDelta).not.toContain("related_paths");
     expect(serializedDelta).not.toContain("evidence_locations");
+  });
+
+  it("replays the captured v1 review and merge-candidate journal compatibility fixture", async () => {
+    const fixture = await readFile(
+      new URL(
+        "../fixtures/review/v1-review-merge-candidate-journal.jsonl",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    const workspaceRoot = await mkdtemp(
+      join(tmpdir(), "symphony-v1-review-replay-"),
+    );
+    const journalPath = getDispatcherRunJournalPath(workspaceRoot);
+    await mkdir(dirname(journalPath), { recursive: true });
+    await writeFile(journalPath, fixture);
+
+    const replayed = await readDispatcherRunJournal(workspaceRoot);
+    const delta = buildStateDelta(replayed, { sinceSeq: 0 });
+    const candidates = reduceMergeCandidates(replayed);
+
+    expect(replayed.map((entry) => entry.kind)).toEqual([
+      "review_round",
+      "review_gate_result",
+      "merge_candidate",
+    ]);
+    expect(delta.entries.map((entry) => entry.kind)).toEqual([
+      "review_round",
+      "review_gate_result",
+      "merge_candidate",
+    ]);
+    expect(
+      replayed.find((entry) => entry.kind === "review_gate_result")?.metadata,
+    ).toMatchObject({
+      schema_version: 1,
+      gate_verdict: "pass",
+      decorrelation_merge_eligible: true,
+      review_result_path: "/tmp/symph-804/review-result.json",
+    });
+    expect(candidates["issue-symph-804"]).toMatchObject({
+      issueIdentifier: "SYMPH-804",
+      repo: "mobilyze-llc/symphony-ts",
+      prNumber: 804,
+      baseSha: "base-sha-v1",
+      headSha: "head-sha-v1",
+      reviewedHeadSha: "head-sha-v1",
+      reviewResultPath: "/tmp/symph-804/review-result.json",
+      councilVerdict: "pass",
+      decorrelationMergeEligible: true,
+      round: 1,
+      status: "candidate",
+    });
   });
 
   it("persists lane wall-time and token telemetry through state delta", async () => {

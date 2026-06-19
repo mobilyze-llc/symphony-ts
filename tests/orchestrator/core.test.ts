@@ -1,6 +1,6 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -176,6 +176,51 @@ describe("orchestrator core", () => {
         (entry) => entry.kind === "failure_exhausted",
       )?.metadata.reason,
     ).toContain("not merge-eligible");
+  });
+
+  it("parks review completion when review-result artifact spoofs a different canonical path", async () => {
+    const reviewResultPath = await writeReviewGateResultFixture();
+    const artifact = JSON.parse(
+      await readFile(reviewResultPath, "utf8"),
+    ) as HeadlessCouncilGateResult;
+    artifact.artifactPaths.resultJson = join(
+      dirname(reviewResultPath),
+      "spoofed-review-result.json",
+    );
+    await writeFile(reviewResultPath, `${JSON.stringify(artifact, null, 2)}\n`);
+    const orchestrator = createOrchestrator({
+      config: createReviewMergeConfig(),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+    });
+
+    await orchestrator.pollTick();
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: [
+        "Council PASS.",
+        `[REVIEW_GATE_RESULT_PATH: ${reviewResultPath}]`,
+        "[STAGE_COMPLETE]",
+      ].join("\n"),
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    const state = orchestrator.getState();
+    expect(retry).toBeNull();
+    expect(state.failed.has("1")).toBe(true);
+    expect(state.resumeRequired.has("1")).toBe(true);
+    expect(state.issueStages["1"]).toBeUndefined();
+    expect(
+      state.dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "failure_exhausted",
+      )?.metadata.reason,
+    ).toContain("resultJson path does not match the dispatcher marker");
+    expect(state.dispatcherRunJournal.map((entry) => entry.kind)).not.toContain(
+      "merge_candidate",
+    );
   });
 
   it("ingests review-result artifact rows before advancing review to merge", async () => {
