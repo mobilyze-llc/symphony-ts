@@ -30,6 +30,17 @@ describe("dispatch admission chokepoint (SYMPH-825)", () => {
     expect(calls.length).toBe(1);
   });
 
+  it("forbids indirect spellings that would dodge the call-site count (council NIT)", () => {
+    // The exactly-one-call-site check counts literal `this.dispatchIssue(`. A
+    // future bypass could reach the private method without that spelling — via
+    // `this.dispatchIssue.bind(this)` or bracket access `this["dispatchIssue"]()` —
+    // and the count would still read 1. Forbid those forms so the structural
+    // guarantee can't be quietly routed around. (A full AST-resolved check is the
+    // stronger long-term form — tracked as a follow-up.)
+    expect(source).not.toMatch(/dispatchIssue\.bind\(/);
+    expect(source).not.toMatch(/\[\s*["'`]dispatchIssue["'`]\s*\]/);
+  });
+
   it("makes admitAndDispatch the SOLE caller of dispatchIssue", () => {
     const body = methodBody(source, "private async admitAndDispatch(");
     expect(body).not.toBeNull();
