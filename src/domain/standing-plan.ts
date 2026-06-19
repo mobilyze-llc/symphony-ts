@@ -473,7 +473,11 @@ function isPlanBatch(value: unknown): value is PlanBatch {
     return false;
   }
   if (value.canary === null) {
-    return true;
+    // A canary-chain batch with no canary structure is unexecutable — the
+    // planner downgrades these to parallel-isolated at WRITE, so a null canary on
+    // a canary-chain row is a corrupt/hand-edited entry; drop it on READ so it
+    // never becomes store truth (council R2, Pi P2). Other modes may be null.
+    return value.mode !== "canary-chain";
   }
   if (!isPlanCanaryStructure(value.canary)) {
     return false;
