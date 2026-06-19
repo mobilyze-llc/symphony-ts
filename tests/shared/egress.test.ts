@@ -185,6 +185,25 @@ describe("URL preservation vs. base64 redaction (SYMPH-822)", () => {
       ),
     ).toContain("token=[REDACTED]");
   });
+
+  it("still redacts a base64-shaped OAuth code/state value in a URL query (codex-review P2)", () => {
+    // Non-credential keys redactSecretAssignments does NOT cover; the lookbehind
+    // must spare only the URL PATH, not the query, or these leak.
+    const secret = "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx2Yz3_";
+    expect(sanitizeForLinear(`https://example.com/cb?code=${secret}`)).toContain(
+      "[REDACTED:token]",
+    );
+    expect(
+      sanitizeForLinear(`https://example.com/cb?state=${secret}`),
+    ).toContain("[REDACTED:token]");
+  });
+
+  it("still redacts a base64-shaped token in a URL fragment (codex-review P2)", () => {
+    const secret = "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx2Yz3_";
+    expect(sanitizeForLinear(`https://example.com/cb#${secret}`)).toContain(
+      "[REDACTED:token]",
+    );
+  });
 });
 
 describe("sanitizeForReworkChannel", () => {
