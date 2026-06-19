@@ -3610,6 +3610,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         ),
         runningIssueIdentifiers: input.runningIssueIdentifiers,
         nowMs: this.now().getTime(),
+        // Team-scoped candidate source ⇒ the plan path releases only
+        // operator-approved batches, never the posture-B auto-release frontier
+        // (SYMPH-794: the team backlog must never dispatch without an explicit go).
+        teamScoped: (this.config.tracker.teamKeys ?? []).length > 0,
         candidatePriorityBands,
         mergedSincePlanCount: mergedOutcomes.sinceCount,
         mergedIssueIdentifiers: mergedOutcomes.identifiers,
@@ -3655,8 +3659,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       admissionGuardrailEnabled: cfg?.admissionGuardrail.enabled === true,
       loadPlan: () => loadStandingPlan(root),
       listHonoredDecisions: () => listHonoredDecisions(root),
-      onError: (error) => {
-        void this.logger?.warn(
+      onError: async (error) => {
+        // Awaited inside the helper so the degrade diagnostic flushes before the
+        // empty-set (fail-closed) return; the helper swallows any logger error.
+        await this.logger?.warn(
           "queue_triage_admission_degraded",
           "Admission gate store read failed; failing closed (no admissions this tick).",
           { outcome: "degraded", detail: toErrorMessage(error) },

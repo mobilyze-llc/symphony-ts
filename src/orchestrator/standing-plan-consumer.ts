@@ -294,6 +294,15 @@ export interface PlanDispatchDecisionInput {
   mergedSincePlanCount?: number;
   /** issue identifiers with a recorded merged outcome; SYMPH-800 canary tail. */
   mergedIssueIdentifiers?: ReadonlySet<string>;
+  /**
+   * Team-scoped candidate source (SYMPH-794). The plan-driven path is the only
+   * dispatch path that skips the admission guardrail, so when the source is the
+   * team backlog, "released" must mean "operator-approved": posture-B
+   * auto-release is forced OFF (effective frontier 0) so a bare team-scoped
+   * candidate never dispatches without an explicit go. Defaults to false
+   * (project-scoped posture-B unchanged).
+   */
+  teamScoped?: boolean;
 }
 
 export interface PlanDispatchDecision {
@@ -353,7 +362,9 @@ export function decidePlanDrivenDispatch(
     plan: input.plan,
     honoredApprovals: input.honoredApprovals,
     runningIssueIdentifiers: input.runningIssueIdentifiers,
-    autoReleaseFrontier: cfg.autoReleaseFrontier,
+    // Team-scoped ⇒ no auto-release: only an explicit operator approval releases
+    // a batch (SYMPH-794). Project-scoped posture-B keeps its configured frontier.
+    autoReleaseFrontier: input.teamScoped ? 0 : cfg.autoReleaseFrontier,
     envelope: cfg.envelope,
     ...(input.mergedIssueIdentifiers === undefined
       ? {}

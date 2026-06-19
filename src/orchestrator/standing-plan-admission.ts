@@ -133,7 +133,7 @@ export async function resolveAdmittedIdentifiersForTick(input: {
   admissionGuardrailEnabled: boolean;
   loadPlan: () => Promise<StandingPlan | null>;
   listHonoredDecisions: () => Promise<readonly PlanDecision[]>;
-  onError?: (error: unknown) => void;
+  onError?: (error: unknown) => void | Promise<void>;
 }): Promise<ReadonlySet<string> | null> {
   if (!input.teamScoped && !input.admissionGuardrailEnabled) {
     return null; // inert: legacy project-scoped dispatch (zero-diff)
@@ -144,7 +144,16 @@ export async function resolveAdmittedIdentifiersForTick(input: {
       plan === null ? [] : await input.listHonoredDecisions();
     return approvedAdmittedIdentifiers({ plan, honoredApprovals });
   } catch (error) {
-    input.onError?.(error);
-    return new Set<string>(); // fail closed
+    // Fail closed: admit nothing this tick. The diagnostic must never change
+    // that outcome — a throwing or rejecting `onError` observer is swallowed so
+    // it can't reopen the gate (council Pi P1). Awaited so a host can flush the
+    // log before the empty-set return (restores the pre-refactor ordering;
+    // council Pi P2).
+    try {
+      await input.onError?.(error);
+    } catch {
+      // a logging failure cannot reopen the gate
+    }
+    return new Set<string>();
   }
 }

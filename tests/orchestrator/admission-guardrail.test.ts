@@ -47,6 +47,7 @@ describe("admission guardrail (SYMPH-794)", () => {
       ...(options.planDrivenDispatch
         ? { planDrivenDispatch: options.planDrivenDispatch }
         : {}),
+      timerScheduler: createFakeTimerScheduler(),
       now: () => new Date("2026-06-19T12:00:00.000Z"),
     });
     return { core, spawned };
@@ -187,7 +188,92 @@ describe("admission guardrail (SYMPH-794)", () => {
       reasonCode: "admit_signal_required",
     });
   });
+
+  // The retry-timer path is a second dispatch entry point that reads
+  // fetchCandidateIssues() (the team-scoped backlog when armed) and calls
+  // dispatchIssue(). It must honor the same gate as pollTick (council finding A):
+  // a retry whose admit signal was revoked / superseded must NOT re-dispatch.
+  it("retry path enforces the gate: a retry whose admit signal was revoked is HELD, not re-dispatched (SYMPH-794, council A)", async () => {
+    let admitCall = 0;
+    const { core, spawned } = createCore({
+      candidates: [issue("1", "SYMPH-1")],
+      resolveAdmittedIdentifiers: async () => {
+        admitCall += 1;
+        // Admitted on the first dispatch (pollTick), then the operator revokes
+        // (or a re-plan supersedes) the approval before the retry fires.
+        return admitCall <= 1 ? new Set(["SYMPH-1"]) : new Set<string>();
+      },
+    });
+
+    await core.pollTick();
+    expect(spawned).toEqual(["SYMPH-1"]); // first dispatch admitted
+
+    const retryEntry = await core.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      endedAt: new Date("2026-06-19T12:00:05.000Z"),
+    });
+    expect(retryEntry).not.toBeNull();
+
+    const result = await core.onRetryTimer("1");
+    expect(result.dispatched).toBe(false);
+    expect(spawned).toEqual(["SYMPH-1"]); // NO second spawn — the gate held it
+    expect(core.getState().issueDispositions["1"]).toMatchObject({
+      disposition: "gate",
+      reasonCode: "admit_signal_required",
+    });
+  });
+
+  it("retry path still dispatches when the issue remains admitted (no false hold)", async () => {
+    const { core, spawned } = createCore({
+      candidates: [issue("1", "SYMPH-1")],
+      resolveAdmittedIdentifiers: async () => new Set(["SYMPH-1"]),
+    });
+
+    await core.pollTick();
+    expect(spawned).toEqual(["SYMPH-1"]);
+
+    await core.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      endedAt: new Date("2026-06-19T12:00:05.000Z"),
+    });
+    const result = await core.onRetryTimer("1");
+    expect(result.dispatched).toBe(true);
+    expect(spawned).toEqual(["SYMPH-1", "SYMPH-1"]); // re-dispatched (still admitted)
+  });
+
+  it("retry path is inert when the gate is disabled (null) — zero-diff for project-scoped (council A)", async () => {
+    const { core, spawned } = createCore({
+      candidates: [issue("1", "SYMPH-1")],
+      resolveAdmittedIdentifiers: async () => null, // guardrail off
+    });
+
+    await core.pollTick();
+    expect(spawned).toEqual(["SYMPH-1"]);
+
+    await core.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      endedAt: new Date("2026-06-19T12:00:05.000Z"),
+    });
+    const result = await core.onRetryTimer("1");
+    expect(result.dispatched).toBe(true);
+    expect(spawned).toEqual(["SYMPH-1", "SYMPH-1"]); // unchanged legacy behavior
+  });
 });
+
+function createFakeTimerScheduler() {
+  const scheduled: Array<{ callback: () => void; delayMs: number }> = [];
+  return {
+    scheduled,
+    set(callback: () => void, delayMs: number) {
+      scheduled.push({ callback, delayMs });
+      return { callback, delayMs } as unknown as ReturnType<typeof setTimeout>;
+    },
+    clear() {},
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Helpers

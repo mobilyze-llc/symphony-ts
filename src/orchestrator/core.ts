@@ -5732,6 +5732,48 @@ export class OrchestratorCore {
     // Present in the candidate set — reset any prior absence streak.
     this.clearStaleRetryCandidateAbsence(issueId);
 
+    // No-ambient-control-surfaces gate (SYMPH-794, council A). The retry timer
+    // is a second dispatch entry point that reads `fetchCandidateIssues()` — the
+    // team-scoped backlog when armed — and dispatches, so it must honor the same
+    // admitted-set gate as pollTick. When the gate is active (team-scoped, or the
+    // guardrail opted on), a retry may re-dispatch only while its issue is STILL
+    // operator-admitted; a revoked or superseded approval HOLDS it rather than
+    // re-dispatching a bare-backlog issue. `null` ⇒ gate inert (project-scoped) ⇒
+    // zero-diff legacy behavior. Fail closed on a store error (admit nothing).
+    // No claim is held here yet (admitRetryResumeRequirement acquires it below),
+    // so a hold simply re-defers — matching the other retry gate-deferrals.
+    if (this.resolveAdmittedIdentifiers !== undefined) {
+      let admitted: ReadonlySet<string> | null;
+      try {
+        admitted = await this.resolveAdmittedIdentifiers({ candidates });
+      } catch {
+        admitted = new Set<string>(); // fail closed
+      }
+      if (admitted !== null && !admitted.has(issue.identifier)) {
+        this.recordDispatchVerdict({
+          issueId,
+          issueIdentifier: issue.identifier,
+          disposition: "gate",
+          reasonCode: "admit_signal_required",
+          remedy:
+            "Release this issue's batch via the standing-plan control surface (operator approval), or disable team-scoped dispatch.",
+          attempt: retryEntry.attempt,
+        });
+        // Hold without consuming an attempt: re-defer so the retry re-checks
+        // admission on its next timer fire if the operator later approves.
+        return {
+          dispatched: false,
+          released: false,
+          retryEntry: this.scheduleRetry(issueId, retryEntry.attempt, {
+            identifier: issue.identifier,
+            error: "admit signal required (team-scoped gate)",
+            delayType: retryEntry.delayType,
+            deferral: true,
+          }),
+        };
+      }
+    }
+
     if (!this.admitRetryResumeRequirement(issue, retryEntry)) {
       this.releaseClaim(issueId);
       return {
