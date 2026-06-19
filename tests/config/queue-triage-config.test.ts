@@ -68,4 +68,19 @@ describe("config-resolver queue triage (SYMPH-784)", () => {
       allowedModes: ["parallel-isolated"],
     });
   });
+
+  it("throws on a malformed envelope rather than silently widening authority", () => {
+    expect(() =>
+      resolveWorkflowConfig({
+        workflowPath: "/repo/WORKFLOW.md",
+        config: {
+          queue_triage: {
+            enabled: true,
+            envelope: { allowed_modes: ["bogus-mode"] },
+          },
+        },
+        promptTemplate: "Prompt",
+      }),
+    ).toThrow(/unknown batch mode/);
+  });
 });

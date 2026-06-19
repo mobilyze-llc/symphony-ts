@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { promises as nodeFs } from "node:fs";
 import { join } from "node:path";
 
@@ -11,6 +12,8 @@ import {
 import {
   PLAN_BATCH_MODES,
   type PlanBatch,
+  type PlanBatchMember,
+  type PlanCanaryStructure,
   type PlanEnvelope,
   type PlanOptionLine,
 } from "../domain/standing-plan.js";
@@ -67,7 +70,9 @@ export const PLANNER_OUTPUT_SCHEMA = z.object({
       rationale: z.string(),
       canary: z
         .object({
-          headIssueIdentifiers: z.array(z.string()),
+          // A canary-chain must have a head to gate on; an empty head is a
+          // permanent deadlock for the consumer (council R1, Pi P1).
+          headIssueIdentifiers: z.array(z.string()).min(1),
           contingentIssueIdentifiers: z.array(z.string()),
         })
         .nullable()
@@ -213,14 +218,22 @@ export function buildPlanBody(raw: RawPlan, context: PlannerContext): PlanBody {
     if (members.length === 0) {
       continue; // every identifier was unknown — drop the empty batch
     }
-    const batchId = `b${batches.length + 1}`;
+    // Canary head/contingent must reference this batch's resolved members;
+    // drop out-of-backlog refs, and drop the whole canary if no valid head
+    // survives (council R1, Codex P2 + Pi P1/P2).
+    const canary = normalizeCanary(rawBatch.canary ?? null, members);
+    // Content-derived id: stable for identical content (preserves content-hash
+    // idempotency across revisions) and unique for different content (so a new
+    // lookahead batch never collides with a committed batch unless it IS the
+    // same batch, in which case dedup is correct) — council R1, Codex P1.
+    const batchId = contentBatchId(rawBatch.mode, members, canary);
     batches.push({
       batchId,
       mode: rawBatch.mode,
       status: "lookahead",
       members,
       rationale: rawBatch.rationale,
-      canary: rawBatch.canary ?? null,
+      canary,
     });
     options.push({
       marker: `[opt-${batches.length}]`,
@@ -259,6 +272,62 @@ export async function runTriagePlanner(
 function extractFencedJson(markdown: string): string | null {
   const match = markdown.match(/```json\s*\n([\s\S]*?)\n```/);
   return match?.[1] ?? null;
+}
+
+/**
+ * Restrict canary head/contingent identifiers to the batch's resolved members.
+ * Returns null when no valid head survives — a canary without a head is not a
+ * valid chain and must not be persisted.
+ */
+function normalizeCanary(
+  canary: PlanCanaryStructure | null,
+  members: readonly PlanBatchMember[],
+): PlanCanaryStructure | null {
+  if (canary === null) {
+    return null;
+  }
+  const memberIdentifiers = new Set(
+    members.map((member) => member.issueIdentifier),
+  );
+  const headIssueIdentifiers = canary.headIssueIdentifiers.filter((id) =>
+    memberIdentifiers.has(id),
+  );
+  if (headIssueIdentifiers.length === 0) {
+    return null;
+  }
+  const contingentIssueIdentifiers = canary.contingentIssueIdentifiers.filter(
+    (id) => memberIdentifiers.has(id),
+  );
+  return { headIssueIdentifiers, contingentIssueIdentifiers };
+}
+
+/**
+ * Content-derived, collision-free batch id. Deterministic in the batch's
+ * meaningful content (mode + members + canary), so identical proposals hash
+ * identically (idempotency) and distinct proposals never collide.
+ */
+function contentBatchId(
+  mode: string,
+  members: readonly PlanBatchMember[],
+  canary: PlanCanaryStructure | null,
+): string {
+  const memberKey = members
+    .map((member) => member.issueIdentifier)
+    .slice()
+    .sort()
+    .join(",");
+  const canaryKey =
+    canary === null
+      ? ""
+      : `${[...canary.headIssueIdentifiers].sort().join(",")}>${[
+          ...canary.contingentIssueIdentifiers,
+        ]
+          .sort()
+          .join(",")}`;
+  const digest = createHash("sha256")
+    .update(`${mode}\n${memberKey}\n${canaryKey}`)
+    .digest("hex");
+  return `b-${digest.slice(0, 12)}`;
 }
 
 // ---------------------------------------------------------------------------

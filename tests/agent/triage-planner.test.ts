@@ -99,6 +99,26 @@ describe("parsePlannerOutput", () => {
     const result = parsePlannerOutput(artifact({ rationale: "x" }));
     expect(result.ok).toBe(false);
   });
+
+  it("rejects a canary-chain with an empty head (a permanent deadlock)", () => {
+    const result = parsePlannerOutput(
+      artifact({
+        rationale: "x",
+        batches: [
+          {
+            mode: "canary-chain",
+            issueIdentifiers: ["SYMPH-1"],
+            rationale: "no head",
+            canary: {
+              headIssueIdentifiers: [],
+              contingentIssueIdentifiers: ["SYMPH-1"],
+            },
+          },
+        ],
+      }),
+    );
+    expect(result.ok).toBe(false);
+  });
 });
 
 describe("buildPlanBody", () => {
@@ -176,6 +196,83 @@ describe("buildPlanBody", () => {
       context(),
     );
     expect(body.batches.map((b) => b.mode)).toEqual(["parallel-isolated"]);
+  });
+
+  it("assigns content-derived batch ids: stable for identical content, distinct otherwise", () => {
+    const raw = {
+      rationale: "plan",
+      batches: [
+        {
+          mode: "parallel-isolated" as const,
+          issueIdentifiers: ["SYMPH-1"],
+          rationale: "a",
+        },
+      ],
+    };
+    const a = buildPlanBody(raw, context());
+    const b = buildPlanBody(raw, context());
+    expect(a.batches[0]?.batchId).toBe(b.batches[0]?.batchId);
+    expect(a.batches[0]?.batchId).toMatch(/^b-[0-9a-f]{12}$/);
+
+    const other = buildPlanBody(
+      {
+        rationale: "plan",
+        batches: [
+          {
+            mode: "parallel-isolated" as const,
+            issueIdentifiers: ["SYMPH-2"],
+            rationale: "b",
+          },
+        ],
+      },
+      context(),
+    );
+    expect(other.batches[0]?.batchId).not.toBe(a.batches[0]?.batchId);
+  });
+
+  it("filters canary identifiers to the batch's resolved members", () => {
+    const body = buildPlanBody(
+      {
+        rationale: "plan",
+        batches: [
+          {
+            mode: "canary-chain" as const,
+            issueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+            rationale: "chain",
+            canary: {
+              headIssueIdentifiers: ["SYMPH-1", "SYMPH-404"],
+              contingentIssueIdentifiers: ["SYMPH-2", "SYMPH-999"],
+            },
+          },
+        ],
+      },
+      context(),
+    );
+    expect(body.batches[0]?.canary).toEqual({
+      headIssueIdentifiers: ["SYMPH-1"],
+      contingentIssueIdentifiers: ["SYMPH-2"],
+    });
+  });
+
+  it("drops the canary entirely when no valid head member survives", () => {
+    const body = buildPlanBody(
+      {
+        rationale: "plan",
+        batches: [
+          {
+            mode: "canary-chain" as const,
+            issueIdentifiers: ["SYMPH-1"],
+            rationale: "chain",
+            canary: {
+              headIssueIdentifiers: ["SYMPH-404"],
+              contingentIssueIdentifiers: ["SYMPH-1"],
+            },
+          },
+        ],
+      },
+      context(),
+    );
+    expect(body.batches[0]?.canary).toBeNull();
   });
 });
 

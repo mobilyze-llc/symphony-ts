@@ -123,4 +123,59 @@ describe("standing-plan journal", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("rejects a structurally-malformed plan_revision row (deep validation)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-standing-plan-"));
+    try {
+      await appendStandingPlanJournalEntriesWithLock(root, [revisionDraft(1)]);
+      // A row that is shape-loose-valid (batches is an array) but whose batch
+      // members are not an array must NOT be projected — it would poison
+      // supersession's committed-batch carry-forward.
+      const poison = {
+        sequence: 2,
+        idempotencyKey: "plan-1:rev:2",
+        timestamp: "2026-06-18T00:00:00.000Z",
+        kind: "plan_revision",
+        planId: "plan-1",
+        revision: {
+          revision: 2,
+          planId: "plan-1",
+          contentHash: "x",
+          supersedes: 1,
+          createdAt: "2026-06-18T00:00:00.000Z",
+          envelope: {
+            version: 1,
+            concurrencyCeiling: 3,
+            allowedRisk: "medium",
+            allowedModes: ["parallel-isolated"],
+          },
+          batches: [
+            {
+              batchId: "b1",
+              mode: "parallel-isolated",
+              status: "in_flight",
+              rationale: "r",
+              members: "not-an-array",
+              canary: null,
+            },
+          ],
+          options: [],
+          rationale: "poison",
+          source: "planner",
+        },
+      };
+      await fs.appendFile(
+        getStandingPlanJournalPath(root),
+        `${JSON.stringify(poison)}\n`,
+        "utf8",
+      );
+
+      const journal = await readStandingPlanJournal(root);
+      // Only the valid rev-1 row survives; the poison rev-2 row is dropped.
+      expect(journal).toHaveLength(1);
+      expect(journal[0]?.kind).toBe("plan_revision");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

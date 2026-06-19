@@ -9,6 +9,11 @@ import {
 } from "../domain/standing-plan.js";
 import { withDispatcherRunJournalWriteLock } from "./run-journal.js";
 
+// Re-exported so the store can run read → rotate → append atomically under the
+// SAME single-writer lock (SYMPH-784 council R1: the revision/decision must be
+// allocated inside the lock, not before it, or concurrent writers race).
+export { withDispatcherRunJournalWriteLock as withStandingPlanJournalWriteLock } from "./run-journal.js";
+
 // The standing-plan journal lives alongside the dispatcher run journal and
 // shares its single-writer lock (SYMPH-784 design: one writer boundary). It is
 // append-only and NOT compacted in v2 — the full revision + decision history is

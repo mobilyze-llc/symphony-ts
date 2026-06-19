@@ -431,11 +431,77 @@ function isPlanRevision(value: unknown): value is PlanRevision {
     typeof value.contentHash === "string" &&
     (value.supersedes === null || typeof value.supersedes === "number") &&
     typeof value.createdAt === "string" &&
-    isRecord(value.envelope) &&
+    isPlanEnvelope(value.envelope) &&
     Array.isArray(value.batches) &&
+    value.batches.every(isPlanBatch) &&
     Array.isArray(value.options) &&
+    value.options.every(isPlanOptionLine) &&
     typeof value.rationale === "string" &&
-    typeof value.source === "string"
+    PLAN_REVISION_SOURCES.includes(value.source as PlanRevisionSource)
+  );
+}
+
+// Deep validation so a malformed-but-shape-loose journal row cannot poison the
+// projection or supersession carry-forward (council R1, Codex P2). The store is
+// the source of truth, so a row that fails here is dropped on read.
+function isPlanEnvelope(value: unknown): value is PlanEnvelope {
+  return (
+    isRecord(value) &&
+    typeof value.version === "number" &&
+    typeof value.concurrencyCeiling === "number" &&
+    PLAN_RISK_TIERS.includes(value.allowedRisk as PlanRiskTier) &&
+    Array.isArray(value.allowedModes) &&
+    value.allowedModes.every((mode) =>
+      PLAN_BATCH_MODES.includes(mode as PlanBatchMode),
+    )
+  );
+}
+
+function isPlanBatch(value: unknown): value is PlanBatch {
+  return (
+    isRecord(value) &&
+    typeof value.batchId === "string" &&
+    PLAN_BATCH_MODES.includes(value.mode as PlanBatchMode) &&
+    PLAN_BATCH_STATUSES.includes(value.status as PlanBatchStatus) &&
+    typeof value.rationale === "string" &&
+    Array.isArray(value.members) &&
+    value.members.every(isPlanBatchMember) &&
+    (value.canary === null || isPlanCanaryStructure(value.canary))
+  );
+}
+
+function isPlanBatchMember(value: unknown): value is PlanBatchMember {
+  return (
+    isRecord(value) &&
+    typeof value.issueId === "string" &&
+    typeof value.issueIdentifier === "string"
+  );
+}
+
+function isPlanCanaryStructure(value: unknown): value is PlanCanaryStructure {
+  return (
+    isRecord(value) &&
+    Array.isArray(value.headIssueIdentifiers) &&
+    value.headIssueIdentifiers.every((id) => typeof id === "string") &&
+    Array.isArray(value.contingentIssueIdentifiers) &&
+    value.contingentIssueIdentifiers.every((id) => typeof id === "string")
+  );
+}
+
+function isPlanOptionLine(value: unknown): value is PlanOptionLine {
+  return (
+    isRecord(value) &&
+    typeof value.marker === "string" &&
+    typeof value.label === "string" &&
+    (value.intent === null || isPlanOptionIntent(value.intent))
+  );
+}
+
+function isPlanOptionIntent(value: unknown): value is PlanOptionIntent {
+  return (
+    isRecord(value) &&
+    typeof value.verb === "string" &&
+    (value.batchId === null || typeof value.batchId === "string")
   );
 }
 

@@ -229,4 +229,57 @@ describe("standing-plan store", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("serializes concurrent re-plans so neither distinct body is dropped", async () => {
+    const root = tmpRoot();
+    try {
+      const [a, b] = await Promise.all([
+        recordPlanRevision(root, body([lookahead("b1", "SYMPH-1")]), {
+          planId: "plan-1",
+          createdAt: "2026-06-18T00:00:00.000Z",
+        }),
+        recordPlanRevision(root, body([lookahead("b2", "SYMPH-2")]), {
+          planId: "plan-1",
+          createdAt: "2026-06-18T00:00:01.000Z",
+        }),
+      ]);
+      // Both distinct bodies must land as distinct, monotonically-rotated
+      // revisions — neither silently dropped on a colliding revision id.
+      expect(a.recorded).toBe(true);
+      expect(b.recorded).toBe(true);
+      expect([a.plan.revision, b.plan.revision].sort()).toEqual([1, 2]);
+      const plan = await loadStandingPlan(root);
+      expect(plan?.revision).toBe(2);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("records a decision idempotently (recorded=false on replay)", async () => {
+    const root = tmpRoot();
+    try {
+      await recordPlanRevision(root, body([lookahead("b1", "SYMPH-1")]), {
+        planId: "plan-1",
+        createdAt: "2026-06-18T00:00:00.000Z",
+      });
+      const decision: PlanDecision = {
+        decisionId: "d1",
+        planId: "plan-1",
+        revision: 1,
+        batchId: "b1",
+        kind: "approve",
+        actor: "eric@litman.org",
+        optionMarker: "[opt-1]",
+        createdAt: "2026-06-18T00:00:30.000Z",
+        note: null,
+      };
+      const first = await recordPlanDecision(root, decision);
+      const replay = await recordPlanDecision(root, decision);
+      expect(first.recorded).toBe(true);
+      expect(replay.recorded).toBe(false);
+      expect((await listHonoredDecisions(root)).length).toBe(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

@@ -61,13 +61,25 @@ export function rotateRevision(
   );
   const batches = [...committed, ...lookahead];
 
+  // Keep only options that target a surviving lookahead batch (or carry no
+  // batch-scoped intent). Dropping a proposed batch that collided with a
+  // committed one must NOT leave behind a "release" option pointing at the
+  // already-in-flight batch (council R1, Codex P1).
+  const lookaheadIds = new Set(lookahead.map((batch) => batch.batchId));
+  const optionsForLookahead = body.options.filter(
+    (option) =>
+      option.intent === null ||
+      option.intent.batchId === null ||
+      lookaheadIds.has(option.intent.batchId),
+  );
+
   const planId = prior?.planId ?? options.planId ?? randomUUID();
   const revision = (prior?.revision ?? 0) + 1;
   const supersedes = prior === null ? null : prior.revision;
   const contentHash = computePlanContentHash({
     planId,
     batches,
-    options: body.options,
+    options: optionsForLookahead,
     envelope: body.envelope,
     rationale: body.rationale,
     source: body.source,
@@ -81,7 +93,7 @@ export function rotateRevision(
     createdAt: options.createdAt,
     envelope: body.envelope,
     batches,
-    options: body.options,
+    options: optionsForLookahead,
     rationale: body.rationale,
     source: body.source,
   };

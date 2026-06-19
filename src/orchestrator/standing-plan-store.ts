@@ -5,8 +5,10 @@ import type {
   StandingPlanJournal,
 } from "../domain/standing-plan.js";
 import {
-  appendStandingPlanJournalEntriesWithLock,
+  appendStandingPlanJournalEntry,
+  appendStandingPlanJournalEntryToDisk,
   readStandingPlanJournal,
+  withStandingPlanJournalWriteLock,
 } from "../logging/standing-plan-journal.js";
 import {
   type PlanBody,
@@ -39,16 +41,25 @@ export interface RecordPlanDecisionResult {
 export function projectStandingPlan(
   journal: StandingPlanJournal,
 ): StandingPlan | null {
-  let latest: { revision: PlanRevision; updatedAt: string } | null = null;
+  // Pick the most recently WRITTEN revision (highest journal sequence), not the
+  // numerically-largest revision id. The journal is the truth and "current"
+  // means last-written — defense-in-depth against out-of-order or manually
+  // edited rows (council R1, Pi P2).
+  let latest: {
+    revision: PlanRevision;
+    updatedAt: string;
+    sequence: number;
+  } | null = null;
   for (const entry of journal) {
     if (entry.kind !== "plan_revision") {
       continue;
     }
-    if (
-      latest === null ||
-      entry.revision.revision >= latest.revision.revision
-    ) {
-      latest = { revision: entry.revision, updatedAt: entry.timestamp };
+    if (latest === null || entry.sequence >= latest.sequence) {
+      latest = {
+        revision: entry.revision,
+        updatedAt: entry.timestamp,
+        sequence: entry.sequence,
+      };
     }
   }
   if (latest === null) {
@@ -85,33 +96,38 @@ export async function recordPlanRevision(
   body: PlanBody,
   options: RotateRevisionOptions,
 ): Promise<RecordPlanRevisionResult> {
-  const journal = await readStandingPlanJournal(workspaceRoot);
-  const current = projectStandingPlan(journal);
-  const candidate = rotateRevision(current, body, options);
+  // Read → rotate → append ALL inside the single-writer lock. Allocating the
+  // revision before the lock lets two concurrent re-plans compute the same
+  // revision id; the second's distinct body would be silently dropped on the
+  // idempotency key (council R1, Codex+Pi P1). Inside the lock, the second
+  // re-plan re-reads the freshly-committed first and rotates onto it.
+  return withStandingPlanJournalWriteLock(workspaceRoot, async () => {
+    const journal = await readStandingPlanJournal(workspaceRoot);
+    const current = projectStandingPlan(journal);
+    const candidate = rotateRevision(current, body, options);
 
-  if (current !== null && candidate.contentHash === current.contentHash) {
-    return { recorded: false, plan: current };
-  }
+    if (current !== null && candidate.contentHash === current.contentHash) {
+      return { recorded: false, plan: current };
+    }
 
-  const appendResult = await appendStandingPlanJournalEntriesWithLock(
-    workspaceRoot,
-    [
-      {
-        kind: "plan_revision",
-        idempotencyKey: `${candidate.planId}:rev:${candidate.revision}`,
-        timestamp: options.createdAt,
-        planId: candidate.planId,
-        revision: candidate,
-      },
-    ],
-  );
+    const appended = appendStandingPlanJournalEntry(journal, {
+      kind: "plan_revision",
+      idempotencyKey: `${candidate.planId}:rev:${candidate.revision}`,
+      timestamp: options.createdAt,
+      planId: candidate.planId,
+      revision: candidate,
+    });
+    if (appended.appended) {
+      await appendStandingPlanJournalEntryToDisk(workspaceRoot, appended.entry);
+    }
 
-  const plan = projectStandingPlan(appendResult.journal);
-  if (plan === null) {
-    // Unreachable: we just appended a revision. Guard for type-safety.
-    throw new Error("standing-plan store: projection empty after append");
-  }
-  return { recorded: appendResult.appendedEntries.length > 0, plan };
+    const plan = projectStandingPlan(appended.journal);
+    if (plan === null) {
+      // Unreachable: we just appended a revision. Guard for type-safety.
+      throw new Error("standing-plan store: projection empty after append");
+    }
+    return { recorded: appended.appended, plan };
+  });
 }
 
 /**
@@ -123,25 +139,31 @@ export async function recordPlanDecision(
   workspaceRoot: string,
   decision: PlanDecision,
 ): Promise<RecordPlanDecisionResult> {
-  const journal = await readStandingPlanJournal(workspaceRoot);
-  const current = projectStandingPlan(journal);
-  if (current === null) {
-    return { recorded: false, reason: "no_plan" };
-  }
-  if (decision.revision !== current.revision) {
-    return { recorded: false, reason: "stale_revision" };
-  }
+  // Validate the revision binding and append inside the SAME lock, so a re-plan
+  // cannot supersede the revision between the check and the write (council R1,
+  // Codex P2 + Pi P1). `recorded` reflects the actual append (idempotent).
+  return withStandingPlanJournalWriteLock(workspaceRoot, async () => {
+    const journal = await readStandingPlanJournal(workspaceRoot);
+    const current = projectStandingPlan(journal);
+    if (current === null) {
+      return { recorded: false, reason: "no_plan" };
+    }
+    if (decision.revision !== current.revision) {
+      return { recorded: false, reason: "stale_revision" };
+    }
 
-  await appendStandingPlanJournalEntriesWithLock(workspaceRoot, [
-    {
+    const appended = appendStandingPlanJournalEntry(journal, {
       kind: "plan_decision",
       idempotencyKey: `${decision.planId}:decision:${decision.decisionId}`,
       timestamp: decision.createdAt,
       planId: decision.planId,
       decision,
-    },
-  ]);
-  return { recorded: true };
+    });
+    if (appended.appended) {
+      await appendStandingPlanJournalEntryToDisk(workspaceRoot, appended.entry);
+    }
+    return { recorded: appended.appended };
+  });
 }
 
 /** Decisions bound to the current revision (the only ones still in force). */
