@@ -254,7 +254,7 @@ describe("buildPlanBody", () => {
     });
   });
 
-  it("drops the canary entirely when no valid head member survives", () => {
+  it("drops the canary AND downgrades the mode to parallel-isolated when no valid head survives (council R1, Codex P1)", () => {
     const body = buildPlanBody(
       {
         rationale: "plan",
@@ -272,7 +272,14 @@ describe("buildPlanBody", () => {
       },
       context(),
     );
+    // No valid head → canary dropped; the mode is downgraded so the batch is an
+    // honest parallel-isolated batch, never an unexecutable "canary" with no
+    // canary structure (which would bypass the contingent-release gate).
     expect(body.batches[0]?.canary).toBeNull();
+    expect(body.batches[0]?.mode).toBe("parallel-isolated");
+    expect(body.batches[0]?.members.map((m) => m.issueIdentifier)).toEqual([
+      "SYMPH-1",
+    ]);
   });
 });
 

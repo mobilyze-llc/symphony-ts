@@ -3543,8 +3543,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
                   : candidate.priority,
               ]),
             );
-      const mergedSincePlanCount =
-        plan === null ? 0 : await this.countMergesSince(root, plan.createdAt);
+      const mergedOutcomes =
+        plan === null
+          ? { sinceCount: 0, identifiers: new Set<string>() }
+          : await this.collectMergedOutcomes(root, plan.createdAt);
       const decision = decidePlanDrivenDispatch({
         config: cfg,
         plan,
@@ -3555,7 +3557,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         runningIssueIdentifiers: input.runningIssueIdentifiers,
         nowMs: this.now().getTime(),
         candidatePriorityBands,
-        mergedSincePlanCount,
+        mergedSincePlanCount: mergedOutcomes.sinceCount,
+        mergedIssueIdentifiers: mergedOutcomes.identifiers,
       });
       if (decision.forceReplan) {
         this.requestStandingPlanReplan();
@@ -3651,30 +3654,37 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   }
 
   /**
-   * How many issues merged since `sinceIso` — the merge-moved-the-world re-plan
-   * predicate input (SYMPH-801). Counts plan_outcome "merged" entries newer than
-   * the plan. Only called on the plan-driven path (not shadow), so the extra
-   * journal read is off the shadow hot path.
+   * Merged-outcome facts for the consumer's plan-driven decision (one journal
+   * pass): how many issues merged since `sinceIso` (the merge-moved-the-world
+   * re-plan predicate, SYMPH-801) and the set of ALL merged issue identifiers
+   * (canary contingent-release + merged-exclusion, SYMPH-800). Only called on the
+   * plan-driven path (not shadow), so the read is off the shadow hot path.
    */
-  private async countMergesSince(
+  private async collectMergedOutcomes(
     root: string,
     sinceIso: string,
-  ): Promise<number> {
+  ): Promise<{ sinceCount: number; identifiers: Set<string> }> {
     const sinceMs = Date.parse(sinceIso);
-    if (Number.isNaN(sinceMs)) {
-      return 0;
-    }
     const journal = await readStandingPlanJournal(root);
-    let count = 0;
+    let sinceCount = 0;
+    const identifiers = new Set<string>();
     for (const entry of journal) {
-      if (entry.kind === "plan_outcome" && entry.outcome.result === "merged") {
-        const outcomeMs = Date.parse(entry.outcome.createdAt);
-        if (!Number.isNaN(outcomeMs) && outcomeMs > sinceMs) {
-          count += 1;
-        }
+      if (entry.kind !== "plan_outcome" || entry.outcome.result !== "merged") {
+        continue;
+      }
+      for (const identifier of entry.outcome.issueIdentifiers) {
+        identifiers.add(identifier);
+      }
+      const outcomeMs = Date.parse(entry.outcome.createdAt);
+      if (
+        !Number.isNaN(sinceMs) &&
+        !Number.isNaN(outcomeMs) &&
+        outcomeMs > sinceMs
+      ) {
+        sinceCount += 1;
       }
     }
-    return count;
+    return { sinceCount, identifiers };
   }
 
   async requestAnchorFieldEdit(

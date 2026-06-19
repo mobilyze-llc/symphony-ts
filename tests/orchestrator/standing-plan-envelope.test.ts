@@ -22,12 +22,15 @@ function batch(mode: PlanBatch["mode"]): PlanBatch {
 }
 
 describe("resolveStandingPlanEnvelope", () => {
-  it("applies spine defaults: only parallel-isolated until other modes' execution ships", () => {
+  it("applies spine defaults: parallel-isolated + canary-chain (shared-surface still gated)", () => {
     const envelope = resolveStandingPlanEnvelope({ concurrencyCeiling: 3 });
     expect(envelope.version).toBe(1);
     expect(envelope.concurrencyCeiling).toBe(3);
     expect(envelope.allowedRisk).toBe("medium");
-    expect(envelope.allowedModes).toEqual(["parallel-isolated"]);
+    expect(envelope.allowedModes).toEqual([
+      "parallel-isolated",
+      "canary-chain",
+    ]);
   });
 
   it("honors explicit overrides", () => {

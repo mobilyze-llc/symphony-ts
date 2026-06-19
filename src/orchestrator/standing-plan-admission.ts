@@ -63,11 +63,29 @@ export function approvedAdmittedIdentifiers(input: {
     if (batch === undefined) {
       continue; // stale/unknown batch id — admits nothing
     }
-    for (const member of batch.members) {
+    for (const member of admittedMembersFor(batch)) {
       admitted.add(member.issueIdentifier);
     }
   }
   return admitted;
+}
+
+/**
+ * Which members of an approved batch the guardrail admits. For a canary-chain
+ * batch, admit ONLY the head — the contingent tail is released by the plan-driven
+ * consumer after the head merges, never tail-before-head on the degrade/comparator
+ * path the guardrail governs (council R2, Codex P1). A canary-chain batch with no
+ * canary structure admits nothing (the planner downgrades these; defensive).
+ */
+function admittedMembersFor(batch: StandingPlan["batches"][number]) {
+  if (batch.mode !== "canary-chain") {
+    return batch.members;
+  }
+  if (batch.canary === null) {
+    return [];
+  }
+  const head = new Set(batch.canary.headIssueIdentifiers);
+  return batch.members.filter((member) => head.has(member.issueIdentifier));
 }
 
 /**

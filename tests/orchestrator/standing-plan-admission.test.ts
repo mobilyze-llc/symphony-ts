@@ -147,6 +147,35 @@ describe("approvedAdmittedIdentifiers (SYMPH-794)", () => {
     expect([...admitted].sort()).toEqual(["SYMPH-1", "SYMPH-2"]);
   });
 
+  it("admits only the canary HEAD of an approved canary-chain batch, not the tail (council R2, Codex P1)", () => {
+    const canaryPlan: StandingPlan = {
+      ...plan(),
+      batches: [
+        {
+          batchId: "b-canary",
+          mode: "canary-chain",
+          status: "lookahead",
+          members: [
+            { issueId: "1", issueIdentifier: "SYMPH-1" },
+            { issueId: "2", issueIdentifier: "SYMPH-2" },
+          ],
+          rationale: "r",
+          canary: {
+            headIssueIdentifiers: ["SYMPH-1"],
+            contingentIssueIdentifiers: ["SYMPH-2"],
+          },
+        },
+      ],
+    };
+    const admitted = approvedAdmittedIdentifiers({
+      plan: canaryPlan,
+      honoredApprovals: [approve("b-canary")],
+    });
+    // head admitted via the guardrail; the contingent tail is released by the
+    // plan-driven consumer after the head merges — never tail-before-head here.
+    expect([...admitted]).toEqual(["SYMPH-1"]);
+  });
+
   it("a modify on an approved batch does NOT revoke it (only hold/reject revoke)", () => {
     // modify is a re-plan signal, not a go/no-go — it must not un-admit an
     // operator-approved batch (council R3, Pi P3 regression guard).

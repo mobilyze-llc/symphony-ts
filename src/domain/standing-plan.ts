@@ -331,11 +331,13 @@ export function isCommittedBatchStatus(status: PlanBatchStatus): boolean {
  * execution path is complete. canary-chain (its contingent-release flow) and
  * shared-surface (shared-branch execution, Track 2) are intentionally EXCLUDED
  * by default until their execution paths ship, so the planner never proposes a
- * mode the consumer cannot fully execute. The consumer + envelope already
- * support these modes for when an operator opts in via config.
+ * mode the consumer cannot fully execute. canary-chain is enabled now that its
+ * contingent-release execution path shipped (SYMPH-800); shared-surface stays
+ * gated until its path ships. An operator can still narrow this per workflow.
  */
 export const DEFAULT_ENVELOPE_ALLOWED_MODES: PlanBatchMode[] = [
   "parallel-isolated",
+  "canary-chain",
 ];
 
 export const DEFAULT_ENVELOPE_ALLOWED_RISK: PlanRiskTier = "medium";
@@ -471,7 +473,11 @@ function isPlanBatch(value: unknown): value is PlanBatch {
     return false;
   }
   if (value.canary === null) {
-    return true;
+    // A canary-chain batch with no canary structure is unexecutable — the
+    // planner downgrades these to parallel-isolated at WRITE, so a null canary on
+    // a canary-chain row is a corrupt/hand-edited entry; drop it on READ so it
+    // never becomes store truth (council R2, Pi P2). Other modes may be null.
+    return value.mode !== "canary-chain";
   }
   if (!isPlanCanaryStructure(value.canary)) {
     return false;

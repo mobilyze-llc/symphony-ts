@@ -220,4 +220,44 @@ describe("standing-plan journal", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("rejects a plan_revision row with mode canary-chain but a null canary (council R2, Pi P2)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-standing-plan-"));
+    try {
+      await appendStandingPlanJournalEntriesWithLock(root, [revisionDraft(1)]);
+      const base = createRevision(2);
+      const poison = {
+        sequence: 2,
+        idempotencyKey: "plan-1:rev:2",
+        timestamp: "2026-06-18T00:00:00.000Z",
+        kind: "plan_revision",
+        planId: "plan-1",
+        revision: {
+          ...base,
+          batches: [
+            {
+              batchId: "b1",
+              mode: "canary-chain",
+              status: "lookahead",
+              rationale: "unexecutable canary",
+              members: [{ issueId: "i1", issueIdentifier: "SYMPH-1" }],
+              // canary-chain with no canary structure — unexecutable; the planner
+              // downgrades these at WRITE, so this is a corrupt hand-edited row.
+              canary: null,
+            },
+          ],
+        },
+      };
+      await fs.appendFile(
+        getStandingPlanJournalPath(root),
+        `${JSON.stringify(poison)}\n`,
+        "utf8",
+      );
+
+      const journal = await readStandingPlanJournal(root);
+      expect(journal).toHaveLength(1); // poison row dropped on read
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
