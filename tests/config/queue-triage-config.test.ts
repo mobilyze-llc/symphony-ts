@@ -35,6 +35,11 @@ describe("config-resolver queue triage (SYMPH-784)", () => {
     ]);
     expect(resolved.queueTriage?.envelope.version).toBe(1);
     expect(resolved.queueTriage?.autoReleaseFrontier).toBe(1);
+    // control doc surface off by default (needs a team id + live verification).
+    expect(resolved.queueTriage?.controlDoc).toEqual({
+      enabled: false,
+      teamId: null,
+    });
   });
 
   it("honors explicit queue_triage overrides", () => {

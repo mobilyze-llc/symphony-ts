@@ -4,15 +4,18 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { computeStandingPlanCalibration } from "../../src/calibration/standing-plan-digest.js";
 import type {
   PlanBatch,
   PlanDecision,
   PlanEnvelope,
 } from "../../src/domain/standing-plan.js";
 import { appendStandingPlanJournalEntriesWithLock } from "../../src/logging/standing-plan-journal.js";
+import { readStandingPlanJournal } from "../../src/logging/standing-plan-journal.js";
 import {
   listHonoredDecisions,
   loadStandingPlan,
+  recordBatchOutcome,
   recordPlanControlDecision,
   recordPlanDecision,
   recordPlanRevision,
@@ -432,6 +435,43 @@ describe("standing-plan store", () => {
         createdAt: "2026-06-18T00:02:00.000Z",
       });
       expect(result.reason).toBe("stale_revision");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("records a batch outcome that the calibration digest joins end-to-end (SYMPH-792)", async () => {
+    const root = tmpRoot();
+    try {
+      await recordPlanRevision(root, body([lookahead("b1", "SYMPH-1")]), {
+        planId: "plan-1",
+        createdAt: "2026-06-18T00:00:00.000Z",
+      });
+      const plan = await loadStandingPlan(root);
+      await recordPlanControlDecision(root, {
+        kind: "approve",
+        revision: 1,
+        batchId: plan?.batches[0]?.batchId ?? "b?",
+        actor: "operator@pro14",
+        note: "go",
+        decisionId: "dc1",
+        createdAt: "2026-06-18T00:00:30.000Z",
+      });
+      const out = await recordBatchOutcome(root, {
+        planId: "plan-1",
+        revision: 1,
+        batchId: plan?.batches[0]?.batchId ?? "b?",
+        result: "merged",
+        issueIdentifiers: ["SYMPH-1"],
+        outcomeId: "oc1",
+        createdAt: "2026-06-18T01:00:00.000Z",
+      });
+      expect(out.recorded).toBe(true);
+      const report = computeStandingPlanCalibration(
+        await readStandingPlanJournal(root),
+      );
+      expect(report.rows[0]?.outcome).toBe("merged");
+      expect(report.rows[0]?.mode).toBe("parallel-isolated");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -185,6 +185,7 @@ function triageConfig(
     plannerModel: "opus",
     heartbeatMs: 900_000,
     autoReleaseFrontier: 1,
+    controlDoc: { enabled: false, teamId: null },
     envelope: ENVELOPE,
     ...over,
   };

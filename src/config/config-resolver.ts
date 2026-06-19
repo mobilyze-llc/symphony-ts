@@ -72,6 +72,7 @@ import {
   DEFAULT_PAUSE_TRIAGE_MAX_RESUMES,
   DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_QUEUE_TRIAGE_AUTO_RELEASE_FRONTIER,
+  DEFAULT_QUEUE_TRIAGE_CONTROL_DOC_ENABLED,
   DEFAULT_QUEUE_TRIAGE_ENABLED,
   DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS,
   DEFAULT_QUEUE_TRIAGE_PLANNER_MODEL,
@@ -497,6 +498,12 @@ function resolveQueueTriageConfig(
     autoReleaseFrontier:
       readPositiveInteger(queueTriage.auto_release_frontier) ??
       DEFAULT_QUEUE_TRIAGE_AUTO_RELEASE_FRONTIER,
+    controlDoc: {
+      enabled:
+        readBoolean(asRecord(queueTriage.control_doc).enabled) ??
+        DEFAULT_QUEUE_TRIAGE_CONTROL_DOC_ENABLED,
+      teamId: readString(asRecord(queueTriage.control_doc).team_id),
+    },
     envelope: resolveStandingPlanEnvelope({
       version: readPositiveInteger(envelope.version) ?? 1,
       concurrencyCeiling:

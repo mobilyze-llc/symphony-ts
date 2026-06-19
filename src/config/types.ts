@@ -423,6 +423,20 @@ export interface WorkflowQueueTriageConfig {
    */
   autoReleaseFrontier: number;
   envelope: PlanEnvelope;
+  /**
+   * Living control doc surface (SYMPH-790/791). Default-DISABLED and separate
+   * from `enabled` because it needs a Linear team UUID and live document-API
+   * access; an operator turns it on per workflow once verified. When enabled,
+   * the planner heartbeat renders/updates the "🚦Ticket Triage Controls" doc and
+   * ingests operator comments as revision-bound plan-control intents.
+   */
+  controlDoc: WorkflowQueueTriageControlDocConfig;
+}
+
+export interface WorkflowQueueTriageControlDocConfig {
+  enabled: boolean;
+  /** Linear team UUID the team-level control doc attaches to. */
+  teamId: string | null;
 }
 
 export interface ResolvedWorkflowConfig {
