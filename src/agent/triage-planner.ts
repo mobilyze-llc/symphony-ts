@@ -156,14 +156,15 @@ export function buildPlannerPrompt(context: PlannerContext): string {
     "{",
     '  "rationale": "one-paragraph portfolio rationale",',
     '  "batches": [',
-    '    { "mode": "parallel-isolated", "issueIdentifiers": ["SYMPH-1"], "rationale": "why", "canary": null }',
+    '    { "mode": "parallel-isolated", "issueIdentifiers": ["SYMPH-1"], "rationale": "why", "canary": null },',
+    '    { "mode": "canary-chain", "issueIdentifiers": ["SYMPH-2", "SYMPH-3"], "rationale": "why", "canary": { "headIssueIdentifiers": ["SYMPH-2"], "contingentIssueIdentifiers": ["SYMPH-3"] } }',
     "  ]",
     "}",
     "```",
     "- `mode` must be one of the allowed modes above.",
     "- `issueIdentifiers` must all come from the backlog list.",
     "- Order batches head-first (the highest-value batch first).",
-    "- For `canary-chain`, set `canary` with head + contingent identifiers.",
+    "- For `canary-chain`, set `canary` to an object with exactly these keys: `headIssueIdentifiers` (the gating head, at least one identifier) and `contingentIssueIdentifiers` (the tail, released only once the head validates) — both arrays of backlog identifiers. For every other mode set `canary` to null.",
   );
   return lines.join("\n");
 }
@@ -184,7 +185,9 @@ export function parsePlannerOutput(
       reason: `plan JSON did not parse: ${(error as Error).message}`,
     };
   }
-  const validated = PLANNER_OUTPUT_SCHEMA.safeParse(parsed);
+  const validated = PLANNER_OUTPUT_SCHEMA.safeParse(
+    normalizeRawPlanCanaries(parsed),
+  );
   if (!validated.success) {
     return {
       ok: false,
@@ -192,6 +195,66 @@ export function parsePlannerOutput(
     };
   }
   return { ok: true, value: validated.data };
+}
+
+/**
+ * SYMPH-836: tolerate a malformed or aliased `canary` on a single batch so one
+ * bad field never voids the entire plan. The prompt now shows the exact keys
+ * (headIssueIdentifiers/contingentIssueIdentifiers), but if the model still
+ * emits aliases ({head, contingent}), a non-array head, or garbage, coerce each
+ * batch's canary to either a canonical structure or null. A null canary on a
+ * canary-chain batch is downgraded to parallel-isolated in buildPlanBody — so a
+ * bad canary degrades that one batch, never the whole plan.
+ */
+function normalizeRawPlanCanaries(parsed: unknown): unknown {
+  if (!isPlainRecord(parsed) || !Array.isArray(parsed.batches)) {
+    return parsed;
+  }
+  return {
+    ...parsed,
+    batches: parsed.batches.map((batch) =>
+      isPlainRecord(batch)
+        ? { ...batch, canary: coerceRawCanary(batch.canary) }
+        : batch,
+    ),
+  };
+}
+
+function coerceRawCanary(rawCanary: unknown): {
+  headIssueIdentifiers: string[];
+  contingentIssueIdentifiers: string[];
+} | null {
+  if (!isPlainRecord(rawCanary)) {
+    return null;
+  }
+  const head = toIdentifierArray(
+    rawCanary.headIssueIdentifiers ?? rawCanary.head,
+  );
+  // No valid head ⇒ drop the canary; buildPlanBody downgrades a null-canary
+  // canary-chain to parallel-isolated, so the batch survives as honest work.
+  if (head.length === 0) {
+    return null;
+  }
+  return {
+    headIssueIdentifiers: head,
+    contingentIssueIdentifiers: toIdentifierArray(
+      rawCanary.contingentIssueIdentifiers ?? rawCanary.contingent,
+    ),
+  };
+}
+
+function toIdentifierArray(value: unknown): string[] {
+  if (typeof value === "string") {
+    return value.trim() === "" ? [] : [value];
+  }
+  if (Array.isArray(value)) {
+    return value.filter((item): item is string => typeof item === "string");
+  }
+  return [];
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function buildPlanBody(raw: RawPlan, context: PlannerContext): PlanBody {
