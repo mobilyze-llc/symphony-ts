@@ -3,8 +3,26 @@ base_config: ../templates/WORKFLOW-template.md
 # Single-homing guard (SYMPH-383): only this host may dispatch the symphony
 # product. A second orchestrator fails loudly at startup instead of racing.
 owner_host: pro14
+# SYMPH-840: team-scoped dispatch. This instance grooms the whole SYMPH team's
+# eligible backlog across every Linear project (not the `project` field). team_keys
+# forces the mandatory admission gate + autoReleaseFrontier=0, so nothing dispatches
+# without an explicit operator `symphonyctl release_batch`. project_slug is pinned
+# to null to override the base template's placeholder and retire the Pipeline project
+# as the dispatch scope (SYMPH-299 tracks the Linear-side terminal-issue cleanup).
+# active_states is inherited from the base template; Backlog is NOT eligible, so
+# moving an issue to Todo is the deliberate "make it a candidate" signal.
 tracker:
-  project_slug: fdba14472043
+  team_keys: [SYMPH]
+  project_slug: null
+# SYMPH-840: arm the Queue Triage v2 planner — REQUIRED alongside team_keys. The
+# only admit path is `release_batch` against a persisted standing plan; with the
+# planner OFF the team-scoped gate would hold every candidate forever (permanent
+# lock, no escape hatch). shadow_mode keeps dispatch ORDERING on the proven
+# comparator while the planner still persists releasable plans; team-scope forces
+# operator-gated release regardless of shadow. Empty Todo => empty plan => quiescent.
+queue_triage:
+  enabled: true
+  shadow_mode: true
 agent:
   max_concurrent_agents: 5
 server:
