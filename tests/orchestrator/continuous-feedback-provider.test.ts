@@ -375,7 +375,7 @@ setInterval(() => {}, 1000);
       args: [runnerScript],
       cwd: process.cwd(),
       prompt: "",
-      timeoutMs: 250,
+      timeoutMs: 2000,
       killGraceMs: 250,
     });
 
