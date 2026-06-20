@@ -97,6 +97,15 @@ describe("parseManagerPlanCliArgs", () => {
     ).toThrow(ManagerPlanCliUsageError);
   });
 
+  it("rejects a zero concurrency ceiling or page size (positive-integer contract)", () => {
+    expect(() =>
+      parseManagerPlanCliArgs(["--concurrency-ceiling", "0"]),
+    ).toThrow(ManagerPlanCliUsageError);
+    expect(() => parseManagerPlanCliArgs(["--page-size", "0"])).toThrow(
+      ManagerPlanCliUsageError,
+    );
+  });
+
   it("rejects an unknown flag", () => {
     expect(() => parseManagerPlanCliArgs(["--frobnicate"])).toThrow(
       ManagerPlanCliUsageError,
@@ -127,6 +136,35 @@ describe("runManagerPlanCli", () => {
     });
     expect(code).toBe(1);
     expect(err()).toMatch(/--state/);
+  });
+
+  it("errors when a --state value is empty", async () => {
+    const { io, err } = captureIo();
+    const code = await runManagerPlanCli(["--team", "MOB", "--state", ""], {
+      io,
+      env: {},
+      loadCandidates: async () => [],
+      createPlannerRunner: okRunner,
+    });
+    expect(code).toBe(1);
+    expect(err()).toMatch(/--state/);
+  });
+
+  it("returns a distinct exit code (5) when loading candidates fails", async () => {
+    const { io, err } = captureIo();
+    const code = await runManagerPlanCli(
+      ["--team", "MOB", "--state", "Backlog"],
+      {
+        io,
+        env: {},
+        loadCandidates: async () => {
+          throw new Error("Linear is down");
+        },
+        createPlannerRunner: okRunner,
+      },
+    );
+    expect(code).toBe(5);
+    expect(err()).toContain("Linear is down");
   });
 
   it("--prompt-only prints the planner prompt and never invokes the model", async () => {

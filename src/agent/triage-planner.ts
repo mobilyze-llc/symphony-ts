@@ -294,6 +294,13 @@ export function buildPlanBody(raw: RawPlan, context: PlannerContext): PlanBody {
       rawBatch.mode === "canary-chain" && canary === null
         ? "parallel-isolated"
         : rawBatch.mode;
+    // The downgrade can land on a mode the envelope forbids (e.g. a
+    // canary-chain-only envelope downgrading to parallel-isolated). Re-check the
+    // FINAL mode and drop the batch rather than emit one outside the envelope —
+    // the early check only saw the pre-downgrade mode (council R1, Codex).
+    if (!allowedModes.has(mode)) {
+      continue;
+    }
     // Content-derived id: stable for identical content (preserves content-hash
     // idempotency across revisions) and unique for different content (so a new
     // lookahead batch never collides with a committed batch unless it IS the

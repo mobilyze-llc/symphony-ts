@@ -40,7 +40,12 @@ fi
 if [[ ! -f "$CLI_JS" ]] ||
   [[ -n "$(find "$REPO_ROOT/src" -name '*.ts' -newer "$CLI_JS" -print -quit 2>/dev/null)" ]]; then
   echo "symphony-manager-plan: dist is missing or stale; building…" >&2
-  (cd "$REPO_ROOT" && pnpm build >&2)
+  # `set -e` does NOT abort inside an `if` body, so check the build explicitly —
+  # otherwise a failed build would silently exec a stale or missing CLI.
+  if ! (cd "$REPO_ROOT" && pnpm build >&2); then
+    echo "symphony-manager-plan: build failed; refusing to run a stale or missing CLI." >&2
+    exit 1
+  fi
 fi
 
 exec node "$CLI_JS" "$@"

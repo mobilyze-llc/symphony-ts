@@ -42,6 +42,9 @@ export const MANAGER_PLAN_EXIT = {
   usage: 1,
   unavailable: 3,
   invalid: 4,
+  // Candidate load (network / Linear) failure — distinct from a usage error so
+  // scripted callers can tell "your args were wrong" from "Linear is down".
+  loadFailed: 5,
 } as const;
 
 export interface ManagerPlanCliOptions {
@@ -216,6 +219,10 @@ export async function runManagerPlanCli(
     );
     return MANAGER_PLAN_EXIT.usage;
   }
+  if (options.states.some((state) => state.trim() === "")) {
+    io.stderr(`--state values must be non-empty.\n${renderUsage()}`);
+    return MANAGER_PLAN_EXIT.usage;
+  }
 
   let envelope: PlannerContext["envelope"];
   try {
@@ -253,7 +260,7 @@ export async function runManagerPlanCli(
     });
   } catch (error) {
     io.stderr(`Failed to load candidates: ${formatError(error)}\n`);
-    return MANAGER_PLAN_EXIT.usage;
+    return MANAGER_PLAN_EXIT.loadFailed;
   }
 
   const context = assembleShadowPlannerContext({
@@ -467,7 +474,10 @@ function readValueFlag(
 }
 
 function parsePositiveInt(raw: string, flag: string): number {
-  if (!/^\d+$/.test(raw.trim())) {
+  // Strictly positive: reject 0 (and 0-padded forms) so the "positive integer"
+  // contract holds — a --page-size of 0 would issue a Linear `first: 0` query
+  // (council R1, Codex P2).
+  if (!/^[1-9]\d*$/.test(raw.trim())) {
     throw new ManagerPlanCliUsageError(
       `${flag} must be a positive integer (got ${raw}).`,
     );

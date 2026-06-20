@@ -352,6 +352,30 @@ describe("buildPlanBody", () => {
       "SYMPH-1",
     ]);
   });
+
+  it("drops a canary-chain batch that would downgrade to a mode outside the envelope (council R1, Codex)", () => {
+    // canary-chain-only envelope: a batch with no usable canary must downgrade
+    // to parallel-isolated, which is NOT allowed here — so it is dropped rather
+    // than emitted with a mode outside the envelope.
+    const body = buildPlanBody(
+      {
+        rationale: "plan",
+        batches: [
+          {
+            mode: "canary-chain" as const,
+            issueIdentifiers: ["SYMPH-1"],
+            rationale: "no usable canary",
+            canary: null,
+          },
+        ],
+      },
+      {
+        ...context(),
+        envelope: { ...ENVELOPE, allowedModes: ["canary-chain"] },
+      },
+    );
+    expect(body.batches).toEqual([]);
+  });
 });
 
 describe("runTriagePlanner", () => {
