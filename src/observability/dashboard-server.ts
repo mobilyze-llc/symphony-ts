@@ -1543,7 +1543,12 @@ export function createDashboardRequestHandler(
           return;
         }
 
-        await options.host.handleLinearWebhookDelivery(delivery);
+        try {
+          await options.host.handleLinearWebhookDelivery(delivery);
+        } catch (error) {
+          linearWebhookDeduper.delete(delivery.deliveryId);
+          throw error;
+        }
         writeJson(response, 202, {
           accepted: true,
           delivery_id: delivery.deliveryId,

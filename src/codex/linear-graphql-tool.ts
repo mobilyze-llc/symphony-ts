@@ -249,7 +249,10 @@ function validateDocument(input: {
     );
   }
 
-  const issueProjectWrites = findLinearIssueProjectWrites(document);
+  const issueProjectWrites = findLinearIssueProjectWrites(
+    document,
+    input.variables,
+  );
   if (issueProjectWrites.length > 0) {
     return invalidInput(
       `linear_graphql issue project writes bypass portfolio classification (found: ${issueProjectWrites.join(", ")}). Use symphony-linear-portfolio or the portfolio-verified linear-pp-cli wrapper for issueCreate/issueUpdate project assignment.`,
@@ -286,7 +289,10 @@ function findInlineLinearContentWrites(document: DocumentNode): string[] {
   return [...violations].sort();
 }
 
-function findLinearIssueProjectWrites(document: DocumentNode): string[] {
+function findLinearIssueProjectWrites(
+  document: DocumentNode,
+  variables: JsonObject,
+): string[] {
   const fragments = new Map<string, FragmentDefinitionNode>();
   for (const definition of document.definitions) {
     if (definition.kind === Kind.FRAGMENT_DEFINITION) {
@@ -308,6 +314,7 @@ function findLinearIssueProjectWrites(document: DocumentNode): string[] {
       fragments,
       violations,
       new Set(),
+      variables,
     );
   }
 
@@ -319,10 +326,11 @@ function collectIssueProjectWritesInSelectionSet(
   fragments: ReadonlyMap<string, FragmentDefinitionNode>,
   violations: Set<string>,
   visitedFragments: Set<string>,
+  variables: JsonObject,
 ): void {
   for (const selection of selectionSet.selections) {
     if (selection.kind === Kind.FIELD) {
-      collectIssueProjectWriteInField(selection, violations);
+      collectIssueProjectWriteInField(selection, violations, variables);
       continue;
     }
 
@@ -332,6 +340,7 @@ function collectIssueProjectWritesInSelectionSet(
         fragments,
         violations,
         visitedFragments,
+        variables,
       );
       continue;
     }
@@ -346,6 +355,7 @@ function collectIssueProjectWritesInSelectionSet(
           fragments,
           violations,
           visitedFragments,
+          variables,
         );
         visitedFragments.delete(fragmentName);
       }
@@ -356,17 +366,25 @@ function collectIssueProjectWritesInSelectionSet(
 function collectIssueProjectWriteInField(
   field: FieldNode,
   violations: Set<string>,
+  variables: JsonObject,
 ): void {
   if (!LINEAR_ISSUE_PROJECT_WRITE_MUTATIONS.has(field.name.value)) {
     return;
   }
   if (
     (field.arguments ?? []).some((argument) =>
-      objectValueHasField(argument.value, "projectId"),
+      valueHasProjectId(argument.value, variables),
     )
   ) {
     violations.add(field.name.value);
   }
+}
+
+function valueHasProjectId(value: ValueNode, variables: JsonObject): boolean {
+  if (value.kind === Kind.VARIABLE) {
+    return jsonValueHasField(variables[value.name.value], "projectId");
+  }
+  return objectValueHasField(value, "projectId");
 }
 
 function objectValueHasField(value: ValueNode, fieldName: string): boolean {
@@ -381,6 +399,21 @@ function objectValueHasField(value: ValueNode, fieldName: string): boolean {
     return value.values.some((entry) => objectValueHasField(entry, fieldName));
   }
   return false;
+}
+
+function jsonValueHasField(value: unknown, fieldName: string): boolean {
+  if (value === null || typeof value !== "object") {
+    return false;
+  }
+  if (Array.isArray(value)) {
+    return value.some((entry) => jsonValueHasField(entry, fieldName));
+  }
+  if (Object.hasOwn(value, fieldName)) {
+    return true;
+  }
+  return Object.values(value).some((entry) =>
+    jsonValueHasField(entry, fieldName),
+  );
 }
 
 function collectInlineContentFieldsInMutation(

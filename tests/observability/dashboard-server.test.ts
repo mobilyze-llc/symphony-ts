@@ -1058,6 +1058,57 @@ describe("dashboard server", () => {
     });
     expect(deliveries).toEqual(["delivery-1"]);
   });
+
+  it("releases failed Linear webhook deliveries so retries can repair", async () => {
+    const deliveries: string[] = [];
+    const signingSecret = "linear-secret";
+    const server = await startDashboardServer({
+      port: 0,
+      linearWebhookSigningSecret: signingSecret,
+      host: createHost({
+        handleLinearWebhookDelivery: (delivery) => {
+          deliveries.push(delivery.deliveryId);
+          if (deliveries.length === 1) {
+            throw new Error("temporary repair failure");
+          }
+        },
+      }),
+    });
+    servers.push(server);
+
+    const body = JSON.stringify({
+      type: "Issue",
+      action: "update",
+      webhookTimestamp: Date.now(),
+      data: { id: "issue-1" },
+    });
+    const headers = {
+      "content-type": "application/json",
+      "linear-delivery": "delivery-retry",
+      "linear-signature": signLinearWebhook(body, signingSecret),
+    };
+
+    const first = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/linear/webhook",
+      body,
+      headers,
+    });
+    expect(first.statusCode).toBe(500);
+
+    const second = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/linear/webhook",
+      body,
+      headers,
+    });
+    expect(second.statusCode).toBe(202);
+    expect(JSON.parse(second.body)).toMatchObject({
+      accepted: true,
+      delivery_id: "delivery-retry",
+    });
+    expect(deliveries).toEqual(["delivery-retry", "delivery-retry"]);
+  });
 });
 
 function createHost(

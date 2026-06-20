@@ -355,12 +355,16 @@ describe("continuous feedback provider", () => {
     // descendant orphaned and holding the pipes; reaping the whole process
     // group kills both. Because both ignore SIGTERM, only the group-scoped
     // SIGKILL escalation can stop them — this is not SIGTERM's default
-    // termination doing the work.
-    const descInline = `require("fs").writeFileSync(${JSON.stringify(descPidFile)}, String(process.pid)); process.on("SIGTERM", () => {}); setInterval(() => {}, 1000);`;
+    // termination doing the work. The runner records the descendant pid from
+    // spawn().pid so a prompt group reap cannot kill the descendant before its
+    // own startup code writes the pid file under full-suite load.
+    const descInline =
+      'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000);';
     const runnerSource = `import { spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
 writeFileSync(${JSON.stringify(runnerPidFile)}, String(process.pid));
-spawn(process.execPath, ["-e", ${JSON.stringify(descInline)}], { stdio: "inherit" });
+const descendant = spawn(process.execPath, ["-e", ${JSON.stringify(descInline)}], { stdio: "inherit" });
+writeFileSync(${JSON.stringify(descPidFile)}, String(descendant.pid));
 process.on("SIGTERM", () => {});
 setInterval(() => {}, 1000);
 `;

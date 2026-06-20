@@ -671,20 +671,9 @@ export const LINEAR_ISSUE_LABELS_BY_NAMES_QUERY = `
 export const LINEAR_ISSUE_DETAILS_UPDATE_MUTATION = `
   mutation SymphonyIssueDetailsUpdate(
     $issueId: String!
-    $description: String!
-    $labelIds: [String!]
-    $projectId: String
-    $parentId: String
+    $input: IssueUpdateInput!
   ) {
-    issueUpdate(
-      id: $issueId
-      input: {
-        description: $description
-        labelIds: $labelIds
-        projectId: $projectId
-        parentId: $parentId
-      }
-    ) {
+    issueUpdate(id: $issueId, input: $input) {
       success
       issue {
         id

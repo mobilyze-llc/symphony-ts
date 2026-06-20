@@ -64,15 +64,55 @@ export interface PortfolioWebhookRepairCallbacks {
   }): Promise<void>;
 }
 
+export interface InMemoryLinearWebhookDeduperOptions {
+  maxEntries?: number;
+  ttlMs?: number;
+  now?: () => number;
+}
+
 export class InMemoryLinearWebhookDeduper {
-  private readonly seen = new Set<string>();
+  private readonly seen = new Map<string, number>();
+  private readonly maxEntries: number;
+  private readonly ttlMs: number;
+  private readonly now: () => number;
+
+  constructor(options: InMemoryLinearWebhookDeduperOptions = {}) {
+    this.maxEntries = options.maxEntries ?? 10_000;
+    this.ttlMs = options.ttlMs ?? 60 * 60 * 1000;
+    this.now = options.now ?? (() => Date.now());
+  }
 
   has(deliveryId: string): boolean {
+    this.sweep(this.now());
     return this.seen.has(deliveryId);
   }
 
   add(deliveryId: string): void {
-    this.seen.add(deliveryId);
+    const now = this.now();
+    this.seen.delete(deliveryId);
+    this.seen.set(deliveryId, now);
+    this.sweep(now);
+    while (this.seen.size > this.maxEntries) {
+      const oldest = this.seen.keys().next().value;
+      if (oldest === undefined) {
+        return;
+      }
+      this.seen.delete(oldest);
+    }
+  }
+
+  delete(deliveryId: string): void {
+    this.seen.delete(deliveryId);
+  }
+
+  private sweep(now: number): void {
+    const cutoff = now - this.ttlMs;
+    for (const [deliveryId, seenAt] of this.seen) {
+      if (seenAt > cutoff) {
+        continue;
+      }
+      this.seen.delete(deliveryId);
+    }
   }
 }
 

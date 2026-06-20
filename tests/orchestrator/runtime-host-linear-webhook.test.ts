@@ -84,4 +84,63 @@ describe("OrchestratorRuntimeHost Linear webhook repair", () => {
       }),
     );
   });
+
+  it("omits labelIds when webhook repair cannot resolve labels from a team key", async () => {
+    const tracker = new LinearTrackerClient({
+      endpoint: "https://api.linear.app/graphql",
+      apiKey: "token",
+      projectSlug: null,
+      activeStates: ["Todo"],
+      fetchFn: vi.fn(),
+    });
+    vi.spyOn(tracker, "fetchIssueReferencesByIds").mockResolvedValue([
+      {
+        id: "issue-2",
+        identifier: "MOB-264",
+        title: "Webhook should classify ambiguous project writes",
+        description: "Webhook payload only carried an issue id.",
+        url: "https://linear.app/mob/issue/MOB-264",
+        teamId: null,
+        teamKey: null,
+        projectId: null,
+        projectSlug: null,
+        projectName: null,
+        labels: ["source:agent"],
+        parent: null,
+      },
+    ]);
+    const resolveLabelIdsByNames = vi.spyOn(tracker, "resolveLabelIdsByNames");
+    const updateIssue = vi.spyOn(tracker, "updateIssue").mockResolvedValue({
+      id: "issue-2",
+      identifier: "MOB-264",
+      title: "Webhook should classify ambiguous project writes",
+    });
+    const logger = { info: vi.fn(async () => undefined) };
+    const delivery: LinearWebhookAcceptedDelivery = {
+      status: "accepted",
+      deliveryId: "delivery-no-team",
+      payload: {
+        type: "Issue",
+        action: "update",
+        webhookTimestamp: Date.parse("2026-06-20T12:00:00.000Z"),
+        data: { id: "issue-2" },
+      },
+    };
+
+    await OrchestratorRuntimeHost.prototype.handleLinearWebhookDelivery.call(
+      { tracker, logger } as unknown as OrchestratorRuntimeHost,
+      delivery,
+    );
+
+    expect(resolveLabelIdsByNames).not.toHaveBeenCalled();
+    expect(updateIssue).toHaveBeenCalledWith(
+      expect.not.objectContaining({ labelIds: expect.anything() }),
+    );
+    expect(updateIssue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        issueId: "issue-2",
+        projectId: PORTFOLIO_INTAKE_PROJECT.id,
+      }),
+    );
+  });
 });

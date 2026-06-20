@@ -221,7 +221,55 @@ describe("createLinearGraphqlDynamicTool", () => {
       });
     }
 
+    await expect(
+      tool.execute({
+        query:
+          "mutation UpdateIssue($issueId: String!, $input: IssueUpdateInput!) { issueUpdate(id: $issueId, input: $input) { success } }",
+        variables: {
+          issueId: "issue-1",
+          input: {
+            description: "body update",
+            projectId: "project-1",
+          },
+        },
+      }),
+    ).resolves.toMatchObject({
+      success: false,
+      error: {
+        code: "invalid_input",
+        message: expect.stringContaining("bypass portfolio classification"),
+      },
+    });
+
     expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("allows variable-backed issue content writes without project assignment", async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(
+          JSON.stringify({ data: { issueUpdate: { success: true } } }),
+        ),
+      );
+    const tool = createLinearGraphqlDynamicTool({
+      endpoint: "https://api.linear.app/graphql",
+      apiKey: "linear-token",
+      fetchFn,
+    });
+
+    await expect(
+      tool.execute({
+        query:
+          "mutation UpdateIssue($issueId: String!, $input: IssueUpdateInput!) { issueUpdate(id: $issueId, input: $input) { success } }",
+        variables: {
+          issueId: "issue-1",
+          input: {
+            description: "body update",
+          },
+        },
+      }),
+    ).resolves.toMatchObject({ success: true });
   });
 
   it("allows content fields in read selections", async () => {

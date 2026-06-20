@@ -821,7 +821,7 @@ export class LinearTrackerClient implements IssueTracker {
   async updateIssue(input: {
     issueId: string;
     description: string;
-    labelIds: string[];
+    labelIds?: string[];
     projectId?: string;
     parentId?: string;
   }): Promise<{ id: string; identifier: string; title: string }> {
@@ -829,12 +829,14 @@ export class LinearTrackerClient implements IssueTracker {
       LINEAR_ISSUE_DETAILS_UPDATE_MUTATION,
       {
         issueId: input.issueId,
-        description: input.description,
-        labelIds: input.labelIds,
-        ...(input.projectId !== undefined
-          ? { projectId: input.projectId }
-          : {}),
-        ...(input.parentId !== undefined ? { parentId: input.parentId } : {}),
+        input: {
+          description: input.description,
+          ...(input.labelIds !== undefined ? { labelIds: input.labelIds } : {}),
+          ...(input.projectId !== undefined
+            ? { projectId: input.projectId }
+            : {}),
+          ...(input.parentId !== undefined ? { parentId: input.parentId } : {}),
+        },
       },
     );
 

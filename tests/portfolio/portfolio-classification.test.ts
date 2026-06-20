@@ -70,6 +70,31 @@ describe("portfolio classification", () => {
     });
   });
 
+  it("routes single weak keyword matches to intake with candidate context", () => {
+    const hostFleetProject = PORTFOLIO_TAXONOMY_PROJECTS.find(
+      (project) => project.name === "Host Fleet & Runner Reliability",
+    )!;
+    const classification = classifyPortfolioIssue({
+      identifier: "MOB-906",
+      title: "Fix localhost callback in the demo",
+      teamKey: "MOB",
+      projectId: null,
+      projectSlug: null,
+      projectName: null,
+    });
+
+    expect(classification).toMatchObject({
+      status: "intake",
+      confidence: "low",
+      intakeProject: { id: PORTFOLIO_INTAKE_PROJECT.id },
+    });
+    expect(classification.targetProject).toBeNull();
+    expect(classification.candidates.map((project) => project.id)).toContain(
+      hostFleetProject.id,
+    );
+    expect(classification.whyUncertain).toContain("low-confidence");
+  });
+
   it("does not force old metadata-free unit fixtures into portfolio scope", () => {
     const partition = partitionPortfolioEligibleIssues([
       issue({ id: "issue-1", identifier: "SYMPH-903" }),

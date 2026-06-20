@@ -161,10 +161,14 @@ export function classifyPortfolioIssue(
   }
 
   const candidates = inferCandidateProjects(input);
-  if (candidates.length === 1 && candidates[0]?.score !== undefined) {
+  if (
+    candidates.length === 1 &&
+    candidates[0]?.score !== undefined &&
+    candidates[0].score >= 2
+  ) {
     return result({
       status: "repair",
-      confidence: candidates[0].score >= 2 ? "medium" : "low",
+      confidence: "medium",
       reason:
         "Deterministic title/body keywords identify one registered portfolio target.",
       teamKey,
@@ -189,7 +193,9 @@ export function classifyPortfolioIssue(
     whyUncertain:
       candidates.length === 0
         ? "No deterministic project hint matched the title, description, parent, or current project metadata."
-        : "Multiple deterministic project hints matched; refusing to invent product intent.",
+        : candidates.length === 1
+          ? "Only one low-confidence deterministic project hint matched; refusing to invent product intent."
+          : "Multiple deterministic project hints matched; refusing to invent product intent.",
   });
 }
 

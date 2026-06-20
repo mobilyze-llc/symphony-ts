@@ -53,6 +53,28 @@ describe("linear webhook portfolio reconciler", () => {
     ).toEqual({ status: "duplicate", deliveryId: "delivery-1" });
   });
 
+  it("bounds dedupe state with ttl and max-entry eviction", () => {
+    let now = 1_000;
+    const deduper = new InMemoryLinearWebhookDeduper({
+      maxEntries: 2,
+      ttlMs: 1_000,
+      now: () => now,
+    });
+
+    deduper.add("delivery-1");
+    deduper.add("delivery-2");
+    deduper.add("delivery-3");
+
+    expect(deduper.has("delivery-1")).toBe(false);
+    expect(deduper.has("delivery-2")).toBe(true);
+    expect(deduper.has("delivery-3")).toBe(true);
+
+    now = 3_001;
+
+    expect(deduper.has("delivery-2")).toBe(false);
+    expect(deduper.has("delivery-3")).toBe(false);
+  });
+
   it("rejects invalid signatures before parsing payload semantics", () => {
     const now = new Date("2026-06-20T12:00:00.000Z");
     const rawBody = JSON.stringify({

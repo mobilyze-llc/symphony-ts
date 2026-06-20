@@ -1817,7 +1817,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
             issue.teamKey === null ||
             issue.teamKey === undefined ||
             issue.labels.length === 0
-              ? []
+              ? null
               : (
                   await tracker.resolveLabelIdsByNames(
                     issue.labels,
@@ -1830,8 +1830,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
               issue.description ?? "",
               classification,
             ),
-            labelIds,
             projectId,
+            ...(labelIds === null ? {} : { labelIds }),
           });
         },
       },
