@@ -27,6 +27,18 @@ describe("resolveStageRunnerProviderSelector", () => {
     ).toBe("gemini");
   });
 
+  it("falls back to the resolved runner kind when no provider selector is configured", () => {
+    expect(
+      resolveStageRunnerProviderSelector({
+        runnerKind: "gemini",
+        defaultRunnerKind: "codex",
+        stageRunner: "gemini",
+        executionProvider: null,
+        defaultRunnerProvider: null,
+      }),
+    ).toBe("gemini");
+  });
+
   it("compares runner selectors case-insensitively before inheriting defaults", () => {
     expect(
       resolveStageRunnerProviderSelector({

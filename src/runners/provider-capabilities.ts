@@ -263,6 +263,8 @@ export function resolveRunnerProviderCapability(input: {
 export function findRunnerProviderCapabilityMatches(
   provider: string | null | undefined,
 ): readonly RunnerProviderCapabilityRow[] {
+  // Diagnostic helper for config errors; execution must use
+  // resolveRunnerProviderCapability so runner-kind context is preserved.
   const selector = normalizeSelector(provider);
   if (selector === null) {
     return [];

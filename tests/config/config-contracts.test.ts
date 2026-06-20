@@ -294,6 +294,35 @@ describe("config-contracts", () => {
     expect(validation.error.message).toContain("Codex app-server");
   });
 
+  it("rejects control-needing stages on the delegated crabrunner backend", () => {
+    const resolved = stagedConfig({
+      stages: {
+        work: {
+          type: "agent",
+          runner: "codex",
+          linear_state: "In Progress",
+          on_complete: "done",
+          execution: {
+            role: "investigator",
+            phase: "investigate",
+            backend: "crabrunner",
+            control_needing: true,
+            provider: "openai",
+          },
+        },
+        done: { type: "terminal" },
+      },
+    });
+
+    const validation = validateDispatchConfig(resolved);
+    expect(validation.ok).toBe(false);
+    if (validation.ok) {
+      throw new Error("expected contract violation");
+    }
+    expect(validation.error.message).toContain("provider 'crabrunner'");
+    expect(validation.error.message).toContain("Codex app-server");
+  });
+
   it("fails closed when a control-needing stage selects an unknown provider", () => {
     const resolved = stagedConfig({
       stages: {
