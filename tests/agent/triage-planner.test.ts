@@ -69,6 +69,14 @@ describe("buildPlannerPrompt", () => {
     expect(prompt).toContain("SYMPH-9"); // open PR
     expect(prompt.toLowerCase()).toContain("json");
   });
+
+  it("shows the exact canary object key names in the emitted example (SYMPH-836)", () => {
+    const prompt = buildPlannerPrompt(context());
+    // The model must be SHOWN the schema keys, not merely told "head + contingent"
+    // — otherwise it emits {head, contingent} and the whole plan is rejected.
+    expect(prompt).toContain("headIssueIdentifiers");
+    expect(prompt).toContain("contingentIssueIdentifiers");
+  });
 });
 
 describe("parsePlannerOutput", () => {
@@ -127,15 +135,45 @@ describe("parsePlannerOutput", () => {
     expect(result.ok).toBe(false);
   });
 
-  it("rejects a canary-chain with an empty head (a permanent deadlock)", () => {
+  it("normalizes aliased canary keys (head/contingent) instead of rejecting the plan (SYMPH-836)", () => {
+    // The exact MOB/Crucible failure: Opus emitted {head, contingent} rather than
+    // the schema's {headIssueIdentifiers, contingentIssueIdentifiers}, which voided
+    // the whole plan. Aliases must be coerced, not rejected.
     const result = parsePlannerOutput(
       artifact({
         rationale: "x",
         batches: [
           {
             mode: "canary-chain",
+            issueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+            rationale: "chain with aliased canary keys",
+            canary: { head: "SYMPH-1", contingent: ["SYMPH-2"] },
+          },
+        ],
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.batches[0]?.canary).toEqual({
+        headIssueIdentifiers: ["SYMPH-1"],
+        contingentIssueIdentifiers: ["SYMPH-2"],
+      });
+    }
+  });
+
+  it("tolerates a canary-chain with an empty head — drops the canary instead of voiding the plan (SYMPH-836)", () => {
+    // Previously an empty head voided the WHOLE plan (a single bad canary lost
+    // every batch). That contradicted buildPlanBody's own no-valid-head downgrade.
+    // Now parse drops the unusable canary to null and the batch is downgraded to
+    // honest parallel-isolated work downstream.
+    const parsed = parsePlannerOutput(
+      artifact({
+        rationale: "x",
+        batches: [
+          {
+            mode: "canary-chain",
             issueIdentifiers: ["SYMPH-1"],
-            rationale: "no head",
+            rationale: "empty head",
             canary: {
               headIssueIdentifiers: [],
               contingentIssueIdentifiers: ["SYMPH-1"],
@@ -144,7 +182,13 @@ describe("parsePlannerOutput", () => {
         ],
       }),
     );
-    expect(result.ok).toBe(false);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.value.batches[0]?.canary).toBeNull();
+      const body = buildPlanBody(parsed.value, context());
+      expect(body.batches[0]?.mode).toBe("parallel-isolated");
+      expect(body.batches[0]?.canary).toBeNull();
+    }
   });
 });
 
@@ -308,6 +352,30 @@ describe("buildPlanBody", () => {
       "SYMPH-1",
     ]);
   });
+
+  it("drops a canary-chain batch that would downgrade to a mode outside the envelope (council R1, Codex)", () => {
+    // canary-chain-only envelope: a batch with no usable canary must downgrade
+    // to parallel-isolated, which is NOT allowed here — so it is dropped rather
+    // than emitted with a mode outside the envelope.
+    const body = buildPlanBody(
+      {
+        rationale: "plan",
+        batches: [
+          {
+            mode: "canary-chain" as const,
+            issueIdentifiers: ["SYMPH-1"],
+            rationale: "no usable canary",
+            canary: null,
+          },
+        ],
+      },
+      {
+        ...context(),
+        envelope: { ...ENVELOPE, allowedModes: ["canary-chain"] },
+      },
+    );
+    expect(body.batches).toEqual([]);
+  });
 });
 
 describe("runTriagePlanner", () => {
@@ -381,6 +449,40 @@ describe("runTriagePlanner", () => {
     };
     const result = await runTriagePlanner(context(), deps);
     expect(result.status).toBe("invalid");
+  });
+
+  it("downgrades a single malformed-canary batch instead of voiding the whole plan (SYMPH-836)", async () => {
+    const deps = {
+      runClaude: async (): Promise<PlannerRunResult> => ({
+        status: "ok",
+        markdown: artifact({
+          rationale: "two batches; one carries a garbage canary",
+          batches: [
+            {
+              mode: "parallel-isolated",
+              issueIdentifiers: ["SYMPH-1"],
+              rationale: "valid",
+            },
+            {
+              mode: "canary-chain",
+              issueIdentifiers: ["SYMPH-2"],
+              rationale: "garbage canary must not void the whole plan",
+              canary: { nonsense: true },
+            },
+          ],
+        }),
+      }),
+    };
+    const result = await runTriagePlanner(context(), deps);
+    expect(result.status).toBe("ok");
+    if (result.status === "ok") {
+      expect(result.body.batches).toHaveLength(2);
+      const downgraded = result.body.batches.find((b) =>
+        b.members.some((m) => m.issueIdentifier === "SYMPH-2"),
+      );
+      expect(downgraded?.mode).toBe("parallel-isolated");
+      expect(downgraded?.canary).toBeNull();
+    }
   });
 });
 
