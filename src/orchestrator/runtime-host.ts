@@ -61,6 +61,7 @@ import type {
   ResolvedWorkflowConfig,
   StageDefinition,
   StageExecutionBackend as StageExecutionBackendKind,
+  WorkflowHardStopsConfig,
 } from "../config/types.js";
 import { WorkflowWatcher } from "../config/workflow-watch.js";
 import type {
@@ -4607,11 +4608,20 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       lastResult: null,
       completion: Promise.resolve(),
     };
+    const globalHardStops = resolveHardStopsConfig(
+      this.config.hardStops,
+      DEFAULT_RUNTIME_HARD_STOPS_CONFIG,
+    );
+    const effectiveHardStops = resolveHardStopsConfig(
+      stage?.hardStops,
+      globalHardStops,
+    );
     const executionJob = this.createStageExecutionJobSpec({
       issue,
       attempt,
       stage,
       stageName,
+      effectiveHardStops,
     });
     const stageExecutionBackend =
       this.resolveStageExecutionBackend(executionJob);
@@ -4628,15 +4638,6 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         stage_execution_run_group_id: executionJob.identity.runGroupId,
         stage_execution_idempotency_key: executionJob.identity.idempotencyKey,
       },
-    );
-
-    const globalHardStops = resolveHardStopsConfig(
-      this.config.hardStops,
-      DEFAULT_RUNTIME_HARD_STOPS_CONFIG,
-    );
-    const effectiveHardStops = resolveHardStopsConfig(
-      stage?.hardStops,
-      globalHardStops,
     );
 
     const runnerInput: AgentRunInput = {
@@ -4715,12 +4716,17 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     attempt: number | null;
     stage: StageDefinition | null;
     stageName: string | null;
+    effectiveHardStops?: WorkflowHardStopsConfig | null;
   }): StageExecutionJobSpec {
+    const { effectiveHardStops, ...jobSpecInput } = input;
     return createStageExecutionJobSpec({
-      ...input,
+      ...jobSpecInput,
       defaultRunnerKind: this.config.runner.kind,
       defaultRunnerModel: this.config.runner.model,
       defaultRunnerProvider: this.config.runner.provider ?? null,
+      effectiveHardStops: effectiveHardStops ?? null,
+      defaultTurnTimeoutMs: this.config.codex.turnTimeoutMs,
+      defaultStallTimeoutMs: this.config.codex.stallTimeoutMs,
       baseRef: resolveStageExecutionBaseRef(),
       artifactRoot: getDurableCodexSessionArtifactDirectory(
         this.config.workspace.root,

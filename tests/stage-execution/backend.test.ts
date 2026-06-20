@@ -67,6 +67,33 @@ function createJob(): StageExecutionJobSpec {
       provider: "openai",
       reasoningEffort: null,
     },
+    enforcement: {
+      required: false,
+      budget: {
+        maxTokens: null,
+        maxUsd: null,
+        estimatedCostPer1kTokensUsd: null,
+        cachedTokenCostRatio: null,
+        liveBudgetGraceRatio: null,
+      },
+      timing: {
+        timeoutMs: null,
+        stallTimeoutMs: null,
+        noProgressTurns: null,
+        maxIterations: null,
+      },
+      telemetry: {
+        heartbeatIntervalMs: null,
+        progressIntervalMs: null,
+        usageIntervalMs: null,
+      },
+      cancellation: {
+        jobIdRequired: false,
+        cooperativeAbort: false,
+        processGroupKill: false,
+        killGraceMs: null,
+      },
+    },
   };
 }
 

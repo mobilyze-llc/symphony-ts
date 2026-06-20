@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import type { StageDefinition } from "../../src/config/types.js";
+import type {
+  StageDefinition,
+  WorkflowHardStopsConfig,
+} from "../../src/config/types.js";
 import type { Issue } from "../../src/domain/model.js";
+import type { StageExecutionEnforcementContract } from "../../src/stage-execution/backend.js";
 import {
   createStageExecutionIdempotencyKey,
   createStageExecutionJobSpec,
@@ -37,6 +41,12 @@ describe("createStageExecutionJobSpec", () => {
       stageName: "implement",
       defaultRunnerKind: "codex",
       defaultRunnerModel: null,
+      effectiveHardStops: createHardStops({
+        maxTokensPerUnit: 50_000,
+        maxDollarBudgetUsd: 6,
+      }),
+      defaultTurnTimeoutMs: 600_000,
+      defaultStallTimeoutMs: 120_000,
       baseRef: "origin/main:weird",
       artifactRoot: "/tmp/artifacts/issue-807",
     });
@@ -62,12 +72,105 @@ describe("createStageExecutionJobSpec", () => {
         provider: "openai",
         reasoningEffort: "medium",
       },
+      enforcement: {
+        required: true,
+        budget: {
+          maxTokens: 50_000,
+          maxUsd: 6,
+          estimatedCostPer1kTokensUsd: 0.05,
+          cachedTokenCostRatio: 0.1,
+          liveBudgetGraceRatio: 0.2,
+        },
+        timing: {
+          timeoutMs: 600_000,
+          stallTimeoutMs: 120_000,
+          noProgressTurns: 3,
+          maxIterations: 10,
+        },
+        telemetry: {
+          heartbeatIntervalMs: 30_000,
+          progressIntervalMs: 30_000,
+          usageIntervalMs: 30_000,
+        },
+        cancellation: {
+          jobIdRequired: true,
+          cooperativeAbort: true,
+          processGroupKill: true,
+          killGraceMs: 5_000,
+        },
+      },
     });
     expect(job.identity.idempotencyKey).toMatch(
       /^stage-execution:SYMPH-807:implement:2:crabrunner:[a-f0-9]{20}$/,
     );
     expect(job.identity.idempotencyKey).not.toContain("feature/SYMPH-807:refs");
     expect(job.identity.idempotencyKey).not.toContain("rg:807");
+  });
+
+  it("derives delegated enforcement from stage profile and effective hard stops", () => {
+    const job = createStageExecutionJobSpec({
+      issue: createIssue({ id: "issue-832", identifier: "SYMPH-832" }),
+      attempt: 0,
+      stage: createStage({
+        timeoutMs: 900_000,
+        execution: {
+          role: "implementer",
+          phase: "implement",
+          backend: "crabrunner",
+          controlNeeding: false,
+          provider: "openai",
+          model: null,
+          reasoningEffort: null,
+          profile: "write.pro16",
+          artifacts: { requires: [], produces: ["patch"] },
+          timeoutMs: 180_000,
+          budget: { maxTokens: 12_000, maxUsd: 1.25 },
+          dependencies: { stages: [], capsules: [], missingCapsule: "fail" },
+          runGroup: { id: "rg-832", key: null },
+          capsules: { consume: [], produce: [] },
+        },
+      }),
+      stageName: "implement",
+      defaultRunnerKind: "codex",
+      defaultRunnerModel: "gpt-5.3-codex",
+      effectiveHardStops: createHardStops({
+        maxTokensPerUnit: 80_000,
+        maxDollarBudgetUsd: 9,
+        noProgressTurns: 4,
+      }),
+      defaultTurnTimeoutMs: 600_000,
+      defaultStallTimeoutMs: 90_000,
+      baseRef: "origin/main",
+      artifactRoot: "/tmp/artifacts/issue-832",
+    });
+
+    expect(job.enforcement).toEqual({
+      required: true,
+      budget: {
+        maxTokens: 12_000,
+        maxUsd: 1.25,
+        estimatedCostPer1kTokensUsd: 0.05,
+        cachedTokenCostRatio: 0.1,
+        liveBudgetGraceRatio: 0.2,
+      },
+      timing: {
+        timeoutMs: 180_000,
+        stallTimeoutMs: 90_000,
+        noProgressTurns: 4,
+        maxIterations: 10,
+      },
+      telemetry: {
+        heartbeatIntervalMs: 30_000,
+        progressIntervalMs: 30_000,
+        usageIntervalMs: 30_000,
+      },
+      cancellation: {
+        jobIdRequired: true,
+        cooperativeAbort: true,
+        processGroupKill: true,
+        killGraceMs: 5_000,
+      },
+    });
   });
 
   it("preserves the legacy current-runner idempotency key contract", () => {
@@ -189,6 +292,7 @@ describe("createStageExecutionJobSpec", () => {
       profileId: "write.pro16",
       baseRef: "41e1975",
       targetHeadRef: "head-a",
+      enforcement: createEnforcement(),
       runner: {
         runnerKind: "codex",
         model: "gpt-5.3-codex",
@@ -228,6 +332,18 @@ describe("createStageExecutionJobSpec", () => {
         baseRef: "41e1976",
       }),
     ).not.toBe(original);
+    expect(
+      createStageExecutionIdempotencyKey({
+        ...base,
+        enforcement: {
+          ...base.enforcement,
+          budget: {
+            ...base.enforcement.budget,
+            maxTokens: 24_000,
+          },
+        },
+      }),
+    ).not.toBe(original);
   });
 
   it("keeps scheduler-key visible segments bounded and non-empty", () => {
@@ -241,6 +357,7 @@ describe("createStageExecutionJobSpec", () => {
       profileId: null,
       baseRef: "41e1975",
       targetHeadRef: "feature/SYMPH-807",
+      enforcement: createEnforcement(),
       runner: {
         runnerKind: "codex",
         model: null,
@@ -267,6 +384,7 @@ describe("createStageExecutionJobSpec", () => {
       profileId: null,
       baseRef: "41e1975",
       targetHeadRef: "feature/SYMPH-807",
+      enforcement: createEnforcement(),
       runner: {
         runnerKind: "codex",
         model: null,
@@ -318,6 +436,57 @@ function createStage(overrides: Partial<StageDefinition>): StageDefinition {
     linearState: null,
     hardStops: null,
     execution: null,
+    ...overrides,
+  };
+}
+
+function createHardStops(
+  overrides: Partial<WorkflowHardStopsConfig> = {},
+): WorkflowHardStopsConfig {
+  return {
+    maxIterations: 10,
+    noProgressTurns: 3,
+    maxTokensPerUnit: 100_000,
+    maxDollarBudgetUsd: 10,
+    premiumBudgetPauseRatio: 0.8,
+    liveBudgetGraceRatio: 0.2,
+    estimatedCostPer1kTokensUsd: 0.05,
+    cachedTokenCostRatio: 0.1,
+    maxPrimaryWindowPctPerUnit: null,
+    maxSecondaryWindowPctPerUnit: null,
+    ...overrides,
+  };
+}
+
+function createEnforcement(
+  overrides: Partial<StageExecutionEnforcementContract> = {},
+): StageExecutionEnforcementContract {
+  return {
+    required: true,
+    budget: {
+      maxTokens: 12_000,
+      maxUsd: 1.25,
+      estimatedCostPer1kTokensUsd: 0.05,
+      cachedTokenCostRatio: 0.1,
+      liveBudgetGraceRatio: 0.2,
+    },
+    timing: {
+      timeoutMs: 180_000,
+      stallTimeoutMs: 90_000,
+      noProgressTurns: 3,
+      maxIterations: 10,
+    },
+    telemetry: {
+      heartbeatIntervalMs: 30_000,
+      progressIntervalMs: 30_000,
+      usageIntervalMs: 30_000,
+    },
+    cancellation: {
+      jobIdRequired: true,
+      cooperativeAbort: true,
+      processGroupKill: true,
+      killGraceMs: 5_000,
+    },
     ...overrides,
   };
 }
