@@ -26,7 +26,11 @@
  */
 
 import { normalizeIssueState } from "../domain/model.js";
-import { resolveRunnerProviderCapability } from "../runners/provider-capabilities.js";
+import {
+  findRunnerProviderCapabilityMatches,
+  resolveRunnerProviderCapability,
+} from "../runners/provider-capabilities.js";
+import { resolveStageRunnerProviderSelector } from "../runners/provider-selection.js";
 import type { ResolvedWorkflowConfig, StagesConfig } from "./types.js";
 
 /**
@@ -259,7 +263,13 @@ function checkControlNeedingStageProviderSelection(
     }
 
     const runnerKind = stage.runner ?? config.runner.kind;
-    const provider = execution.provider ?? config.runner.provider ?? null;
+    const provider = resolveStageRunnerProviderSelector({
+      runnerKind,
+      defaultRunnerKind: config.runner.kind,
+      stageRunner: stage.runner ?? null,
+      executionProvider: execution.provider,
+      defaultRunnerProvider: config.runner.provider,
+    });
     const capability = resolveRunnerProviderCapability({
       backend: execution.backend,
       runnerKind,
@@ -267,11 +277,18 @@ function checkControlNeedingStageProviderSelection(
     });
 
     if (capability === null) {
+      const providerMatches = findRunnerProviderCapabilityMatches(provider);
+      const providerContext =
+        providerMatches.length > 0
+          ? ` Provider '${provider}' is registered for runner kind(s) ${formatQuotedList(
+              unique(providerMatches.map((row) => row.runnerKind)),
+            )}, not '${runnerKind}'.`
+          : "";
       violations.push({
         rule: "control_needing_stage_provider_supports_control_semantics",
         key: `stages.${stageName}.execution.provider`,
         value: provider ?? "<default>",
-        message: `stages.${stageName}.execution.control_needing is true, but the selected runner/provider ('${runnerKind}' / '${provider ?? "<default>"}') is not in the provider capability matrix. Fix: select the Codex app-server provider for control-needing stages or add a truthful capability row.`,
+        message: `stages.${stageName}.execution.control_needing is true, but the selected runner/provider ('${runnerKind}' / '${provider ?? "<default>"}') is not in the provider capability matrix for that runner.${providerContext} Fix: select the Codex app-server provider for control-needing stages or add a truthful capability row.`,
       });
       continue;
     }
@@ -288,6 +305,14 @@ function checkControlNeedingStageProviderSelection(
     });
   }
   return violations;
+}
+
+function formatQuotedList(values: readonly string[]): string {
+  return values.map((value) => `'${value}'`).join(", ");
+}
+
+function unique<T>(values: readonly T[]): T[] {
+  return Array.from(new Set(values));
 }
 
 /**

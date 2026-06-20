@@ -260,6 +260,18 @@ export function resolveRunnerProviderCapability(input: {
   return sameRunner ?? null;
 }
 
+export function findRunnerProviderCapabilityMatches(
+  provider: string | null | undefined,
+): readonly RunnerProviderCapabilityRow[] {
+  const selector = normalizeSelector(provider);
+  if (selector === null) {
+    return [];
+  }
+  return RUNNER_PROVIDER_CAPABILITY_MATRIX.filter((row) =>
+    row.aliases.some((alias) => normalizeSelector(alias) === selector),
+  );
+}
+
 export function requiresCodexAppServerControlPath(input: {
   backend?: StageExecutionBackend | null;
   runnerKind: string | null | undefined;

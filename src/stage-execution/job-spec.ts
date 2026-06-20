@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import type { StageDefinition } from "../config/types.js";
 import type { Issue } from "../domain/model.js";
+import { resolveStageRunnerProviderSelector } from "../runners/provider-selection.js";
 import type { StageExecutionJobSpec } from "./backend.js";
 
 export interface CreateStageExecutionJobSpecInput {
@@ -23,7 +24,7 @@ export function createStageExecutionJobSpec(
   const backend = execution?.backend ?? "current-runner";
   const runnerKind = input.stage?.runner ?? input.defaultRunnerKind;
   const runnerModel = input.stage?.model ?? input.defaultRunnerModel;
-  const runnerProvider = resolveStageRunnerProvider({
+  const runnerProvider = resolveStageRunnerProviderSelector({
     runnerKind,
     defaultRunnerKind: input.defaultRunnerKind,
     stageRunner: input.stage?.runner ?? null,
@@ -75,21 +76,6 @@ export function createStageExecutionJobSpec(
     },
     runner,
   };
-}
-
-function resolveStageRunnerProvider(input: {
-  runnerKind: string;
-  defaultRunnerKind: string;
-  stageRunner: string | null;
-  executionProvider: string | null;
-  defaultRunnerProvider: string | null;
-}): string | null {
-  const stageOverridesRunner =
-    input.stageRunner !== null && input.stageRunner !== input.defaultRunnerKind;
-  const providerSelector =
-    input.executionProvider ??
-    (stageOverridesRunner ? null : input.defaultRunnerProvider);
-  return providerSelector ?? input.runnerKind;
 }
 
 export function createStageExecutionIdempotencyKey(input: {
