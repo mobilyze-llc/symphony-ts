@@ -63,6 +63,58 @@ describe("CrabrunnerStageExecutionBackend", () => {
     ]);
   });
 
+  it("normalizes crabrunner legacy counters through the usage contract", async () => {
+    const backend = new CrabrunnerStageExecutionBackend({
+      client: createClient({
+        admission: { status: "accepted", jobId: "job-normalize" },
+        terminal: {
+          state: "succeeded",
+          usage: {
+            status: "available",
+            inputTokens: 11.9,
+            outputTokens: 7.2,
+            totalTokens: 19.1,
+            cacheReadTokens: 3.8,
+            cacheWriteTokens: -1.2,
+            noCacheTokens: 8.4,
+            reasoningTokens: 2.9,
+          },
+        },
+      }),
+    });
+
+    const result = await backend.execute({
+      job: createJob(),
+      runnerInput: createRunnerInput(),
+    });
+
+    expect(result.result.liveSession.usageMeasurement?.tokens).toMatchObject({
+      inputTokens: 11,
+      outputTokens: 7,
+      totalTokens: 19,
+      cacheReadTokens: 3,
+      noCacheTokens: 8,
+      reasoningTokens: 2,
+    });
+    expect(
+      result.result.liveSession.usageMeasurement?.tokens.cacheWriteTokens,
+    ).toBeUndefined();
+    expect(result.result.liveSession).toMatchObject({
+      codexInputTokens: 11,
+      codexOutputTokens: 7,
+      codexTotalTokens: 19,
+      codexCacheReadTokens: 3,
+      codexCacheWriteTokens: 0,
+      codexNoCacheTokens: 8,
+      codexReasoningTokens: 2,
+      totalStageInputTokens: 11,
+      totalStageOutputTokens: 7,
+      totalStageTotalTokens: 19,
+      totalStageCacheReadTokens: 3,
+      totalStageCacheWriteTokens: 0,
+    });
+  });
+
   it("emits dry-run specs when configured", async () => {
     const client = createClient({
       admission: { status: "accepted", jobId: "dry-1" },
@@ -166,6 +218,21 @@ describe("CrabrunnerStageExecutionBackend", () => {
     expect(result.result.liveSession.lastCodexMessage).toContain(
       '"terminalMessage":"telemetry missing"',
     );
+    expect(result.result.liveSession.usageMeasurement).toMatchObject({
+      source: "crabrunner",
+      measurementQuality: "unavailable",
+      tokens: {
+        inputTokens: null,
+        outputTokens: null,
+        totalTokens: null,
+      },
+      cost: {
+        amountUsd: null,
+        authority: "unavailable",
+      },
+      unavailableReason: "telemetry missing",
+    });
+    expect(result.result.liveSession.codexTotalTokens).toBe(0);
     expect(result.evidence?.usage).not.toHaveProperty("totalTokens");
   });
 

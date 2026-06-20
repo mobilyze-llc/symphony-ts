@@ -66,10 +66,24 @@ describe("GeminiRunner", () => {
     });
     expect(result.status).toBe("completed");
     expect(result.message).toBe("Hello from Gemini");
-    expect(result.usage).toEqual({
+    expect(result.usage).toMatchObject({
       inputTokens: 200,
       outputTokens: 100,
       totalTokens: 300,
+      stageUsage: {
+        source: "gemini_ai_sdk",
+        provider: "google",
+        model: "gemini-2.5-pro",
+        measurementQuality: "true",
+        tokens: {
+          inputTokens: 200,
+          outputTokens: 100,
+          totalTokens: 300,
+        },
+        cost: expect.objectContaining({
+          authority: "unavailable",
+        }),
+      },
     });
   });
 
@@ -106,10 +120,24 @@ describe("GeminiRunner", () => {
     expect(events[0]!.event).toBe("session_started");
     expect(events[0]!.codexAppServerPid).toBeNull();
     expect(events[1]!.event).toBe("turn_completed");
-    expect(events[1]!.usage).toEqual({
+    expect(events[1]!.usage).toMatchObject({
       inputTokens: 10,
       outputTokens: 5,
       totalTokens: 15,
+      stageUsage: {
+        source: "gemini_ai_sdk",
+        provider: "google",
+        model: "gemini-2.5-pro",
+        measurementQuality: "true",
+        tokens: {
+          inputTokens: 10,
+          outputTokens: 5,
+          totalTokens: 15,
+        },
+        cost: expect.objectContaining({
+          authority: "unavailable",
+        }),
+      },
     });
   });
 

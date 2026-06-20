@@ -95,12 +95,19 @@ describe("CodexAppServerClient", () => {
     expect(events).toContainEqual(
       expect.objectContaining({
         event: "notification",
-        usage: {
+        usage: expect.objectContaining({
           inputTokens: 11,
           outputTokens: 7,
           totalTokens: 18,
-        },
-      } satisfies Partial<CodexClientEvent>),
+          stageUsage: expect.objectContaining({
+            source: "codex_app_server",
+            measurementQuality: "true",
+            cost: expect.objectContaining({
+              authority: "unavailable",
+            }),
+          }),
+        }),
+      }),
     );
 
     await client.close();
@@ -1004,7 +1011,9 @@ describe("CodexAppServerClient", () => {
   it("extracts the codex cached_input_tokens share into cacheReadTokens", async () => {
     const workspace = await createWorkspace();
     const events: CodexClientEvent[] = [];
-    const client = createClient("codex-cached-usage", workspace, events);
+    const client = createClient("codex-cached-usage", workspace, events, {
+      runnerModel: "gpt-5-codex",
+    });
 
     const result = await client.startSession({
       prompt: "Report cached usage",
@@ -1023,6 +1032,13 @@ describe("CodexAppServerClient", () => {
       totalTokens: 82512,
       cacheReadTokens: 56064,
       reasoningTokens: 12,
+      stageUsage: {
+        model: "gpt-5-codex",
+        tokens: expect.objectContaining({
+          cacheReadTokens: 56064,
+          reasoningTokens: 12,
+        }),
+      },
     });
     // camelCase notification path (cachedInputTokens / reasoningOutputTokens)
     expect(events).toContainEqual(
@@ -1030,6 +1046,13 @@ describe("CodexAppServerClient", () => {
         usage: expect.objectContaining({
           cacheReadTokens: 41000,
           reasoningTokens: 7,
+          stageUsage: expect.objectContaining({
+            model: "gpt-5-codex",
+            tokens: expect.objectContaining({
+              cacheReadTokens: 41000,
+              reasoningTokens: 7,
+            }),
+          }),
         }),
       }),
     );
@@ -1102,10 +1125,22 @@ describe("CodexAppServerClient", () => {
       title: "ABC-123: Example",
     });
 
-    expect(result.usage).toEqual({
+    expect(result.usage).toMatchObject({
       inputTokens: 100,
       outputTokens: 50,
       totalTokens: 150,
+      stageUsage: {
+        source: "codex_app_server",
+        measurementQuality: "true",
+        tokens: {
+          inputTokens: 100,
+          outputTokens: 50,
+          totalTokens: 150,
+        },
+        cost: expect.objectContaining({
+          authority: "unavailable",
+        }),
+      },
     });
     expect(result.rateLimits).toEqual({
       requestsRemaining: 7,
@@ -1858,6 +1893,7 @@ function createClient(
     disableSkills: boolean;
     toolOutputTokenLimit: number;
     modelAutoCompactTokenLimit: number;
+    runnerModel: string | null;
     artifactDirectory: string;
     threadSandbox: ConstructorParameters<
       typeof CodexAppServerClient
@@ -1882,6 +1918,9 @@ function createClient(
     ...(overrides?.modelAutoCompactTokenLimit === undefined
       ? {}
       : { modelAutoCompactTokenLimit: overrides.modelAutoCompactTokenLimit }),
+    ...(overrides?.runnerModel === undefined
+      ? {}
+      : { runnerModel: overrides.runnerModel }),
     cwd: workspace,
     approvalPolicy: "full-auto",
     threadSandbox: overrides?.threadSandbox ?? "workspace-write",

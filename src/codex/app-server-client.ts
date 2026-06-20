@@ -21,6 +21,10 @@ import {
   DEFAULT_CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
   DEFAULT_CODEX_TOOL_OUTPUT_TOKEN_LIMIT,
 } from "../config/defaults.js";
+import {
+  type StageUsageMeasurement,
+  mapCodexAppServerUsageToStageUsage,
+} from "../domain/stage-usage.js";
 import { ERROR_CODES } from "../errors/codes.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
 import {
@@ -87,6 +91,7 @@ export interface CodexUsage {
   cacheWriteTokens?: number;
   noCacheTokens?: number;
   reasoningTokens?: number;
+  stageUsage?: StageUsageMeasurement;
 }
 
 export interface CodexSessionArtifact {
@@ -156,6 +161,7 @@ export interface CodexAppServerClientOptions {
   disableSkills?: boolean;
   toolOutputTokenLimit?: number;
   modelAutoCompactTokenLimit?: number;
+  runnerModel?: string | null;
   cwd: string;
   approvalPolicy: unknown;
   threadSandbox: unknown;
@@ -832,7 +838,9 @@ export class CodexAppServerClient {
       return;
     }
 
-    const usage = extractUsage(parsed);
+    const usage = extractUsage(parsed, {
+      model: this.options.runnerModel ?? null,
+    });
     if (usage !== null) {
       this.lastUsage = usage;
     }
@@ -2340,9 +2348,16 @@ function truncateCommandForReason(command: string): string {
   return `${command.slice(0, maxLength)}...`;
 }
 
-function extractUsage(message: JsonObject): CodexUsage | null {
+interface StageUsageExtractionContext {
+  model: string | null;
+}
+
+function extractUsage(
+  message: JsonObject,
+  context: StageUsageExtractionContext,
+): CodexUsage | null {
   for (const candidate of walkObjects(message)) {
-    const usage = coerceUsage(candidate);
+    const usage = coerceUsage(candidate, context);
     if (usage !== null) {
       return usage;
     }
@@ -2350,7 +2365,10 @@ function extractUsage(message: JsonObject): CodexUsage | null {
   return null;
 }
 
-function coerceUsage(value: JsonObject): CodexUsage | null {
+function coerceUsage(
+  value: JsonObject,
+  context: StageUsageExtractionContext,
+): CodexUsage | null {
   const specificAliases = [
     ["inputTokens", "outputTokens", "totalTokens"],
     ["input_tokens", "output_tokens", "total_tokens"],
@@ -2363,12 +2381,15 @@ function coerceUsage(value: JsonObject): CodexUsage | null {
     const total = asFiniteNumber(value[totalKey]);
     // Accept usage if at least input and output are present; total is optional.
     if (input !== null && output !== null) {
-      return {
-        inputTokens: input,
-        outputTokens: output,
-        totalTokens: total ?? input + output,
-        ...extractExtendedTokenFields(value),
-      };
+      return withStageUsageMeasurement(
+        {
+          inputTokens: input,
+          outputTokens: output,
+          totalTokens: total ?? input + output,
+          ...extractExtendedTokenFields(value),
+        },
+        context,
+      );
     }
   }
 
@@ -2381,12 +2402,15 @@ function coerceUsage(value: JsonObject): CodexUsage | null {
     genericOutput !== null &&
     genericTotal !== null
   ) {
-    return {
-      inputTokens: genericInput,
-      outputTokens: genericOutput,
-      totalTokens: genericTotal,
-      ...extractExtendedTokenFields(value),
-    };
+    return withStageUsageMeasurement(
+      {
+        inputTokens: genericInput,
+        outputTokens: genericOutput,
+        totalTokens: genericTotal,
+        ...extractExtendedTokenFields(value),
+      },
+      context,
+    );
   }
 
   if ("total_token_usage" in value) {
@@ -2396,11 +2420,24 @@ function coerceUsage(value: JsonObject): CodexUsage | null {
       typeof nested === "object" &&
       !Array.isArray(nested)
     ) {
-      return coerceUsage(nested as JsonObject);
+      return coerceUsage(nested as JsonObject, context);
     }
   }
 
   return null;
+}
+
+function withStageUsageMeasurement(
+  usage: Omit<CodexUsage, "stageUsage">,
+  context: StageUsageExtractionContext,
+): CodexUsage {
+  return {
+    ...usage,
+    stageUsage: mapCodexAppServerUsageToStageUsage({
+      usage,
+      model: context.model,
+    }),
+  };
 }
 
 /**

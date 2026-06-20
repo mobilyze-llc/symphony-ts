@@ -1,5 +1,6 @@
 import type { ErrorSignatureClass } from "../errors/signature.js";
 import type { ProcessIdentitySnapshot } from "../shared/process-tree.js";
+import type { StageUsageMeasurement } from "./stage-usage.js";
 
 export const ORCHESTRATOR_ISSUE_STATUSES = [
   "unclaimed",
@@ -826,6 +827,7 @@ export interface LiveSession {
   totalStageCacheReadTokens: number;
   totalStageCacheWriteTokens: number;
   totalStageCompactions?: number;
+  usageMeasurement?: StageUsageMeasurement | null;
   turnHistory: TurnHistoryEntry[];
   recentActivity: RecentActivityEntry[];
   tokenTelemetry: TokenTelemetryEntry[];
@@ -1110,6 +1112,7 @@ export interface StageRecord {
   compactions?: number;
   rateLimitWindows?: SessionRateLimitTelemetry;
   usageEventCadence?: StageUsageEventCadence;
+  usageMeasurement?: StageUsageMeasurement;
   turns: number;
   outcome: string;
 }
@@ -1744,6 +1747,7 @@ export function createEmptyLiveSession(): LiveSession {
     totalStageCacheReadTokens: 0,
     totalStageCacheWriteTokens: 0,
     totalStageCompactions: 0,
+    usageMeasurement: null,
     turnHistory: [],
     recentActivity: [],
     tokenTelemetry: [],

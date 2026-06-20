@@ -1139,6 +1139,7 @@ function renderDashboardClientScript(
             '<span class="detail-kv-label">Tool cap</span><span class="detail-kv-value numeric">' + formatInteger(outputCaps.tool_output_token_limit) + '</span>' +
             '<span class="detail-kv-label">Auto compact</span><span class="detail-kv-value numeric">' + formatInteger(outputCaps.model_auto_compact_token_limit) + '</span>' +
             '<span class="detail-kv-label">Compactions</span><span class="detail-kv-value numeric">' + formatInteger(churn.current_stage_compactions) + '</span>' +
+            renderUsageMeasurementKv(row.usage_measurement) +
             rateLimitWindowKv(row.rate_limit_window) +
             '</div></div>';
 
@@ -1170,20 +1171,50 @@ function renderDashboardClientScript(
             '</div>';
 
           const execRows = (!row.execution_history || row.execution_history.length === 0)
-            ? '<tr><td colspan="6" class="muted">No completed stages.</td></tr>'
+            ? '<tr><td colspan="7" class="muted">No completed stages.</td></tr>'
             : row.execution_history.map(function (s) {
-                return '<tr><td>' + escapeHtml(s.stageName) + '</td><td class="numeric">' + formatInteger(s.turns) + '</td><td class="numeric">' + formatInteger(s.totalTokens) + '</td><td class="numeric">' + formatInteger(s.inputTokens || 0) + '</td><td class="numeric">' + formatInteger(s.outputTokens || 0) + '</td><td>' + renderOutcomeLabel(s.outcome) + '</td></tr>';
+                return '<tr><td>' + escapeHtml(s.stageName) + '</td><td class="numeric">' + formatInteger(s.turns) + '</td><td class="numeric">' + formatInteger(s.totalTokens) + '</td><td class="numeric">' + formatInteger(s.inputTokens || 0) + '</td><td class="numeric">' + formatInteger(s.outputTokens || 0) + '</td><td>' + escapeHtml(formatUsageQuality(s.usageMeasurement)) + '</td><td>' + renderOutcomeLabel(s.outcome) + '</td></tr>';
               }).join('');
           const executionHistory =
             '<div class="detail-section">' +
             '<p class="detail-section-title">Execution history</p>' +
-            '<table class="exec-history-table"><thead><tr><th>Stage</th><th>Turns</th><th>Tokens</th><th>In</th><th>Out</th><th>Outcome</th></tr></thead>' +
+            '<table class="exec-history-table"><thead><tr><th>Stage</th><th>Turns</th><th>Tokens</th><th>In</th><th>Out</th><th>Quality</th><th>Outcome</th></tr></thead>' +
             '<tbody>' + execRows + '</tbody></table>' +
             '</div>';
 
           const loopTrace = renderLoopTraceJournalPreview(row.loop_trace_preview);
 
           return '<div class="detail-panel">' + contextSection + '<div class="detail-grid">' + tokenBreakdown + recentActivity + executionHistory + loopTrace + '</div></div>';
+        }
+
+        function renderUsageMeasurementKv(usageMeasurement) {
+          if (usageMeasurement == null) {
+            return '';
+          }
+          return '<span class="detail-kv-label">Usage quality</span><span class="detail-kv-value">' + escapeHtml(formatUsageQuality(usageMeasurement)) + '</span>' +
+            '<span class="detail-kv-label">Cost</span><span class="detail-kv-value">' + escapeHtml(formatUsageCost(usageMeasurement)) + '</span>';
+        }
+
+        function formatUsageQuality(usageMeasurement) {
+          if (usageMeasurement == null) {
+            return 'unknown';
+          }
+          var parts = [usageMeasurement.measurementQuality || 'unknown'];
+          if (usageMeasurement.cost && usageMeasurement.cost.authority) {
+            parts.push(usageMeasurement.cost.authority);
+          }
+          if (usageMeasurement.source) {
+            parts.push(usageMeasurement.source);
+          }
+          return parts.join(' · ');
+        }
+
+        function formatUsageCost(usageMeasurement) {
+          var cost = usageMeasurement && usageMeasurement.cost;
+          if (cost == null || cost.amountUsd == null) {
+            return cost && cost.sourceDescription ? cost.sourceDescription : 'not reported';
+          }
+          return '$' + Number(cost.amountUsd).toFixed(4) + ' USD (' + cost.authority + ', ' + cost.source + ')';
         }
 
         function rateLimitWindowKv(windows) {
@@ -1859,6 +1890,7 @@ function renderDetailPanel(row: RuntimeSnapshot["running"][number]): string {
         <span class="detail-kv-label">Tool cap</span><span class="detail-kv-value numeric">${formatInteger(outputCaps?.tool_output_token_limit ?? Number.NaN)}</span>
         <span class="detail-kv-label">Auto compact</span><span class="detail-kv-value numeric">${formatInteger(outputCaps?.model_auto_compact_token_limit ?? Number.NaN)}</span>
         <span class="detail-kv-label">Compactions</span><span class="detail-kv-value numeric">${formatInteger(churn?.current_stage_compactions ?? Number.NaN)}</span>
+        ${renderUsageMeasurementKv(row.usage_measurement)}
         ${renderRateLimitWindowKv(row.rate_limit_window)}
       </div>
     </div>`;
@@ -1903,11 +1935,11 @@ function renderDetailPanel(row: RuntimeSnapshot["running"][number]): string {
 
   const execHistoryRows =
     row.execution_history.length === 0
-      ? `<tr><td colspan="6" class="muted">No completed stages.</td></tr>`
+      ? `<tr><td colspan="7" class="muted">No completed stages.</td></tr>`
       : row.execution_history
           .map(
             (s) =>
-              `<tr><td>${escapeHtml(s.stageName)}</td><td class="numeric">${formatInteger(s.turns)}</td><td class="numeric">${formatInteger(s.totalTokens)}</td><td class="numeric">${formatInteger(s.inputTokens ?? 0)}</td><td class="numeric">${formatInteger(s.outputTokens ?? 0)}</td><td>${renderOutcomeLabel(s.outcome)}</td></tr>`,
+              `<tr><td>${escapeHtml(s.stageName)}</td><td class="numeric">${formatInteger(s.turns)}</td><td class="numeric">${formatInteger(s.totalTokens)}</td><td class="numeric">${formatInteger(s.inputTokens ?? 0)}</td><td class="numeric">${formatInteger(s.outputTokens ?? 0)}</td><td>${escapeHtml(formatUsageQuality(s.usageMeasurement))}</td><td>${renderOutcomeLabel(s.outcome)}</td></tr>`,
           )
           .join("");
 
@@ -1915,7 +1947,7 @@ function renderDetailPanel(row: RuntimeSnapshot["running"][number]): string {
     <div class="detail-section">
       <p class="detail-section-title">Execution history</p>
       <table class="exec-history-table">
-        <thead><tr><th>Stage</th><th>Turns</th><th>Tokens</th><th>In</th><th>Out</th><th>Outcome</th></tr></thead>
+        <thead><tr><th>Stage</th><th>Turns</th><th>Tokens</th><th>In</th><th>Out</th><th>Quality</th><th>Outcome</th></tr></thead>
         <tbody>${execHistoryRows}</tbody>
       </table>
     </div>`;
@@ -1999,6 +2031,45 @@ function renderDeployDrift(snapshot: RuntimeSnapshot): string {
     ${freshnessLabel === null ? "" : `<div><span class="detail-kv-label">Freshness</span><span class="detail-kv-value">${escapeHtml(freshnessLabel)}</span></div>`}
     <div><span class="detail-kv-label">Note</span><span class="detail-kv-value">${escapeHtml(drift.note)}</span></div>
   </div>`;
+}
+
+function renderUsageMeasurementKv(
+  usageMeasurement: RuntimeSnapshot["running"][number]["usage_measurement"],
+): string {
+  if (usageMeasurement === null || usageMeasurement === undefined) {
+    return "";
+  }
+  return `<span class="detail-kv-label">Usage quality</span><span class="detail-kv-value">${escapeHtml(formatUsageQuality(usageMeasurement))}</span><span class="detail-kv-label">Cost</span><span class="detail-kv-value">${escapeHtml(formatUsageCost(usageMeasurement))}</span>`;
+}
+
+function formatUsageQuality(
+  usageMeasurement:
+    | RuntimeSnapshot["running"][number]["usage_measurement"]
+    | RuntimeSnapshot["running"][number]["execution_history"][number]["usageMeasurement"],
+): string {
+  if (usageMeasurement === null || usageMeasurement === undefined) {
+    return "unknown";
+  }
+  const parts: string[] = [usageMeasurement.measurementQuality ?? "unknown"];
+  if (usageMeasurement.cost?.authority) {
+    parts.push(usageMeasurement.cost.authority);
+  }
+  if (usageMeasurement.source) {
+    parts.push(usageMeasurement.source);
+  }
+  return parts.join(" · ");
+}
+
+function formatUsageCost(
+  usageMeasurement:
+    | RuntimeSnapshot["running"][number]["usage_measurement"]
+    | RuntimeSnapshot["running"][number]["execution_history"][number]["usageMeasurement"],
+): string {
+  const cost = usageMeasurement?.cost;
+  if (cost === null || cost === undefined || cost.amountUsd === null) {
+    return cost?.sourceDescription ?? "not reported";
+  }
+  return `$${cost.amountUsd.toFixed(4)} USD (${cost.authority}, ${cost.source})`;
 }
 
 function renderRateLimitWindowKv(

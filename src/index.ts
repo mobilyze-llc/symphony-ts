@@ -10,6 +10,7 @@ export * from "./codex/workpad-sync-tool.js";
 export * from "./config/workflow-loader.js";
 export * from "./config/workflow-watch.js";
 export * from "./domain/model.js";
+export * from "./domain/stage-usage.js";
 export * from "./errors/codes.js";
 export * from "./logging/fields.js";
 export * from "./logging/manager-run-import.js";

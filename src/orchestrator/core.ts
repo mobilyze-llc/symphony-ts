@@ -84,6 +84,7 @@ import {
   normalizeIssueState,
   parseFailureSignal,
 } from "../domain/model.js";
+import { isStageUsageMeasurement } from "../domain/stage-usage.js";
 import { ERROR_CODES } from "../errors/codes.js";
 import {
   type ErrorSignatureClass,
@@ -6053,6 +6054,11 @@ export class OrchestratorCore {
     // Append a StageRecord to execution history for this completed stage.
     const stageName = this.state.issueStages[input.issueId];
     if (stageName !== undefined) {
+      const usageMeasurement = isStageUsageMeasurement(
+        runningEntry.usageMeasurement,
+      )
+        ? runningEntry.usageMeasurement
+        : undefined;
       const stageRecord: StageRecord = {
         stageName,
         completedAt: endedAt.toISOString(),
@@ -6067,6 +6073,7 @@ export class OrchestratorCore {
           runningEntry.rateLimitWindows,
         ),
         usageEventCadence: buildStageUsageEventCadence(runningEntry),
+        ...(usageMeasurement === undefined ? {} : { usageMeasurement }),
         turns: runningEntry.turnCount,
         outcome: classifiedOutcome,
       };
@@ -15099,6 +15106,9 @@ function toStageRecordFromMetadata(
   }
   const rateLimitWindows = readStageRateLimitTelemetry(metadata);
   const usageEventCadence = readStageUsageEventCadence(metadata);
+  const usageMeasurement = isStageUsageMeasurement(metadata.usageMeasurement)
+    ? metadata.usageMeasurement
+    : undefined;
   const completedAt = readMetadataString(metadata, "completedAt");
   return {
     stageName,
@@ -15112,6 +15122,7 @@ function toStageRecordFromMetadata(
     compactions: readMetadataNumber(metadata, "compactions") ?? 0,
     ...(rateLimitWindows === undefined ? {} : { rateLimitWindows }),
     ...(usageEventCadence === undefined ? {} : { usageEventCadence }),
+    ...(usageMeasurement === undefined ? {} : { usageMeasurement }),
     turns,
     outcome,
   };

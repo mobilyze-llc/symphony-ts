@@ -5,6 +5,10 @@ import type {
   CodexClientEvent,
   CodexTurnResult,
 } from "../codex/app-server-client.js";
+import {
+  coerceLegacyCounterValue,
+  mapGeminiAiSdkUsageToStageUsage,
+} from "../domain/stage-usage.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
 
 export interface GeminiRunnerOptions {
@@ -74,10 +78,15 @@ export class GeminiRunner implements AgentRunnerCodexClient {
         prompt,
       });
 
+      const stageUsage = mapGeminiAiSdkUsageToStageUsage({
+        usage: result.usage,
+        model: this.options.model,
+      });
       const usage = {
-        inputTokens: result.usage.inputTokens ?? 0,
-        outputTokens: result.usage.outputTokens ?? 0,
-        totalTokens: result.usage.totalTokens ?? 0,
+        inputTokens: coerceLegacyCounterValue(stageUsage.tokens.inputTokens),
+        outputTokens: coerceLegacyCounterValue(stageUsage.tokens.outputTokens),
+        totalTokens: coerceLegacyCounterValue(stageUsage.tokens.totalTokens),
+        stageUsage,
       };
 
       this.emit({

@@ -14,6 +14,7 @@ import type {
   DispatcherRunJournalEntry,
   Issue,
 } from "../../src/domain/model.js";
+import { mapCodexAppServerUsageToStageUsage } from "../../src/domain/stage-usage.js";
 import { ERROR_CODES } from "../../src/errors/codes.js";
 import { normalizeErrorSignature } from "../../src/errors/signature.js";
 import {
@@ -14532,6 +14533,149 @@ describe("execution history stage records", () => {
       rateLimitWindows: record?.rateLimitWindows,
       usageEventCadence: record?.usageEventCadence,
     });
+  });
+
+  it("StageRecord replays usage measurement quality without changing token totals", async () => {
+    const config = createStageConfig();
+    const orchestrator = createOrchestrator({
+      config,
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+    const stageUsage = mapCodexAppServerUsageToStageUsage({
+      usage: { inputTokens: 1200, outputTokens: 300, totalTokens: 1500 },
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueStages["1"] = "investigate";
+
+    orchestrator.onCodexEvent({
+      issueId: "1",
+      event: {
+        event: "turn_completed",
+        timestamp: "2026-03-06T00:00:06.000Z",
+        codexAppServerPid: "1001",
+        sessionId: "s1",
+        threadId: "t1",
+        turnId: "turn-1",
+        usage: {
+          inputTokens: 1200,
+          outputTokens: 300,
+          totalTokens: 1500,
+          stageUsage,
+        },
+        rateLimits: {},
+        message: "done",
+      },
+    });
+
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    const record = orchestrator.getState().issueExecutionHistory["1"]?.[0];
+    expect(record).toMatchObject({
+      totalTokens: 1500,
+      inputTokens: 1200,
+      outputTokens: 300,
+      usageMeasurement: {
+        measurementQuality: "true",
+        source: "codex_app_server",
+        cost: { authority: "unavailable" },
+      },
+    });
+
+    const replayed = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+
+    expect(replayed.getState().issueExecutionHistory["1"]?.[0]).toMatchObject({
+      totalTokens: 1500,
+      usageMeasurement: record?.usageMeasurement,
+    });
+  });
+
+  it("drops malformed live usage measurement before journaling a StageRecord", async () => {
+    const config = createStageConfig();
+    const orchestrator = createOrchestrator({
+      config,
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueStages["1"] = "investigate";
+
+    orchestrator.onCodexEvent({
+      issueId: "1",
+      event: {
+        event: "turn_completed",
+        timestamp: "2026-03-06T00:00:06.000Z",
+        codexAppServerPid: "1001",
+        sessionId: "s1",
+        threadId: "t1",
+        turnId: "turn-1",
+        usage: {
+          inputTokens: 1200,
+          outputTokens: 300,
+          totalTokens: 1500,
+          stageUsage: {
+            schema: "symphony.stage-usage.v1",
+            source: "codex_app_server",
+            runnerKind: "codex",
+            provider: "openai",
+            model: null,
+            profile: null,
+            measurementQuality: "true",
+            tokens: {
+              inputTokens: 1200,
+              outputTokens: 300,
+              totalTokens: 1500,
+            },
+          } as never,
+        },
+        rateLimits: {},
+        message: "done",
+      },
+    });
+
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    const record = orchestrator.getState().issueExecutionHistory["1"]?.[0];
+    expect(record).toMatchObject({
+      totalTokens: 1500,
+      inputTokens: 1200,
+      outputTokens: 300,
+    });
+    expect(record?.usageMeasurement).toBeUndefined();
+
+    const replayed = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+
+    expect(
+      replayed.getState().issueExecutionHistory["1"]?.[0]?.usageMeasurement,
+    ).toBeUndefined();
   });
 
   it("accumulates records across multiple stages", async () => {

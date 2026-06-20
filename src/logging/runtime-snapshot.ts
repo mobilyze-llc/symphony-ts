@@ -27,6 +27,7 @@ import type {
   StageRecord,
   TurnHistoryEntry,
 } from "../domain/model.js";
+import type { StageUsageMeasurement } from "../domain/stage-usage.js";
 import type { ComponentStatus } from "../observability/component-status.js";
 import type { DeployDriftStatus } from "../observability/deploy-drift.js";
 import { isIssueAnchorExpired } from "../orchestrator/anchor-policy.js";
@@ -77,6 +78,7 @@ export interface RuntimeSnapshotRunningRow {
     cache_write_tokens: number;
     reasoning_tokens: number;
   };
+  usage_measurement?: StageUsageMeasurement | null;
   output_caps?: RuntimeSnapshotOutputCaps;
   churn?: RuntimeSnapshotChurn;
   rework_count?: number;
@@ -807,6 +809,7 @@ export function buildRuntimeSnapshot(
           cache_write_tokens: entry.totalStageCacheWriteTokens,
           reasoning_tokens: entry.codexReasoningTokens,
         },
+        usage_measurement: entry.usageMeasurement ?? null,
         total_pipeline_tokens: totalPipelineTokens,
         pipeline_tokens: {
           input_tokens: pipelineInputTokens,

@@ -99,6 +99,7 @@ describe("domain model", () => {
       totalStageCacheReadTokens: 0,
       totalStageCacheWriteTokens: 0,
       totalStageCompactions: 0,
+      usageMeasurement: null,
       turnHistory: [],
       recentActivity: [],
       tokenTelemetry: [],
