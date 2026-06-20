@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+#
+# symphony-manager-plan — thin wrapper around the manager-plan CLI bin (SYMPH-837).
+#
+# Runs the Queue Triage v2 backlog Manager (planner) ONE-SHOT against a Linear
+# team's eligible backlog and prints the suggested batch plan. Output-only: it
+# spends one Opus pass (via cmux-spawn) unless --prompt-only, and writes NOTHING
+# to Linear, the live standing-plan store, or dispatch.
+#
+# Loads .env for LINEAR_API_KEY, ensures dist/ is built, then execs the compiled
+# CLI. Symlinked into ~/.local/bin so `symphony-manager-plan ...` works anywhere.
+#
+# Examples:
+#   symphony-manager-plan --team MOB --state Backlog
+#   symphony-manager-plan --team MOB --state Backlog --prompt-only
+#   symphony-manager-plan --team SYMPH --state Todo --concurrency-ceiling 5 --json
+set -euo pipefail
+
+# Resolve this script's real directory even when invoked via a ~/.local/bin
+# symlink (portable; macOS readlink has no -f).
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -h "$SOURCE" ]]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+CLI_JS="$REPO_ROOT/dist/src/cli/manager-plan.js"
+
+# Load .env (LINEAR_API_KEY etc.) without overriding values already in the env.
+if [[ -f "$REPO_ROOT/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$REPO_ROOT/.env"
+  set +a
+fi
+
+# Build dist/ if the compiled CLI is missing or any source file is newer.
+if [[ ! -f "$CLI_JS" ]] ||
+  [[ -n "$(find "$REPO_ROOT/src" -name '*.ts' -newer "$CLI_JS" -print -quit 2>/dev/null)" ]]; then
+  echo "symphony-manager-plan: dist is missing or stale; building…" >&2
+  (cd "$REPO_ROOT" && pnpm build >&2)
+fi
+
+exec node "$CLI_JS" "$@"
