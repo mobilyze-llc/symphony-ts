@@ -210,6 +210,34 @@ async function handleMessage(message) {
       return;
     }
 
+    if (scenario === "stall-reset-activity") {
+      setTimeout(() => {
+        writeJson({
+          method: "item/started",
+          params: {
+            item: {
+              type: "tool_call",
+              name: "Bash",
+            },
+          },
+        });
+      }, 30);
+      setTimeout(() => {
+        writeJson({
+          method: "turn/completed",
+          params: {
+            message: "Activity kept the turn alive",
+            usage: {
+              inputTokens: 14,
+              outputTokens: 3,
+              totalTokens: 17,
+            },
+          },
+        });
+      }, 65);
+      return;
+    }
+
     if (scenario === "exit-mid-turn") {
       // SYMPH-412: the app-server dies while the turn is still streaming.
       setTimeout(() => {

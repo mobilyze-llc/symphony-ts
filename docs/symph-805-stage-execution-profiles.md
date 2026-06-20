@@ -12,6 +12,7 @@ SYMPH-805 keeps the existing `runner`, `model`, transition, and stage validation
 
 - `role` and `phase` are required, typed values.
 - `backend` defaults to `current-runner` and is separate from `runner.kind`, provider, model, and profile metadata.
+- `control_needing` marks stages that require the current Codex app-server control surface; config validation rejects one-shot or delegated providers for those stages.
 - `artifact_contract.requires` and `artifact_contract.produces` describe required and produced artifact names.
 - `timeout_ms`, `budget`, `dependencies`, `run_group`, and `capsules` are parsed into typed config.
 - Invalid fields are carried as path-specific `executionValidationErrors` and make stage/dispatch config validation fail.
@@ -57,6 +58,7 @@ rg -n "cmux|CMUX|cmux-spawn|CMUX_SPAWN_BIN|symphony-council-review-gate|headless
 | Stage workflow names, transitions, and existing `runner`/`model` fields | Preserve as contract | These are product workflow concepts and existing config remains behavior-neutral. |
 | Stage `execution.role`, `execution.phase`, artifact contract, dependency policy, run group, and capsule paths | Preserve as contract | Later backend tickets need a typed, backend-neutral shape before swapping execution substrate. |
 | `execution.backend` | Preserve as contract | It keeps backend selection orthogonal to runner/provider/model/profile metadata. |
+| Provider capability matrix | Preserve as contract | `docs/stage-provider-capabilities.md` distinguishes current repo behavior from target/buildable behavior before provider selection changes execution semantics. |
 | Path-specific execution validation errors | Preserve as contract | Operators need config errors that point to the exact invalid field before a worker runs. |
 | Delegated stage attempt record | Collapse into generic stage execution | It is the canonical model for review rounds, reviewer lanes, retry attempts, job status, usage, artifacts, and capsule readiness. |
 | Missing required capsule handling | Preserve as contract | Required evidence must fail or degrade explicitly instead of disappearing into worker prose. |

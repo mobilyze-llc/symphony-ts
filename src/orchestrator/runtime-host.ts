@@ -4623,6 +4623,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       ...input,
       defaultRunnerKind: this.config.runner.kind,
       defaultRunnerModel: this.config.runner.model,
+      defaultRunnerProvider: this.config.runner.provider ?? null,
       baseRef: resolveStageExecutionBaseRef(),
       artifactRoot: getDurableCodexSessionArtifactDirectory(
         this.config.workspace.root,

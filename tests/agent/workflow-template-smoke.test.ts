@@ -168,7 +168,11 @@ const resolvedConfig = resolveWorkflowConfig(workflow, {
 
 describe("WORKFLOW-symphony.md smoke tests", () => {
   it("uses Codex low effort as the primary workflow runner", () => {
-    expect(resolvedConfig.runner).toEqual({ kind: "codex", model: null });
+    expect(resolvedConfig.runner).toEqual({
+      kind: "codex",
+      model: null,
+      provider: null,
+    });
     expect(resolvedConfig.codex.command).toBe(CODEX_LOW_APP_SERVER_COMMAND);
     expect(resolvedConfig.codex.ephemeralHome).toBe(true);
     expect(resolvedConfig.codex.disableSkills).toBe(true);

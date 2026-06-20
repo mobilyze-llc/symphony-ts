@@ -26,6 +26,7 @@
  */
 
 import { normalizeIssueState } from "../domain/model.js";
+import { resolveRunnerProviderCapability } from "../runners/provider-capabilities.js";
 import type { ResolvedWorkflowConfig, StagesConfig } from "./types.js";
 
 /**
@@ -242,6 +243,53 @@ function checkStageExecutionProfiles(
   return violations;
 }
 
+function checkControlNeedingStageProviderSelection(
+  config: ResolvedWorkflowConfig,
+): ContractViolation[] {
+  const stages = config.stages;
+  if (stages === null) {
+    return [];
+  }
+
+  const violations: ContractViolation[] = [];
+  for (const [stageName, stage] of Object.entries(stages.stages)) {
+    const execution = stage.execution ?? null;
+    if (execution?.controlNeeding !== true) {
+      continue;
+    }
+
+    const runnerKind = stage.runner ?? config.runner.kind;
+    const provider = execution.provider ?? config.runner.provider ?? null;
+    const capability = resolveRunnerProviderCapability({
+      backend: execution.backend,
+      runnerKind,
+      provider,
+    });
+
+    if (capability === null) {
+      violations.push({
+        rule: "control_needing_stage_provider_supports_control_semantics",
+        key: `stages.${stageName}.execution.provider`,
+        value: provider ?? "<default>",
+        message: `stages.${stageName}.execution.control_needing is true, but the selected runner/provider ('${runnerKind}' / '${provider ?? "<default>"}') is not in the provider capability matrix. Fix: select the Codex app-server provider for control-needing stages or add a truthful capability row.`,
+      });
+      continue;
+    }
+
+    if (capability.current.fullControlSemantics) {
+      continue;
+    }
+
+    violations.push({
+      rule: "control_needing_stage_provider_supports_control_semantics",
+      key: `stages.${stageName}.execution.provider`,
+      value: provider ?? capability.id,
+      message: `stages.${stageName}.execution.control_needing is true, but provider '${capability.id}' does not currently preserve the Codex app-server control surface. Control-needing stages must use Codex app-server, not a one-shot or delegated provider.`,
+    });
+  }
+  return violations;
+}
+
 /**
  * The declared-vs-consumed contract table. Future pairs (prompt variables vs
  * render context, verb→state view mappings) are added as entries here.
@@ -273,6 +321,13 @@ const CONTRACT_RULES: readonly ContractRule[] = [
     consumed:
       "delegated stage profile/run-group/capsule configuration consumed by future stage execution backends",
     check: checkStageExecutionProfiles,
+  },
+  {
+    id: "control_needing_stage_provider_supports_control_semantics",
+    declared: "stages.<name>.execution.provider",
+    consumed:
+      "control-needing stages that require Codex app-server budget/stall/abort/signal semantics",
+    check: checkControlNeedingStageProviderSelection,
   },
 ];
 

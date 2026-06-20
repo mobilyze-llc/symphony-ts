@@ -208,6 +208,7 @@ describe("resolveStagesConfig", () => {
       role: "investigator",
       phase: "investigate",
       backend: "crabrunner",
+      controlNeeding: false,
       provider: "openai",
       model: "gpt-5.3-codex",
       reasoningEffort: "medium",
@@ -286,6 +287,26 @@ describe("resolveStagesConfig", () => {
     expect(stage.execution!.reasoningEffort).toBe("medium");
   });
 
+  it("parses control_needing on delegated execution profiles", () => {
+    const result = resolveStagesConfig({
+      investigate: {
+        type: "agent",
+        on_complete: "done",
+        execution: {
+          role: "investigator",
+          phase: "investigate",
+          control_needing: true,
+        },
+      },
+      done: {
+        type: "terminal",
+      },
+    });
+
+    expect(result!.stages.investigate!.executionValidationErrors).toEqual([]);
+    expect(result!.stages.investigate!.execution!.controlNeeding).toBe(true);
+  });
+
   it("attributes delegated execution thinking fallback errors to thinking", () => {
     const result = resolveStagesConfig({
       investigate: {
@@ -345,6 +366,7 @@ describe("resolveStagesConfig", () => {
           role: "worker",
           phase: "execute",
           backend: "codex-crabrunner",
+          control_needing: "yes",
           profile: "bad profile",
           artifact_contract: {
             requires: [123],
@@ -376,6 +398,7 @@ describe("resolveStagesConfig", () => {
         "stages.implement.execution.role",
         "stages.implement.execution.phase",
         "stages.implement.execution.backend",
+        "stages.implement.execution.control_needing",
         "stages.implement.execution.profile",
         "stages.implement.execution.artifact_contract.requires.0",
         "stages.implement.execution.artifact_contract.produces",

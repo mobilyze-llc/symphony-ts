@@ -388,6 +388,7 @@ export function resolveWorkflowConfig(
     runner: {
       kind: readString(runner.kind) ?? DEFAULT_RUNNER_KIND,
       model: readString(runner.model),
+      provider: readString(runner.provider),
     },
     continuousFeedback: {
       enabled:
