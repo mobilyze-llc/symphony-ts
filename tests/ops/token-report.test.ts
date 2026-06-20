@@ -1029,40 +1029,6 @@ describe("token-report.mjs analyze", () => {
     }
   });
 
-  it("excludes spec-gen stage from per_stage_spend aggregation", () => {
-    const records: Record<string, unknown>[] = [];
-    const now = new Date();
-
-    // Create records for implement and spec-gen stages
-    for (let d = 0; d < 10; d++) {
-      const date = new Date(now);
-      date.setDate(date.getDate() - d);
-      records.push(
-        makeTokenRecord({
-          timestamp: date.toISOString(),
-          stage_name: "implement",
-          total_total_tokens: 3000,
-        }),
-      );
-      records.push(
-        makeTokenRecord({
-          timestamp: date.toISOString(),
-          stage_name: "spec-gen",
-          total_total_tokens: 1000,
-        }),
-      );
-    }
-
-    writeTokenHistory(symphonyHome, records);
-    writeConfigHistory(symphonyHome, [makeConfigSnapshot()]);
-
-    const result = runAnalyze(symphonyHome);
-
-    // spec-gen should be excluded from per_stage_spend
-    expect(result.per_stage_spend["spec-gen"]).toBeUndefined();
-    expect(result.per_stage_spend.implement).toBeDefined();
-  });
-
   it("SYMPH-186: inflection records include pipeline_classification and llm_insight fields", () => {
     // Generate 35 days with a spike pattern in the last 7 days
     const records: Record<string, unknown>[] = [];
@@ -1111,68 +1077,6 @@ describe("token-report.mjs analyze", () => {
 
     // SYMPH-186: llm_insight should be null when TOKEN_REPORT_LLM is not set
     expect(inf.llm_insight).toBeNull();
-  });
-
-  it("SYMPH-186: spec-gen stage is excluded from inflection aggregations", () => {
-    const records: Record<string, unknown>[] = [];
-    const now = new Date();
-
-    // Generate spec-gen records with a spike that would trigger inflection
-    // Days 8-34: normal spec-gen (3000 tokens)
-    for (let d = 8; d < 35; d++) {
-      const date = new Date(now);
-      date.setDate(date.getDate() - d);
-      records.push(
-        makeTokenRecord({
-          timestamp: date.toISOString(),
-          stage_name: "spec-gen",
-          total_total_tokens: 3000,
-          issue_identifier: `SYMPH-SG${d}`,
-        }),
-      );
-    }
-
-    // Days 0-7: spec-gen spike (6000 tokens)
-    for (let d = 0; d < 7; d++) {
-      const date = new Date(now);
-      date.setDate(date.getDate() - d);
-      records.push(
-        makeTokenRecord({
-          timestamp: date.toISOString(),
-          stage_name: "spec-gen",
-          total_total_tokens: 6000,
-          issue_identifier: `SYMPH-SGS${d}`,
-        }),
-      );
-    }
-
-    // Add steady implement records so we have >=30d of non-spec-gen data
-    // (needed to reach the >=30d tier where inflection detection runs)
-    for (let d = 0; d < 35; d++) {
-      const date = new Date(now);
-      date.setDate(date.getDate() - d);
-      records.push(
-        makeTokenRecord({
-          timestamp: date.toISOString(),
-          stage_name: "implement",
-          total_total_tokens: 3000,
-          issue_identifier: `SYMPH-IM${d}`,
-        }),
-      );
-    }
-
-    writeTokenHistory(symphonyHome, records);
-    writeConfigHistory(symphonyHome, [makeConfigSnapshot()]);
-
-    const result = runAnalyze(symphonyHome);
-
-    // With >=30d of non-spec-gen data, inflections should be an array
-    expect(Array.isArray(result.inflections)).toBe(true);
-    // spec-gen should never appear in inflections since it's filtered out
-    const specGenInflections = result.inflections.filter(
-      (inf: Record<string, unknown>) => inf.metric === "spec-gen",
-    );
-    expect(specGenInflections).toHaveLength(0);
   });
 
   it("SYMPH-186: pipeline_classification contains raw ticket data, not classification labels", () => {

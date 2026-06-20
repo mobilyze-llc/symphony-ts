@@ -42,7 +42,7 @@ Labels: {{ issue.labels | join: ", " }}
 2. Create a feature branch from the issue's suggested branch name{% if issue.branch_name %} (`{{ issue.branch_name }}`){% endif %}, or use `{{ issue.identifier | downcase }}/<short-description>`.
 3. Implement the task per the issue description and investigation notes.
 4. Write tests as needed — for UI scenarios, write Playwright test files; for API scenarios, verify commands run directly.
-5. Run all `# Verify:` commands from the spec. You are not done until every verify command exits 0.
+5. Run all `# Verify:` commands from the issue description. You are not done until every verify command exits 0.
 6. Commit your changes with message format: `feat({{ issue.identifier }}): <description>`.
 7. If the Mode Permission Envelope allows PR creation, open a draft PR targeting this repo (not its upstream fork parent) via `gh pr create --draft --repo $(git remote get-url origin | sed "s|.*github.com/||;s|\.git$||")` with the issue description in the PR body. Keep the PR draft until review gates pass.
 8. If PR creation is denied by the Mode Permission Envelope, do not run PR creation commands. Stop after local verification and put `[BLOCKED_NEEDS_HUMAN: pr_creation]` on its own final line if a PR is required to finish the issue.
@@ -50,14 +50,14 @@ Labels: {{ issue.labels | join: ", " }}
 
 ## Verify Line Rules
 
-- Run all `# Verify:` commands found in the issue description or linked spec scenarios.
+- Run all `# Verify:` commands found in the issue description.
 - Every verify command must exit 0 before you are done.
 - If a verify command appears to contradict the implementation or seems wrong, flag the specific verify line in the PR description, explain the contradiction, and move the issue to "blocked" immediately. Do not attempt to make incorrect verify lines pass by changing the implementation.
 
 ## Scope Discipline
 
-- If your task requires a capability that doesn't exist in the codebase and isn't specified in the spec, stop and comment what's missing on the issue. Don't scaffold unspecced infrastructure.
+- If your task requires a capability that doesn't exist in the codebase and isn't specified in the issue, stop and comment what's missing on the issue. Don't scaffold unspecced infrastructure.
 - Tests must be runnable against $BASE_URL (no localhost assumptions in committed tests).
-- E2E test file names should map to spec capability names where applicable.
+- E2E test file names should map to the behavior they exercise where applicable.
 
 {% render 'prompts/eligibility-on-ticket-rewrite.liquid' %}

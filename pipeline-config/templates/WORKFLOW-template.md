@@ -507,15 +507,6 @@ If the table is too large for the workpad, write it as a bounded local artifact 
 
 You are in the INVESTIGATE stage. Your job is to analyze the issue and create an implementation plan.
 
-### Spec-Informed Investigation
-If the issue description contains a detailed spec with specific file paths, line numbers, and proposed changes (typical of spec-gen'd issues): DO NOT re-explore the codebase from scratch. Instead:
-1. Read the spec from the issue description
-2. Verify the cited files and line numbers are still accurate (quick reads, not full grep sweeps)
-3. Reformat the spec content into the Linear workpad structure below
-4. Post the workpad to Linear and complete
-
-Save full codebase exploration for issues with vague or ambiguous descriptions that lack specific file references.
-
 {% if issue.state == "Resume" %}
 ## RESUME CONTEXT
 This issue was previously blocked. Check the issue comments for a `## Resume Context` comment explaining what changed. Focus your investigation on the blocking reasons and what has been updated.

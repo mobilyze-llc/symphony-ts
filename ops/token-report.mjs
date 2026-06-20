@@ -891,15 +891,13 @@ function computePerProduct(records) {
  * Requires >=20 samples in baseline (30d).
  */
 function detectInflections(records, configRecords, now) {
-  // SYMPH-186: filter spec-gen stage from inflection aggregations
-  const filteredRecords = records.filter((r) => r.stage_name !== "spec-gen");
   const stageNames = [
-    ...new Set(filteredRecords.map((r) => r.stage_name).filter(Boolean)),
+    ...new Set(records.map((r) => r.stage_name).filter(Boolean)),
   ];
   const inflections = [];
 
   for (const stage of stageNames) {
-    const stageRecords = filteredRecords.filter((r) => r.stage_name === stage);
+    const stageRecords = records.filter((r) => r.stage_name === stage);
 
     const d7 = daysAgo(7, now);
     const d30 = daysAgo(30, now);
@@ -1384,30 +1382,23 @@ function computeAnalysis() {
     };
   }
 
-  // Filter spec-gen stage from all aggregations (SYMPH-185)
-  const filteredRecords = records.filter((r) => r.stage_name !== "spec-gen");
-
-  const spanDays = dataSpanDays(filteredRecords);
+  const spanDays = dataSpanDays(records);
   const tier = coldStartTier(spanDays);
   const now = new Date();
 
   const isColdStart = spanDays < 7;
 
-  const scorecard = computeScorecardWithTrends(filteredRecords, now);
-  const executiveSummary = buildExecutiveSummary(
-    filteredRecords,
-    spanDays,
-    now,
-  );
-  const perStageSpend = computePerStageSpend(filteredRecords);
-  const perStageStats = computePerStageStats(filteredRecords);
-  const perStageTrend = computePerStageTrend(filteredRecords, configRecords);
-  const perTicketTrend = computePerTicketTrend(filteredRecords);
+  const scorecard = computeScorecardWithTrends(records, now);
+  const executiveSummary = buildExecutiveSummary(records, spanDays, now);
+  const perStageSpend = computePerStageSpend(records);
+  const perStageStats = computePerStageStats(records);
+  const perStageTrend = computePerStageTrend(records, configRecords);
+  const perTicketTrend = computePerTicketTrend(records);
 
   // Per-ticket series: rolling median tokens per ticket by date (ported from renderHtml — SYMPH-189)
   const perTicketSeries = (() => {
     const byDate = {};
-    for (const r of filteredRecords) {
+    for (const r of records) {
       if (!r.issue_identifier) continue;
       const dk = dateKey(parseTs(r.timestamp));
       if (!byDate[dk]) byDate[dk] = {};
@@ -1420,11 +1411,11 @@ function computeAnalysis() {
 
   // Per-ticket WoW delta: median tokens per issue, current vs prior week (ported from renderHtml — SYMPH-189)
   const perTicketWowDelta = (() => {
-    if (filteredRecords.length === 0) return null;
+    if (records.length === 0) return null;
     const d7 = daysAgo(7, now);
     const d14 = daysAgo(14, now);
-    const curr = filterByDateRange(filteredRecords, d7, now);
-    const prev = filterByDateRange(filteredRecords, d14, d7);
+    const curr = filterByDateRange(records, d7, now);
+    const prev = filterByDateRange(records, d14, d7);
     if (curr.length === 0 || prev.length === 0) return null;
     const currIssues = {};
     for (const r of curr) {
@@ -1449,8 +1440,8 @@ function computeAnalysis() {
     perTicketTrend.wow_delta_pct = perTicketWowDelta;
   }
 
-  const perProduct = computePerProduct(filteredRecords);
-  const leaderboard = buildLeaderboard(filteredRecords);
+  const perProduct = computePerProduct(records);
+  const leaderboard = buildLeaderboard(records);
 
   // Inflection detection and outliers: only meaningful with sufficient data
   let inflections = [];
@@ -1458,11 +1449,7 @@ function computeAnalysis() {
 
   if (tier === ">=30d") {
     const d7 = daysAgo(7, now);
-    const rawInflections = detectInflections(
-      filteredRecords,
-      configRecords,
-      now,
-    );
+    const rawInflections = detectInflections(records, configRecords, now);
     // Transform detectInflections output to UI Inflection shape (SYMPH-185)
     // SYMPH-186: pass through pipeline_classification from raw inflection
     inflections = rawInflections.map((inf) => {
@@ -1481,35 +1468,35 @@ function computeAnalysis() {
       mapped.llm_insight = generateInflectionInsight(mapped);
       return mapped;
     });
-    outliers = detectOutliers(filteredRecords);
+    outliers = detectOutliers(records);
   } else if (tier === "7-29d") {
-    outliers = detectOutliers(filteredRecords);
+    outliers = detectOutliers(records);
     inflections = [];
   }
 
   // Build daily metric series for efficiency scorecard sparklines
   const dailySeries = {
-    cacheEff: buildDailyMetricSeries(filteredRecords, (recs) => {
+    cacheEff: buildDailyMetricSeries(records, (recs) => {
       const sc = computeEfficiencyScorecard(recs);
       return sc.cache_efficiency;
     }),
-    outputRatio: buildDailyMetricSeries(filteredRecords, (recs) => {
+    outputRatio: buildDailyMetricSeries(records, (recs) => {
       const sc = computeEfficiencyScorecard(recs);
       return sc.output_ratio;
     }),
-    wastedCtx: buildDailyMetricSeries(filteredRecords, (recs) => {
+    wastedCtx: buildDailyMetricSeries(records, (recs) => {
       const sc = computeEfficiencyScorecard(recs);
       return sc.wasted_context;
     }),
-    tokPerTurn: buildDailyMetricSeries(filteredRecords, (recs) => {
+    tokPerTurn: buildDailyMetricSeries(records, (recs) => {
       const sc = computeEfficiencyScorecard(recs);
       return sc.tokens_per_turn;
     }),
-    firstPass: buildDailyMetricSeries(filteredRecords, (recs) => {
+    firstPass: buildDailyMetricSeries(records, (recs) => {
       const sc = computeEfficiencyScorecard(recs);
       return sc.first_pass_rate;
     }),
-    failureRate: buildDailyMetricSeries(filteredRecords, (recs) => {
+    failureRate: buildDailyMetricSeries(records, (recs) => {
       const total = recs.length;
       const failed = recs.filter((r) => r.outcome === "failed").length;
       return total > 0 ? (failed / total) * 100 : 0;

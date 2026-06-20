@@ -6,7 +6,7 @@ argument-hint: <bundle-path> <codebase-path>
 
 # Gap Analysis — Design Bundle vs Codebase
 
-You compare a design reference bundle (produced by `/export-design`) against a target codebase to surface gaps — things the design expects that the codebase doesn't yet provide. The output is an interactive gap report the user reviews, challenges, and uses to decide which gaps warrant `/spec-gen` tickets.
+You compare a design reference bundle (produced by `/export-design`) against a target codebase to surface gaps — things the design expects that the codebase doesn't yet provide. The output is an interactive gap report the user reviews, challenges, and uses to decide which gaps warrant Linear tickets.
 
 ---
 
@@ -149,7 +149,7 @@ This skill is interactive. After presenting the gap report:
 
 1. **Invite the user to challenge gaps.** Some reported gaps may not be real — the user has context you don't. Ask: "Which of these gaps look incorrect or overstated?"
 2. **Let the user prioritize.** Not all gaps need resolution before implementation. Some can be deferred, others are blockers.
-3. **Let the user decide next steps.** The user chooses which gaps warrant `/spec-gen` tickets. Never auto-create Linear issues or assume all gaps need immediate action.
+3. **Let the user decide next steps.** The user chooses which gaps warrant Linear tickets. Never auto-create Linear issues or assume all gaps need immediate action.
 
 The gap report is a conversation starter, not a final verdict.
 
@@ -163,7 +163,7 @@ The gap report is a conversation starter, not a final verdict.
 - **Bundle version compatibility.** v1 bundles may be missing `behavior.md` and `charts.md`. Handle gracefully — skip those extraction steps and note "behavioral/chart analysis unavailable (v1 bundle)" in the report. Never fail on a missing optional artifact.
 - **"Doesn't have" vs "has differently."** Distinguish between the codebase lacking a capability entirely and the codebase implementing it in a way the design doesn't expect. The former is a gap; the latter is an alignment task. Report them differently.
 - **Design tokens are rarely gaps.** Unless the codebase has no theming system at all, mismatched colors or fonts are styling tasks, not structural gaps. Don't list every color difference as a gap — focus on missing data and behavior.
-- **Don't invent architecture.** The gap report identifies what's missing, not how to build it. Suggested resolutions should be brief pointers, not design documents. That's what `/spec-gen` is for.
+- **Don't invent architecture.** The gap report identifies what's missing, not how to build it. Suggested resolutions should be brief pointers, not design documents.
 - **Screenshots are reference, not specification.** Section PNGs in the bundle are visual context. The JSX, structural contracts, and DATA annotations are the source of truth for gap identification.
 
 ---
@@ -171,4 +171,3 @@ The gap report is a conversation starter, not a final verdict.
 ## Related Skills
 
 - `/export-design` — Produce the design reference bundles this skill consumes
-- `/spec-gen` — Generate structured specs from identified gaps, create Linear issues for implementation

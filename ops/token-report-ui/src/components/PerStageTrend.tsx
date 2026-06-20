@@ -20,12 +20,6 @@ export default function PerStageTrend({
   dataSpanDays,
 }: PerStageTrendProps) {
   const trend = perStageTrend ?? {};
-  const filteredTrend: Record<string, StageTrend> = {};
-  for (const [stage, val] of Object.entries(trend)) {
-    if (stage !== "spec-gen") {
-      filteredTrend[stage] = val;
-    }
-  }
   const infl = Array.isArray(inflections) ? inflections : [];
 
   return (
@@ -102,10 +96,7 @@ export default function PerStageTrend({
               overflowX: "auto" as const,
             }}
           >
-            <MultiLineChart
-              stageData={filteredTrend}
-              configChanges={configChanges}
-            />
+            <MultiLineChart stageData={trend} configChanges={configChanges} />
           </div>
           {infl.length > 0 && (
             <div
