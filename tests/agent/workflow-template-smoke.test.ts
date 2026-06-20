@@ -454,6 +454,7 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     }
 
     const seenProjectSlugs = new Set<string>();
+    const seenTeamScopes = new Set<string>();
     const seenPorts = new Set<number>();
 
     for (const configPath of discoveredWorkflowConfigs) {
@@ -466,10 +467,26 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
       expect(validateDispatchConfig(resolved, { hostname: "pro14" })).toEqual({
         ok: true,
       });
-      expect(resolved.tracker.projectSlug).toMatch(/^[a-z0-9]{12}$/);
-      expect(resolved.tracker.projectSlug).not.toBe("<YOUR_PROJECT_SLUG_HERE>");
-      expect(seenProjectSlugs.has(resolved.tracker.projectSlug!)).toBe(false);
-      seenProjectSlugs.add(resolved.tracker.projectSlug!);
+      // SYMPH-840: a shipped workflow is validly scoped by EITHER a unique 12-char
+      // project slug (legacy) OR a non-empty team_keys list (team-scoped backlog,
+      // SYMPH-794/819). validateDispatchConfig above already enforces the either/or;
+      // assert slug shape + uniqueness for project-scoped workflows, and a null slug
+      // + unique team scope for team-scoped ones (two workflows sharing a team is the
+      // SYMPH-383 single-homing race vector that the slug-uniqueness check guarded).
+      const teamKeys = resolved.tracker.teamKeys ?? [];
+      if (teamKeys.length > 0) {
+        expect(resolved.tracker.projectSlug).toBeNull();
+        const teamScope = [...teamKeys].sort().join(",");
+        expect(seenTeamScopes.has(teamScope)).toBe(false);
+        seenTeamScopes.add(teamScope);
+      } else {
+        expect(resolved.tracker.projectSlug).toMatch(/^[a-z0-9]{12}$/);
+        expect(resolved.tracker.projectSlug).not.toBe(
+          "<YOUR_PROJECT_SLUG_HERE>",
+        );
+        expect(seenProjectSlugs.has(resolved.tracker.projectSlug!)).toBe(false);
+        seenProjectSlugs.add(resolved.tracker.projectSlug!);
+      }
 
       expect(resolved.server.port).not.toBeNull();
       expect(seenPorts.has(resolved.server.port!)).toBe(false);
