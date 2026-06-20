@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { runLinearPortfolioWriteCli } from "../../src/cli/linear-portfolio-write.js";
 import {
@@ -82,6 +82,56 @@ describe("symphony-linear-portfolio", () => {
       status: "intake",
       intakeProject: { id: PORTFOLIO_INTAKE_PROJECT.id },
     });
+  });
+
+  it("runs edit commands through the configured linear binary", async () => {
+    const descriptionFile = tempDescription("Body");
+    const io = captureIo();
+    const runCommand = vi.fn(async () => "updated");
+
+    await expect(
+      runLinearPortfolioWriteCli(
+        [
+          "edit",
+          "MOB-263",
+          "--team",
+          "MOB",
+          "--title",
+          "Wrap Linear writes",
+          "--description-file",
+          descriptionFile,
+          "--project",
+          taxonomyProject.slugId,
+          "--linear-bin",
+          "/tmp/linear-pp-cli",
+        ],
+        { io, runCommand },
+      ),
+    ).resolves.toBe(0);
+
+    expect(runCommand).toHaveBeenCalledWith(
+      "/tmp/linear-pp-cli",
+      expect.arrayContaining([
+        "issues",
+        "edit",
+        "MOB-263",
+        "--project",
+        taxonomyProject.id,
+        "--agent",
+      ]),
+    );
+    expect(io.out()).toBe("updated\n");
+  });
+
+  it("prints usage on invalid wrapper commands", async () => {
+    const io = captureIo();
+
+    await expect(
+      runLinearPortfolioWriteCli(["delete", "MOB-263"], { io }),
+    ).resolves.toBe(1);
+
+    expect(io.err()).toContain("Unknown command: delete");
+    expect(io.err()).toContain("symphony-linear-portfolio create");
   });
 });
 
