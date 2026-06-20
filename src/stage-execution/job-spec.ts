@@ -23,8 +23,13 @@ export function createStageExecutionJobSpec(
   const backend = execution?.backend ?? "current-runner";
   const runnerKind = input.stage?.runner ?? input.defaultRunnerKind;
   const runnerModel = input.stage?.model ?? input.defaultRunnerModel;
-  const runnerProvider =
-    execution?.provider ?? input.defaultRunnerProvider ?? runnerKind;
+  const runnerProvider = resolveStageRunnerProvider({
+    runnerKind,
+    defaultRunnerKind: input.defaultRunnerKind,
+    stageRunner: input.stage?.runner ?? null,
+    executionProvider: execution?.provider ?? null,
+    defaultRunnerProvider: input.defaultRunnerProvider ?? null,
+  });
   const stageKey = input.stageName ?? "worker";
   const stageAttempt = input.attempt ?? 0;
   const runGroupId =
@@ -70,6 +75,21 @@ export function createStageExecutionJobSpec(
     },
     runner,
   };
+}
+
+function resolveStageRunnerProvider(input: {
+  runnerKind: string;
+  defaultRunnerKind: string;
+  stageRunner: string | null;
+  executionProvider: string | null;
+  defaultRunnerProvider: string | null;
+}): string | null {
+  const stageOverridesRunner =
+    input.stageRunner !== null && input.stageRunner !== input.defaultRunnerKind;
+  const providerSelector =
+    input.executionProvider ??
+    (stageOverridesRunner ? null : input.defaultRunnerProvider);
+  return providerSelector ?? input.runnerKind;
 }
 
 export function createStageExecutionIdempotencyKey(input: {

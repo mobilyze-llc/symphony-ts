@@ -51,6 +51,18 @@ describe("runner provider capability matrix", () => {
     ]);
   });
 
+  it("requires full-control rows to have current control primitives", () => {
+    for (const row of RUNNER_PROVIDER_CAPABILITY_MATRIX) {
+      if (!row.current.fullControlSemantics) {
+        continue;
+      }
+
+      expect(row.current.budgetTelemetry).toBe("current");
+      expect(row.current.stallReset).toBe("current");
+      expect(row.current.stageSignalParsing).toBe("current");
+    }
+  });
+
   it("resolves stage-provider aliases in runner context", () => {
     expect(
       resolveRunnerProviderCapability({
