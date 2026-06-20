@@ -289,12 +289,18 @@ function parsePortfolioProjectHint(description: string | null): string | null {
     return null;
   }
   for (const line of lines.slice(start + 1)) {
-    if (/^##+\s+/.test(line.trim())) {
+    const trimmed = line.trim();
+    if (/^##+\s+/.test(trimmed)) {
       return null;
     }
-    const match = /^Project:\s*`?([^`]+?)`?\s*$/i.exec(line.trim());
-    if (match?.[1] !== undefined) {
-      const project = match[1].trim();
+    if (trimmed.slice(0, "Project:".length).toLowerCase() === "project:") {
+      const rawProject = trimmed.slice("Project:".length).trim();
+      const project =
+        rawProject.startsWith("`") &&
+        rawProject.endsWith("`") &&
+        rawProject.length >= 2
+          ? rawProject.slice(1, -1).trim()
+          : rawProject;
       return project === "" || project === "(none)" ? null : project;
     }
   }
