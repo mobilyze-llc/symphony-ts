@@ -41,6 +41,12 @@ export interface PlannerCandidate {
   title: string;
   priority: number | null;
   state: string;
+  /**
+   * Recorded Linear blocker identifiers (SYMPH-841). Grounds the model's
+   * dependency reasoning in the real blockedBy graph instead of title inference.
+   * Empty when the issue has no recorded blockers.
+   */
+  blockedBy: string[];
 }
 
 export interface PlannerPrInfo {
@@ -119,8 +125,12 @@ export function buildPlannerPrompt(context: PlannerContext): string {
     lines.push("- (none)");
   } else {
     for (const candidate of context.backlog) {
+      const blockedBy =
+        candidate.blockedBy.length > 0
+          ? ` (blocked by: ${candidate.blockedBy.join(", ")})`
+          : "";
       lines.push(
-        `- ${candidate.issueIdentifier} [${candidate.state}, priority ${candidate.priority ?? "none"}] ${candidate.title}`,
+        `- ${candidate.issueIdentifier} [${candidate.state}, priority ${candidate.priority ?? "none"}] ${candidate.title}${blockedBy}`,
       );
     }
   }

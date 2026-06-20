@@ -28,6 +28,7 @@ function context(): PlannerContext {
         title: "First",
         priority: 1,
         state: "Todo",
+        blockedBy: [],
       },
       {
         issueId: "u-2",
@@ -35,6 +36,7 @@ function context(): PlannerContext {
         title: "Second",
         priority: 2,
         state: "Todo",
+        blockedBy: [],
       },
     ],
     openPrs: [{ issueIdentifier: "SYMPH-9", prNumber: 42, title: "WIP" }],
@@ -76,6 +78,16 @@ describe("buildPlannerPrompt", () => {
     // — otherwise it emits {head, contingent} and the whole plan is rejected.
     expect(prompt).toContain("headIssueIdentifiers");
     expect(prompt).toContain("contingentIssueIdentifiers");
+  });
+
+  it("renders recorded blockedBy on the candidate line (SYMPH-841)", () => {
+    const ctx = context();
+    const first = ctx.backlog[0];
+    if (first) {
+      first.blockedBy = ["SYMPH-2"];
+    }
+    const prompt = buildPlannerPrompt(ctx);
+    expect(prompt).toContain("(blocked by: SYMPH-2)");
   });
 });
 
