@@ -7,8 +7,14 @@ import {
   runManagerPlanCli,
 } from "../../src/cli/manager-plan.js";
 import type { Issue } from "../../src/domain/model.js";
+import { PORTFOLIO_TAXONOMY_PROJECTS } from "../../src/portfolio/taxonomy.js";
 
-function issue(id: string, identifier: string, priority = 2): Issue {
+function issue(
+  id: string,
+  identifier: string,
+  priority = 2,
+  overrides: Partial<Issue> = {},
+): Issue {
   return {
     id,
     identifier,
@@ -22,6 +28,7 @@ function issue(id: string, identifier: string, priority = 2): Issue {
     blockedBy: [],
     createdAt: null,
     updatedAt: null,
+    ...overrides,
   };
 }
 
@@ -344,6 +351,50 @@ describe("runManagerPlanCli", () => {
     expect(code).toBe(0);
     const parsed = JSON.parse(out());
     expect(parsed.batches[0].members[0].issueIdentifier).toBe("MOB-1");
+  });
+
+  it("excludes portfolio-held candidates from manager planning JSON", async () => {
+    const taxonomyProject = PORTFOLIO_TAXONOMY_PROJECTS.find(
+      (project) =>
+        project.name === "Portfolio Taxonomy & Agent Workflow Tooling",
+    )!;
+    const { io, out } = captureIo();
+    const prompts: string[] = [];
+    const code = await runManagerPlanCli(
+      ["--team", "MOB", "--state", "Backlog", "--json"],
+      {
+        io,
+        env: {},
+        loadCandidates: async () => [
+          issue("u1", "MOB-1", 2, {
+            teamKey: "MOB",
+            projectId: taxonomyProject.id,
+            projectSlug: taxonomyProject.slugId,
+            projectName: taxonomyProject.name,
+          }),
+          issue("u2", "MOB-2", 2, {
+            teamKey: "MOB",
+            projectId: null,
+            projectSlug: null,
+            projectName: null,
+          }),
+        ],
+        createPlannerRunner: () => async (prompt: string) => {
+          prompts.push(prompt);
+          return {
+            status: "ok",
+            markdown: GOOD_ARTIFACT,
+          };
+        },
+      },
+    );
+    expect(code).toBe(0);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain("MOB-1");
+    expect(prompts[0]).not.toContain("MOB-2");
+    const parsed = JSON.parse(out());
+    expect(parsed.candidateCount).toBe(1);
+    expect(parsed.portfolioHeldCount).toBe(1);
   });
 
   it("returns 3 and a message when the planner is unavailable", async () => {

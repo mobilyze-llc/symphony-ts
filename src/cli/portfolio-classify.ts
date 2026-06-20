@@ -91,9 +91,22 @@ function normalizeLiveProjects(value: unknown): LivePortfolioProject[] {
         : (record.teams?.nodes ?? [])
             .map((team) => team.key)
             .filter((team): team is string => typeof team === "string"),
-      initiative: null,
+      initiative: normalizeInitiative(record.initiative),
     };
   });
+}
+
+function normalizeInitiative(
+  value: unknown,
+): NonNullable<LivePortfolioProject["initiative"]> | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const id = (value as { id?: unknown }).id;
+  const name = (value as { name?: unknown }).name;
+  return typeof id === "string" && typeof name === "string"
+    ? { id, name }
+    : null;
 }
 
 function unwrapLinearEnvelope(value: unknown): unknown {

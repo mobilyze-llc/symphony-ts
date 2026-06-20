@@ -53,6 +53,21 @@ export async function runLinearPortfolioWriteCli(
     }
 
     const description = readFileSync(parsed.descriptionFile, "utf8");
+    const existingPortfolioProject =
+      parsed.project === null
+        ? findPortfolioProject({
+            name: readPortfolioProjectHint(description),
+          })
+        : null;
+    if (
+      command === "edit" &&
+      parsed.project === null &&
+      existingPortfolioProject === null
+    ) {
+      throw new Error(
+        "Portfolio edit without --project requires an existing Portfolio Classification block with a registered project.",
+      );
+    }
     const explicitProject =
       parsed.project === null
         ? null
@@ -76,10 +91,15 @@ export async function runLinearPortfolioWriteCli(
       throw new Error("Portfolio classifier did not produce a target project.");
     }
 
-    const generatedDescription = writeDescriptionWithClassification(
-      upsertPortfolioClassificationBlock(description, classification),
+    const descriptionWithPortfolio = upsertPortfolioClassificationBlock(
+      description,
+      classification,
     );
-    const descriptionFile = generatedDescription.path;
+    const generatedDescription = dryRun
+      ? null
+      : writeDescriptionWithClassification(descriptionWithPortfolio);
+    const descriptionFile =
+      generatedDescription?.path ?? "<generated-description-file>";
     const args: string[] = ["issues"];
     if (command === "create") {
       args.push(
@@ -111,11 +131,23 @@ export async function runLinearPortfolioWriteCli(
 
     if (dryRun) {
       io.stdout(
-        `${JSON.stringify({ command: linearBin, args, classification }, null, 2)}\n`,
+        `${JSON.stringify(
+          {
+            command: linearBin,
+            args,
+            classification,
+            description: descriptionWithPortfolio,
+          },
+          null,
+          2,
+        )}\n`,
       );
       return 0;
     }
 
+    if (generatedDescription === null) {
+      throw new Error("Internal error: missing generated description file.");
+    }
     let output: string;
     try {
       output = await runCommand(linearBin, args);
@@ -165,6 +197,33 @@ function writeDescriptionWithClassification(classifiedDescription: string): {
     path,
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   };
+}
+
+function readPortfolioProjectHint(description: string): string | null {
+  const lines = description.split(/\r?\n/);
+  const start = lines.findIndex((line) =>
+    /^##+\s+Portfolio Classification\s*$/i.test(line.trim()),
+  );
+  if (start === -1) {
+    return null;
+  }
+  for (const line of lines.slice(start + 1)) {
+    const trimmed = line.trim();
+    if (/^##+\s+/.test(trimmed)) {
+      return null;
+    }
+    if (trimmed.slice(0, "Project:".length).toLowerCase() === "project:") {
+      const rawProject = trimmed.slice("Project:".length).trim();
+      const project =
+        rawProject.startsWith("`") &&
+        rawProject.endsWith("`") &&
+        rawProject.length >= 2
+          ? rawProject.slice(1, -1).trim()
+          : rawProject;
+      return project === "" || project === "(none)" ? null : project;
+    }
+  }
+  return null;
 }
 
 function readRequiredFlag(argv: readonly string[], flag: string): string {

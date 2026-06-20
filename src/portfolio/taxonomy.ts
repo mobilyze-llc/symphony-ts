@@ -276,16 +276,20 @@ export function findForbiddenPortfolioProject(input: {
   slugId?: string | null;
   name?: string | null;
 }): ForbiddenPortfolioProject | null {
-  return (
+  const matchingProject =
     FORBIDDEN_PORTFOLIO_PROJECTS.find((project) =>
       projectMatches(project, input),
-    ) ??
-    (input.name !== undefined &&
+    ) ?? null;
+  if (matchingProject !== null) {
+    return matchingProject;
+  }
+  return input.name !== undefined &&
     input.name !== null &&
     normalizePortfolioName(input.name) === "pipeline"
-      ? (FORBIDDEN_PORTFOLIO_PROJECTS[0] ?? null)
-      : null)
-  );
+    ? (FORBIDDEN_PORTFOLIO_PROJECTS.find(
+        (project) => normalizePortfolioName(project.name) === "pipeline",
+      ) ?? null)
+    : null;
 }
 
 export function validatePortfolioTaxonomyRegistry(

@@ -39,6 +39,7 @@ describe("symphony-linear-portfolio", () => {
 
     const dryRun = JSON.parse(io.out()) as {
       args: string[];
+      description: string;
       classification: { status: string; targetProject: { id: string } };
     };
     expect(dryRun.args).toContain(taxonomyProject.id);
@@ -46,25 +47,22 @@ describe("symphony-linear-portfolio", () => {
       status: "valid",
       targetProject: { id: taxonomyProject.id },
     });
-    const generatedDescription = readFileSync(
-      dryRun.args[dryRun.args.indexOf("--description-file") + 1]!,
-      "utf8",
-    );
-    expect(generatedDescription).toContain("## Portfolio Classification");
-    expect(generatedDescription).toContain(`Project ID: ${taxonomyProject.id}`);
+    expect(dryRun.description).toContain("## Portfolio Classification");
+    expect(dryRun.description).toContain(`Project ID: ${taxonomyProject.id}`);
   });
 
-  it("dry-runs ambiguous issue edits into portfolio intake", async () => {
+  it("dry-runs ambiguous issue creates into portfolio intake", async () => {
     const descriptionFile = tempDescription("No deterministic hints");
     const io = captureIo();
 
     await expect(
       runLinearPortfolioWriteCli(
         [
-          "edit",
-          "SYMPH-123",
+          "create",
           "--team",
           "SYMPH",
+          "--title",
+          "Needs a human classification",
           "--description-file",
           descriptionFile,
           "--dry-run",
@@ -81,6 +79,69 @@ describe("symphony-linear-portfolio", () => {
     expect(dryRun.classification).toMatchObject({
       status: "intake",
       intakeProject: { id: PORTFOLIO_INTAKE_PROJECT.id },
+    });
+  });
+
+  it("rejects ambiguous issue edits without a project or existing classification block", async () => {
+    const descriptionFile = tempDescription("No deterministic hints");
+    const io = captureIo();
+
+    await expect(
+      runLinearPortfolioWriteCli(
+        [
+          "edit",
+          "SYMPH-123",
+          "--team",
+          "SYMPH",
+          "--description-file",
+          descriptionFile,
+          "--dry-run",
+        ],
+        { io },
+      ),
+    ).resolves.toBe(1);
+
+    expect(io.err()).toContain(
+      "Portfolio edit without --project requires an existing Portfolio Classification block",
+    );
+  });
+
+  it("dry-runs issue edits that preserve an existing classification block", async () => {
+    const descriptionFile = tempDescription(
+      [
+        "Body",
+        "",
+        "## Portfolio Classification",
+        "",
+        `Project: \`${taxonomyProject.name}\``,
+        `Project ID: ${taxonomyProject.id}`,
+      ].join("\n"),
+    );
+    const io = captureIo();
+
+    await expect(
+      runLinearPortfolioWriteCli(
+        [
+          "edit",
+          "MOB-263",
+          "--team",
+          "MOB",
+          "--description-file",
+          descriptionFile,
+          "--dry-run",
+        ],
+        { io },
+      ),
+    ).resolves.toBe(0);
+
+    const dryRun = JSON.parse(io.out()) as {
+      args: string[];
+      classification: { status: string; targetProject: { id: string } };
+    };
+    expect(dryRun.args).toContain(taxonomyProject.id);
+    expect(dryRun.classification).toMatchObject({
+      status: "repair",
+      targetProject: { id: taxonomyProject.id },
     });
   });
 

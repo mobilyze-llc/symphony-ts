@@ -86,6 +86,7 @@ function normalizeLiveProjects(value: unknown): LivePortfolioProject[] {
       name?: unknown;
       teamKeys?: unknown;
       teams?: { nodes?: Array<{ key?: unknown }> };
+      initiative?: unknown;
     };
     return {
       id: requireString(record.id, "project.id"),
@@ -98,9 +99,22 @@ function normalizeLiveProjects(value: unknown): LivePortfolioProject[] {
         : (record.teams?.nodes ?? [])
             .map((team) => team.key)
             .filter((team): team is string => typeof team === "string"),
-      initiative: null,
+      initiative: normalizeInitiative(record.initiative),
     };
   });
+}
+
+function normalizeInitiative(
+  value: unknown,
+): NonNullable<LivePortfolioProject["initiative"]> | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const id = value.id;
+  const name = value.name;
+  return typeof id === "string" && typeof name === "string"
+    ? { id, name }
+    : null;
 }
 
 function readProjectNodes(value: unknown): unknown[] {
