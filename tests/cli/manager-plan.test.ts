@@ -91,6 +91,21 @@ describe("parseManagerPlanCliArgs", () => {
     expect(opts.json).toBe(false);
   });
 
+  it("parses --no-canary (default false) (SYMPH-838)", () => {
+    expect(
+      parseManagerPlanCliArgs(["--team", "MOB", "--state", "Backlog"]).noCanary,
+    ).toBe(false);
+    expect(
+      parseManagerPlanCliArgs([
+        "--team",
+        "MOB",
+        "--state",
+        "Backlog",
+        "--no-canary",
+      ]).noCanary,
+    ).toBe(true);
+  });
+
   it("rejects a non-integer concurrency ceiling", () => {
     expect(() =>
       parseManagerPlanCliArgs(["--concurrency-ceiling", "abc"]),
@@ -245,6 +260,21 @@ describe("runManagerPlanCli", () => {
     expect(out()).toContain("Execution waves");
     expect(out()).toContain("Wave 1: MOB-1");
     expect(out()).toContain("waits on MOB-1");
+  });
+
+  it("--no-canary drops canary-chain from the allowed modes (SYMPH-838)", async () => {
+    const { io, out } = captureIo();
+    const code = await runManagerPlanCli(
+      ["--team", "MOB", "--state", "Backlog", "--no-canary", "--prompt-only"],
+      {
+        io,
+        env: {},
+        loadCandidates: async () => [issue("u1", "MOB-1")],
+        createPlannerRunner: okRunner,
+      },
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("allowed modes: parallel-isolated\n");
   });
 
   it("passes the team and eligible states through to the candidate loader", async () => {

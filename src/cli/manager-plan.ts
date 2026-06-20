@@ -15,6 +15,7 @@ import {
 import { DEFAULT_LINEAR_ENDPOINT } from "../config/defaults.js";
 import type { Issue } from "../domain/model.js";
 import {
+  DEFAULT_ENVELOPE_ALLOWED_MODES,
   type PlanBatchMode,
   type PlanRiskTier,
   computeDependencyWaves,
@@ -58,6 +59,7 @@ export interface ManagerPlanCliOptions {
   pageSize: number | null;
   promptOnly: boolean;
   json: boolean;
+  noCanary: boolean;
   help: boolean;
 }
 
@@ -113,6 +115,7 @@ export function parseManagerPlanCliArgs(
   let pageSize: number | null = null;
   let promptOnly = false;
   let json = false;
+  let noCanary = false;
   let help = false;
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -131,6 +134,10 @@ export function parseManagerPlanCliArgs(
     }
     if (token === "--json") {
       json = true;
+      continue;
+    }
+    if (token === "--no-canary") {
+      noCanary = true;
       continue;
     }
 
@@ -182,6 +189,7 @@ export function parseManagerPlanCliArgs(
     pageSize,
     promptOnly,
     json,
+    noCanary,
     help,
   };
 }
@@ -227,10 +235,18 @@ export async function runManagerPlanCli(
 
   let envelope: PlannerContext["envelope"];
   try {
+    // --no-canary drops canary-chain from the resolved modes (composes with
+    // --modes; stays correct if shared-surface ever turns on). An empty result
+    // (e.g. --modes canary-chain --no-canary) fails envelope resolution below.
+    const allowedModes = options.noCanary
+      ? (options.modes ?? [...DEFAULT_ENVELOPE_ALLOWED_MODES]).filter(
+          (mode) => mode !== "canary-chain",
+        )
+      : options.modes;
     envelope = resolveStandingPlanEnvelope({
       concurrencyCeiling: options.concurrencyCeiling,
       allowedRisk: options.risk,
-      ...(options.modes === null ? {} : { allowedModes: options.modes }),
+      ...(allowedModes === null ? {} : { allowedModes }),
     });
   } catch (error) {
     io.stderr(`Invalid envelope: ${formatError(error)}\n`);
@@ -457,6 +473,7 @@ export function renderUsage(): string {
     `  --concurrency-ceiling <n>    Operating-envelope ceiling (default ${DEFAULT_MANAGER_PLAN_CONCURRENCY_CEILING})`,
     "  --risk <low|medium|high>     Allowed risk tier (default medium)",
     "  --modes <csv>                Allowed batch modes (default parallel-isolated,canary-chain)",
+    "  --no-canary                  Drop canary-chain from the allowed modes (no canary runners)",
     `  --model <name>               Planner model alias (default ${DEFAULT_MANAGER_PLAN_MODEL})`,
     "  --page-size <n>              Linear candidate page size",
     "  --prompt-only                Print the assembled planner prompt and exit (no Opus pass)",
