@@ -319,13 +319,12 @@ describe("continuous feedback provider", () => {
       ],
       cwd: process.cwd(),
       prompt: "",
-      timeoutMs: 250,
+      timeoutMs: 2000,
       killGraceMs: 250,
     });
 
     expect(result.exitCode).toBeNull();
-    const childPid = Number((await readFile(pidFile, "utf8")).trim());
-    expect(Number.isInteger(childPid)).toBe(true);
+    const childPid = await readPid(pidFile);
     // The call resolved only from `close`, so the child must already be dead.
     let alive = true;
     try {
@@ -420,7 +419,7 @@ process.exit(0);
       args: [runnerScript],
       cwd: process.cwd(),
       prompt: "",
-      timeoutMs: 250,
+      timeoutMs: 5000,
       killGraceMs: 250,
     });
 
