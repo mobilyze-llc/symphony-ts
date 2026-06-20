@@ -182,6 +182,206 @@ describe("config-contracts", () => {
     );
   });
 
+  it("fails dispatch validation when a control-needing stage selects the Codex CLI provider", () => {
+    const resolved = stagedConfig({
+      stages: {
+        work: {
+          type: "agent",
+          runner: "codex",
+          linear_state: "In Progress",
+          on_complete: "done",
+          execution: {
+            role: "implementer",
+            phase: "implement",
+            backend: "current-runner",
+            control_needing: true,
+            provider: "codex-cli",
+          },
+        },
+        done: { type: "terminal" },
+      },
+    });
+
+    const validation = validateDispatchConfig(resolved);
+    expect(validation.ok).toBe(false);
+    if (validation.ok) {
+      throw new Error("expected contract violation");
+    }
+    expect(validation.error.code).toBe(ERROR_CODES.configContractViolation);
+    expect(validation.error.message).toContain("control_needing");
+    expect(validation.error.message).toContain("codex-cli");
+    expect(validation.error.message).toContain("Codex app-server");
+  });
+
+  it("allows a control-needing stage on the current Codex app-server provider", () => {
+    const resolved = stagedConfig({
+      stages: {
+        work: {
+          type: "agent",
+          runner: "codex",
+          linear_state: "In Progress",
+          on_complete: "done",
+          execution: {
+            role: "investigator",
+            phase: "investigate",
+            backend: "current-runner",
+            control_needing: true,
+            provider: "openai",
+          },
+        },
+        done: { type: "terminal" },
+      },
+    });
+
+    expect(validateDispatchConfig(resolved)).toEqual({ ok: true });
+  });
+
+  it("allows a control-needing stage runner override to use the overridden runner default provider", () => {
+    const resolved = stagedConfig({
+      runner: {
+        kind: "gemini",
+        provider: "google",
+      },
+      stages: {
+        work: {
+          type: "agent",
+          runner: "codex",
+          linear_state: "In Progress",
+          on_complete: "done",
+          execution: {
+            role: "investigator",
+            phase: "investigate",
+            backend: "current-runner",
+            control_needing: true,
+          },
+        },
+        done: { type: "terminal" },
+      },
+    });
+
+    expect(validateDispatchConfig(resolved)).toEqual({ ok: true });
+  });
+
+  it("does not let a control-needing runner override inherit a top-level app-server provider", () => {
+    const resolved = stagedConfig({
+      runner: {
+        kind: "codex",
+        provider: "openai",
+      },
+      stages: {
+        work: {
+          type: "agent",
+          runner: "gemini",
+          linear_state: "In Progress",
+          on_complete: "done",
+          execution: {
+            role: "investigator",
+            phase: "investigate",
+            backend: "current-runner",
+            control_needing: true,
+          },
+        },
+        done: { type: "terminal" },
+      },
+    });
+
+    const validation = validateDispatchConfig(resolved);
+    expect(validation.ok).toBe(false);
+    if (validation.ok) {
+      throw new Error("expected contract violation");
+    }
+    expect(validation.error.message).toContain("provider 'gemini'");
+    expect(validation.error.message).toContain("Codex app-server");
+  });
+
+  it("rejects control-needing stages on the delegated crabrunner backend", () => {
+    const resolved = stagedConfig({
+      stages: {
+        work: {
+          type: "agent",
+          runner: "codex",
+          linear_state: "In Progress",
+          on_complete: "done",
+          execution: {
+            role: "investigator",
+            phase: "investigate",
+            backend: "crabrunner",
+            control_needing: true,
+            provider: "openai",
+          },
+        },
+        done: { type: "terminal" },
+      },
+    });
+
+    const validation = validateDispatchConfig(resolved);
+    expect(validation.ok).toBe(false);
+    if (validation.ok) {
+      throw new Error("expected contract violation");
+    }
+    expect(validation.error.message).toContain("provider 'crabrunner'");
+    expect(validation.error.message).toContain("Codex app-server");
+  });
+
+  it("fails closed when a control-needing stage selects an unknown provider", () => {
+    const resolved = stagedConfig({
+      stages: {
+        work: {
+          type: "agent",
+          runner: "codex",
+          linear_state: "In Progress",
+          on_complete: "done",
+          execution: {
+            role: "investigator",
+            phase: "investigate",
+            backend: "current-runner",
+            control_needing: true,
+            provider: "mystery-provider",
+          },
+        },
+        done: { type: "terminal" },
+      },
+    });
+
+    const validation = validateDispatchConfig(resolved);
+    expect(validation.ok).toBe(false);
+    if (validation.ok) {
+      throw new Error("expected contract violation");
+    }
+    expect(validation.error.message).toContain("provider capability matrix");
+    expect(validation.error.message).toContain("mystery-provider");
+  });
+
+  it("names provider aliases that belong to a different runner kind", () => {
+    const resolved = stagedConfig({
+      stages: {
+        work: {
+          type: "agent",
+          runner: "codex",
+          linear_state: "In Progress",
+          on_complete: "done",
+          execution: {
+            role: "investigator",
+            phase: "investigate",
+            backend: "current-runner",
+            control_needing: true,
+            provider: "anthropic",
+          },
+        },
+        done: { type: "terminal" },
+      },
+    });
+
+    const validation = validateDispatchConfig(resolved);
+    expect(validation.ok).toBe(false);
+    if (validation.ok) {
+      throw new Error("expected contract violation");
+    }
+    expect(validation.error.message).toContain(
+      "registered for runner kind(s) 'claude-code', not 'codex'",
+    );
+  });
+
   it("reports no contract violations for a stage-less config", () => {
     const resolved = resolveConfig({});
 

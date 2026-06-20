@@ -21,6 +21,7 @@ describe("createStageExecutionJobSpec", () => {
           role: "implementer",
           phase: "implement",
           backend: "crabrunner",
+          controlNeeding: false,
           provider: "openai",
           model: "gpt-5.3-codex",
           reasoningEffort: "medium",
@@ -82,6 +83,7 @@ describe("createStageExecutionJobSpec", () => {
           role: "implementer",
           phase: "implement",
           backend: "current-runner",
+          controlNeeding: false,
           provider: null,
           model: null,
           reasoningEffort: null,
@@ -104,6 +106,76 @@ describe("createStageExecutionJobSpec", () => {
     expect(job.identity.idempotencyKey).toBe(
       "issue-806:implement:1:current-runner:rg-806:codex/SYMPH-806-stage-execution-backend",
     );
+  });
+
+  it("threads the top-level runner provider into stages without an execution provider", () => {
+    const job = createStageExecutionJobSpec({
+      issue: createIssue({ id: "issue-834", identifier: "SYMPH-834" }),
+      attempt: 0,
+      stage: createStage({
+        execution: {
+          role: "investigator",
+          phase: "investigate",
+          backend: "current-runner",
+          controlNeeding: true,
+          provider: null,
+          model: null,
+          reasoningEffort: null,
+          profile: null,
+          artifacts: { requires: [], produces: [] },
+          timeoutMs: null,
+          budget: { maxTokens: null, maxUsd: null },
+          dependencies: { stages: [], capsules: [], missingCapsule: "fail" },
+          runGroup: { id: "rg-834", key: null },
+          capsules: { consume: [], produce: [] },
+        },
+      }),
+      stageName: "investigate",
+      defaultRunnerKind: "codex",
+      defaultRunnerModel: null,
+      defaultRunnerProvider: "codex-app-server",
+      baseRef: "origin/main",
+      artifactRoot: "/tmp/artifacts/issue-834",
+    });
+
+    expect(job.runner.provider).toBe("codex-app-server");
+  });
+
+  it("does not apply a top-level provider across a stage runner override", () => {
+    const job = createStageExecutionJobSpec({
+      issue: createIssue({ id: "issue-834", identifier: "SYMPH-834" }),
+      attempt: 0,
+      stage: createStage({
+        runner: "gemini",
+        execution: {
+          role: "investigator",
+          phase: "investigate",
+          backend: "current-runner",
+          controlNeeding: false,
+          provider: null,
+          model: null,
+          reasoningEffort: null,
+          profile: null,
+          artifacts: { requires: [], produces: [] },
+          timeoutMs: null,
+          budget: { maxTokens: null, maxUsd: null },
+          dependencies: { stages: [], capsules: [], missingCapsule: "fail" },
+          runGroup: { id: "rg-834", key: null },
+          capsules: { consume: [], produce: [] },
+        },
+      }),
+      stageName: "investigate",
+      defaultRunnerKind: "codex",
+      defaultRunnerModel: null,
+      defaultRunnerProvider: "openai",
+      baseRef: "origin/main",
+      artifactRoot: "/tmp/artifacts/issue-834",
+    });
+
+    expect(job.runner).toMatchObject({
+      runnerKind: "gemini",
+      provider: "gemini",
+    });
   });
 
   it("changes identity when model/profile/base/head fields change", () => {

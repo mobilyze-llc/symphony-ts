@@ -4,6 +4,7 @@ import type { CodexClientEvent } from "../../src/codex/app-server-client.js";
 import { createModeScopedPermissionPolicy } from "../../src/policy/hard-stops.js";
 import { ClaudeCodeRunner } from "../../src/runners/claude-code-runner.js";
 import {
+  REGISTERED_RUNNER_KINDS,
   createRunnerFromConfig,
   isAiSdkRunner,
 } from "../../src/runners/factory.js";
@@ -107,5 +108,6 @@ describe("isAiSdkRunner", () => {
 describe("RUNNER_KINDS", () => {
   it("contains all supported runner kinds", () => {
     expect(RUNNER_KINDS).toEqual(["codex", "claude-code", "gemini"]);
+    expect(REGISTERED_RUNNER_KINDS).toEqual(RUNNER_KINDS);
   });
 });

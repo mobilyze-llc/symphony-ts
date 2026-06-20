@@ -9,6 +9,12 @@ const DEFAULT_MODELS: Record<RunnerKind, string> = {
   gemini: "gemini-2.5-pro",
 };
 
+export const REGISTERED_RUNNER_KINDS: readonly RunnerKind[] = [
+  "codex",
+  "claude-code",
+  "gemini",
+] as const;
+
 export function createRunnerFromConfig(
   input: RunnerFactoryInput,
 ): AgentRunnerCodexClient {

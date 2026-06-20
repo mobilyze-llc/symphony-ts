@@ -1598,6 +1598,31 @@ describe("CodexAppServerClient", () => {
     await client.close();
   });
 
+  it("resets the stall timer on streamed app-server activity", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient("stall-reset-activity", workspace, events, {
+      stallTimeoutMs: 50,
+      turnTimeoutMs: 500,
+    });
+
+    const result = await client.startSession({
+      prompt: "Run a command before finishing",
+      title: "SYMPH-834: stall parity",
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.message).toBe("Activity kept the turn alive");
+    expect(events).not.toContainEqual(
+      expect.objectContaining({
+        event: "turn_ended_with_error",
+        errorCode: ERROR_CODES.codexSessionStalled,
+      }),
+    );
+
+    await client.close();
+  });
+
   it("disables stall detection when stallTimeoutMs is zero", async () => {
     const workspace = await createWorkspace();
     const events: CodexClientEvent[] = [];

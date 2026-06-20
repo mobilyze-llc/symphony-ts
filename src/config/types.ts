@@ -227,6 +227,8 @@ export interface WorkflowPauseTriageConfig {
 export interface WorkflowRunnerConfig {
   kind: string;
   model: string | null;
+  /** Runner provider selector; null means the runner kind's current default. */
+  provider?: string | null;
 }
 
 export type WorkflowContinuousFeedbackEvent = "commit" | "diff" | "checkpoint";
@@ -453,6 +455,11 @@ export interface StageExecutionProfile {
   role: StageExecutionRole | null;
   phase: StageExecutionPhase | null;
   backend: StageExecutionBackend;
+  /**
+   * When true, config loading fails closed unless the selected provider keeps
+   * the current Codex app-server control semantics.
+   */
+  controlNeeding: boolean;
   provider: string | null;
   model: string | null;
   reasoningEffort: ReasoningEffort | null;

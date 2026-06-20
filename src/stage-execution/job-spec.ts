@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import type { StageDefinition } from "../config/types.js";
 import type { Issue } from "../domain/model.js";
+import { resolveStageRunnerProviderSelector } from "../runners/provider-selection.js";
 import type { StageExecutionJobSpec } from "./backend.js";
 
 export interface CreateStageExecutionJobSpecInput {
@@ -11,6 +12,7 @@ export interface CreateStageExecutionJobSpecInput {
   stageName: string | null;
   defaultRunnerKind: string;
   defaultRunnerModel: string | null;
+  defaultRunnerProvider?: string | null;
   baseRef: string;
   artifactRoot: string;
 }
@@ -22,6 +24,13 @@ export function createStageExecutionJobSpec(
   const backend = execution?.backend ?? "current-runner";
   const runnerKind = input.stage?.runner ?? input.defaultRunnerKind;
   const runnerModel = input.stage?.model ?? input.defaultRunnerModel;
+  const runnerProvider = resolveStageRunnerProviderSelector({
+    runnerKind,
+    defaultRunnerKind: input.defaultRunnerKind,
+    stageRunner: input.stage?.runner ?? null,
+    executionProvider: execution?.provider ?? null,
+    defaultRunnerProvider: input.defaultRunnerProvider ?? null,
+  });
   const stageKey = input.stageName ?? "worker";
   const stageAttempt = input.attempt ?? 0;
   const runGroupId =
@@ -33,7 +42,7 @@ export function createStageExecutionJobSpec(
   const runner = {
     runnerKind,
     model: runnerModel,
-    provider: execution?.provider ?? runnerKind,
+    provider: runnerProvider,
     reasoningEffort:
       execution?.reasoningEffort ?? input.stage?.reasoningEffort ?? null,
   };

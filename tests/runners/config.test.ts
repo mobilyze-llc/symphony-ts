@@ -14,6 +14,7 @@ describe("runner config resolution", () => {
     expect(config.runner.kind).toBe("codex");
     expect(config.runner.kind).toBe(DEFAULT_RUNNER_KIND);
     expect(config.runner.model).toBeNull();
+    expect(config.runner.provider).toBeNull();
   });
 
   it("reads runner.kind from YAML config", () => {
@@ -23,6 +24,7 @@ describe("runner config resolution", () => {
         runner: {
           kind: "claude-code",
           model: "opus",
+          provider: "anthropic",
         },
       },
       promptTemplate: "test",
@@ -30,6 +32,7 @@ describe("runner config resolution", () => {
 
     expect(config.runner.kind).toBe("claude-code");
     expect(config.runner.model).toBe("opus");
+    expect(config.runner.provider).toBe("anthropic");
   });
 
   it("reads runner.kind gemini from YAML config", () => {

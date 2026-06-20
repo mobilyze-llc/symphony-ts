@@ -77,6 +77,11 @@ export function parseStageExecutionProfile(
       role,
       phase,
       backend,
+      controlNeeding: readOptionalBoolean(
+        record.control_needing,
+        `${path}.control_needing`,
+        errors,
+      ),
       provider: readOptionalNonBlankString(
         record.provider,
         `${path}.provider`,
@@ -388,6 +393,23 @@ function readOptionalNonBlankString(
     return null;
   }
   return value.trim();
+}
+
+function readOptionalBoolean(
+  value: unknown,
+  path: string,
+  errors: StageExecutionValidationError[],
+): boolean {
+  if (value === undefined || value === null) {
+    return false;
+  }
+  if (typeof value === "boolean") {
+    return value;
+  }
+  errors.push(
+    executionValidationError(path, value, `${path} must be a boolean.`),
+  );
+  return false;
 }
 
 function readOptionalReasoningEffort(
