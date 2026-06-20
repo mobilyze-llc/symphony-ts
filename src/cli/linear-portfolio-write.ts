@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -75,9 +76,10 @@ export async function runLinearPortfolioWriteCli(
       throw new Error("Portfolio classifier did not produce a target project.");
     }
 
-    const descriptionFile = writeDescriptionWithClassification(
+    const generatedDescription = writeDescriptionWithClassification(
       upsertPortfolioClassificationBlock(description, classification),
     );
+    const descriptionFile = generatedDescription.path;
     const args: string[] = ["issues"];
     if (command === "create") {
       args.push(
@@ -114,7 +116,12 @@ export async function runLinearPortfolioWriteCli(
       return 0;
     }
 
-    const output = await runCommand(linearBin, args);
+    let output: string;
+    try {
+      output = await runCommand(linearBin, args);
+    } finally {
+      generatedDescription.cleanup();
+    }
     io.stdout(output.endsWith("\n") ? output : `${output}\n`);
     return 0;
   } catch (error) {
@@ -147,13 +154,17 @@ function parseEdit(argv: readonly string[]) {
   };
 }
 
-function writeDescriptionWithClassification(
-  classifiedDescription: string,
-): string {
+function writeDescriptionWithClassification(classifiedDescription: string): {
+  path: string;
+  cleanup: () => void;
+} {
   const dir = mkdtempSync(join(tmpdir(), "symphony-linear-portfolio-"));
   const path = join(dir, "description.md");
   writeFileSync(path, classifiedDescription);
-  return path;
+  return {
+    path,
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+  };
 }
 
 function readRequiredFlag(argv: readonly string[], flag: string): string {

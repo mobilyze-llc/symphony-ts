@@ -154,7 +154,7 @@ export function acceptLinearWebhookDelivery(input: {
     return { status: "rejected", reason: "missing_timestamp" };
   }
   const now = input.now ?? new Date();
-  const toleranceMs = input.toleranceMs ?? 60_000;
+  const toleranceMs = input.toleranceMs ?? 10 * 60_000;
   if (Math.abs(now.valueOf() - timestamp) > toleranceMs) {
     return { status: "rejected", reason: "stale_timestamp" };
   }

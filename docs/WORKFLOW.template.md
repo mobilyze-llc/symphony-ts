@@ -272,7 +272,7 @@ When finished:
 
 1. Update the Linear issue state to "Done" using the `linear_graphql` tool.
    Use raw `linear_graphql` for state changes, comments, and reads; use the portfolio-verified
-   issue write wrapper for SYMPH/MOB project assignment.
+   issue write wrapper for SYMPH/MOB project assignment, including batch assignment.
    First, query the available workflow states to find the "Done" state ID:
    ```graphql
    query GetWorkflowStates {

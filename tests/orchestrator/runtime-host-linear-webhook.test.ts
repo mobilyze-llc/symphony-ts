@@ -143,4 +143,64 @@ describe("OrchestratorRuntimeHost Linear webhook repair", () => {
       }),
     );
   });
+
+  it("does not fail an applied webhook repair when repair logging fails", async () => {
+    const tracker = new LinearTrackerClient({
+      endpoint: "https://api.linear.app/graphql",
+      apiKey: "token",
+      projectSlug: null,
+      activeStates: ["Todo"],
+      fetchFn: vi.fn(),
+    });
+    vi.spyOn(tracker, "fetchIssueReferencesByIds").mockResolvedValue([
+      {
+        id: "issue-3",
+        identifier: "MOB-264",
+        title: "Webhook should classify ambiguous project writes",
+        description: "Webhook payload only carried an issue id.",
+        url: "https://linear.app/mob/issue/MOB-264",
+        teamId: "team-mob",
+        teamKey: "MOB",
+        projectId: null,
+        projectSlug: null,
+        projectName: null,
+        labels: [],
+        parent: null,
+      },
+    ]);
+    const updateIssue = vi.spyOn(tracker, "updateIssue").mockResolvedValue({
+      id: "issue-3",
+      identifier: "MOB-264",
+      title: "Webhook should classify ambiguous project writes",
+    });
+    const logger = {
+      info: vi.fn(async () => {
+        throw new Error("log sink unavailable");
+      }),
+    };
+    const delivery: LinearWebhookAcceptedDelivery = {
+      status: "accepted",
+      deliveryId: "delivery-log-failure",
+      payload: {
+        type: "Issue",
+        action: "update",
+        webhookTimestamp: Date.parse("2026-06-20T12:00:00.000Z"),
+        data: { id: "issue-3" },
+      },
+    };
+
+    await expect(
+      OrchestratorRuntimeHost.prototype.handleLinearWebhookDelivery.call(
+        { tracker, logger } as unknown as OrchestratorRuntimeHost,
+        delivery,
+      ),
+    ).resolves.toBeUndefined();
+    expect(updateIssue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        issueId: "issue-3",
+        projectId: PORTFOLIO_INTAKE_PROJECT.id,
+      }),
+    );
+    expect(logger.info).toHaveBeenCalled();
+  });
 });

@@ -92,6 +92,40 @@ describe("linear webhook portfolio reconciler", () => {
     ).toEqual({ status: "rejected", reason: "invalid_signature" });
   });
 
+  it("allows delayed signed retries within the default freshness window", () => {
+    const webhookTime = new Date("2026-06-20T12:00:00.000Z");
+    const rawBody = JSON.stringify({
+      type: "Issue",
+      action: "update",
+      webhookTimestamp: webhookTime.valueOf(),
+      data: { id: "issue-1" },
+    });
+
+    expect(
+      acceptLinearWebhookDelivery({
+        headers: headerReader({
+          "linear-signature": sign(rawBody, secret),
+          "linear-delivery": "delivery-delayed",
+        }),
+        rawBody,
+        signingSecret: secret,
+        now: new Date("2026-06-20T12:05:00.000Z"),
+      }),
+    ).toMatchObject({ status: "accepted", deliveryId: "delivery-delayed" });
+
+    expect(
+      acceptLinearWebhookDelivery({
+        headers: headerReader({
+          "linear-signature": sign(rawBody, secret),
+          "linear-delivery": "delivery-stale",
+        }),
+        rawBody,
+        signingSecret: secret,
+        now: new Date("2026-06-20T12:11:00.000Z"),
+      }),
+    ).toEqual({ status: "rejected", reason: "stale_timestamp" });
+  });
+
   it("routes ambiguous portfolio issues to intake after refetching the issue", async () => {
     const delivery = {
       status: "accepted" as const,

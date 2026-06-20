@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -87,7 +87,16 @@ describe("symphony-linear-portfolio", () => {
   it("runs edit commands through the configured linear binary", async () => {
     const descriptionFile = tempDescription("Body");
     const io = captureIo();
-    const runCommand = vi.fn(async () => "updated");
+    let generatedDescriptionFile: string | null = null;
+    const runCommand = vi.fn(async (_command, args) => {
+      generatedDescriptionFile =
+        args[args.indexOf("--description-file") + 1] ?? null;
+      expect(generatedDescriptionFile).not.toBeNull();
+      expect(readFileSync(generatedDescriptionFile!, "utf8")).toContain(
+        "## Portfolio Classification",
+      );
+      return "updated";
+    });
 
     await expect(
       runLinearPortfolioWriteCli(
@@ -120,6 +129,8 @@ describe("symphony-linear-portfolio", () => {
         "--agent",
       ]),
     );
+    expect(generatedDescriptionFile).not.toBeNull();
+    expect(existsSync(generatedDescriptionFile!)).toBe(false);
     expect(io.out()).toBe("updated\n");
   });
 

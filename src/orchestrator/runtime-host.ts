@@ -1838,18 +1838,22 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     });
 
     if (plan !== null && plan.action !== "noop") {
-      await this.logger?.info(
-        "linear_webhook_portfolio_repair",
-        `Linear webhook repaired portfolio classification for ${plan.issue.identifier}.`,
-        {
-          delivery_id: delivery.deliveryId,
-          issue_id: plan.issue.id,
-          issue_identifier: plan.issue.identifier,
-          action: plan.action,
-          target_project_id: plan.targetProjectId,
-          reason: plan.reason,
-        },
-      );
+      try {
+        await this.logger?.info(
+          "linear_webhook_portfolio_repair",
+          `Linear webhook repaired portfolio classification for ${plan.issue.identifier}.`,
+          {
+            delivery_id: delivery.deliveryId,
+            issue_id: plan.issue.id,
+            issue_identifier: plan.issue.identifier,
+            action: plan.action,
+            target_project_id: plan.targetProjectId,
+            reason: plan.reason,
+          },
+        );
+      } catch {
+        // Logging must not turn an already-applied Linear repair into a retry.
+      }
     }
   }
 

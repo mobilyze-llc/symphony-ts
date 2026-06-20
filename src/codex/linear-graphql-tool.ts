@@ -22,6 +22,7 @@ const LINEAR_GRAPHQL_DESCRIPTION =
 
 const LINEAR_CONTENT_FIELD_NAMES = new Set(["body", "content", "description"]);
 const LINEAR_ISSUE_PROJECT_WRITE_MUTATIONS = new Set([
+  "issueBatchUpdate",
   "issueCreate",
   "issueUpdate",
 ]);
@@ -382,38 +383,34 @@ function collectIssueProjectWriteInField(
 
 function valueHasProjectId(value: ValueNode, variables: JsonObject): boolean {
   if (value.kind === Kind.VARIABLE) {
-    return jsonValueHasField(variables[value.name.value], "projectId");
+    return jsonObjectHasOwnField(variables[value.name.value], "projectId");
   }
-  return objectValueHasField(value, "projectId");
+  return objectValueHasDirectField(value, "projectId");
 }
 
-function objectValueHasField(value: ValueNode, fieldName: string): boolean {
+function objectValueHasDirectField(
+  value: ValueNode,
+  fieldName: string,
+): boolean {
   if (value.kind === Kind.OBJECT) {
-    return value.fields.some(
-      (field) =>
-        field.name.value === fieldName ||
-        objectValueHasField(field.value, fieldName),
-    );
+    return value.fields.some((field) => field.name.value === fieldName);
   }
   if (value.kind === Kind.LIST) {
-    return value.values.some((entry) => objectValueHasField(entry, fieldName));
+    return value.values.some((entry) =>
+      objectValueHasDirectField(entry, fieldName),
+    );
   }
   return false;
 }
 
-function jsonValueHasField(value: unknown, fieldName: string): boolean {
+function jsonObjectHasOwnField(value: unknown, fieldName: string): boolean {
   if (value === null || typeof value !== "object") {
     return false;
   }
   if (Array.isArray(value)) {
-    return value.some((entry) => jsonValueHasField(entry, fieldName));
+    return value.some((entry) => jsonObjectHasOwnField(entry, fieldName));
   }
-  if (Object.hasOwn(value, fieldName)) {
-    return true;
-  }
-  return Object.values(value).some((entry) =>
-    jsonValueHasField(entry, fieldName),
-  );
+  return Object.hasOwn(value, fieldName);
 }
 
 function collectInlineContentFieldsInMutation(
