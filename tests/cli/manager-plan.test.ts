@@ -277,6 +277,29 @@ describe("runManagerPlanCli", () => {
     expect(out()).toContain("allowed modes: parallel-isolated\n");
   });
 
+  it("errors when --no-canary empties the allowed modes (--modes canary-chain --no-canary) (SYMPH-838)", async () => {
+    const { io } = captureIo();
+    const code = await runManagerPlanCli(
+      [
+        "--team",
+        "MOB",
+        "--state",
+        "Backlog",
+        "--modes",
+        "canary-chain",
+        "--no-canary",
+        "--prompt-only",
+      ],
+      {
+        io,
+        env: {},
+        loadCandidates: async () => [issue("u1", "MOB-1")],
+        createPlannerRunner: okRunner,
+      },
+    );
+    expect(code).toBe(1);
+  });
+
   it("passes the team and eligible states through to the candidate loader", async () => {
     const { io } = captureIo();
     const seen: Array<{ teamKeys?: string[]; activeStates: string[] }> = [];

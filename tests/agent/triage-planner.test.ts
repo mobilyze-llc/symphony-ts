@@ -479,6 +479,54 @@ describe("buildPlanBody", () => {
       dependsOn: "SYMPH-404",
     });
   });
+
+  it("keeps the dependency graph acyclic — hard edge wins, the cycle-closing soft edge is dropped (council R1)", () => {
+    const ctx: PlannerContext = {
+      ...context(),
+      backlog: [
+        {
+          issueId: "u-1",
+          issueIdentifier: "SYMPH-1",
+          title: "A",
+          priority: 1,
+          state: "Todo",
+          blockedBy: ["SYMPH-2"],
+        },
+        {
+          issueId: "u-2",
+          issueIdentifier: "SYMPH-2",
+          title: "B",
+          priority: 2,
+          state: "Todo",
+          blockedBy: [],
+        },
+      ],
+    };
+    const body = buildPlanBody(
+      {
+        rationale: "plan",
+        batches: [
+          {
+            mode: "parallel-isolated",
+            issueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+            rationale: "r",
+          },
+        ],
+        // recorded blockedBy gives SYMPH-1 -> SYMPH-2 (added first); the soft edge
+        // SYMPH-2 -> SYMPH-1 would close the cycle and is dropped.
+        dependencies: [{ issueIdentifier: "SYMPH-2", dependsOn: ["SYMPH-1"] }],
+      },
+      ctx,
+    );
+    expect(body.dependencyEdges).toContainEqual({
+      issueIdentifier: "SYMPH-1",
+      dependsOn: "SYMPH-2",
+    });
+    expect(body.dependencyEdges).not.toContainEqual({
+      issueIdentifier: "SYMPH-2",
+      dependsOn: "SYMPH-1",
+    });
+  });
 });
 
 describe("runTriagePlanner", () => {

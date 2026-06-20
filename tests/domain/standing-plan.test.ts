@@ -26,4 +26,17 @@ describe("computeDependencyWaves (SYMPH-843)", () => {
     );
     expect(waves).toEqual([["A", "B"]]);
   });
+
+  it("terminates defensively on cyclic input (never hangs), preserving all members (council R1)", () => {
+    // buildPlanBody guarantees acyclic edges; this only exercises the defensive
+    // guard so a corrupted/hand-built cyclic input can't infinite-loop.
+    const waves = computeDependencyWaves(
+      ["A", "B"],
+      [
+        { issueIdentifier: "A", dependsOn: "B" },
+        { issueIdentifier: "B", dependsOn: "A" },
+      ],
+    );
+    expect([...waves.flat()].sort()).toEqual(["A", "B"]);
+  });
 });
