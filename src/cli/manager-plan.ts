@@ -17,6 +17,7 @@ import type { Issue } from "../domain/model.js";
 import {
   type PlanBatchMode,
   type PlanRiskTier,
+  computeDependencyWaves,
   resolveStandingPlanEnvelope,
 } from "../domain/standing-plan.js";
 import { assembleShadowPlannerContext } from "../orchestrator/standing-plan-shadow.js";
@@ -322,6 +323,13 @@ function renderPlanJson(
       envelope: body.envelope,
       rationale: body.rationale,
       batches: body.batches,
+      dependencyEdges: body.dependencyEdges,
+      waves: computeDependencyWaves(
+        body.batches.flatMap((batch) =>
+          batch.members.map((member) => member.issueIdentifier),
+        ),
+        body.dependencyEdges,
+      ),
       options: body.options,
     },
     null,
@@ -361,6 +369,31 @@ function renderPlanHuman(
     }
     lines.push(`      rationale: ${batch.rationale}`);
   });
+  const memberIdentifiers = body.batches.flatMap((batch) =>
+    batch.members.map((member) => member.issueIdentifier),
+  );
+  const waves = computeDependencyWaves(memberIdentifiers, body.dependencyEdges);
+  if (waves.length > 0) {
+    lines.push("");
+    lines.push(
+      "Execution waves (run a wave's issues in parallel; later waves wait on earlier):",
+    );
+    const prerequisitesOf = (issueIdentifier: string): string[] =>
+      body.dependencyEdges
+        .filter((edge) => edge.issueIdentifier === issueIdentifier)
+        .map((edge) => edge.dependsOn);
+    waves.forEach((wave, index) => {
+      const rendered = wave
+        .map((issueIdentifier) => {
+          const prerequisites = prerequisitesOf(issueIdentifier);
+          return prerequisites.length > 0
+            ? `${issueIdentifier} (waits on ${prerequisites.join(", ")})`
+            : issueIdentifier;
+        })
+        .join(", ");
+      lines.push(`  Wave ${index + 1}: ${rendered}`);
+    });
+  }
   if (body.options.length > 0) {
     lines.push("");
     lines.push("Release options:");

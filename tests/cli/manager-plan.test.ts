@@ -213,6 +213,40 @@ describe("runManagerPlanCli", () => {
     expect(out().toLowerCase()).toContain("batch");
   });
 
+  it("renders execution waves from the plan's dependency edges (SYMPH-843)", async () => {
+    const { io, out } = captureIo();
+    const artifactWithDeps = `# Plan\n\`\`\`json\n${JSON.stringify({
+      rationale: "go",
+      batches: [
+        {
+          mode: "parallel-isolated",
+          issueIdentifiers: ["MOB-1", "MOB-2"],
+          rationale: "r",
+        },
+      ],
+      dependencies: [{ issueIdentifier: "MOB-2", dependsOn: ["MOB-1"] }],
+    })}\n\`\`\`\n`;
+    const code = await runManagerPlanCli(
+      ["--team", "MOB", "--state", "Backlog"],
+      {
+        io,
+        env: {},
+        loadCandidates: async () => [
+          issue("u1", "MOB-1"),
+          issue("u2", "MOB-2"),
+        ],
+        createPlannerRunner: () => async () => ({
+          status: "ok",
+          markdown: artifactWithDeps,
+        }),
+      },
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("Execution waves");
+    expect(out()).toContain("Wave 1: MOB-1");
+    expect(out()).toContain("waits on MOB-1");
+  });
+
   it("passes the team and eligible states through to the candidate loader", async () => {
     const { io } = captureIo();
     const seen: Array<{ teamKeys?: string[]; activeStates: string[] }> = [];
