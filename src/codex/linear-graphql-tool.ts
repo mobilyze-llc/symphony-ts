@@ -21,6 +21,10 @@ const LINEAR_GRAPHQL_DESCRIPTION =
   "Execute one GraphQL query or mutation against the configured Linear workspace using Symphony-managed auth. Linear body/description writes must use GraphQL variables.";
 
 const LINEAR_CONTENT_FIELD_NAMES = new Set(["body", "content", "description"]);
+const LINEAR_ISSUE_PROJECT_WRITE_MUTATIONS = new Set([
+  "issueCreate",
+  "issueUpdate",
+]);
 
 type JsonObject = Record<string, unknown>;
 
@@ -245,6 +249,13 @@ function validateDocument(input: {
     );
   }
 
+  const issueProjectWrites = findLinearIssueProjectWrites(document);
+  if (issueProjectWrites.length > 0) {
+    return invalidInput(
+      `linear_graphql issue project writes bypass portfolio classification (found: ${issueProjectWrites.join(", ")}). Use symphony-linear-portfolio or the portfolio-verified linear-pp-cli wrapper for issueCreate/issueUpdate project assignment.`,
+    );
+  }
+
   return {
     success: true,
     query: input.query,
@@ -273,6 +284,103 @@ function findInlineLinearContentWrites(document: DocumentNode): string[] {
   }
 
   return [...violations].sort();
+}
+
+function findLinearIssueProjectWrites(document: DocumentNode): string[] {
+  const fragments = new Map<string, FragmentDefinitionNode>();
+  for (const definition of document.definitions) {
+    if (definition.kind === Kind.FRAGMENT_DEFINITION) {
+      fragments.set(definition.name.value, definition);
+    }
+  }
+
+  const violations = new Set<string>();
+  for (const definition of document.definitions) {
+    if (
+      definition.kind !== Kind.OPERATION_DEFINITION ||
+      definition.operation !== "mutation"
+    ) {
+      continue;
+    }
+
+    collectIssueProjectWritesInSelectionSet(
+      definition.selectionSet,
+      fragments,
+      violations,
+      new Set(),
+    );
+  }
+
+  return [...violations].sort();
+}
+
+function collectIssueProjectWritesInSelectionSet(
+  selectionSet: SelectionSetNode,
+  fragments: ReadonlyMap<string, FragmentDefinitionNode>,
+  violations: Set<string>,
+  visitedFragments: Set<string>,
+): void {
+  for (const selection of selectionSet.selections) {
+    if (selection.kind === Kind.FIELD) {
+      collectIssueProjectWriteInField(selection, violations);
+      continue;
+    }
+
+    if (selection.kind === Kind.INLINE_FRAGMENT) {
+      collectIssueProjectWritesInSelectionSet(
+        selection.selectionSet,
+        fragments,
+        violations,
+        visitedFragments,
+      );
+      continue;
+    }
+
+    if (selection.kind === Kind.FRAGMENT_SPREAD) {
+      const fragmentName = selection.name.value;
+      const fragment = fragments.get(fragmentName);
+      if (fragment !== undefined && !visitedFragments.has(fragmentName)) {
+        visitedFragments.add(fragmentName);
+        collectIssueProjectWritesInSelectionSet(
+          fragment.selectionSet,
+          fragments,
+          violations,
+          visitedFragments,
+        );
+        visitedFragments.delete(fragmentName);
+      }
+    }
+  }
+}
+
+function collectIssueProjectWriteInField(
+  field: FieldNode,
+  violations: Set<string>,
+): void {
+  if (!LINEAR_ISSUE_PROJECT_WRITE_MUTATIONS.has(field.name.value)) {
+    return;
+  }
+  if (
+    (field.arguments ?? []).some((argument) =>
+      objectValueHasField(argument.value, "projectId"),
+    )
+  ) {
+    violations.add(field.name.value);
+  }
+}
+
+function objectValueHasField(value: ValueNode, fieldName: string): boolean {
+  if (value.kind === Kind.OBJECT) {
+    return value.fields.some(
+      (field) =>
+        field.name.value === fieldName ||
+        objectValueHasField(field.value, fieldName),
+    );
+  }
+  if (value.kind === Kind.LIST) {
+    return value.values.some((entry) => objectValueHasField(entry, fieldName));
+  }
+  return false;
 }
 
 function collectInlineContentFieldsInMutation(

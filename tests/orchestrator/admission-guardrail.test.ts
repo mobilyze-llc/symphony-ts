@@ -18,6 +18,7 @@ import {
   OrchestratorCore,
   type PlanDrivenDispatchDecision,
 } from "../../src/orchestrator/core.js";
+import { PORTFOLIO_TAXONOMY_PROJECTS } from "../../src/portfolio/taxonomy.js";
 import type { IssueTracker } from "../../src/tracker/tracker.js";
 
 describe("admission guardrail (SYMPH-794)", () => {
@@ -70,6 +71,37 @@ describe("admission guardrail (SYMPH-794)", () => {
     const result = await core.pollTick();
     expect(result.dispatchedIssueIds).toEqual(["1"]);
     expect(spawned).toEqual(["SYMPH-1"]);
+  });
+
+  it("holds portfolio-invalid candidates before dispatch even when the admission hook is disabled", async () => {
+    const project = PORTFOLIO_TAXONOMY_PROJECTS.find(
+      (entry) => entry.name === "Runtime Operations & Admission Safety",
+    )!;
+    const { core, spawned } = createCore({
+      candidates: [
+        issue("1", "SYMPH-1", {
+          teamKey: "SYMPH",
+          projectId: null,
+          projectSlug: null,
+          projectName: null,
+        }),
+        issue("2", "SYMPH-2", {
+          teamKey: "SYMPH",
+          projectId: project.id,
+          projectSlug: project.slugId,
+          projectName: project.name,
+        }),
+      ],
+    });
+
+    const result = await core.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual(["2"]);
+    expect(spawned).toEqual(["SYMPH-2"]);
+    expect(core.getState().issueDispositions["1"]).toMatchObject({
+      disposition: "gate",
+      reasonCode: "portfolio_project_missing",
+    });
   });
 
   it("dispatches ONLY explicitly-admitted issues; a bare-project candidate is held", async () => {
@@ -316,7 +348,11 @@ function createFakeTimerScheduler() {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function issue(id: string, identifier: string): Issue {
+function issue(
+  id: string,
+  identifier: string,
+  overrides: Partial<Issue> = {},
+): Issue {
   return {
     id,
     identifier,
@@ -330,6 +366,7 @@ function issue(id: string, identifier: string): Issue {
     blockedBy: [],
     createdAt: "2026-06-01T00:00:00.000Z",
     updatedAt: "2026-06-01T00:00:00.000Z",
+    ...overrides,
   };
 }
 

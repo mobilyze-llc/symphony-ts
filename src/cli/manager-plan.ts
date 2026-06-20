@@ -23,6 +23,7 @@ import {
 } from "../domain/standing-plan.js";
 import { assembleShadowPlannerContext } from "../orchestrator/standing-plan-shadow.js";
 import type { PlanBody } from "../orchestrator/standing-plan-supersession.js";
+import { partitionPortfolioEligibleIssues } from "../portfolio/eligibility.js";
 import { LinearTrackerClient } from "../tracker/linear-client.js";
 
 // ---------------------------------------------------------------------------
@@ -280,8 +281,9 @@ export async function runManagerPlanCli(
     return MANAGER_PLAN_EXIT.loadFailed;
   }
 
+  const portfolioPartition = partitionPortfolioEligibleIssues(candidates);
   const context = assembleShadowPlannerContext({
-    candidates,
+    candidates: portfolioPartition.eligible,
     inFlight: [],
     envelope,
   });
@@ -320,8 +322,8 @@ export async function runManagerPlanCli(
 
   io.stdout(
     options.json
-      ? `${renderPlanJson(options, candidates.length, result.body)}\n`
-      : `${renderPlanHuman(options, candidates.length, result.body)}\n`,
+      ? `${renderPlanJson(options, portfolioPartition.eligible.length, result.body, portfolioPartition.held.length)}\n`
+      : `${renderPlanHuman(options, portfolioPartition.eligible.length, result.body, portfolioPartition.held.length)}\n`,
   );
   return MANAGER_PLAN_EXIT.ok;
 }
@@ -330,12 +332,14 @@ function renderPlanJson(
   options: ManagerPlanCliOptions,
   candidateCount: number,
   body: PlanBody,
+  portfolioHeldCount = 0,
 ): string {
   return JSON.stringify(
     {
       team: options.team,
       states: options.states,
       candidateCount,
+      portfolioHeldCount,
       envelope: body.envelope,
       rationale: body.rationale,
       batches: body.batches,
@@ -357,11 +361,17 @@ function renderPlanHuman(
   options: ManagerPlanCliOptions,
   candidateCount: number,
   body: PlanBody,
+  portfolioHeldCount = 0,
 ): string {
   const lines: string[] = [];
   lines.push(
     `Manager plan — team ${options.team}, state(s) [${options.states.join(", ")}], ${candidateCount} candidate(s)`,
   );
+  if (portfolioHeldCount > 0) {
+    lines.push(
+      `Portfolio classification held ${portfolioHeldCount} candidate(s) before planning.`,
+    );
+  }
   lines.push(
     `Envelope: ceiling=${body.envelope.concurrencyCeiling} risk=${body.envelope.allowedRisk} modes=[${body.envelope.allowedModes.join(", ")}]`,
   );

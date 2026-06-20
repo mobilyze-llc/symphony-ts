@@ -149,6 +149,11 @@ import {
   createModeScopedPermissionPolicy,
   resolveHardStopsConfig,
 } from "../policy/hard-stops.js";
+import { upsertPortfolioClassificationBlock } from "../portfolio/classifier.js";
+import {
+  type LinearWebhookAcceptedDelivery,
+  runPortfolioWebhookRepair,
+} from "../portfolio/linear-webhook-reconciler.js";
 import { createRunnerFromConfig, isAiSdkRunner } from "../runners/factory.js";
 import type { RunnerKind } from "../runners/types.js";
 import { getDurableCodexSessionArtifactDirectory } from "../shared/codex-session-artifacts.js";
@@ -177,6 +182,7 @@ import { createStageExecutionJobSpec } from "../stage-execution/job-spec.js";
 import { serializeTrackerErrorDetails } from "../tracker/errors.js";
 import {
   type LinearIssueComment,
+  type LinearIssueReference,
   LinearTrackerClient,
 } from "../tracker/linear-client.js";
 import {
@@ -509,6 +515,27 @@ const execFileAsync = promisify(execFile);
 function resolveRuntimeRepoRoot(): string {
   const thisFile = fileURLToPath(import.meta.url);
   return resolve(dirname(thisFile), "..", "..", "..");
+}
+
+function issueFromLinearReference(reference: LinearIssueReference): Issue {
+  return {
+    id: reference.id,
+    identifier: reference.identifier,
+    title: reference.title,
+    description: reference.description,
+    teamKey: reference.teamKey,
+    projectId: reference.projectId,
+    projectSlug: reference.projectSlug,
+    projectName: reference.projectName ?? null,
+    priority: null,
+    state: "unknown",
+    branchName: null,
+    url: reference.url,
+    labels: reference.labels,
+    blockedBy: [],
+    createdAt: null,
+    updatedAt: null,
+  };
 }
 
 function mergeDispatcherRunJournals(
@@ -1758,6 +1785,72 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     }
 
     return null;
+  }
+
+  async handleLinearWebhookDelivery(
+    delivery: LinearWebhookAcceptedDelivery,
+  ): Promise<void> {
+    if (!(this.tracker instanceof LinearTrackerClient)) {
+      throw new Error(
+        "Linear webhook reconciliation requires a Linear-backed tracker.",
+      );
+    }
+    const tracker = this.tracker;
+    const plan = await runPortfolioWebhookRepair({
+      delivery,
+      callbacks: {
+        loadIssue: async (identifierOrId) => {
+          const refs = await tracker.fetchIssueReferencesByIds([
+            identifierOrId,
+          ]);
+          const ref = refs[0];
+          if (ref !== undefined) {
+            return issueFromLinearReference(ref);
+          }
+          if (/^[A-Z]+-\d+$/.test(identifierOrId)) {
+            return await tracker.fetchIssueByIdentifier(identifierOrId);
+          }
+          return null;
+        },
+        repairIssueProject: async ({ issue, projectId, classification }) => {
+          const labelIds =
+            issue.teamKey === null ||
+            issue.teamKey === undefined ||
+            issue.labels.length === 0
+              ? []
+              : (
+                  await tracker.resolveLabelIdsByNames(
+                    issue.labels,
+                    issue.teamKey,
+                  )
+                ).map((label) => label.id);
+          await tracker.updateIssue({
+            issueId: issue.id,
+            description: upsertPortfolioClassificationBlock(
+              issue.description ?? "",
+              classification,
+            ),
+            labelIds,
+            projectId,
+          });
+        },
+      },
+    });
+
+    if (plan !== null && plan.action !== "noop") {
+      await this.logger?.info(
+        "linear_webhook_portfolio_repair",
+        `Linear webhook repaired portfolio classification for ${plan.issue.identifier}.`,
+        {
+          delivery_id: delivery.deliveryId,
+          issue_id: plan.issue.id,
+          issue_identifier: plan.issue.identifier,
+          action: plan.action,
+          target_project_id: plan.targetProjectId,
+          reason: plan.reason,
+        },
+      );
+    }
   }
 
   /**

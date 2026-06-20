@@ -197,6 +197,33 @@ describe("createLinearGraphqlDynamicTool", () => {
     expect(request.variables.body).toBe(payload);
   });
 
+  it("rejects direct issue project writes through raw GraphQL", async () => {
+    const fetchFn = vi.fn<typeof fetch>();
+    const tool = createLinearGraphqlDynamicTool({
+      endpoint: "https://api.linear.app/graphql",
+      apiKey: "linear-token",
+      fetchFn,
+    });
+
+    const unsafeWrites = [
+      'mutation CreateIssue($projectId: String!) { issueCreate(input: { teamId: "team-1", title: "T", projectId: $projectId }) { success } }',
+      "mutation UpdateIssue($issueId: String!, $projectId: String!) { issueUpdate(id: $issueId, input: { projectId: $projectId }) { success } }",
+      'mutation Spread($projectId: String!) { ...IssueWrite } fragment IssueWrite on Mutation { issueCreate(input: { teamId: "team-1", title: "T", projectId: $projectId }) { success } }',
+    ];
+
+    for (const query of unsafeWrites) {
+      await expect(tool.execute({ query })).resolves.toMatchObject({
+        success: false,
+        error: {
+          code: "invalid_input",
+          message: expect.stringContaining("bypass portfolio classification"),
+        },
+      });
+    }
+
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
   it("allows content fields in read selections", async () => {
     const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
       jsonResponse({

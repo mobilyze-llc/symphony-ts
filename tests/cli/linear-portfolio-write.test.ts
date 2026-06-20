@@ -1,0 +1,104 @@
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { describe, expect, it } from "vitest";
+
+import { runLinearPortfolioWriteCli } from "../../src/cli/linear-portfolio-write.js";
+import {
+  PORTFOLIO_INTAKE_PROJECT,
+  PORTFOLIO_TAXONOMY_PROJECTS,
+} from "../../src/portfolio/taxonomy.js";
+
+describe("symphony-linear-portfolio", () => {
+  const taxonomyProject = PORTFOLIO_TAXONOMY_PROJECTS.find(
+    (project) => project.name === "Portfolio Taxonomy & Agent Workflow Tooling",
+  )!;
+
+  it("dry-runs issue create with an explicit taxonomy project and classification block", async () => {
+    const descriptionFile = tempDescription("Body");
+    const io = captureIo();
+
+    await expect(
+      runLinearPortfolioWriteCli(
+        [
+          "create",
+          "--team",
+          "MOB",
+          "--title",
+          "Enforce portfolio wrapper",
+          "--description-file",
+          descriptionFile,
+          "--project",
+          taxonomyProject.name,
+          "--dry-run",
+        ],
+        { io },
+      ),
+    ).resolves.toBe(0);
+
+    const dryRun = JSON.parse(io.out()) as {
+      args: string[];
+      classification: { status: string; targetProject: { id: string } };
+    };
+    expect(dryRun.args).toContain(taxonomyProject.id);
+    expect(dryRun.classification).toMatchObject({
+      status: "valid",
+      targetProject: { id: taxonomyProject.id },
+    });
+    const generatedDescription = readFileSync(
+      dryRun.args[dryRun.args.indexOf("--description-file") + 1]!,
+      "utf8",
+    );
+    expect(generatedDescription).toContain("## Portfolio Classification");
+    expect(generatedDescription).toContain(`Project ID: ${taxonomyProject.id}`);
+  });
+
+  it("dry-runs ambiguous issue edits into portfolio intake", async () => {
+    const descriptionFile = tempDescription("No deterministic hints");
+    const io = captureIo();
+
+    await expect(
+      runLinearPortfolioWriteCli(
+        [
+          "edit",
+          "SYMPH-123",
+          "--team",
+          "SYMPH",
+          "--description-file",
+          descriptionFile,
+          "--dry-run",
+        ],
+        { io },
+      ),
+    ).resolves.toBe(0);
+
+    const dryRun = JSON.parse(io.out()) as {
+      args: string[];
+      classification: { status: string; intakeProject: { id: string } };
+    };
+    expect(dryRun.args).toContain(PORTFOLIO_INTAKE_PROJECT.id);
+    expect(dryRun.classification).toMatchObject({
+      status: "intake",
+      intakeProject: { id: PORTFOLIO_INTAKE_PROJECT.id },
+    });
+  });
+});
+
+function tempDescription(body: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "linear-portfolio-write-test-"));
+  const path = join(dir, "description.md");
+  writeFileSync(path, body);
+  return path;
+}
+
+function captureIo() {
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  return {
+    stdout: (message: string) => stdout.push(message),
+    stderr: (message: string) => stderr.push(message),
+    out: () => stdout.join(""),
+    err: () => stderr.join(""),
+  };
+}

@@ -271,6 +271,8 @@ If the agent must call networked tools during a turn:
 When finished:
 
 1. Update the Linear issue state to "Done" using the `linear_graphql` tool.
+   Use raw `linear_graphql` for state changes, comments, and reads; use the portfolio-verified
+   issue write wrapper for SYMPH/MOB project assignment.
    First, query the available workflow states to find the "Done" state ID:
    ```graphql
    query GetWorkflowStates {
@@ -291,4 +293,4 @@ When finished:
 2. Provide a summary:
    - What changed
    - Test command and result
-   - Any follow-up risks
+   - Outstanding tracked risks with Linear IDs

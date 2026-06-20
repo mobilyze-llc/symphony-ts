@@ -8,6 +8,14 @@ const ISSUE_FIELDS = `
   url
   createdAt
   updatedAt
+  team {
+    key
+  }
+  project {
+    id
+    slugId
+    name
+  }
   state {
     name
   }
@@ -572,6 +580,7 @@ export const LINEAR_ISSUE_DETAILS_BY_IDS_QUERY = `
         project {
           id
           slugId
+          name
         }
         labels {
           nodes {
@@ -621,6 +630,7 @@ export const LINEAR_OPEN_ISSUES_BY_TITLE_QUERY = `
         project {
           id
           slugId
+          name
         }
         labels {
           nodes {
@@ -663,6 +673,7 @@ export const LINEAR_ISSUE_DETAILS_UPDATE_MUTATION = `
     $issueId: String!
     $description: String!
     $labelIds: [String!]
+    $projectId: String
     $parentId: String
   ) {
     issueUpdate(
@@ -670,6 +681,7 @@ export const LINEAR_ISSUE_DETAILS_UPDATE_MUTATION = `
       input: {
         description: $description
         labelIds: $labelIds
+        projectId: $projectId
         parentId: $parentId
       }
     ) {

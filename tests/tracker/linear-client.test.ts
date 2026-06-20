@@ -125,7 +125,6 @@ describe("LinearTrackerClient", () => {
     // candidate query must filter by team key and must NOT carry a project
     // filter (setting/clearing `project` can never arm or disarm dispatch).
     expect(request.query).toContain("team: { key: { in: $teamKeys } }");
-    expect(request.query).not.toContain("slugId");
     expect(request.query).not.toContain("project:");
     expect(request.variables).toEqual({
       teamKeys: ["SYMPH"],
@@ -229,7 +228,6 @@ describe("LinearTrackerClient", () => {
     expect(issues.map((issue) => issue.identifier)).toEqual(["SYMPH-901"]);
     const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
     expect(request.query).toContain("team: { key: { in: $teamKeys } }");
-    expect(request.query).not.toContain("slugId");
     expect(request.query).not.toContain("project:");
     expect(request.variables).toEqual({
       teamKeys: ["SYMPH"],
@@ -409,7 +407,6 @@ describe("LinearTrackerClient", () => {
     expect(issues.map((issue) => issue.identifier)).toEqual(["SYMPH-999"]);
     const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
     expect(request.query).toContain("team: { key: { in: $teamKeys } }");
-    expect(request.query).not.toContain("slugId");
     expect(request.query).not.toContain("project:");
     expect(request.variables).toEqual({
       teamKeys: ["SYMPH"],
@@ -481,7 +478,6 @@ describe("LinearTrackerClient", () => {
     expect(issues.map((issue) => issue.identifier)).toEqual(["SYMPH-999"]);
     const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
     expect(request.query).toContain("team: { key: { in: $teamKeys } }");
-    expect(request.query).not.toContain("slugId");
     expect(request.query).not.toContain("project:");
     expect(request.variables).toEqual({
       teamKeys: ["SYMPH"],

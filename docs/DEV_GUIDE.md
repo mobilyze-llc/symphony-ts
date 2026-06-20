@@ -25,7 +25,7 @@ WORKFLOW.md (config + prompt template)
 [AgentRunner] -- spawns codex app-server subprocess in workspace
       |
       v
-Codex agent works on the issue, writes back to Linear via linear_graphql tool
+Codex agent works on the issue, writes back to Linear via guarded tools
 ```
 
 ---
@@ -431,12 +431,16 @@ the exact production code path, swaps the workflow `codex.command`'s trailing
 contains a `### Available skills` section or a Hindsight block. It needs a
 local authed `codex` CLI, so it is not part of `pnpm test`.
 
-### linear_graphql Dynamic Tool
+### Linear Write Tools
 
 Every Codex agent run automatically gets a `linear_graphql` tool injected, allowing the agent to read and write Linear directly.
 
 For issue/comment/document body writes, pass markdown through GraphQL variables, use `sync_workpad`, or use `linear-pp-cli` file-backed commands such as `comments add/edit --body-file` and `documents create/edit --content-file`. Do not use Codex app/connector MCP tools for Linear writes in headless runs because they can request interactive elicitation.
 Symphony rejects inline `body: "..."`, `description: "..."`, and `content: "..."` literals on Linear write mutations so shell-sensitive snippets such as `$VAR`, `${VAR}`, `$(cmd)`, and backticks remain literal data.
+
+For SYMPH/MOB issue project assignment, use `symphony-linear-portfolio` instead of raw `linear_graphql` `issueCreate` or `issueUpdate` project writes. The wrapper classifies the issue into the portfolio taxonomy, stamps a `## Portfolio Classification` block into the description, and routes ambiguous issues to `Portfolio Intake / Needs Classification` with `why_uncertain` and candidate projects. Raw `linear_graphql` rejects direct `projectId` writes on issue create/update so project metadata cannot bypass classification.
+
+Linear project assignment is portfolio taxonomy metadata only. Dispatch authority still comes from journaled admission and standing-plan release; adding a project never admits work by itself, and `Pipeline` is reserved rather than a generic project.
 
 ```graphql
 # Example mutation an agent might run to update issue state
