@@ -12,7 +12,7 @@ You extract a Paper artboard into a portable design reference bundle that implem
 
 1. **spec-identifier** (required): Kebab-case name used as the bundle directory name (e.g., `token-report`, `settings-page`).
 2. **artboard** (optional): Paper artboard name or ID. If omitted and only one artboard exists, use it automatically. If multiple exist, list them and ask.
-3. **repo-path**: Resolve the same way as spec-gen — explicit path, cwd with project markers, or ask.
+3. **repo-path**: Resolve from an explicit path, cwd with project markers, or ask.
 
 **Output directory:** `<repo-path>/pipeline-config/design-refs/<spec-identifier>/`
 
@@ -516,5 +516,4 @@ If any check fails, fix the issue before continuing.
 
 ## Related Skills
 
-- `/spec-gen` — Generate structured specs from brain dumps, create parent issue in Draft
-- `/spec-freeze` — Freeze a drafted spec into Linear sub-issues for autonomous pipeline execution
+- `/gap-analysis` — Analyze the design bundles this skill produces against a target codebase to surface gaps
