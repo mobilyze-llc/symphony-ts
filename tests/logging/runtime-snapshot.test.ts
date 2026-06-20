@@ -1141,6 +1141,66 @@ describe("runtime snapshot", () => {
     expect(row.tokens.reasoning_tokens).toBe(75);
   });
 
+  it("includes stage usage measurement quality in running rows", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+
+    const entry = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "AAA-1",
+      startedAt: "2026-03-06T10:00:00.000Z",
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: "turn_completed",
+      lastCodexTimestamp: "2026-03-06T10:00:05.000Z",
+      lastCodexMessage: "Working",
+      turnCount: 1,
+      codexInputTokens: 1000,
+      codexOutputTokens: 500,
+      codexTotalTokens: 1500,
+    });
+    entry.totalStageInputTokens = 1000;
+    entry.totalStageOutputTokens = 500;
+    entry.totalStageTotalTokens = 1500;
+    entry.usageMeasurement = {
+      schema: "symphony.stage-usage.v1",
+      source: "claude_code_ai_sdk",
+      runnerKind: "claude-code",
+      provider: "anthropic",
+      model: "claude-sonnet-4-5",
+      profile: "write.local",
+      measurementQuality: "true",
+      tokens: {
+        inputTokens: 1000,
+        outputTokens: 500,
+        totalTokens: 1500,
+      },
+      cost: {
+        amountUsd: 0.42,
+        currency: "USD",
+        source: "subscription_advisory",
+        authority: "advisory",
+        sourceDescription: "subscription equivalent",
+      },
+    };
+    state.running["issue-1"] = entry;
+
+    const snapshot = buildRuntimeSnapshot(state, {
+      now: new Date("2026-03-06T10:00:10.000Z"),
+    });
+
+    expect(snapshot.running[0]?.tokens.total_tokens).toBe(1500);
+    expect(snapshot.running[0]?.usage_measurement).toMatchObject({
+      measurementQuality: "true",
+      source: "claude_code_ai_sdk",
+      cost: {
+        amountUsd: 0.42,
+        authority: "advisory",
+      },
+    });
+  });
+
   it("classifies health as green when session is active and token burn is normal", () => {
     const state = createInitialOrchestratorState({
       pollIntervalMs: 30_000,

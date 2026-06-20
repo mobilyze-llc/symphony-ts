@@ -693,6 +693,98 @@ describe("Dashboard Pipeline column", () => {
     expect(html).toContain("300");
   });
 
+  it("token breakdown renders usage measurement quality and cost authority", () => {
+    const snapshot = buildSnapshot({
+      usage_measurement: {
+        schema: "symphony.stage-usage.v1",
+        source: "claude_code_ai_sdk",
+        runnerKind: "claude-code",
+        provider: "anthropic",
+        model: "claude-sonnet-4-5",
+        profile: "write.local",
+        measurementQuality: "true",
+        tokens: {
+          inputTokens: 1000,
+          outputTokens: 500,
+          totalTokens: 1500,
+        },
+        cost: {
+          amountUsd: 0.42,
+          currency: "USD",
+          source: "subscription_advisory",
+          authority: "advisory",
+          sourceDescription: "subscription equivalent",
+        },
+      },
+      execution_history: [
+        {
+          stageName: "investigate",
+          durationMs: 1000,
+          totalTokens: 1500,
+          inputTokens: 1000,
+          outputTokens: 500,
+          turns: 1,
+          outcome: "completed",
+          usageMeasurement: {
+            schema: "symphony.stage-usage.v1",
+            source: "codex_app_server",
+            runnerKind: "codex",
+            provider: "openai",
+            model: null,
+            profile: null,
+            measurementQuality: "true",
+            tokens: {
+              inputTokens: 1000,
+              outputTokens: 500,
+              totalTokens: 1500,
+            },
+            cost: {
+              amountUsd: null,
+              currency: "USD",
+              source: "not_reported",
+              authority: "unavailable",
+              sourceDescription: "not reported by provider",
+            },
+          },
+        },
+      ],
+    });
+    const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: false });
+
+    expect(html).toContain("Usage quality");
+    expect(html).toContain("true · advisory · claude_code_ai_sdk");
+    expect(html).toContain("$0.4200 USD (advisory, subscription_advisory)");
+    expect(html).toContain("Quality");
+    expect(html).toContain("true · unavailable · codex_app_server");
+  });
+
+  it("token breakdown handles malformed usage measurements without cost", () => {
+    const html = renderDashboardHtml(
+      buildSnapshot({
+        usage_measurement: {
+          schema: "symphony.stage-usage.v1",
+          source: "codex_app_server",
+          runnerKind: "codex",
+          provider: "openai",
+          model: null,
+          profile: null,
+          measurementQuality: "true",
+          tokens: {
+            inputTokens: 1000,
+            outputTokens: 500,
+            totalTokens: 1500,
+          },
+        } as NonNullable<
+          RuntimeSnapshot["running"][number]["usage_measurement"]
+        >,
+      }),
+      { liveUpdatesEnabled: false },
+    );
+
+    expect(html).toContain("true · codex_app_server");
+    expect(html).toContain("not reported");
+  });
+
   it("token breakdown renders output caps and compaction churn", () => {
     const snapshot = buildSnapshot({
       output_caps: {

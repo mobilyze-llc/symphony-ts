@@ -3,6 +3,10 @@ import {
   type RunAttemptPhase,
   createEmptyLiveSession,
 } from "../domain/model.js";
+import {
+  coerceLegacyCounterValue,
+  mapCrabrunnerUsageToStageUsage,
+} from "../domain/stage-usage.js";
 import type {
   StageExecutionBackendInput,
   StageExecutionBackendResult,
@@ -273,8 +277,34 @@ function createCrabrunnerAgentResult(input: {
   const terminal = input.terminal;
   const artifactRefs = terminal?.artifactRefs ?? [];
   const terminalUsage = terminal?.usage;
-  const usage =
-    terminalUsage?.status === "available" ? terminalUsage : undefined;
+  const usageMeasurement = mapCrabrunnerUsageToStageUsage({
+    usage: terminalUsage,
+    runnerKind: input.input.job.runner.runnerKind,
+    provider: input.input.job.runner.provider,
+    model: input.input.job.runner.model,
+    profile: input.input.job.identity.profileId,
+  });
+  const legacyInputTokens = coerceLegacyCounterValue(
+    usageMeasurement.tokens.inputTokens,
+  );
+  const legacyOutputTokens = coerceLegacyCounterValue(
+    usageMeasurement.tokens.outputTokens,
+  );
+  const legacyTotalTokens = coerceLegacyCounterValue(
+    usageMeasurement.tokens.totalTokens,
+  );
+  const legacyCacheReadTokens = coerceLegacyCounterValue(
+    usageMeasurement.tokens.cacheReadTokens,
+  );
+  const legacyCacheWriteTokens = coerceLegacyCounterValue(
+    usageMeasurement.tokens.cacheWriteTokens,
+  );
+  const legacyNoCacheTokens = coerceLegacyCounterValue(
+    usageMeasurement.tokens.noCacheTokens,
+  );
+  const legacyReasoningTokens = coerceLegacyCounterValue(
+    usageMeasurement.tokens.reasoningTokens,
+  );
   return {
     issue: input.input.runnerInput.issue,
     workspace: {
@@ -305,20 +335,21 @@ function createCrabrunnerAgentResult(input: {
               usageStatus: terminal.usage?.status ?? "unknown",
               artifactRefs,
             }),
-      codexInputTokens: usage?.inputTokens ?? 0,
-      codexOutputTokens: usage?.outputTokens ?? 0,
-      codexTotalTokens: usage?.totalTokens ?? 0,
-      codexCacheReadTokens: usage?.cacheReadTokens ?? 0,
-      codexCacheWriteTokens: usage?.cacheWriteTokens ?? 0,
-      codexNoCacheTokens: usage?.noCacheTokens ?? 0,
-      codexReasoningTokens: usage?.reasoningTokens ?? 0,
-      codexTotalInputTokens: usage?.inputTokens ?? 0,
-      codexTotalOutputTokens: usage?.outputTokens ?? 0,
-      totalStageInputTokens: usage?.inputTokens ?? 0,
-      totalStageOutputTokens: usage?.outputTokens ?? 0,
-      totalStageTotalTokens: usage?.totalTokens ?? 0,
-      totalStageCacheReadTokens: usage?.cacheReadTokens ?? 0,
-      totalStageCacheWriteTokens: usage?.cacheWriteTokens ?? 0,
+      codexInputTokens: legacyInputTokens,
+      codexOutputTokens: legacyOutputTokens,
+      codexTotalTokens: legacyTotalTokens,
+      codexCacheReadTokens: legacyCacheReadTokens,
+      codexCacheWriteTokens: legacyCacheWriteTokens,
+      codexNoCacheTokens: legacyNoCacheTokens,
+      codexReasoningTokens: legacyReasoningTokens,
+      codexTotalInputTokens: legacyInputTokens,
+      codexTotalOutputTokens: legacyOutputTokens,
+      totalStageInputTokens: legacyInputTokens,
+      totalStageOutputTokens: legacyOutputTokens,
+      totalStageTotalTokens: legacyTotalTokens,
+      totalStageCacheReadTokens: legacyCacheReadTokens,
+      totalStageCacheWriteTokens: legacyCacheWriteTokens,
+      usageMeasurement,
       codexSessionLogs: artifactRefs.map((path, index) => ({
         label: `crabrunner-artifact-${index + 1}`,
         path,

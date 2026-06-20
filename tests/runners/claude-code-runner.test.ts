@@ -117,10 +117,24 @@ describe("ClaudeCodeRunner", () => {
     );
     expect(result.status).toBe("completed");
     expect(result.message).toBe("Hello from Claude");
-    expect(result.usage).toEqual({
+    expect(result.usage).toMatchObject({
       inputTokens: 100,
       outputTokens: 50,
       totalTokens: 150,
+      stageUsage: {
+        source: "claude_code_ai_sdk",
+        provider: "anthropic",
+        model: "opus",
+        measurementQuality: "true",
+        tokens: {
+          inputTokens: 100,
+          outputTokens: 50,
+          totalTokens: 150,
+        },
+        cost: expect.objectContaining({
+          authority: "unavailable",
+        }),
+      },
     });
   });
 
@@ -156,10 +170,24 @@ describe("ClaudeCodeRunner", () => {
     expect(events[0]!.event).toBe("session_started");
     expect(events[0]!.codexAppServerPid).toBeNull();
     expect(events[1]!.event).toBe("turn_completed");
-    expect(events[1]!.usage).toEqual({
+    expect(events[1]!.usage).toMatchObject({
       inputTokens: 10,
       outputTokens: 5,
       totalTokens: 15,
+      stageUsage: {
+        source: "claude_code_ai_sdk",
+        provider: "anthropic",
+        model: "sonnet",
+        measurementQuality: "true",
+        tokens: {
+          inputTokens: 10,
+          outputTokens: 5,
+          totalTokens: 15,
+        },
+        cost: expect.objectContaining({
+          authority: "unavailable",
+        }),
+      },
     });
   });
 
@@ -530,7 +558,7 @@ describe("ClaudeCodeRunner", () => {
     expect(first.threadId).toBe(second.threadId);
   });
 
-  it("handles undefined token values from AI SDK gracefully", async () => {
+  it("handles unavailable AI SDK token values gracefully", async () => {
     mockGenerateText.mockResolvedValueOnce({
       text: "result",
       usage: {
@@ -538,13 +566,13 @@ describe("ClaudeCodeRunner", () => {
         outputTokens: undefined,
         totalTokens: undefined,
         inputTokenDetails: {
-          noCacheTokens: undefined,
+          noCacheTokens: null,
           cacheReadTokens: undefined,
-          cacheWriteTokens: undefined,
+          cacheWriteTokens: -1,
         },
         outputTokenDetails: {
           textTokens: undefined,
-          reasoningTokens: undefined,
+          reasoningTokens: null,
         },
       },
     } as never);
@@ -555,10 +583,21 @@ describe("ClaudeCodeRunner", () => {
     });
 
     const result = await runner.startSession({ prompt: "p", title: "t" });
-    expect(result.usage).toEqual({
+    expect(result.usage).toMatchObject({
       inputTokens: 0,
       outputTokens: 0,
       totalTokens: 0,
+      stageUsage: {
+        source: "claude_code_ai_sdk",
+        provider: "anthropic",
+        model: "sonnet",
+        measurementQuality: "unavailable",
+        tokens: {
+          inputTokens: null,
+          outputTokens: null,
+          totalTokens: null,
+        },
+      },
     });
     // detail fields should be absent (not 0) when provider doesn't report them
     expect(result.usage?.cacheReadTokens).toBeUndefined();

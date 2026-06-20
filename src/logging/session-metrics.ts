@@ -163,6 +163,10 @@ export function applyCodexEventToSession(
     };
   }
 
+  if (event.usage.stageUsage !== undefined) {
+    session.usageMeasurement = event.usage.stageUsage;
+  }
+
   const inputTokens = normalizeAbsoluteCounter(event.usage.inputTokens);
   const outputTokens = normalizeAbsoluteCounter(event.usage.outputTokens);
   const totalTokens = normalizeAbsoluteCounter(event.usage.totalTokens);

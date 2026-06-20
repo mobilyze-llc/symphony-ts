@@ -121,6 +121,7 @@ export interface AgentRunnerCodexClientFactoryInput {
   stallTimeoutMs: number;
   toolOutputTokenLimit: number;
   modelAutoCompactTokenLimit: number;
+  runnerModel: string | null;
   artifactDirectory?: string;
   dynamicTools: CodexDynamicTool[];
   modePolicy?: ModeScopedPermissionPolicy;
@@ -472,6 +473,7 @@ export class AgentRunner {
           modelAutoCompactTokenLimit:
             this.config.codex.modelAutoCompactTokenLimit ??
             DEFAULT_CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+          runnerModel: effectiveModel,
           artifactDirectory: getDurableCodexSessionArtifactDirectory(
             this.config.workspace.root,
             workspaceKey,
@@ -1509,6 +1511,7 @@ function createDefaultCodexClient(
     stallTimeoutMs: input.stallTimeoutMs,
     toolOutputTokenLimit: input.toolOutputTokenLimit,
     modelAutoCompactTokenLimit: input.modelAutoCompactTokenLimit,
+    runnerModel: input.runnerModel,
     ...(input.artifactDirectory === undefined
       ? {}
       : { artifactDirectory: input.artifactDirectory }),

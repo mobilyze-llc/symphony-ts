@@ -10,6 +10,10 @@ import type {
   CodexTurnResult,
   CodexUsage,
 } from "../codex/app-server-client.js";
+import {
+  coerceLegacyCounterValue,
+  mapClaudeCodeAiSdkUsageToStageUsage,
+} from "../domain/stage-usage.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
 import {
   type ClaudePermissionMode,
@@ -295,24 +299,31 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
         abortSignal: controller.signal,
       });
 
+      const stageUsage = mapClaudeCodeAiSdkUsageToStageUsage({
+        usage: result.usage,
+        model: this.options.model,
+      });
       const usage: CodexUsage = {
-        inputTokens: result.usage.inputTokens ?? 0,
-        outputTokens: result.usage.outputTokens ?? 0,
-        totalTokens: result.usage.totalTokens ?? 0,
-        ...(result.usage.inputTokenDetails?.cacheReadTokens !== undefined
-          ? { cacheReadTokens: result.usage.inputTokenDetails.cacheReadTokens }
-          : {}),
-        ...(result.usage.inputTokenDetails?.cacheWriteTokens !== undefined
-          ? {
-              cacheWriteTokens: result.usage.inputTokenDetails.cacheWriteTokens,
-            }
-          : {}),
-        ...(result.usage.inputTokenDetails?.noCacheTokens !== undefined
-          ? { noCacheTokens: result.usage.inputTokenDetails.noCacheTokens }
-          : {}),
-        ...(result.usage.outputTokenDetails?.reasoningTokens !== undefined
-          ? { reasoningTokens: result.usage.outputTokenDetails.reasoningTokens }
-          : {}),
+        inputTokens: coerceLegacyCounterValue(stageUsage.tokens.inputTokens),
+        outputTokens: coerceLegacyCounterValue(stageUsage.tokens.outputTokens),
+        totalTokens: coerceLegacyCounterValue(stageUsage.tokens.totalTokens),
+        ...(stageUsage.tokens.cacheReadTokens === null ||
+        stageUsage.tokens.cacheReadTokens === undefined
+          ? {}
+          : { cacheReadTokens: stageUsage.tokens.cacheReadTokens }),
+        ...(stageUsage.tokens.cacheWriteTokens === null ||
+        stageUsage.tokens.cacheWriteTokens === undefined
+          ? {}
+          : { cacheWriteTokens: stageUsage.tokens.cacheWriteTokens }),
+        ...(stageUsage.tokens.noCacheTokens === null ||
+        stageUsage.tokens.noCacheTokens === undefined
+          ? {}
+          : { noCacheTokens: stageUsage.tokens.noCacheTokens }),
+        ...(stageUsage.tokens.reasoningTokens === null ||
+        stageUsage.tokens.reasoningTokens === undefined
+          ? {}
+          : { reasoningTokens: stageUsage.tokens.reasoningTokens }),
+        stageUsage,
       };
 
       this.emit({
