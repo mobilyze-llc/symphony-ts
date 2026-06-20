@@ -25,12 +25,41 @@ export interface StageExecutionRunnerProfile {
   reasoningEffort: string | null;
 }
 
+export interface StageExecutionEnforcementContract {
+  required: boolean;
+  budget: {
+    maxTokens: number | null;
+    maxUsd: number | null;
+    estimatedCostPer1kTokensUsd: number | null;
+    cachedTokenCostRatio: number | null;
+    liveBudgetGraceRatio: number | null;
+  };
+  timing: {
+    timeoutMs: number | null;
+    stallTimeoutMs: number | null;
+    noProgressTurns: number | null;
+    maxIterations: number | null;
+  };
+  telemetry: {
+    heartbeatIntervalMs: number | null;
+    progressIntervalMs: number | null;
+    usageIntervalMs: number | null;
+  };
+  cancellation: {
+    jobIdRequired: boolean;
+    cooperativeAbort: boolean;
+    processGroupKill: boolean;
+    killGraceMs: number | null;
+  };
+}
+
 export interface StageExecutionJobSpec {
   backend: StageExecutionBackendKind;
   role: StageExecutionRole | null;
   phase: StageExecutionPhase | null;
   identity: StageExecutionIdentity;
   runner: StageExecutionRunnerProfile;
+  enforcement: StageExecutionEnforcementContract;
 }
 
 export interface StageExecutionBackendInput {

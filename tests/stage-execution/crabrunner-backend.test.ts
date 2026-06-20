@@ -5,10 +5,13 @@ import type { StageExecutionJobSpec } from "../../src/stage-execution/backend.js
 import {
   CRABRUNNER_JOB_SPEC_VERSION,
   type CrabrunnerAdmissionResult,
+  type CrabrunnerCancellationRequest,
   type CrabrunnerJobSpec,
   type CrabrunnerSchedulerClient,
   CrabrunnerStageExecutionBackend,
   type CrabrunnerTerminalEvidence,
+  createCrabrunnerJobSpec,
+  validateCrabrunnerLaneEnforcementContract,
 } from "../../src/stage-execution/crabrunner-backend.js";
 
 describe("CrabrunnerStageExecutionBackend", () => {
@@ -45,6 +48,20 @@ describe("CrabrunnerStageExecutionBackend", () => {
         phase: "implement",
         mode: "submit",
         issue: expect.objectContaining({ identifier: "SYMPH-807" }),
+        enforcement: expect.objectContaining({
+          required: true,
+          budget: expect.objectContaining({
+            maxTokens: 50_000,
+            maxUsd: 4,
+          }),
+          timing: expect.objectContaining({
+            timeoutMs: 600_000,
+            stallTimeoutMs: 120_000,
+          }),
+          cancellation: expect.objectContaining({
+            processGroupKill: true,
+          }),
+        }),
       }),
     ]);
     expect(client.calls).toEqual(["submit", "status:job-1", "collect:job-1"]);
@@ -159,7 +176,11 @@ describe("CrabrunnerStageExecutionBackend", () => {
 
   it.each([
     ["timed_out", "timed_out"],
+    ["budget_exceeded", "failed"],
+    ["stalled", "stalled"],
     ["canceled", "canceled_by_reconciliation"],
+    ["kill_failed", "failed"],
+    ["enforcement_contract_missing", "failed"],
     ["runner_failed", "failed"],
     ["artifact_parse_failed", "failed"],
     ["artifact_collection_failed", "failed"],
@@ -255,6 +276,315 @@ describe("CrabrunnerStageExecutionBackend", () => {
     );
   });
 
+  it("preserves progress, process, and cancellation evidence in terminal summaries", async () => {
+    const backend = new CrabrunnerStageExecutionBackend({
+      client: createClient({
+        admission: { status: "accepted", jobId: "job-evidence" },
+        terminal: {
+          state: "budget_exceeded",
+          message: "token budget exceeded",
+          progress: {
+            heartbeatCount: 3,
+            progressEventCount: 5,
+            usageEventCount: 2,
+            lastHeartbeatAt: "2026-06-20T12:00:00.000Z",
+            lastProgressAt: "2026-06-20T12:00:01.000Z",
+            lastUsageAt: "2026-06-20T12:00:02.000Z",
+          },
+          process: {
+            pid: 1234,
+            processGroupId: 1234,
+          },
+          cancellation: {
+            requested: false,
+            signal: null,
+            processGroup: false,
+            killed: false,
+            failure: null,
+          },
+        },
+      }),
+    });
+
+    const result = await backend.execute({
+      job: createJob(),
+      runnerInput: createRunnerInput(),
+    });
+
+    expect(result.result.runAttempt.status).toBe("failed");
+    expect(result.result.liveSession.lastCodexMessage).toContain(
+      '"usageEventCount":2',
+    );
+    expect(result.result.liveSession.lastCodexMessage).toContain('"pid":1234');
+    expect(result.result.liveSession.lastCodexMessage).toContain(
+      '"cancellation"',
+    );
+  });
+
+  it("fails closed lane-side when delegated enforcement metadata is missing", async () => {
+    const job = {
+      ...createJob(),
+      enforcement: {
+        ...createJob().enforcement,
+        budget: {
+          ...createJob().enforcement.budget,
+          maxTokens: null,
+          maxUsd: null,
+        },
+        timing: {
+          ...createJob().enforcement.timing,
+          stallTimeoutMs: null,
+        },
+      },
+    };
+    const spec = createCrabrunnerJobSpec(
+      {
+        job,
+        runnerInput: createRunnerInput(),
+      },
+      false,
+    );
+    const client = createClient({
+      admission: { status: "accepted", jobId: "job-should-not-submit" },
+      terminal: { state: "succeeded" },
+    });
+    const backend = new CrabrunnerStageExecutionBackend({ client });
+
+    const result = await backend.execute({
+      job,
+      runnerInput: createRunnerInput(),
+    });
+
+    expect(client.calls).toEqual([]);
+    expect(result.result.runAttempt.status).toBe("failed");
+    expect(result.evidence).toMatchObject({
+      admission: {
+        status: "rejected",
+        jobId: null,
+      },
+      terminal: {
+        state: "enforcement_contract_missing",
+      },
+    });
+    expect(validateCrabrunnerLaneEnforcementContract(spec)).toEqual({
+      state: "enforcement_contract_missing",
+      message:
+        "missing or invalid delegated lane enforcement metadata: enforcement.budget.maxTokens, enforcement.budget.maxUsd, enforcement.timing.stallTimeoutMs",
+    });
+  });
+
+  it("allows non-delegated enforcement contracts to remain advisory", () => {
+    const job = {
+      ...createJob(),
+      enforcement: {
+        ...createJob().enforcement,
+        required: false,
+        budget: {
+          maxTokens: null,
+          maxUsd: null,
+          estimatedCostPer1kTokensUsd: null,
+          cachedTokenCostRatio: null,
+          liveBudgetGraceRatio: null,
+        },
+      },
+    };
+    const spec = createCrabrunnerJobSpec(
+      {
+        job,
+        runnerInput: createRunnerInput(),
+      },
+      false,
+    );
+
+    expect(validateCrabrunnerLaneEnforcementContract(spec)).toBeNull();
+  });
+
+  it("rejects invalid delegated budget and timeout metadata before submission", async () => {
+    const job = {
+      ...createJob(),
+      enforcement: {
+        ...createJob().enforcement,
+        budget: {
+          ...createJob().enforcement.budget,
+          cachedTokenCostRatio: null,
+          liveBudgetGraceRatio: 1.5,
+        },
+        timing: {
+          ...createJob().enforcement.timing,
+          timeoutMs: 0,
+        },
+      },
+    };
+    const spec = createCrabrunnerJobSpec(
+      {
+        job,
+        runnerInput: createRunnerInput(),
+      },
+      false,
+    );
+    const client = createClient({
+      admission: { status: "accepted", jobId: "job-should-not-submit" },
+      terminal: { state: "succeeded" },
+    });
+    const backend = new CrabrunnerStageExecutionBackend({ client });
+
+    const result = await backend.execute({
+      job,
+      runnerInput: createRunnerInput(),
+    });
+
+    expect(client.calls).toEqual([]);
+    expect(result.evidence?.terminal).toEqual({
+      state: "enforcement_contract_missing",
+      message:
+        "missing or invalid delegated lane enforcement metadata: enforcement.budget.cachedTokenCostRatio, enforcement.budget.liveBudgetGraceRatio, enforcement.timing.timeoutMs",
+    });
+    expect(validateCrabrunnerLaneEnforcementContract(spec)).toEqual(
+      result.evidence?.terminal,
+    );
+  });
+
+  it("cancels delegated jobs by job id with process-group kill semantics on abort", async () => {
+    const controller = new AbortController();
+    controller.abort("stall_timeout");
+    const cancelRequests: Array<{
+      jobId: string;
+      request: CrabrunnerCancellationRequest;
+    }> = [];
+    const client = createClient({
+      admission: { status: "accepted", jobId: "job-cancel" },
+      terminal: { state: "succeeded" },
+      cancel: async (jobId, request) => {
+        cancelRequests.push({ jobId, request });
+        return {
+          state: "canceled",
+          message: "canceled by abort signal",
+          cancellation: {
+            requested: true,
+            signal: request.signal,
+            processGroup: request.processGroup,
+            killed: true,
+            failure: null,
+          },
+        };
+      },
+    });
+    const backend = new CrabrunnerStageExecutionBackend({ client });
+
+    const result = await backend.execute({
+      job: createJob(),
+      runnerInput: createRunnerInput({ signal: controller.signal }),
+    });
+
+    expect(client.calls).toEqual(["submit", "cancel:job-cancel"]);
+    expect(cancelRequests).toEqual([
+      {
+        jobId: "job-cancel",
+        request: {
+          reason: "abort_signal",
+          signal: "SIGTERM",
+          processGroup: true,
+          killGraceMs: 5_000,
+        },
+      },
+    ]);
+    expect(result.result.runAttempt.status).toBe("canceled_by_reconciliation");
+    expect(result.evidence?.terminal?.cancellation).toMatchObject({
+      killed: true,
+      processGroup: true,
+    });
+  });
+
+  it("cancels delegated jobs when abort fires during collection", async () => {
+    const controller = new AbortController();
+    const cancelRequests: Array<{
+      jobId: string;
+      request: CrabrunnerCancellationRequest;
+    }> = [];
+    const calls: string[] = [];
+    const submittedSpecs: CrabrunnerJobSpec[] = [];
+    const client: CrabrunnerSchedulerClient & {
+      calls: string[];
+      submittedSpecs: CrabrunnerJobSpec[];
+    } = {
+      calls,
+      submittedSpecs,
+      submit: vi.fn(async (spec) => {
+        calls.push("submit");
+        submittedSpecs.push(spec);
+        return { status: "accepted" as const, jobId: "job-race" };
+      }),
+      status: vi.fn(async (jobId) => {
+        calls.push(`status:${jobId}`);
+      }),
+      collect: vi.fn((jobId) => {
+        calls.push(`collect:${jobId}`);
+        controller.abort("stall_timeout");
+        return new Promise<CrabrunnerTerminalEvidence>(() => {});
+      }),
+      cancel: vi.fn(async (jobId, request) => {
+        calls.push(`cancel:${jobId}`);
+        cancelRequests.push({ jobId, request });
+        return {
+          state: "canceled" as const,
+          message: "canceled while collecting",
+          cancellation: {
+            requested: true,
+            signal: request.signal,
+            processGroup: request.processGroup,
+            killed: true,
+            failure: null,
+          },
+        };
+      }),
+    };
+    const backend = new CrabrunnerStageExecutionBackend({ client });
+
+    const result = await backend.execute({
+      job: createJob(),
+      runnerInput: createRunnerInput({ signal: controller.signal }),
+    });
+
+    expect(calls).toEqual([
+      "submit",
+      "status:job-race",
+      "collect:job-race",
+      "cancel:job-race",
+    ]);
+    expect(cancelRequests).toHaveLength(1);
+    expect(result.result.runAttempt.status).toBe("canceled_by_reconciliation");
+    expect(result.evidence?.terminal?.cancellation).toMatchObject({
+      killed: true,
+      processGroup: true,
+    });
+  });
+
+  it("surfaces kill failure distinctly when cancellation cannot be delivered", async () => {
+    const controller = new AbortController();
+    controller.abort("operator_stop");
+    const backend = new CrabrunnerStageExecutionBackend({
+      client: createClient({
+        admission: { status: "accepted", jobId: "job-kill-failed" },
+        terminal: { state: "succeeded" },
+      }),
+    });
+
+    const result = await backend.execute({
+      job: createJob(),
+      runnerInput: createRunnerInput({ signal: controller.signal }),
+    });
+
+    expect(result.result.runAttempt.status).toBe("failed");
+    expect(result.result.runAttempt.error).toContain("crabrunner_kill_failed");
+    expect(result.evidence?.terminal?.state).toBe("kill_failed");
+    expect(result.evidence?.terminal?.cancellation).toMatchObject({
+      requested: true,
+      processGroup: true,
+      killed: false,
+      failure: "cancel_not_supported",
+    });
+  });
+
   it("maps scheduler unavailability to failure instead of local success", async () => {
     const backend = new CrabrunnerStageExecutionBackend({
       client: {
@@ -316,12 +646,17 @@ describe("CrabrunnerStageExecutionBackend", () => {
 function createClient(input: {
   admission: CrabrunnerAdmissionResult;
   terminal: CrabrunnerTerminalEvidence;
+  cancel?: (
+    jobId: string,
+    request: CrabrunnerCancellationRequest,
+  ) => Promise<CrabrunnerTerminalEvidence>;
 }): CrabrunnerSchedulerClient & {
   calls: string[];
   submittedSpecs: CrabrunnerJobSpec[];
 } {
   const calls: string[] = [];
   const submittedSpecs: CrabrunnerJobSpec[] = [];
+  const cancel = input.cancel;
   return {
     calls,
     submittedSpecs,
@@ -337,6 +672,14 @@ function createClient(input: {
       calls.push(`collect:${jobId}`);
       return input.terminal;
     }),
+    ...(cancel === undefined
+      ? {}
+      : {
+          cancel: vi.fn(async (jobId, request) => {
+            calls.push(`cancel:${jobId}`);
+            return await cancel(jobId, request);
+          }),
+        }),
   };
 }
 
@@ -364,10 +707,39 @@ function createJob(): StageExecutionJobSpec {
       provider: null,
       reasoningEffort: null,
     },
+    enforcement: {
+      required: true,
+      budget: {
+        maxTokens: 50_000,
+        maxUsd: 4,
+        estimatedCostPer1kTokensUsd: 0.05,
+        cachedTokenCostRatio: 0.1,
+        liveBudgetGraceRatio: 0.2,
+      },
+      timing: {
+        timeoutMs: 600_000,
+        stallTimeoutMs: 120_000,
+        noProgressTurns: 3,
+        maxIterations: 10,
+      },
+      telemetry: {
+        heartbeatIntervalMs: 30_000,
+        progressIntervalMs: 30_000,
+        usageIntervalMs: 30_000,
+      },
+      cancellation: {
+        jobIdRequired: true,
+        cooperativeAbort: true,
+        processGroupKill: true,
+        killGraceMs: 5_000,
+      },
+    },
   };
 }
 
-function createRunnerInput(): AgentRunInput {
+function createRunnerInput(
+  overrides: Partial<Pick<AgentRunInput, "signal">> = {},
+): AgentRunInput {
   return {
     issue: {
       id: "issue-807",
@@ -385,5 +757,6 @@ function createRunnerInput(): AgentRunInput {
     },
     attempt: null,
     stageName: "implement",
+    ...overrides,
   };
 }

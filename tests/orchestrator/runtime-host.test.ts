@@ -8635,6 +8635,31 @@ describe("stage execution backend boundary", () => {
     expect(backend.inputs[0]!.job.identity.idempotencyKey).toMatch(
       /^stage-execution:ISSUE-1:investigate:0:crabrunner:[a-f0-9]{20}$/,
     );
+    expect(backend.inputs[0]!.job.enforcement).toMatchObject({
+      required: true,
+      budget: {
+        maxTokens: expect.any(Number),
+        maxUsd: expect.any(Number),
+        estimatedCostPer1kTokensUsd: expect.any(Number),
+      },
+      timing: {
+        timeoutMs: expect.any(Number),
+        stallTimeoutMs: expect.any(Number),
+        noProgressTurns: expect.any(Number),
+        maxIterations: expect.any(Number),
+      },
+      telemetry: {
+        heartbeatIntervalMs: expect.any(Number),
+        progressIntervalMs: expect.any(Number),
+        usageIntervalMs: expect.any(Number),
+      },
+      cancellation: {
+        jobIdRequired: true,
+        cooperativeAbort: true,
+        processGroupKill: true,
+        killGraceMs: expect.any(Number),
+      },
+    });
     expect(fakeRunner.runInputs).toHaveLength(1);
   });
 

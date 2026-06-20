@@ -1,9 +1,21 @@
 import { createHash } from "node:crypto";
 
-import type { StageDefinition } from "../config/types.js";
+import type {
+  StageDefinition,
+  StageExecutionProfile,
+  WorkflowHardStopsConfig,
+} from "../config/types.js";
 import type { Issue } from "../domain/model.js";
 import { resolveStageRunnerProviderSelector } from "../runners/provider-selection.js";
-import type { StageExecutionJobSpec } from "./backend.js";
+import type {
+  StageExecutionEnforcementContract,
+  StageExecutionJobSpec,
+} from "./backend.js";
+
+const DELEGATED_LANE_HEARTBEAT_INTERVAL_MS = 30_000;
+const DELEGATED_LANE_PROGRESS_INTERVAL_MS = 30_000;
+const DELEGATED_LANE_USAGE_INTERVAL_MS = 30_000;
+const DELEGATED_LANE_KILL_GRACE_MS = 5_000;
 
 export interface CreateStageExecutionJobSpecInput {
   issue: Issue;
@@ -13,6 +25,9 @@ export interface CreateStageExecutionJobSpecInput {
   defaultRunnerKind: string;
   defaultRunnerModel: string | null;
   defaultRunnerProvider?: string | null;
+  effectiveHardStops?: WorkflowHardStopsConfig | null;
+  defaultTurnTimeoutMs?: number | null;
+  defaultStallTimeoutMs?: number | null;
   baseRef: string;
   artifactRoot: string;
 }
@@ -39,6 +54,14 @@ export function createStageExecutionJobSpec(
     `${input.issue.id}:${stageKey}`;
   const profileId = execution?.profile ?? null;
   const targetHeadRef = input.issue.branchName ?? null;
+  const enforcement = createStageExecutionEnforcementContract({
+    backend,
+    execution,
+    stage: input.stage,
+    effectiveHardStops: input.effectiveHardStops ?? null,
+    defaultTurnTimeoutMs: input.defaultTurnTimeoutMs ?? null,
+    defaultStallTimeoutMs: input.defaultStallTimeoutMs ?? null,
+  });
   const runner = {
     runnerKind,
     model: runnerModel,
@@ -71,10 +94,61 @@ export function createStageExecutionJobSpec(
         profileId,
         baseRef: input.baseRef,
         targetHeadRef,
+        enforcement,
         runner,
       }),
     },
     runner,
+    enforcement,
+  };
+}
+
+function createStageExecutionEnforcementContract(input: {
+  backend: string;
+  execution: StageExecutionProfile | null;
+  stage: StageDefinition | null;
+  effectiveHardStops: WorkflowHardStopsConfig | null;
+  defaultTurnTimeoutMs: number | null;
+  defaultStallTimeoutMs: number | null;
+}): StageExecutionEnforcementContract {
+  const required = input.backend === "crabrunner";
+  const hardStops = input.effectiveHardStops;
+  return {
+    required,
+    budget: {
+      maxTokens:
+        input.execution?.budget.maxTokens ??
+        hardStops?.maxTokensPerUnit ??
+        null,
+      maxUsd:
+        input.execution?.budget.maxUsd ?? hardStops?.maxDollarBudgetUsd ?? null,
+      estimatedCostPer1kTokensUsd:
+        hardStops?.estimatedCostPer1kTokensUsd ?? null,
+      cachedTokenCostRatio: hardStops?.cachedTokenCostRatio ?? null,
+      liveBudgetGraceRatio: hardStops?.liveBudgetGraceRatio ?? null,
+    },
+    timing: {
+      timeoutMs:
+        input.execution?.timeoutMs ??
+        input.stage?.timeoutMs ??
+        input.defaultTurnTimeoutMs,
+      stallTimeoutMs: input.defaultStallTimeoutMs,
+      noProgressTurns: hardStops?.noProgressTurns ?? null,
+      maxIterations: hardStops?.maxIterations ?? null,
+    },
+    telemetry: {
+      heartbeatIntervalMs: required
+        ? DELEGATED_LANE_HEARTBEAT_INTERVAL_MS
+        : null,
+      progressIntervalMs: required ? DELEGATED_LANE_PROGRESS_INTERVAL_MS : null,
+      usageIntervalMs: required ? DELEGATED_LANE_USAGE_INTERVAL_MS : null,
+    },
+    cancellation: {
+      jobIdRequired: required,
+      cooperativeAbort: required,
+      processGroupKill: required,
+      killGraceMs: required ? DELEGATED_LANE_KILL_GRACE_MS : null,
+    },
   };
 }
 
@@ -88,6 +162,7 @@ export function createStageExecutionIdempotencyKey(input: {
   profileId: string | null;
   baseRef: string | null;
   targetHeadRef: string | null;
+  enforcement: StageExecutionEnforcementContract | null;
   runner: {
     runnerKind: string;
     model: string | null;
@@ -117,6 +192,7 @@ export function createStageExecutionIdempotencyKey(input: {
     profileId: input.profileId,
     baseRef: input.baseRef,
     targetHeadRef: input.targetHeadRef,
+    enforcement: input.enforcement ?? null,
     runner: input.runner,
   };
   const digest = createHash("sha256")

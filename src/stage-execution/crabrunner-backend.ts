@@ -18,7 +18,11 @@ export const CRABRUNNER_JOB_SPEC_VERSION = "symphony.crabrunner.job.v1";
 export type CrabrunnerTerminalState =
   | "succeeded"
   | "timed_out"
+  | "budget_exceeded"
+  | "stalled"
   | "canceled"
+  | "kill_failed"
+  | "enforcement_contract_missing"
   | "runner_failed"
   | "artifact_parse_failed"
   | "artifact_collection_failed"
@@ -46,6 +50,7 @@ export interface CrabrunnerJobSpec {
   mode: "submit" | "dry-run";
   identity: StageExecutionBackendInput["job"]["identity"];
   runner: StageExecutionBackendInput["job"]["runner"];
+  enforcement: StageExecutionBackendInput["job"]["enforcement"];
   role: StageExecutionBackendInput["job"]["role"];
   phase: StageExecutionBackendInput["job"]["phase"];
   issue: {
@@ -68,6 +73,25 @@ export interface CrabrunnerTerminalEvidence {
   workspacePath?: string | null;
   usage?: CrabrunnerUsage | null;
   message?: string | null;
+  progress?: {
+    heartbeatCount?: number;
+    progressEventCount?: number;
+    usageEventCount?: number;
+    lastHeartbeatAt?: string | null;
+    lastProgressAt?: string | null;
+    lastUsageAt?: string | null;
+  } | null;
+  process?: {
+    pid?: number | null;
+    processGroupId?: number | null;
+  } | null;
+  cancellation?: {
+    requested: boolean;
+    signal: string | null;
+    processGroup: boolean;
+    killed: boolean;
+    failure: string | null;
+  } | null;
 }
 
 export interface CrabrunnerStageExecutionEvidence {
@@ -85,6 +109,17 @@ export interface CrabrunnerSchedulerClient {
    */
   status(jobId: string): Promise<void>;
   collect(jobId: string): Promise<CrabrunnerTerminalEvidence>;
+  cancel?(
+    jobId: string,
+    request: CrabrunnerCancellationRequest,
+  ): Promise<CrabrunnerTerminalEvidence>;
+}
+
+export interface CrabrunnerCancellationRequest {
+  reason: "abort_signal";
+  signal: "SIGTERM";
+  processGroup: true;
+  killGraceMs: number;
 }
 
 export interface CrabrunnerStageExecutionBackendOptions {
@@ -118,6 +153,24 @@ export class CrabrunnerStageExecutionBackend
     input: StageExecutionBackendInput,
   ): Promise<StageExecutionBackendResult<CrabrunnerStageExecutionEvidence>> {
     const spec = createCrabrunnerJobSpec(input, this.dryRun);
+    const enforcementFailure = validateCrabrunnerLaneEnforcementContract(spec);
+    if (enforcementFailure !== null) {
+      return this.toBackendResult(input, {
+        admission: {
+          status: "rejected",
+          jobId: null,
+          reason: enforcementFailure.message ?? "enforcement_contract_missing",
+        },
+        terminal: enforcementFailure,
+        artifactRefs: [],
+        usage: null,
+        status: "failed",
+        error: `crabrunner_${enforcementFailure.state}: ${
+          enforcementFailure.message ?? enforcementFailure.state
+        }`,
+      });
+    }
+
     const admission = await this.submit(spec);
 
     if (admission.status === "rejected") {
@@ -142,7 +195,11 @@ export class CrabrunnerStageExecutionBackend
       });
     }
 
-    const terminal = await this.collectTerminalEvidence(admission.jobId);
+    const terminal = await this.collectTerminalEvidence(
+      admission.jobId,
+      input.runnerInput.signal,
+      spec,
+    );
     const status = mapCrabrunnerTerminalStateToRunAttemptPhase(terminal.state);
     const error =
       status === "succeeded"
@@ -175,6 +232,43 @@ export class CrabrunnerStageExecutionBackend
 
   private async collectTerminalEvidence(
     jobId: string,
+    signal: AbortSignal | undefined,
+    spec: CrabrunnerJobSpec,
+  ): Promise<CrabrunnerTerminalEvidence> {
+    if (signal?.aborted) {
+      return await this.cancelJob(jobId, spec);
+    }
+
+    if (signal === undefined) {
+      return await this.collectTerminalEvidenceWithoutCancellation(jobId);
+    }
+
+    let removeAbortListener = (): void => {};
+    const abortPromise = new Promise<CrabrunnerTerminalEvidence>((resolve) => {
+      const onAbort = () => {
+        resolve(this.cancelJob(jobId, spec));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+    });
+
+    if (signal.aborted) {
+      removeAbortListener();
+      return await this.cancelJob(jobId, spec);
+    }
+
+    try {
+      return await Promise.race([
+        this.collectTerminalEvidenceWithoutCancellation(jobId),
+        abortPromise,
+      ]);
+    } finally {
+      removeAbortListener();
+    }
+  }
+
+  private async collectTerminalEvidenceWithoutCancellation(
+    jobId: string,
   ): Promise<CrabrunnerTerminalEvidence> {
     try {
       // Status is a cheap fail-closed scheduler/readiness check. The collected
@@ -193,6 +287,48 @@ export class CrabrunnerStageExecutionBackend
       return {
         state: "artifact_collection_failed",
         message: `crabrunner_artifact_collection_failed: ${formatUnknownError(error)}`,
+      };
+    }
+  }
+
+  private async cancelJob(
+    jobId: string,
+    spec: CrabrunnerJobSpec,
+  ): Promise<CrabrunnerTerminalEvidence> {
+    const request: CrabrunnerCancellationRequest = {
+      reason: "abort_signal",
+      signal: "SIGTERM",
+      processGroup: true,
+      killGraceMs: spec.enforcement.cancellation.killGraceMs ?? 0,
+    };
+
+    if (this.client.cancel === undefined) {
+      return {
+        state: "kill_failed",
+        message: "crabrunner_cancel_unavailable",
+        cancellation: {
+          requested: true,
+          signal: request.signal,
+          processGroup: request.processGroup,
+          killed: false,
+          failure: "cancel_not_supported",
+        },
+      };
+    }
+
+    try {
+      return await this.client.cancel(jobId, request);
+    } catch (error) {
+      return {
+        state: "kill_failed",
+        message: `crabrunner_cancel_failed: ${formatUnknownError(error)}`,
+        cancellation: {
+          requested: true,
+          signal: request.signal,
+          processGroup: request.processGroup,
+          killed: false,
+          failure: formatUnknownError(error),
+        },
       };
     }
   }
@@ -235,6 +371,7 @@ export function createCrabrunnerJobSpec(
     mode: dryRun ? "dry-run" : "submit",
     identity: input.job.identity,
     runner: input.job.runner,
+    enforcement: input.job.enforcement,
     role: input.job.role,
     phase: input.job.phase,
     issue: {
@@ -246,6 +383,100 @@ export function createCrabrunnerJobSpec(
   };
 }
 
+export function validateCrabrunnerLaneEnforcementContract(
+  spec: CrabrunnerJobSpec,
+): CrabrunnerTerminalEvidence | null {
+  if (!spec.enforcement.required) {
+    return null;
+  }
+
+  const invalid: string[] = [];
+  if (
+    spec.enforcement.budget.maxTokens === null ||
+    spec.enforcement.budget.maxTokens <= 0
+  ) {
+    invalid.push("enforcement.budget.maxTokens");
+  }
+  if (
+    spec.enforcement.budget.maxUsd === null ||
+    spec.enforcement.budget.maxUsd <= 0
+  ) {
+    invalid.push("enforcement.budget.maxUsd");
+  }
+  if (
+    spec.enforcement.budget.estimatedCostPer1kTokensUsd === null ||
+    spec.enforcement.budget.estimatedCostPer1kTokensUsd <= 0
+  ) {
+    invalid.push("enforcement.budget.estimatedCostPer1kTokensUsd");
+  }
+  if (
+    spec.enforcement.budget.cachedTokenCostRatio === null ||
+    spec.enforcement.budget.cachedTokenCostRatio < 0 ||
+    spec.enforcement.budget.cachedTokenCostRatio > 1
+  ) {
+    invalid.push("enforcement.budget.cachedTokenCostRatio");
+  }
+  if (
+    spec.enforcement.budget.liveBudgetGraceRatio === null ||
+    spec.enforcement.budget.liveBudgetGraceRatio < 0 ||
+    spec.enforcement.budget.liveBudgetGraceRatio > 1
+  ) {
+    invalid.push("enforcement.budget.liveBudgetGraceRatio");
+  }
+  if (
+    spec.enforcement.timing.timeoutMs === null ||
+    spec.enforcement.timing.timeoutMs <= 0
+  ) {
+    invalid.push("enforcement.timing.timeoutMs");
+  }
+  if (
+    spec.enforcement.timing.stallTimeoutMs === null ||
+    spec.enforcement.timing.stallTimeoutMs <= 0
+  ) {
+    invalid.push("enforcement.timing.stallTimeoutMs");
+  }
+  if (
+    spec.enforcement.timing.noProgressTurns === null ||
+    spec.enforcement.timing.noProgressTurns <= 0
+  ) {
+    invalid.push("enforcement.timing.noProgressTurns");
+  }
+  if (
+    spec.enforcement.timing.maxIterations === null ||
+    spec.enforcement.timing.maxIterations <= 0
+  ) {
+    invalid.push("enforcement.timing.maxIterations");
+  }
+  if (
+    spec.enforcement.telemetry.heartbeatIntervalMs === null ||
+    spec.enforcement.telemetry.heartbeatIntervalMs <= 0 ||
+    spec.enforcement.telemetry.progressIntervalMs === null ||
+    spec.enforcement.telemetry.progressIntervalMs <= 0 ||
+    spec.enforcement.telemetry.usageIntervalMs === null ||
+    spec.enforcement.telemetry.usageIntervalMs <= 0
+  ) {
+    invalid.push("enforcement.telemetry.*IntervalMs");
+  }
+  if (
+    !spec.enforcement.cancellation.jobIdRequired ||
+    !spec.enforcement.cancellation.cooperativeAbort ||
+    !spec.enforcement.cancellation.processGroupKill ||
+    spec.enforcement.cancellation.killGraceMs === null ||
+    spec.enforcement.cancellation.killGraceMs < 0
+  ) {
+    invalid.push("enforcement.cancellation");
+  }
+
+  if (invalid.length === 0) {
+    return null;
+  }
+
+  return {
+    state: "enforcement_contract_missing",
+    message: `missing or invalid delegated lane enforcement metadata: ${invalid.join(", ")}`,
+  };
+}
+
 function mapCrabrunnerTerminalStateToRunAttemptPhase(
   state: CrabrunnerTerminalState,
 ): RunAttemptPhase {
@@ -254,10 +485,15 @@ function mapCrabrunnerTerminalStateToRunAttemptPhase(
       return "succeeded";
     case "timed_out":
       return "timed_out";
+    case "stalled":
+      return "stalled";
     case "canceled":
       return "canceled_by_reconciliation";
     case "usage_unavailable":
       return "succeeded";
+    case "budget_exceeded":
+    case "kill_failed":
+    case "enforcement_contract_missing":
     case "runner_failed":
     case "artifact_parse_failed":
     case "artifact_collection_failed":
@@ -334,6 +570,9 @@ function createCrabrunnerAgentResult(input: {
               terminalMessage: terminal.message ?? null,
               usageStatus: terminal.usage?.status ?? "unknown",
               artifactRefs,
+              progress: terminal.progress ?? null,
+              process: terminal.process ?? null,
+              cancellation: terminal.cancellation ?? null,
             }),
       codexInputTokens: legacyInputTokens,
       codexOutputTokens: legacyOutputTokens,
