@@ -105,6 +105,7 @@ import type {
   HardStopDecision,
   HardStopTrigger,
 } from "../policy/hard-stops.js";
+import { partitionPortfolioEligibleIssues } from "../portfolio/eligibility.js";
 import type { HeadlessCouncilGateResult } from "../review/headless-council-gate.js";
 import { buildReviewJournalEntries } from "../review/review-journal-events.js";
 import { normalizeAccountEmail } from "../shared/account-email.js";
@@ -2738,8 +2739,43 @@ export class OrchestratorCore {
       });
     }
 
+    const portfolioPartition = partitionPortfolioEligibleIssues(issues);
+    for (const held of portfolioPartition.held) {
+      this.recordDispatchVerdict({
+        issueId: held.issue.id,
+        issueIdentifier: held.issue.identifier,
+        disposition: "gate",
+        reasonCode: held.result.reasonCode,
+        remedy: held.result.remedy,
+        details: {
+          classifier_version: held.result.classification.classifierVersion,
+          classification_status: held.result.classification.status,
+          classification_confidence: held.result.classification.confidence,
+          observed_project_id: held.result.classification.observedProject.id,
+          observed_project_slug:
+            held.result.classification.observedProject.slugId,
+          observed_project_name:
+            held.result.classification.observedProject.name,
+          target_project_id:
+            held.result.classification.targetProject?.id ?? null,
+          target_project_name:
+            held.result.classification.targetProject?.name ?? null,
+          intake_project_id:
+            held.result.classification.intakeProject?.id ?? null,
+          why_uncertain: held.result.classification.whyUncertain,
+          candidate_projects: held.result.classification.candidates.map(
+            (candidate) => ({
+              id: candidate.id,
+              name: candidate.name,
+            }),
+          ),
+        },
+      });
+    }
+
+    const selectableIssues = portfolioPartition.eligible;
     const computedDispatchOrder =
-      await this.computeDispatchOrderForPoll(issues);
+      await this.computeDispatchOrderForPoll(selectableIssues);
     const dispatchedIssueIds: string[] = [];
     const dispatchAttempts: DispatchAttemptObservation[] = [];
     const modeDecisions: RightSizingDecision[] = [];
@@ -2747,15 +2783,15 @@ export class OrchestratorCore {
     const admittedSnapshots = this.buildRunningAdmissionSnapshots();
     const sortedIssuesFromOrder = this.issuesFromComputedOrder(
       computedDispatchOrder,
-      issues,
+      selectableIssues,
     );
     const sortedIssues = await this.requireComputedOrderDispatchCandidates({
       candidates: sortedIssuesFromOrder,
       computedOrder: computedDispatchOrder,
-      sourceIssues: issues,
+      sourceIssues: selectableIssues,
     });
     if (sortedIssues === null) {
-      this.trackDispatchStarvation(issues.length, 0);
+      this.trackDispatchStarvation(selectableIssues.length, 0);
       await this.recordQueueBaselineSample({
         consideredIssues: [],
         dispatchPicks: [],
@@ -2797,7 +2833,7 @@ export class OrchestratorCore {
             .map((exclusion) => exclusion.issue_identifier),
         },
       });
-      this.trackDispatchStarvation(issues.length, 0, gate);
+      this.trackDispatchStarvation(selectableIssues.length, 0, gate);
       await this.recordQueueBaselineSample({
         consideredIssues: [],
         dispatchPicks: [],
@@ -3007,7 +3043,7 @@ export class OrchestratorCore {
       expectedIssue: computedHeadReachedDispatchBoundary
         ? computedHeadIssue
         : null,
-      issues,
+      issues: selectableIssues,
       dispatchPicks: dispatchedIssueIds,
       dispatchAttempts,
     });

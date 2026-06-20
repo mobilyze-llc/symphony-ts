@@ -48,12 +48,18 @@ import {
   isPipelineSentinelValue,
   isPlanControlVerb,
 } from "../orchestrator/intent.js";
+import {
+  InMemoryLinearWebhookDeduper,
+  type LinearWebhookAcceptedDelivery,
+  acceptLinearWebhookDelivery,
+} from "../portfolio/linear-webhook-reconciler.js";
 import { fetchClaudeUsageFromCli } from "./dashboard-claude-usage.js";
 import { toErrorMessage } from "./dashboard-format.js";
 import {
   PayloadTooLargeError,
   isSnapshotTimeoutError,
   readRequestBody,
+  readRequestBodyBuffer,
   readRequestBodyText,
   readSnapshot,
   writeHtml,
@@ -421,6 +427,9 @@ export interface DashboardServerHost {
   getPipelineStatus?():
     | PipelineStatusResponse
     | Promise<PipelineStatusResponse>;
+  handleLinearWebhookDelivery?(
+    delivery: LinearWebhookAcceptedDelivery,
+  ): void | Promise<void>;
 }
 
 const anchorPlacementSchema = z.discriminatedUnion("kind", [
@@ -562,6 +571,14 @@ function hasJsonContentType(request: IncomingMessage): boolean {
     return false;
   }
   return header.split(";")[0]?.trim().toLowerCase() === "application/json";
+}
+
+function readHeader(request: IncomingMessage, name: string): string | null {
+  const value = request.headers[name.toLowerCase()];
+  if (Array.isArray(value)) {
+    return value[0] ?? null;
+  }
+  return typeof value === "string" ? value : null;
 }
 
 function isAuthorizedAnchorFieldEditRequest(
@@ -778,6 +795,7 @@ export interface DashboardServerOptions {
   liveUpdatesEnabled?: boolean;
   operatorAuth?: DashboardOperatorAuthOptions;
   anchorFieldEditSecret?: string | null;
+  linearWebhookSigningSecret?: string | null;
   /** GitHub repo slug (e.g. "org/repo"). Falls back to REPO_URL env var. */
   githubRepoSlug?: string;
   /** Injectable gh CLI executor for testing. Defaults to child_process.execFile("gh", ...). */
@@ -882,6 +900,7 @@ export function createDashboardRequestHandler(
   let githubQueueCache: GitHubQueueCache | null = null;
   const execCommand = options.execCommand ?? defaultExecCommand;
   const operatorAuth = resolveOperatorAuth(options);
+  const linearWebhookDeduper = new InMemoryLinearWebhookDeduper();
 
   function clearSwitchUsageCache(): void {
     claudeUsageCache = null;
@@ -912,7 +931,7 @@ export function createDashboardRequestHandler(
       response.setHeader("access-control-allow-methods", "GET, POST, OPTIONS");
       response.setHeader(
         "access-control-allow-headers",
-        "Content-Type, Authorization, X-Symphony-Anchor-Secret",
+        "Content-Type, Authorization, X-Symphony-Anchor-Secret, Linear-Delivery, Linear-Event, Linear-Signature",
       );
 
       // Handle CORS preflight
@@ -1463,6 +1482,77 @@ export function createDashboardRequestHandler(
                 ? 409
                 : 200;
         writeJson(response, statusCode, result);
+        return;
+      }
+
+      if (url.pathname === "/api/v1/linear/webhook") {
+        if (method !== "POST") {
+          writeMethodNotAllowed(response, ["POST"]);
+          return;
+        }
+
+        if (options.host.handleLinearWebhookDelivery === undefined) {
+          writeJsonError(response, 501, "not_implemented", {
+            message:
+              "Linear webhook reconciliation is not supported by this host.",
+          });
+          return;
+        }
+
+        const signingSecret =
+          options.linearWebhookSigningSecret ??
+          process.env.SYMPHONY_LINEAR_WEBHOOK_SECRET ??
+          null;
+        if (signingSecret === null || signingSecret.trim() === "") {
+          writeJsonError(response, 503, "webhook_secret_unconfigured", {
+            message:
+              "Linear webhook reconciliation requires SYMPHONY_LINEAR_WEBHOOK_SECRET or linearWebhookSigningSecret.",
+          });
+          return;
+        }
+
+        if (!hasJsonContentType(request)) {
+          writeUnsupportedMediaType(response);
+          return;
+        }
+
+        const rawBody = await readRequestBodyBuffer(request);
+        const delivery = acceptLinearWebhookDelivery({
+          headers: {
+            get: (name) => readHeader(request, name),
+          },
+          rawBody,
+          signingSecret,
+          deduper: linearWebhookDeduper,
+        });
+
+        if (delivery.status === "rejected") {
+          const statusCode = delivery.reason === "invalid_json" ? 400 : 401;
+          writeJsonError(response, statusCode, "invalid_linear_webhook", {
+            message: `Linear webhook rejected: ${delivery.reason}.`,
+          });
+          return;
+        }
+
+        if (delivery.status === "duplicate") {
+          writeJson(response, 202, {
+            accepted: true,
+            duplicate: true,
+            delivery_id: delivery.deliveryId,
+          });
+          return;
+        }
+
+        try {
+          await options.host.handleLinearWebhookDelivery(delivery);
+        } catch (error) {
+          linearWebhookDeduper.delete(delivery.deliveryId);
+          throw error;
+        }
+        writeJson(response, 202, {
+          accepted: true,
+          delivery_id: delivery.deliveryId,
+        });
         return;
       }
 

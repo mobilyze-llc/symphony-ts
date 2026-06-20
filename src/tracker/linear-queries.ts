@@ -8,6 +8,14 @@ const ISSUE_FIELDS = `
   url
   createdAt
   updatedAt
+  team {
+    key
+  }
+  project {
+    id
+    slugId
+    name
+  }
   state {
     name
   }
@@ -572,6 +580,7 @@ export const LINEAR_ISSUE_DETAILS_BY_IDS_QUERY = `
         project {
           id
           slugId
+          name
         }
         labels {
           nodes {
@@ -621,6 +630,7 @@ export const LINEAR_OPEN_ISSUES_BY_TITLE_QUERY = `
         project {
           id
           slugId
+          name
         }
         labels {
           nodes {
@@ -661,18 +671,9 @@ export const LINEAR_ISSUE_LABELS_BY_NAMES_QUERY = `
 export const LINEAR_ISSUE_DETAILS_UPDATE_MUTATION = `
   mutation SymphonyIssueDetailsUpdate(
     $issueId: String!
-    $description: String!
-    $labelIds: [String!]
-    $parentId: String
+    $input: IssueUpdateInput!
   ) {
-    issueUpdate(
-      id: $issueId
-      input: {
-        description: $description
-        labelIds: $labelIds
-        parentId: $parentId
-      }
-    ) {
+    issueUpdate(id: $issueId, input: $input) {
       success
       issue {
         id

@@ -55,6 +55,10 @@ export interface Issue {
   identifier: string;
   title: string;
   description: string | null;
+  teamKey?: string | null;
+  projectId?: string | null;
+  projectSlug?: string | null;
+  projectName?: string | null;
   priority: number | null;
   state: string;
   branchName: string | null;

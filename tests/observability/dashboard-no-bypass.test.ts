@@ -97,6 +97,7 @@ describe("dashboard no-bypass boundary (SYMPH-408)", () => {
       "requestDispatchFenceClear",
       "getPipelineStatus",
       "requestAnchorFieldEdit",
+      "handleLinearWebhookDelivery",
     ]);
     for (const call of hostCalls) {
       expect

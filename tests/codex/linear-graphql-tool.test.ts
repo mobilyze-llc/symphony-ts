@@ -197,6 +197,131 @@ describe("createLinearGraphqlDynamicTool", () => {
     expect(request.variables.body).toBe(payload);
   });
 
+  it("rejects direct issue project writes through raw GraphQL", async () => {
+    const fetchFn = vi.fn<typeof fetch>();
+    const tool = createLinearGraphqlDynamicTool({
+      endpoint: "https://api.linear.app/graphql",
+      apiKey: "linear-token",
+      fetchFn,
+    });
+
+    const unsafeWrites = [
+      'mutation BatchUpdate($projectId: String!) { issueBatchUpdate(ids: ["issue-1"], input: { projectId: $projectId }) { success } }',
+      'mutation CreateIssue($projectId: String!) { issueCreate(input: { teamId: "team-1", title: "T", projectId: $projectId }) { success } }',
+      "mutation UpdateIssue($issueId: String!, $projectId: String!) { issueUpdate(id: $issueId, input: { projectId: $projectId }) { success } }",
+      'mutation Spread($projectId: String!) { ...IssueWrite } fragment IssueWrite on Mutation { issueCreate(input: { teamId: "team-1", title: "T", projectId: $projectId }) { success } }',
+    ];
+
+    for (const query of unsafeWrites) {
+      await expect(tool.execute({ query })).resolves.toMatchObject({
+        success: false,
+        error: {
+          code: "invalid_input",
+          message: expect.stringContaining("bypass portfolio classification"),
+        },
+      });
+    }
+
+    await expect(
+      tool.execute({
+        query:
+          "mutation UpdateIssue($issueId: String!, $input: IssueUpdateInput!) { issueUpdate(id: $issueId, input: $input) { success } }",
+        variables: {
+          issueId: "issue-1",
+          input: {
+            description: "body update",
+            projectId: "project-1",
+          },
+        },
+      }),
+    ).resolves.toMatchObject({
+      success: false,
+      error: {
+        code: "invalid_input",
+        message: expect.stringContaining("bypass portfolio classification"),
+      },
+    });
+
+    await expect(
+      tool.execute({
+        query:
+          "mutation BatchUpdate($input: IssueBatchUpdateInput!) { issueBatchUpdate(input: $input) { success } }",
+        variables: {
+          input: {
+            projectId: "project-1",
+          },
+        },
+      }),
+    ).resolves.toMatchObject({
+      success: false,
+      error: {
+        code: "invalid_input",
+        message: expect.stringContaining("bypass portfolio classification"),
+      },
+    });
+
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("does not reject nested non-input projectId metadata in issue variables", async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(
+          JSON.stringify({ data: { issueUpdate: { success: true } } }),
+        ),
+      );
+    const tool = createLinearGraphqlDynamicTool({
+      endpoint: "https://api.linear.app/graphql",
+      apiKey: "linear-token",
+      fetchFn,
+    });
+
+    await expect(
+      tool.execute({
+        query:
+          "mutation UpdateIssue($issueId: String!, $input: IssueUpdateInput!) { issueUpdate(id: $issueId, input: $input) { success } }",
+        variables: {
+          issueId: "issue-1",
+          input: {
+            description: "body update",
+            metadata: {
+              projectId: "external-reference",
+            },
+          },
+        },
+      }),
+    ).resolves.toMatchObject({ success: true });
+  });
+
+  it("allows variable-backed issue content writes without project assignment", async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(
+          JSON.stringify({ data: { issueUpdate: { success: true } } }),
+        ),
+      );
+    const tool = createLinearGraphqlDynamicTool({
+      endpoint: "https://api.linear.app/graphql",
+      apiKey: "linear-token",
+      fetchFn,
+    });
+
+    await expect(
+      tool.execute({
+        query:
+          "mutation UpdateIssue($issueId: String!, $input: IssueUpdateInput!) { issueUpdate(id: $issueId, input: $input) { success } }",
+        variables: {
+          issueId: "issue-1",
+          input: {
+            description: "body update",
+          },
+        },
+      }),
+    ).resolves.toMatchObject({ success: true });
+  });
+
   it("allows content fields in read selections", async () => {
     const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
       jsonResponse({

@@ -79,6 +79,7 @@ export interface LinearIssueReference {
   teamKey: string | null;
   projectId: string | null;
   projectSlug: string | null;
+  projectName?: string | null;
   labels: string[];
   parent: {
     id: string;
@@ -209,6 +210,7 @@ interface LinearIssueDetailsNode {
   project?: {
     id?: string;
     slugId?: string | null;
+    name?: string | null;
   } | null;
   labels?: {
     nodes?: Array<{ name?: string | null }>;
@@ -819,16 +821,22 @@ export class LinearTrackerClient implements IssueTracker {
   async updateIssue(input: {
     issueId: string;
     description: string;
-    labelIds: string[];
+    labelIds?: string[];
+    projectId?: string;
     parentId?: string;
   }): Promise<{ id: string; identifier: string; title: string }> {
     const response = await this.postGraphql<LinearIssueDetailsUpdateData>(
       LINEAR_ISSUE_DETAILS_UPDATE_MUTATION,
       {
         issueId: input.issueId,
-        description: input.description,
-        labelIds: input.labelIds,
-        ...(input.parentId !== undefined ? { parentId: input.parentId } : {}),
+        input: {
+          description: input.description,
+          ...(input.labelIds !== undefined ? { labelIds: input.labelIds } : {}),
+          ...(input.projectId !== undefined
+            ? { projectId: input.projectId }
+            : {}),
+          ...(input.parentId !== undefined ? { parentId: input.parentId } : {}),
+        },
       },
     );
 
@@ -1535,6 +1543,8 @@ function normalizeLinearIssueReference(node: unknown): LinearIssueReference {
     projectId: typeof raw.project?.id === "string" ? raw.project.id : null,
     projectSlug:
       typeof raw.project?.slugId === "string" ? raw.project.slugId : null,
+    projectName:
+      typeof raw.project?.name === "string" ? raw.project.name : null,
     labels:
       raw.labels?.nodes
         ?.flatMap((label) =>

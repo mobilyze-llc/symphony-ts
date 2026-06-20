@@ -20,6 +20,14 @@ interface LinearIssueNode {
   url?: unknown;
   createdAt?: unknown;
   updatedAt?: unknown;
+  team?: {
+    key?: unknown;
+  } | null;
+  project?: {
+    id?: unknown;
+    slugId?: unknown;
+    name?: unknown;
+  } | null;
   state?: {
     name?: unknown;
   } | null;
@@ -60,11 +68,22 @@ export function normalizeLinearIssue(node: unknown): Issue {
   const title = requireString(issue.title, "issue.title");
   const state = requireString(issue.state?.name, "issue.state.name");
 
+  const portfolioMetadata =
+    issue.team !== undefined || issue.project !== undefined
+      ? {
+          teamKey: optionalString(issue.team?.key),
+          projectId: optionalString(issue.project?.id),
+          projectSlug: optionalString(issue.project?.slugId),
+          projectName: optionalString(issue.project?.name),
+        }
+      : {};
+
   return {
     id,
     identifier,
     title,
     description: optionalString(issue.description),
+    ...portfolioMetadata,
     priority: normalizePriority(issue.priority),
     state,
     branchName: optionalString(issue.branchName),

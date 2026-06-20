@@ -1,3 +1,7 @@
+import {
+  classifyPortfolioIssue,
+  upsertPortfolioClassificationBlock,
+} from "../portfolio/classifier.js";
 import type { SupervisionFinding } from "./supervision.js";
 
 export interface TrackerIssueWriteRequest {
@@ -25,6 +29,7 @@ export interface TrackerIssueReference {
   teamKey: string | null;
   projectId: string | null;
   projectSlug: string | null;
+  projectName?: string | null;
   labels: string[];
   parent: {
     id: string;
@@ -59,6 +64,7 @@ export interface TrackerIssueWriterClient {
     issueId: string;
     description: string;
     labelIds: string[];
+    projectId?: string;
     parentId?: string;
   }): Promise<{ id: string; identifier: string; title: string }>;
 }
@@ -128,9 +134,9 @@ async function upsertTrackerIssueFromBoundary(input: {
   }
   if (
     primaryIssue.teamId === null ||
+    primaryIssue.teamId.trim() === "" ||
     primaryIssue.teamKey === null ||
-    primaryIssue.teamKey.trim() === "" ||
-    primaryIssue.projectId === null
+    primaryIssue.teamKey.trim() === ""
   ) {
     throw new Error(
       `Tracker write source issue ${primaryIssue.identifier} is missing team/project context.`,
@@ -149,10 +155,31 @@ async function upsertTrackerIssueFromBoundary(input: {
     parent,
     now: input.now(),
   });
+  const classification = classifyPortfolioIssue({
+    identifier: primaryIssue.identifier,
+    title: summary.title,
+    description,
+    teamKey: primaryIssue.teamKey,
+    projectId: primaryIssue.projectId,
+    projectSlug: primaryIssue.projectSlug,
+    projectName: primaryIssue.projectName ?? null,
+  });
+  const targetProject =
+    classification.targetProject ?? classification.intakeProject;
+  const targetProjectId = targetProject?.id ?? primaryIssue.projectId;
+  if (targetProjectId === null) {
+    throw new Error(
+      `Tracker write source issue ${primaryIssue.identifier} is missing project context.`,
+    );
+  }
+  const descriptionWithPortfolio =
+    classification.status === "not_applicable"
+      ? description
+      : upsertPortfolioClassificationBlock(description, classification);
   const existing = await findMatchingOpenIssue({
     client: input.client,
     title: summary.title,
-    projectId: primaryIssue.projectId,
+    projectId: targetProjectId,
     terminalStates: input.terminalStates,
     marker: buildSourceMarker(input.request),
   });
@@ -160,8 +187,9 @@ async function upsertTrackerIssueFromBoundary(input: {
   if (existing !== null) {
     const updated = await input.client.updateIssue({
       issueId: existing.id,
-      description,
+      description: descriptionWithPortfolio,
       labelIds: resolvedLabelIds,
+      projectId: targetProjectId,
       ...(parent !== null ? { parentId: parent.id } : {}),
     });
     return {
@@ -175,9 +203,9 @@ async function upsertTrackerIssueFromBoundary(input: {
   const created = await input.client.createIssue({
     teamId: primaryIssue.teamId,
     title: summary.title,
-    projectId: primaryIssue.projectId,
+    projectId: targetProjectId,
     labelIds: resolvedLabelIds,
-    description,
+    description: descriptionWithPortfolio,
     ...(parent !== null ? { parentId: parent.id } : {}),
   });
   return {

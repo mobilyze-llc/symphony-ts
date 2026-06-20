@@ -6,6 +6,11 @@ import {
   type TrackerIssueWriterClient,
   writeTrackerIssueFromBoundary,
 } from "../../src/orchestrator/tracker-write.js";
+import { PORTFOLIO_TAXONOMY_PROJECTS } from "../../src/portfolio/taxonomy.js";
+
+const TRACKER_PROJECT = PORTFOLIO_TAXONOMY_PROJECTS.find(
+  (project) => project.name === "Runtime Operations & Admission Safety",
+)!;
 
 describe("writeTrackerIssueFromBoundary", () => {
   it("creates a cold-readable follow-up issue with parent linkage", async () => {
@@ -58,7 +63,7 @@ describe("writeTrackerIssueFromBoundary", () => {
     expect(createIssue).toHaveBeenCalledWith(
       expect.objectContaining({
         teamId: "team-1",
-        projectId: "project-1",
+        projectId: TRACKER_PROJECT.id,
         parentId: "parent-1",
         labelIds: expect.arrayContaining([
           "label-supervision",
@@ -121,7 +126,7 @@ describe("writeTrackerIssueFromBoundary", () => {
             "<!-- boundary:explicit_finding:running:actual_write_collision -->",
             "<!-- source-issue-ids:1,2 -->",
           ].join("\n"),
-          projectId: "project-1",
+          projectId: TRACKER_PROJECT.id,
           teamId: "team-1",
           parent: null,
           labels: [],
@@ -150,7 +155,7 @@ describe("writeTrackerIssueFromBoundary", () => {
           title:
             "Dispatcher follow-up: actual_write_collision for ISSUE-1 + ISSUE-2",
           description: "## Scope\nUnrelated work item.",
-          projectId: "project-1",
+          projectId: TRACKER_PROJECT.id,
           teamId: "team-1",
           parent: null,
           labels: [],
@@ -200,7 +205,7 @@ describe("writeTrackerIssueFromBoundary", () => {
     expect(createIssue).toHaveBeenCalledWith(
       expect.objectContaining({
         teamId: "team-1",
-        projectId: "project-1",
+        projectId: TRACKER_PROJECT.id,
         parentId: "parent-1",
         labelIds: expect.arrayContaining([
           "label-mode-prototype",
@@ -232,7 +237,7 @@ describe("writeTrackerIssueFromBoundary", () => {
             "<!-- boundary:promotion_boundary:prototype promotion for ISSUE-1 -->",
             "<!-- source-issue-ids:1 -->",
           ].join("\n"),
-          projectId: "project-1",
+          projectId: TRACKER_PROJECT.id,
           teamId: "team-1",
           parent: null,
           labels: [],
@@ -459,8 +464,9 @@ function createSourceIssue(
     url: "https://linear.app/mobilyze-llc/issue/ISSUE-1",
     teamId: "team-1",
     teamKey: "SYMPH",
-    projectId: "project-1",
-    projectSlug: "symphony",
+    projectId: TRACKER_PROJECT.id,
+    projectSlug: TRACKER_PROJECT.slugId,
+    projectName: TRACKER_PROJECT.name,
     labels: ["risk:high"],
     parent: {
       id: "parent-1",

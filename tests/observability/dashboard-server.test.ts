@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { type IncomingMessage, request as httpRequest } from "node:http";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -814,7 +815,7 @@ describe("dashboard server", () => {
       "GET, POST, OPTIONS",
     );
     expect(response.headers["access-control-allow-headers"]).toBe(
-      "Content-Type, Authorization, X-Symphony-Anchor-Secret",
+      "Content-Type, Authorization, X-Symphony-Anchor-Secret, Linear-Delivery, Linear-Event, Linear-Signature",
     );
   });
 
@@ -836,7 +837,7 @@ describe("dashboard server", () => {
       "GET, POST, OPTIONS",
     );
     expect(response.headers["access-control-allow-headers"]).toBe(
-      "Content-Type, Authorization, X-Symphony-Anchor-Secret",
+      "Content-Type, Authorization, X-Symphony-Anchor-Secret, Linear-Delivery, Linear-Event, Linear-Signature",
     );
   });
 
@@ -1003,6 +1004,110 @@ describe("dashboard server", () => {
     });
     expect(notAllowed.statusCode).toBe(405);
     expect(notAllowed.headers["access-control-allow-origin"]).toBe("*");
+  });
+
+  it("accepts verified Linear webhooks once and deduplicates repeated deliveries", async () => {
+    const deliveries: string[] = [];
+    const signingSecret = "linear-secret";
+    const server = await startDashboardServer({
+      port: 0,
+      linearWebhookSigningSecret: signingSecret,
+      host: createHost({
+        handleLinearWebhookDelivery: (delivery) => {
+          deliveries.push(delivery.deliveryId);
+        },
+      }),
+    });
+    servers.push(server);
+
+    const body = JSON.stringify({
+      type: "Issue",
+      action: "update",
+      webhookTimestamp: Date.now(),
+      data: { id: "issue-1" },
+    });
+    const headers = {
+      "content-type": "application/json",
+      "linear-delivery": "delivery-1",
+      "linear-signature": signLinearWebhook(body, signingSecret),
+    };
+
+    const first = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/linear/webhook",
+      body,
+      headers,
+    });
+    expect(first.statusCode).toBe(202);
+    expect(JSON.parse(first.body)).toMatchObject({
+      accepted: true,
+      delivery_id: "delivery-1",
+    });
+
+    const second = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/linear/webhook",
+      body,
+      headers,
+    });
+    expect(second.statusCode).toBe(202);
+    expect(JSON.parse(second.body)).toMatchObject({
+      accepted: true,
+      duplicate: true,
+      delivery_id: "delivery-1",
+    });
+    expect(deliveries).toEqual(["delivery-1"]);
+  });
+
+  it("releases failed Linear webhook deliveries so retries can repair", async () => {
+    const deliveries: string[] = [];
+    const signingSecret = "linear-secret";
+    const server = await startDashboardServer({
+      port: 0,
+      linearWebhookSigningSecret: signingSecret,
+      host: createHost({
+        handleLinearWebhookDelivery: (delivery) => {
+          deliveries.push(delivery.deliveryId);
+          if (deliveries.length === 1) {
+            throw new Error("temporary repair failure");
+          }
+        },
+      }),
+    });
+    servers.push(server);
+
+    const body = JSON.stringify({
+      type: "Issue",
+      action: "update",
+      webhookTimestamp: Date.now(),
+      data: { id: "issue-1" },
+    });
+    const headers = {
+      "content-type": "application/json",
+      "linear-delivery": "delivery-retry",
+      "linear-signature": signLinearWebhook(body, signingSecret),
+    };
+
+    const first = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/linear/webhook",
+      body,
+      headers,
+    });
+    expect(first.statusCode).toBe(500);
+
+    const second = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/linear/webhook",
+      body,
+      headers,
+    });
+    expect(second.statusCode).toBe(202);
+    expect(JSON.parse(second.body)).toMatchObject({
+      accepted: true,
+      delivery_id: "delivery-retry",
+    });
+    expect(deliveries).toEqual(["delivery-retry", "delivery-retry"]);
   });
 });
 
@@ -1222,6 +1327,10 @@ function sendRequest(
     }
     request.end();
   });
+}
+
+function signLinearWebhook(rawBody: string, signingSecret: string): string {
+  return createHmac("sha256", signingSecret).update(rawBody).digest("hex");
 }
 
 async function openEventStream(

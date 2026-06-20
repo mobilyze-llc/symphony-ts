@@ -62,6 +62,8 @@ This Mobilyze fork intentionally diverges from upstream Symphony where the local
 
 Treat `SPEC.upstream.md` as the upstream baseline and compatibility reference, not as a veto on local Mobilyze deltas. When fork behavior differs from upstream, keep the local guidance explicit and cite the spine decision instead of silently drifting. If local guidance, code comments, or tests conflict with `SPEC.mobilyze.md` or the spine, follow the fork contract and update the stale artifact.
 
+For SYMPH/MOB Linear issue writes, route project assignment through the portfolio classifier/wrapper (`symphony-linear-portfolio` or equivalent library path). Linear projects are taxonomy metadata, not dispatch or admission authority. Ambiguous classification belongs in `Portfolio Intake / Needs Classification` with `why_uncertain` and candidate projects; never use `Pipeline` as a generic project or ambient control surface.
+
 ## Branching & Worktree Workflow
 
 Tasks 1 and 2 may be developed directly in the main working copy. For every task after Task 2, create a dedicated worktree under `.worktrees/` and do the implementation on a separate branch. Complete the work there, push the branch, and open a pull request before merging. Example flow: `git worktree add .worktrees/task-3 -b task-3`, implement the change in that worktree, then submit a PR for review.

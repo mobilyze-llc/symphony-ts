@@ -66,7 +66,14 @@ export class PayloadTooLargeError extends Error {
 export async function readRequestBodyText(
   request: IncomingMessage,
 ): Promise<string> {
-  return await new Promise<string>((resolve, reject) => {
+  return (await readRequestBodyBuffer(request)).toString("utf8");
+}
+
+/** Drain the request body as raw bytes, bounded to 64 KiB. */
+export async function readRequestBodyBuffer(
+  request: IncomingMessage,
+): Promise<Buffer> {
+  return await new Promise<Buffer>((resolve, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
     request.on("error", reject);
@@ -86,7 +93,7 @@ export async function readRequestBodyText(
       chunks.push(buffer);
     });
     request.on("end", () => {
-      resolve(Buffer.concat(chunks).toString("utf8"));
+      resolve(Buffer.concat(chunks));
     });
   });
 }

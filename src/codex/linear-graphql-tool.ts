@@ -21,6 +21,11 @@ const LINEAR_GRAPHQL_DESCRIPTION =
   "Execute one GraphQL query or mutation against the configured Linear workspace using Symphony-managed auth. Linear body/description writes must use GraphQL variables.";
 
 const LINEAR_CONTENT_FIELD_NAMES = new Set(["body", "content", "description"]);
+const LINEAR_ISSUE_PROJECT_WRITE_MUTATIONS = new Set([
+  "issueBatchUpdate",
+  "issueCreate",
+  "issueUpdate",
+]);
 
 type JsonObject = Record<string, unknown>;
 
@@ -245,6 +250,16 @@ function validateDocument(input: {
     );
   }
 
+  const issueProjectWrites = findLinearIssueProjectWrites(
+    document,
+    input.variables,
+  );
+  if (issueProjectWrites.length > 0) {
+    return invalidInput(
+      `linear_graphql issue project writes bypass portfolio classification (found: ${issueProjectWrites.join(", ")}). Use symphony-linear-portfolio or the portfolio-verified linear-pp-cli wrapper for issueCreate/issueUpdate project assignment.`,
+    );
+  }
+
   return {
     success: true,
     query: input.query,
@@ -273,6 +288,129 @@ function findInlineLinearContentWrites(document: DocumentNode): string[] {
   }
 
   return [...violations].sort();
+}
+
+function findLinearIssueProjectWrites(
+  document: DocumentNode,
+  variables: JsonObject,
+): string[] {
+  const fragments = new Map<string, FragmentDefinitionNode>();
+  for (const definition of document.definitions) {
+    if (definition.kind === Kind.FRAGMENT_DEFINITION) {
+      fragments.set(definition.name.value, definition);
+    }
+  }
+
+  const violations = new Set<string>();
+  for (const definition of document.definitions) {
+    if (
+      definition.kind !== Kind.OPERATION_DEFINITION ||
+      definition.operation !== "mutation"
+    ) {
+      continue;
+    }
+
+    collectIssueProjectWritesInSelectionSet(
+      definition.selectionSet,
+      fragments,
+      violations,
+      new Set(),
+      variables,
+    );
+  }
+
+  return [...violations].sort();
+}
+
+function collectIssueProjectWritesInSelectionSet(
+  selectionSet: SelectionSetNode,
+  fragments: ReadonlyMap<string, FragmentDefinitionNode>,
+  violations: Set<string>,
+  visitedFragments: Set<string>,
+  variables: JsonObject,
+): void {
+  for (const selection of selectionSet.selections) {
+    if (selection.kind === Kind.FIELD) {
+      collectIssueProjectWriteInField(selection, violations, variables);
+      continue;
+    }
+
+    if (selection.kind === Kind.INLINE_FRAGMENT) {
+      collectIssueProjectWritesInSelectionSet(
+        selection.selectionSet,
+        fragments,
+        violations,
+        visitedFragments,
+        variables,
+      );
+      continue;
+    }
+
+    if (selection.kind === Kind.FRAGMENT_SPREAD) {
+      const fragmentName = selection.name.value;
+      const fragment = fragments.get(fragmentName);
+      if (fragment !== undefined && !visitedFragments.has(fragmentName)) {
+        visitedFragments.add(fragmentName);
+        collectIssueProjectWritesInSelectionSet(
+          fragment.selectionSet,
+          fragments,
+          violations,
+          visitedFragments,
+          variables,
+        );
+        visitedFragments.delete(fragmentName);
+      }
+    }
+  }
+}
+
+function collectIssueProjectWriteInField(
+  field: FieldNode,
+  violations: Set<string>,
+  variables: JsonObject,
+): void {
+  if (!LINEAR_ISSUE_PROJECT_WRITE_MUTATIONS.has(field.name.value)) {
+    return;
+  }
+  if (
+    (field.arguments ?? []).some((argument) =>
+      valueHasProjectId(argument.value, variables),
+    )
+  ) {
+    violations.add(field.name.value);
+  }
+}
+
+function valueHasProjectId(value: ValueNode, variables: JsonObject): boolean {
+  if (value.kind === Kind.VARIABLE) {
+    return jsonObjectHasOwnField(variables[value.name.value], "projectId");
+  }
+  return objectValueHasDirectField(value, "projectId");
+}
+
+function objectValueHasDirectField(
+  value: ValueNode,
+  fieldName: string,
+): boolean {
+  if (value.kind === Kind.OBJECT) {
+    return value.fields.some((field) => field.name.value === fieldName);
+  }
+  if (value.kind === Kind.LIST) {
+    return value.values.some((entry) =>
+      objectValueHasDirectField(entry, fieldName),
+    );
+  }
+  return false;
+}
+
+function jsonObjectHasOwnField(value: unknown, fieldName: string): boolean {
+  if (value === null || typeof value !== "object") {
+    return false;
+  }
+  if (Array.isArray(value)) {
+    return value.some((entry) => jsonObjectHasOwnField(entry, fieldName));
+  }
+  return Object.hasOwn(value, fieldName);
 }
 
 function collectInlineContentFieldsInMutation(

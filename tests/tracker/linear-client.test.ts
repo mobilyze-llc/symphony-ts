@@ -6,6 +6,7 @@ import {
   LINEAR_CREATE_ISSUE_MUTATION,
   LINEAR_ISSUE_BY_IDENTIFIER_QUERY,
   LINEAR_ISSUE_COMMENTS_QUERY,
+  LINEAR_ISSUE_DETAILS_UPDATE_MUTATION,
   LINEAR_ISSUE_LABELS_BY_NAMES_QUERY,
   LINEAR_ISSUE_STATES_BY_IDS_QUERY,
   LINEAR_OPEN_ISSUES_BY_TITLE_QUERY,
@@ -125,7 +126,6 @@ describe("LinearTrackerClient", () => {
     // candidate query must filter by team key and must NOT carry a project
     // filter (setting/clearing `project` can never arm or disarm dispatch).
     expect(request.query).toContain("team: { key: { in: $teamKeys } }");
-    expect(request.query).not.toContain("slugId");
     expect(request.query).not.toContain("project:");
     expect(request.variables).toEqual({
       teamKeys: ["SYMPH"],
@@ -229,7 +229,6 @@ describe("LinearTrackerClient", () => {
     expect(issues.map((issue) => issue.identifier)).toEqual(["SYMPH-901"]);
     const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
     expect(request.query).toContain("team: { key: { in: $teamKeys } }");
-    expect(request.query).not.toContain("slugId");
     expect(request.query).not.toContain("project:");
     expect(request.variables).toEqual({
       teamKeys: ["SYMPH"],
@@ -409,7 +408,6 @@ describe("LinearTrackerClient", () => {
     expect(issues.map((issue) => issue.identifier)).toEqual(["SYMPH-999"]);
     const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
     expect(request.query).toContain("team: { key: { in: $teamKeys } }");
-    expect(request.query).not.toContain("slugId");
     expect(request.query).not.toContain("project:");
     expect(request.variables).toEqual({
       teamKeys: ["SYMPH"],
@@ -481,7 +479,6 @@ describe("LinearTrackerClient", () => {
     expect(issues.map((issue) => issue.identifier)).toEqual(["SYMPH-999"]);
     const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
     expect(request.query).toContain("team: { key: { in: $teamKeys } }");
-    expect(request.query).not.toContain("slugId");
     expect(request.query).not.toContain("project:");
     expect(request.variables).toEqual({
       teamKeys: ["SYMPH"],
@@ -1310,6 +1307,48 @@ describe("createIssue", () => {
         code: ERROR_CODES.linearUnknownPayload,
       }),
     );
+  });
+});
+
+describe("updateIssue", () => {
+  it("omits labelIds from the Linear update input when labels are not provided", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        data: {
+          issueUpdate: {
+            success: true,
+            issue: {
+              id: "issue-abc",
+              identifier: "ENG-99",
+              title: "Pipeline Halt",
+            },
+          },
+        },
+      }),
+    );
+    const client = createClient({ fetchFn });
+
+    await expect(
+      client.updateIssue({
+        issueId: "issue-abc",
+        description: "Updated body",
+        projectId: "proj-1",
+      }),
+    ).resolves.toEqual({
+      id: "issue-abc",
+      identifier: "ENG-99",
+      title: "Pipeline Halt",
+    });
+
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(request.query).toBe(LINEAR_ISSUE_DETAILS_UPDATE_MUTATION);
+    expect(request.variables).toEqual({
+      issueId: "issue-abc",
+      input: {
+        description: "Updated body",
+        projectId: "proj-1",
+      },
+    });
   });
 });
 
