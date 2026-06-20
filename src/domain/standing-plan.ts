@@ -72,6 +72,19 @@ export interface PlanBatch {
   canary: PlanCanaryStructure | null;
 }
 
+/**
+ * A resolved, directed execution-dependency edge (SYMPH-843): `issueIdentifier`
+ * must run AFTER `dependsOn` (i.e. `dependsOn` is a prerequisite). The plan's
+ * `dependencyEdges` is the union of the model's emitted cross-batch dependencies
+ * (intelligence-driven soft edges), recorded `blockedBy` relations (SYMPH-841,
+ * hard edges), and canary head→contingent edges — restricted to planned members
+ * and kept acyclic (cycle-closing edges are dropped).
+ */
+export interface PlanDependencyEdge {
+  issueIdentifier: string;
+  dependsOn: string;
+}
+
 /** Risk tiers the envelope can permit (mirrors reasoning-effort granularity). */
 export const PLAN_RISK_TIERS = ["low", "medium", "high"] as const;
 

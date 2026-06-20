@@ -41,6 +41,7 @@ function body(batches: PlanBatch[]): PlanBody {
     envelope: ENVELOPE,
     rationale: "rationale",
     source: "planner",
+    dependencyEdges: [],
   };
 }
 
@@ -193,6 +194,7 @@ describe("rotateRevision option filtering", () => {
       envelope: ENVELOPE,
       rationale: "r",
       source: "planner",
+      dependencyEdges: [],
     };
     const next = rotateRevision(prior, bodyWithOptions, {
       createdAt: "2026-06-18T00:02:00.000Z",

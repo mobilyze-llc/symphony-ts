@@ -89,6 +89,12 @@ describe("buildPlannerPrompt", () => {
     const prompt = buildPlannerPrompt(ctx);
     expect(prompt).toContain("(blocked by: SYMPH-2)");
   });
+
+  it("asks the model to emit cross-batch dependencies (SYMPH-843)", () => {
+    const prompt = buildPlannerPrompt(context());
+    expect(prompt).toContain("dependencies");
+    expect(prompt).toContain("dependsOn");
+  });
 });
 
 describe("parsePlannerOutput", () => {
@@ -145,6 +151,28 @@ describe("parsePlannerOutput", () => {
   it("fails when the JSON does not match the schema", () => {
     const result = parsePlannerOutput(artifact({ rationale: "x" }));
     expect(result.ok).toBe(false);
+  });
+
+  it("preserves a top-level dependencies field (SYMPH-843)", () => {
+    const result = parsePlannerOutput(
+      artifact({
+        rationale: "x",
+        batches: [
+          {
+            mode: "parallel-isolated",
+            issueIdentifiers: ["SYMPH-1"],
+            rationale: "a",
+          },
+        ],
+        dependencies: [{ issueIdentifier: "SYMPH-1", dependsOn: ["SYMPH-2"] }],
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.dependencies).toEqual([
+        { issueIdentifier: "SYMPH-1", dependsOn: ["SYMPH-2"] },
+      ]);
+    }
   });
 
   it("normalizes aliased canary keys (head/contingent) instead of rejecting the plan (SYMPH-836)", () => {
@@ -387,6 +415,69 @@ describe("buildPlanBody", () => {
       },
     );
     expect(body.batches).toEqual([]);
+  });
+
+  it("resolves dependencyEdges from soft deps + recorded blockedBy + canary, members-only (SYMPH-843)", () => {
+    const ctx: PlannerContext = {
+      ...context(),
+      backlog: [
+        {
+          issueId: "u-1",
+          issueIdentifier: "SYMPH-1",
+          title: "A",
+          priority: 1,
+          state: "Todo",
+          blockedBy: [],
+        },
+        {
+          issueId: "u-2",
+          issueIdentifier: "SYMPH-2",
+          title: "B",
+          priority: 2,
+          state: "Todo",
+          blockedBy: ["SYMPH-1"],
+        },
+        {
+          issueId: "u-3",
+          issueIdentifier: "SYMPH-3",
+          title: "C",
+          priority: 3,
+          state: "Todo",
+          blockedBy: [],
+        },
+      ],
+    };
+    const body = buildPlanBody(
+      {
+        rationale: "plan",
+        batches: [
+          {
+            mode: "parallel-isolated",
+            issueIdentifiers: ["SYMPH-1", "SYMPH-2", "SYMPH-3"],
+            rationale: "r",
+          },
+        ],
+        dependencies: [
+          { issueIdentifier: "SYMPH-3", dependsOn: ["SYMPH-2"] },
+          { issueIdentifier: "SYMPH-2", dependsOn: ["SYMPH-404"] },
+        ],
+      },
+      ctx,
+    );
+    // recorded blockedBy: SYMPH-2 -> SYMPH-1; soft dep: SYMPH-3 -> SYMPH-2.
+    expect(body.dependencyEdges).toContainEqual({
+      issueIdentifier: "SYMPH-2",
+      dependsOn: "SYMPH-1",
+    });
+    expect(body.dependencyEdges).toContainEqual({
+      issueIdentifier: "SYMPH-3",
+      dependsOn: "SYMPH-2",
+    });
+    // a dependsOn that is not a planned member is dropped.
+    expect(body.dependencyEdges).not.toContainEqual({
+      issueIdentifier: "SYMPH-2",
+      dependsOn: "SYMPH-404",
+    });
   });
 });
 
