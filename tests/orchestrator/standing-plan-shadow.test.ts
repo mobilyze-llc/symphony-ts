@@ -63,6 +63,19 @@ describe("assembleShadowPlannerContext", () => {
     ]);
     expect(context.envelope).toBe(ENVELOPE);
   });
+
+  it("carries recorded blockedBy identifiers onto the candidate (SYMPH-841)", () => {
+    const blocked: Issue = {
+      ...issue("u1", "SYMPH-1"),
+      blockedBy: [{ id: "b1", identifier: "SYMPH-9", state: "Todo" }],
+    };
+    const context = assembleShadowPlannerContext({
+      candidates: [blocked],
+      inFlight: [],
+      envelope: ENVELOPE,
+    });
+    expect(context.backlog[0]?.blockedBy).toEqual(["SYMPH-9"]);
+  });
 });
 
 describe("shouldRunShadowPlanCycle", () => {

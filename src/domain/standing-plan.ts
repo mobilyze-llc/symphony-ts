@@ -72,6 +72,74 @@ export interface PlanBatch {
   canary: PlanCanaryStructure | null;
 }
 
+/**
+ * A resolved, directed execution-dependency edge (SYMPH-843): `issueIdentifier`
+ * must run AFTER `dependsOn` (i.e. `dependsOn` is a prerequisite). The plan's
+ * `dependencyEdges` is the union of the model's emitted cross-batch dependencies
+ * (intelligence-driven soft edges), recorded `blockedBy` relations (SYMPH-841,
+ * hard edges), and canary head→contingent edges — restricted to planned members
+ * and kept acyclic (cycle-closing edges are dropped).
+ */
+export interface PlanDependencyEdge {
+  issueIdentifier: string;
+  dependsOn: string;
+}
+
+/**
+ * Layer planned issues into ordered execution waves by their dependency edges
+ * (SYMPH-843): wave 0 holds issues with no in-set prerequisites, and each later
+ * wave holds issues whose prerequisites all sit in earlier waves. Issues in the
+ * same wave can run in parallel. Edges whose endpoints are not members are
+ * ignored; the edge set is assumed acyclic (buildPlanBody drops cycles), with a
+ * defensive guard so a stray cycle terminates instead of looping.
+ */
+export function computeDependencyWaves(
+  memberIdentifiers: readonly string[],
+  edges: readonly PlanDependencyEdge[],
+): string[][] {
+  const members = new Set(memberIdentifiers);
+  const prerequisites = new Map<string, string[]>();
+  for (const identifier of memberIdentifiers) {
+    prerequisites.set(identifier, []);
+  }
+  for (const edge of edges) {
+    if (members.has(edge.issueIdentifier) && members.has(edge.dependsOn)) {
+      prerequisites.get(edge.issueIdentifier)?.push(edge.dependsOn);
+    }
+  }
+  const waveOf = new Map<string, number>();
+  const inProgress = new Set<string>();
+  const wave = (identifier: string): number => {
+    const cached = waveOf.get(identifier);
+    if (cached !== undefined) {
+      return cached;
+    }
+    if (inProgress.has(identifier)) {
+      return 0; // defensive: a cycle slipped through — treat as a root
+    }
+    inProgress.add(identifier);
+    const deps = prerequisites.get(identifier) ?? [];
+    const depth =
+      deps.length === 0 ? 0 : 1 + Math.max(...deps.map((dep) => wave(dep)));
+    inProgress.delete(identifier);
+    waveOf.set(identifier, depth);
+    return depth;
+  };
+  const byWave = new Map<number, string[]>();
+  for (const identifier of memberIdentifiers) {
+    const depth = wave(identifier);
+    const bucket = byWave.get(depth);
+    if (bucket === undefined) {
+      byWave.set(depth, [identifier]);
+    } else {
+      bucket.push(identifier);
+    }
+  }
+  return [...byWave.keys()]
+    .sort((left, right) => left - right)
+    .map((depth) => byWave.get(depth) ?? []);
+}
+
 /** Risk tiers the envelope can permit (mirrors reasoning-effort granularity). */
 export const PLAN_RISK_TIERS = ["low", "medium", "high"] as const;
 

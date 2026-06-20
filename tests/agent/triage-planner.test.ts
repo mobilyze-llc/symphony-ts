@@ -28,6 +28,7 @@ function context(): PlannerContext {
         title: "First",
         priority: 1,
         state: "Todo",
+        blockedBy: [],
       },
       {
         issueId: "u-2",
@@ -35,6 +36,7 @@ function context(): PlannerContext {
         title: "Second",
         priority: 2,
         state: "Todo",
+        blockedBy: [],
       },
     ],
     openPrs: [{ issueIdentifier: "SYMPH-9", prNumber: 42, title: "WIP" }],
@@ -76,6 +78,22 @@ describe("buildPlannerPrompt", () => {
     // — otherwise it emits {head, contingent} and the whole plan is rejected.
     expect(prompt).toContain("headIssueIdentifiers");
     expect(prompt).toContain("contingentIssueIdentifiers");
+  });
+
+  it("renders recorded blockedBy on the candidate line (SYMPH-841)", () => {
+    const ctx = context();
+    const first = ctx.backlog[0];
+    if (first) {
+      first.blockedBy = ["SYMPH-2"];
+    }
+    const prompt = buildPlannerPrompt(ctx);
+    expect(prompt).toContain("(blocked by: SYMPH-2)");
+  });
+
+  it("asks the model to emit cross-batch dependencies (SYMPH-843)", () => {
+    const prompt = buildPlannerPrompt(context());
+    expect(prompt).toContain("dependencies");
+    expect(prompt).toContain("dependsOn");
   });
 });
 
@@ -133,6 +151,28 @@ describe("parsePlannerOutput", () => {
   it("fails when the JSON does not match the schema", () => {
     const result = parsePlannerOutput(artifact({ rationale: "x" }));
     expect(result.ok).toBe(false);
+  });
+
+  it("preserves a top-level dependencies field (SYMPH-843)", () => {
+    const result = parsePlannerOutput(
+      artifact({
+        rationale: "x",
+        batches: [
+          {
+            mode: "parallel-isolated",
+            issueIdentifiers: ["SYMPH-1"],
+            rationale: "a",
+          },
+        ],
+        dependencies: [{ issueIdentifier: "SYMPH-1", dependsOn: ["SYMPH-2"] }],
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.dependencies).toEqual([
+        { issueIdentifier: "SYMPH-1", dependsOn: ["SYMPH-2"] },
+      ]);
+    }
   });
 
   it("normalizes aliased canary keys (head/contingent) instead of rejecting the plan (SYMPH-836)", () => {
@@ -375,6 +415,117 @@ describe("buildPlanBody", () => {
       },
     );
     expect(body.batches).toEqual([]);
+  });
+
+  it("resolves dependencyEdges from soft deps + recorded blockedBy + canary, members-only (SYMPH-843)", () => {
+    const ctx: PlannerContext = {
+      ...context(),
+      backlog: [
+        {
+          issueId: "u-1",
+          issueIdentifier: "SYMPH-1",
+          title: "A",
+          priority: 1,
+          state: "Todo",
+          blockedBy: [],
+        },
+        {
+          issueId: "u-2",
+          issueIdentifier: "SYMPH-2",
+          title: "B",
+          priority: 2,
+          state: "Todo",
+          blockedBy: ["SYMPH-1"],
+        },
+        {
+          issueId: "u-3",
+          issueIdentifier: "SYMPH-3",
+          title: "C",
+          priority: 3,
+          state: "Todo",
+          blockedBy: [],
+        },
+      ],
+    };
+    const body = buildPlanBody(
+      {
+        rationale: "plan",
+        batches: [
+          {
+            mode: "parallel-isolated",
+            issueIdentifiers: ["SYMPH-1", "SYMPH-2", "SYMPH-3"],
+            rationale: "r",
+          },
+        ],
+        dependencies: [
+          { issueIdentifier: "SYMPH-3", dependsOn: ["SYMPH-2"] },
+          { issueIdentifier: "SYMPH-2", dependsOn: ["SYMPH-404"] },
+        ],
+      },
+      ctx,
+    );
+    // recorded blockedBy: SYMPH-2 -> SYMPH-1; soft dep: SYMPH-3 -> SYMPH-2.
+    expect(body.dependencyEdges).toContainEqual({
+      issueIdentifier: "SYMPH-2",
+      dependsOn: "SYMPH-1",
+    });
+    expect(body.dependencyEdges).toContainEqual({
+      issueIdentifier: "SYMPH-3",
+      dependsOn: "SYMPH-2",
+    });
+    // a dependsOn that is not a planned member is dropped.
+    expect(body.dependencyEdges).not.toContainEqual({
+      issueIdentifier: "SYMPH-2",
+      dependsOn: "SYMPH-404",
+    });
+  });
+
+  it("keeps the dependency graph acyclic — hard edge wins, the cycle-closing soft edge is dropped (council R1)", () => {
+    const ctx: PlannerContext = {
+      ...context(),
+      backlog: [
+        {
+          issueId: "u-1",
+          issueIdentifier: "SYMPH-1",
+          title: "A",
+          priority: 1,
+          state: "Todo",
+          blockedBy: ["SYMPH-2"],
+        },
+        {
+          issueId: "u-2",
+          issueIdentifier: "SYMPH-2",
+          title: "B",
+          priority: 2,
+          state: "Todo",
+          blockedBy: [],
+        },
+      ],
+    };
+    const body = buildPlanBody(
+      {
+        rationale: "plan",
+        batches: [
+          {
+            mode: "parallel-isolated",
+            issueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+            rationale: "r",
+          },
+        ],
+        // recorded blockedBy gives SYMPH-1 -> SYMPH-2 (added first); the soft edge
+        // SYMPH-2 -> SYMPH-1 would close the cycle and is dropped.
+        dependencies: [{ issueIdentifier: "SYMPH-2", dependsOn: ["SYMPH-1"] }],
+      },
+      ctx,
+    );
+    expect(body.dependencyEdges).toContainEqual({
+      issueIdentifier: "SYMPH-1",
+      dependsOn: "SYMPH-2",
+    });
+    expect(body.dependencyEdges).not.toContainEqual({
+      issueIdentifier: "SYMPH-2",
+      dependsOn: "SYMPH-1",
+    });
   });
 });
 

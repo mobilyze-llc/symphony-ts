@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   type PlanBatch,
   type PlanDecision,
+  type PlanDependencyEdge,
   type PlanEnvelope,
   type PlanOptionLine,
   type PlanRevision,
@@ -28,6 +29,12 @@ export interface PlanBody {
   envelope: PlanEnvelope;
   rationale: string;
   source: PlanRevisionSource;
+  /**
+   * Resolved execution-dependency edges (SYMPH-843): soft (model) + recorded
+   * blockedBy + canary, restricted to planned members and acyclic. The render
+   * topo-sorts these into ordered waves.
+   */
+  dependencyEdges: PlanDependencyEdge[];
 }
 
 export interface RotateRevisionOptions {

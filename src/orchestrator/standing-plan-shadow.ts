@@ -46,6 +46,11 @@ export function assembleShadowPlannerContext(
       title: issue.title,
       priority: issue.priority,
       state: issue.state,
+      // SYMPH-841: carry the recorded blocker identifiers through to the planner
+      // so its dependency reasoning is grounded in the real graph, not just titles.
+      blockedBy: issue.blockedBy
+        .map((ref) => ref.identifier)
+        .filter((identifier): identifier is string => identifier !== null),
     }));
   return {
     backlog,

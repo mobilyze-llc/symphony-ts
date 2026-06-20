@@ -15,6 +15,7 @@ import {
   type PlanBatchMember,
   type PlanBatchMode,
   type PlanCanaryStructure,
+  type PlanDependencyEdge,
   type PlanEnvelope,
   type PlanOptionLine,
 } from "../domain/standing-plan.js";
@@ -41,6 +42,12 @@ export interface PlannerCandidate {
   title: string;
   priority: number | null;
   state: string;
+  /**
+   * Recorded Linear blocker identifiers (SYMPH-841). Grounds the model's
+   * dependency reasoning in the real blockedBy graph instead of title inference.
+   * Empty when the issue has no recorded blockers.
+   */
+  blockedBy: string[];
 }
 
 export interface PlannerPrInfo {
@@ -80,6 +87,17 @@ export const PLANNER_OUTPUT_SCHEMA = z.object({
         .optional(),
     }),
   ),
+  // Intelligence-driven cross-batch execution order (SYMPH-843): the model lists
+  // an issue and the planned issues that must complete before it. Optional and
+  // backward-compatible; resolved/validated in buildPlanBody.
+  dependencies: z
+    .array(
+      z.object({
+        issueIdentifier: z.string(),
+        dependsOn: z.array(z.string()),
+      }),
+    )
+    .optional(),
 });
 
 export type RawPlan = z.infer<typeof PLANNER_OUTPUT_SCHEMA>;
@@ -119,8 +137,12 @@ export function buildPlannerPrompt(context: PlannerContext): string {
     lines.push("- (none)");
   } else {
     for (const candidate of context.backlog) {
+      const blockedBy =
+        candidate.blockedBy.length > 0
+          ? ` (blocked by: ${candidate.blockedBy.join(", ")})`
+          : "";
       lines.push(
-        `- ${candidate.issueIdentifier} [${candidate.state}, priority ${candidate.priority ?? "none"}] ${candidate.title}`,
+        `- ${candidate.issueIdentifier} [${candidate.state}, priority ${candidate.priority ?? "none"}] ${candidate.title}${blockedBy}`,
       );
     }
   }
@@ -158,6 +180,9 @@ export function buildPlannerPrompt(context: PlannerContext): string {
     '  "batches": [',
     '    { "mode": "parallel-isolated", "issueIdentifiers": ["SYMPH-1"], "rationale": "why", "canary": null },',
     '    { "mode": "canary-chain", "issueIdentifiers": ["SYMPH-2", "SYMPH-3"], "rationale": "why", "canary": { "headIssueIdentifiers": ["SYMPH-2"], "contingentIssueIdentifiers": ["SYMPH-3"] } }',
+    "  ],",
+    '  "dependencies": [',
+    '    { "issueIdentifier": "SYMPH-3", "dependsOn": ["SYMPH-2"] }',
     "  ]",
     "}",
     "```",
@@ -165,6 +190,7 @@ export function buildPlannerPrompt(context: PlannerContext): string {
     "- `issueIdentifiers` must all come from the backlog list.",
     "- Order batches head-first (the highest-value batch first).",
     "- For `canary-chain`, set `canary` to an object with exactly these keys: `headIssueIdentifiers` (the gating head, at least one identifier) and `contingentIssueIdentifiers` (the tail, released only once the head validates) — both arrays of backlog identifiers. For every other mode set `canary` to null.",
+    "- In `dependencies`, capture the cross-batch execution order you infer: an issue that must complete before another (e.g. a shared-surface foundation before its dependents). One entry per dependent issue, with its prerequisites in `dependsOn`; use only backlog identifiers. The `(blocked by: …)` relations shown in the backlog are HARD constraints — never order an issue ahead of one it is blocked by.",
   );
   return lines.join("\n");
 }
@@ -329,7 +355,106 @@ export function buildPlanBody(raw: RawPlan, context: PlannerContext): PlanBody {
     envelope: context.envelope,
     rationale: raw.rationale,
     source: "planner",
+    dependencyEdges: resolvePlanDependencyEdges(
+      batches,
+      context,
+      raw.dependencies ?? [],
+    ),
   };
+}
+
+/**
+ * Resolve the plan's execution-dependency edges (SYMPH-843): the union of the
+ * model's emitted soft `dependencies`, recorded blockedBy relations (SYMPH-841),
+ * and canary head→contingent edges. Restricted to planned members, deduped, and
+ * kept acyclic by dropping any edge that would close a cycle.
+ */
+function resolvePlanDependencyEdges(
+  batches: readonly PlanBatch[],
+  context: PlannerContext,
+  rawDependencies: ReadonlyArray<{
+    issueIdentifier: string;
+    dependsOn: string[];
+  }>,
+): PlanDependencyEdge[] {
+  const members = new Set(
+    batches.flatMap((batch) =>
+      batch.members.map((member) => member.issueIdentifier),
+    ),
+  );
+  const edges: PlanDependencyEdge[] = [];
+  const seen = new Set<string>();
+  const addEdge = (issueIdentifier: string, dependsOn: string): void => {
+    if (
+      issueIdentifier === dependsOn ||
+      !members.has(issueIdentifier) ||
+      !members.has(dependsOn)
+    ) {
+      return; // self-edge, or an endpoint outside the planned set
+    }
+    const key = `${issueIdentifier} ${dependsOn}`;
+    if (seen.has(key)) {
+      return;
+    }
+    // Drop the cycle-closing edge: if dependsOn already (transitively) depends on
+    // issueIdentifier, adding this edge would form a cycle.
+    if (dependsReaches(edges, dependsOn, issueIdentifier)) {
+      return;
+    }
+    seen.add(key);
+    edges.push({ issueIdentifier, dependsOn });
+  };
+
+  // Recorded blockedBy (hard edges, SYMPH-841).
+  for (const candidate of context.backlog) {
+    for (const blocker of candidate.blockedBy) {
+      addEdge(candidate.issueIdentifier, blocker);
+    }
+  }
+  // Canary head→contingent (within-batch hard edges).
+  for (const batch of batches) {
+    if (batch.canary === null) {
+      continue;
+    }
+    for (const contingent of batch.canary.contingentIssueIdentifiers) {
+      for (const head of batch.canary.headIssueIdentifiers) {
+        addEdge(contingent, head);
+      }
+    }
+  }
+  // Emitted soft dependencies (model judgment).
+  for (const dependency of rawDependencies) {
+    for (const dependsOn of dependency.dependsOn) {
+      addEdge(dependency.issueIdentifier, dependsOn);
+    }
+  }
+  return edges;
+}
+
+/** Does `from` already depend (transitively) on `to` via the edges so far? */
+function dependsReaches(
+  edges: readonly PlanDependencyEdge[],
+  from: string,
+  to: string,
+): boolean {
+  const stack = [from];
+  const visited = new Set<string>();
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (node === undefined || visited.has(node)) {
+      continue;
+    }
+    if (node === to) {
+      return true;
+    }
+    visited.add(node);
+    for (const edge of edges) {
+      if (edge.issueIdentifier === node) {
+        stack.push(edge.dependsOn);
+      }
+    }
+  }
+  return false;
 }
 
 export async function runTriagePlanner(
@@ -346,6 +471,7 @@ export async function runTriagePlanner(
         rationale:
           "Eligible backlog is empty; no standing-plan batches proposed.",
         source: "planner",
+        dependencyEdges: [],
       },
     };
   }

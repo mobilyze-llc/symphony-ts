@@ -303,6 +303,7 @@ const bodyOf = (batches: PlanBatch[]): PlanBody => ({
   envelope: ENVELOPE,
   rationale: "rationale",
   source: "planner",
+  dependencyEdges: [],
 });
 
 describe("admittedIdentifiersFromJournal (SYMPH-823 single projection)", () => {

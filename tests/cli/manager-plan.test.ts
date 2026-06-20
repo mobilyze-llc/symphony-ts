@@ -91,6 +91,21 @@ describe("parseManagerPlanCliArgs", () => {
     expect(opts.json).toBe(false);
   });
 
+  it("parses --no-canary (default false) (SYMPH-838)", () => {
+    expect(
+      parseManagerPlanCliArgs(["--team", "MOB", "--state", "Backlog"]).noCanary,
+    ).toBe(false);
+    expect(
+      parseManagerPlanCliArgs([
+        "--team",
+        "MOB",
+        "--state",
+        "Backlog",
+        "--no-canary",
+      ]).noCanary,
+    ).toBe(true);
+  });
+
   it("rejects a non-integer concurrency ceiling", () => {
     expect(() =>
       parseManagerPlanCliArgs(["--concurrency-ceiling", "abc"]),
@@ -211,6 +226,78 @@ describe("runManagerPlanCli", () => {
     expect(prompts).toHaveLength(1);
     expect(out()).toContain("MOB-1");
     expect(out().toLowerCase()).toContain("batch");
+  });
+
+  it("renders execution waves from the plan's dependency edges (SYMPH-843)", async () => {
+    const { io, out } = captureIo();
+    const artifactWithDeps = `# Plan\n\`\`\`json\n${JSON.stringify({
+      rationale: "go",
+      batches: [
+        {
+          mode: "parallel-isolated",
+          issueIdentifiers: ["MOB-1", "MOB-2"],
+          rationale: "r",
+        },
+      ],
+      dependencies: [{ issueIdentifier: "MOB-2", dependsOn: ["MOB-1"] }],
+    })}\n\`\`\`\n`;
+    const code = await runManagerPlanCli(
+      ["--team", "MOB", "--state", "Backlog"],
+      {
+        io,
+        env: {},
+        loadCandidates: async () => [
+          issue("u1", "MOB-1"),
+          issue("u2", "MOB-2"),
+        ],
+        createPlannerRunner: () => async () => ({
+          status: "ok",
+          markdown: artifactWithDeps,
+        }),
+      },
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("Execution waves");
+    expect(out()).toContain("Wave 1: MOB-1");
+    expect(out()).toContain("waits on MOB-1");
+  });
+
+  it("--no-canary drops canary-chain from the allowed modes (SYMPH-838)", async () => {
+    const { io, out } = captureIo();
+    const code = await runManagerPlanCli(
+      ["--team", "MOB", "--state", "Backlog", "--no-canary", "--prompt-only"],
+      {
+        io,
+        env: {},
+        loadCandidates: async () => [issue("u1", "MOB-1")],
+        createPlannerRunner: okRunner,
+      },
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("allowed modes: parallel-isolated\n");
+  });
+
+  it("errors when --no-canary empties the allowed modes (--modes canary-chain --no-canary) (SYMPH-838)", async () => {
+    const { io } = captureIo();
+    const code = await runManagerPlanCli(
+      [
+        "--team",
+        "MOB",
+        "--state",
+        "Backlog",
+        "--modes",
+        "canary-chain",
+        "--no-canary",
+        "--prompt-only",
+      ],
+      {
+        io,
+        env: {},
+        loadCandidates: async () => [issue("u1", "MOB-1")],
+        createPlannerRunner: okRunner,
+      },
+    );
+    expect(code).toBe(1);
   });
 
   it("passes the team and eligible states through to the candidate loader", async () => {

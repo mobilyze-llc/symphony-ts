@@ -48,6 +48,7 @@ function body(batches: PlanBatch[]): PlanBody {
     envelope: ENVELOPE,
     rationale: "rationale",
     source: "planner",
+    dependencyEdges: [],
   };
 }
 

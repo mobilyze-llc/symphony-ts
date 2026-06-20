@@ -940,6 +940,7 @@ function seedBody(batches: PlanBatch[]): PlanBody {
     envelope: SEED_ENVELOPE,
     rationale: "seed",
     source: "planner",
+    dependencyEdges: [],
   };
 }
 
