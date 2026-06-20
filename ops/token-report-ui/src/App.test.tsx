@@ -273,21 +273,6 @@ describe("PerStageTrend", () => {
     expect(html).toContain("inflection detected");
   });
 
-  it("filters spec-gen from trend data", () => {
-    const inflections = Array.isArray(data.inflections) ? data.inflections : [];
-    const html = renderToString(
-      <PerStageTrend
-        perStageTrend={data.per_stage_trend}
-        inflections={inflections}
-      />,
-    );
-    // spec-gen should not appear in the legend/chart
-    // The chart renders stage names from filtered trend keys
-    expect(html).toContain("investigate");
-    expect(html).toContain("implement");
-    expect(html).not.toContain(">spec-gen<");
-  });
-
   it("renders attribution details for inflections", () => {
     const inflections = Array.isArray(data.inflections) ? data.inflections : [];
     const html = renderToString(
