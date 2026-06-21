@@ -122,6 +122,12 @@ describe("buildCandidateScopeFilter", () => {
       }),
     ).toThrow(/at least one/i);
   });
+
+  it("throws when activeStates is empty (builder enforces its own safety contract)", () => {
+    expect(() =>
+      buildCandidateScopeFilter({ teamKeys: ["MOB"], activeStates: [] }),
+    ).toThrow(/active state/i);
+  });
 });
 
 describe("LINEAR_CANDIDATE_ISSUES_BY_SCOPE_QUERY", () => {

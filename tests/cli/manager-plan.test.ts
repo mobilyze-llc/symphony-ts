@@ -449,6 +449,48 @@ describe("runManagerPlanCli", () => {
     expect(parsed.batches[0].members[0].issueIdentifier).toBe("MOB-1");
   });
 
+  it("emits project and initiative scope in --json output (SYMPH-858)", async () => {
+    const { io, out } = captureIo();
+    const code = await runManagerPlanCli(
+      [
+        "--project",
+        "abc123",
+        "--initiative",
+        "Healthspanners",
+        "--state",
+        "Backlog",
+        "--json",
+      ],
+      {
+        io,
+        env: {},
+        loadCandidates: async () => [issue("u1", "MOB-1")],
+        createPlannerRunner: okRunner,
+      },
+    );
+    expect(code).toBe(0);
+    const parsed = JSON.parse(out());
+    expect(parsed.project).toBe("abc123");
+    expect(parsed.initiative).toBe("Healthspanners");
+    expect(parsed.team).toBeNull();
+  });
+
+  it("describes the active scope in the no-candidates message (SYMPH-858)", async () => {
+    const { io, out } = captureIo();
+    const code = await runManagerPlanCli(
+      ["--project", "abc123", "--state", "Backlog"],
+      {
+        io,
+        env: {},
+        loadCandidates: async () => [],
+        createPlannerRunner: okRunner,
+      },
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("project abc123");
+    expect(out()).not.toContain("team");
+  });
+
   it("excludes portfolio-held candidates from manager planning JSON", async () => {
     const taxonomyProject = PORTFOLIO_TAXONOMY_PROJECTS.find(
       (project) =>

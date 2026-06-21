@@ -240,8 +240,9 @@ export interface CandidateScopeFilterInput {
   /** Linear project slugId; ANDed via `project.slugId.eq`. */
   projectSlug?: string | null;
   /**
-   * Linear initiative reference. A canonical UUID filters by initiative `id`;
-   * any other non-empty string filters by `name` (initiatives have no slug/key).
+   * Linear initiative reference, matched by `id` when the value is a canonical
+   * UUID and by `name` otherwise (name is the identifier an operator typically
+   * knows; the UUID `id` is unambiguous).
    */
   initiative?: string | null;
   /** Eligible-to-start workflow state names; always ANDed via `state.name.in`. */
@@ -252,8 +253,9 @@ export interface CandidateScopeFilterInput {
  * Build a Linear `IssueFilter` that ANDs whichever scope selectors are provided
  * (additive --team / --project / --initiative) plus the active-state filter.
  * `--project` and `--initiative` merge into one `project { slugId, initiatives }`
- * object. Throws when no scope is provided so a caller can never accidentally
- * fetch the entire workspace backlog (SYMPH-858).
+ * object. Throws when no scope is provided (so a caller can never accidentally
+ * fetch the entire workspace backlog) and when activeStates is empty — the
+ * returned filter always constrains both scope and state (SYMPH-858).
  */
 export function buildCandidateScopeFilter(
   input: CandidateScopeFilterInput,
@@ -285,6 +287,11 @@ export function buildCandidateScopeFilter(
   if (teamKeys.length === 0 && Object.keys(project).length === 0) {
     throw new Error(
       "buildCandidateScopeFilter requires at least one of teamKeys, projectSlug, or initiative.",
+    );
+  }
+  if (input.activeStates.length === 0) {
+    throw new Error(
+      "buildCandidateScopeFilter requires at least one active state.",
     );
   }
 

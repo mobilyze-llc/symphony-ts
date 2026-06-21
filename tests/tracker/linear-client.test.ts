@@ -178,6 +178,31 @@ describe("LinearTrackerClient", () => {
     expect(fetchFn).not.toHaveBeenCalled();
   });
 
+  it("fetchCandidateIssuesByScope honours a non-default page size (SYMPH-858)", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          issues: {
+            nodes: [
+              issueNode({
+                id: "1",
+                identifier: "MOB-9",
+                title: "Only",
+                createdAt: "2026-06-01T00:00:00.000Z",
+              }),
+            ],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      }),
+    );
+    const client = createClient({ fetchFn, pageSize: 7 });
+    await client.fetchCandidateIssuesByScope({ projectSlug: "abc123" });
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(request.variables.first).toBe(7);
+    expect(request.variables.relationFirst).toBe(7);
+  });
+
   it("fetches candidate issues by team key (eligible backlog, no project filter) when team_keys is set (SYMPH-794)", async () => {
     const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
       jsonResponse({

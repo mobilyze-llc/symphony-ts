@@ -488,6 +488,10 @@ async function defaultLoadCandidates(
     activeStates: query.activeStates,
     ...(query.pageSize === null ? {} : { pageSize: query.pageSize }),
   });
+  // fetchCandidateIssuesByScope composes its own filter from this scope arg; the
+  // constructor's projectSlug/teamKeys are inert for this path (only activeStates
+  // and pageSize are read from the client), so the scope is the single source of
+  // truth for what gets queried.
   return client.fetchCandidateIssuesByScope({
     teamKeys: query.teamKeys,
     projectSlug: query.projectSlug,
