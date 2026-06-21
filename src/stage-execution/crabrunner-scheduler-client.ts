@@ -516,9 +516,8 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     const profile = resolveProfile(spec);
     const model = resolveModelSlug(spec);
     const thinking = spec.runner.reasoningEffort ?? "medium";
-    // Floor to 1s (TK-1): 0 is NOT "unlimited" — it would be a degenerate
-    // instant timeout. In practice this floor is unreachable for required lanes
-    // (enforcement validation rejects timeoutMs<=0 before submit).
+    // Null timeouts inherit the CLI default; explicit zero/negative values are
+    // rejected by delegated enforcement validation before submit.
     const timeoutSeconds = this.laneTimeoutSeconds(spec);
     // submit() guarantees a prompt_file is present, so this is always a
     // lane-worker.v1 prompt-file lane. WORKER_ARGV_PROTOCOL is reserved for a
@@ -591,10 +590,18 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
         reason: "crabrunner_remote_model_required_symph_864",
       };
     }
+    const promptFile = spec.promptFile;
+    if (promptFile === undefined || promptFile.trim().length === 0) {
+      return {
+        status: "rejected",
+        jobId: null,
+        reason: "crabrunner_prompt_required_symph_856",
+      };
+    }
 
     const jobId = buildJobId(spec);
     const result = await this.run(
-      this.buildRemoteRunArgs(spec, jobId, this.remoteUser, model),
+      this.buildRemoteRunArgs(spec, jobId, this.remoteUser, model, promptFile),
       signal,
       this.remoteRunCliTimeoutMs(spec),
     );
@@ -608,12 +615,8 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     jobId: string,
     remoteUser: string,
     model: string,
+    promptFile: string,
   ): string[] {
-    const promptFile = spec.promptFile;
-    if (promptFile === undefined) {
-      throw new Error("remote crabrunner run requires a prompt_file");
-    }
-
     const timeoutSeconds = this.laneTimeoutSeconds(spec);
     const phase = spec.phase ?? "review";
     const args = [
@@ -699,6 +702,8 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
       `${runResult.job_id}.tar`,
     );
     const archivePresent = await this.isFilePresent(localArchivePath);
+    const archiveMissingMessage =
+      "remote crabrunner collect archive missing or empty";
     if (terminalState === "succeeded" && !archivePresent) {
       terminalState = "artifact_parse_failed";
     }
@@ -730,7 +735,8 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
       ...(artifactRefs.length > 0 ? { artifactRefs } : {}),
       workspacePath: status.workspace ?? null,
       usage,
-      message: status.message ?? null,
+      message:
+        status.message ?? (archivePresent ? null : archiveMissingMessage),
       progress: buildProgress(status),
       process: buildProcess(status),
     };

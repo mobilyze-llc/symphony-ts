@@ -187,6 +187,26 @@ describe("CrabrunnerCliSchedulerClient.submit", () => {
     await expect(readFile(manifestPath!, "utf8")).rejects.toThrow();
   });
 
+  it("uses the shared default timeout for local manifests with null timeout metadata", async () => {
+    let manifestContent: string | null = null;
+    const client = createClient(async (args) => {
+      const index = args.indexOf("--manifest-file");
+      manifestContent = await readFile(args[index + 1]!, "utf8");
+      return cliOk(
+        statusJson({
+          state: "queued",
+          job_id: "job-manifest-default-timeout",
+          collectible: false,
+        }),
+      );
+    });
+
+    await client.submit(nullTimeout(createSpec()));
+
+    const manifest = JSON.parse(manifestContent!) as Record<string, unknown>;
+    expect(manifest.timeout_seconds).toBe(120);
+  });
+
   it("rejects (fail closed) when the spec carries no promptFile (SYMPH-856)", async () => {
     const recorder = createCliRecorder({
       submit: () =>
@@ -348,7 +368,7 @@ describe("CrabrunnerCliSchedulerClient.submit", () => {
       targetRepoRoot: TARGET_REPO_ROOT,
       host: "crabbox-studio1",
       remoteUser: "ericlitman",
-      cliTimeoutMs: 120_000,
+      cliTimeoutMs: 180_000,
       pollIntervalMs: 1_000,
       maxPolls: 10,
       cli,
@@ -751,6 +771,9 @@ describe("CrabrunnerCliSchedulerClient.collect", () => {
       status: "unavailable",
       reason: "remote crabrunner collect archive missing or empty",
     });
+    expect(evidence.message).toBe(
+      "remote crabrunner collect archive missing or empty",
+    );
   });
 
   it("reports remote collect archive usage failures as unavailable", async () => {
