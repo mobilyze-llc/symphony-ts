@@ -1,7 +1,3 @@
-import { rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, resolve, sep } from "node:path";
-
 import type { AgentRunResult } from "../agent/runner.js";
 import {
   type RunAttemptPhase,
@@ -20,11 +16,11 @@ import type {
 export const CRABRUNNER_JOB_SPEC_VERSION = "symphony.crabrunner.job.v1";
 
 /**
- * Prefix for the OS-temp directories the factory's default prompt resolver
- * creates (SYMPH-856). `execute()` cleans up only directories under
- * `tmpdir()` whose name carries this prefix, so an explicit `resolvePromptFile`
- * override pointing elsewhere is never deleted. The factory imports this
- * constant so the create-side and clean-side stay in lockstep.
+ * Name prefix for the OS-temp directories the factory's default prompt resolver
+ * creates (SYMPH-856). Purely cosmetic/diagnostic — cleanup ownership is tracked
+ * explicitly by the factory (a Set of the dirs it created), NOT inferred from
+ * this prefix, so an override path that happens to share it is never deleted
+ * (recheck-2 P2-1).
  */
 export const CRABRUNNER_TEMP_PROMPT_DIR_PREFIX = "crabrunner-prompt-";
 
@@ -177,6 +173,17 @@ export interface CrabrunnerStageExecutionBackendOptions {
   resolvePromptFile?: (
     input: StageExecutionBackendInput,
   ) => Promise<string | null | undefined> | string | null | undefined;
+  /**
+   * Paired cleanup for a prompt path produced by {@link resolvePromptFile}
+   * (SYMPH-856, recheck-2 P2-1). Invoked in `execute()`'s `finally` after the
+   * job is terminal, with the resolved prompt path. Supplied ONLY by the factory
+   * alongside its DEFAULT resolver, which tracks the temp dirs it created and
+   * removes only those — so an explicit `resolvePromptFile` override path (which
+   * has no paired cleanup) is NEVER deleted, even if it collides with the temp
+   * prefix. Must be best-effort: `execute()` swallows any cleanup error so it
+   * never masks the job result.
+   */
+  cleanupPromptFile?: (resolvedPath: string) => Promise<void> | void;
   now?: () => Date;
 }
 
@@ -195,12 +202,17 @@ export class CrabrunnerStageExecutionBackend
       ) => Promise<string | null | undefined> | string | null | undefined)
     | undefined;
 
+  private readonly cleanupPromptFile:
+    | ((resolvedPath: string) => Promise<void> | void)
+    | undefined;
+
   private readonly now: () => Date;
 
   constructor(options: CrabrunnerStageExecutionBackendOptions) {
     this.client = options.client;
     this.dryRun = options.dryRun ?? false;
     this.resolvePromptFile = options.resolvePromptFile;
+    this.cleanupPromptFile = options.cleanupPromptFile;
     this.now = options.now ?? (() => new Date());
   }
 
@@ -228,13 +240,13 @@ export class CrabrunnerStageExecutionBackend
         error: `crabrunner_prompt_render_failed: ${formatUnknownError(error)}`,
       });
     }
-    // P2-2: clean up the temp prompt dir WE own after the job is terminal. The
-    // lane worker consumes the file before the job becomes terminal, and this
-    // method only returns after collect() (terminal), so cleanup-after-execute
-    // is safe for the local-host path. (For future REMOTE hosts, materialization
-    // copies the prompt first; cleanup-after-terminal still holds.) An explicit
-    // resolvePromptFile override pointing outside the owned prefix is left
-    // untouched.
+    // P2-2 / recheck-2 P2-1: clean up the prompt file (via the factory-supplied
+    // paired cleanup in the finally) after the job is terminal. The lane worker
+    // consumes the file before the job becomes terminal, and this method only
+    // returns after collect() (terminal), so cleanup-after-execute is safe for
+    // the local-host path. (For future REMOTE hosts, materialization copies the
+    // prompt first; cleanup-after-terminal still holds.) Only dirs the default
+    // resolver created are removed; an explicit override path is never touched.
     try {
       const spec = createCrabrunnerJobSpec(input, this.dryRun, promptFile);
       const enforcementFailure =
@@ -303,7 +315,18 @@ export class CrabrunnerStageExecutionBackend
         ...(error === undefined ? {} : { error }),
       });
     } finally {
-      await cleanupOwnedTempPromptDir(promptFile);
+      // recheck-2 P2-1: clean up the prompt path via the factory-supplied paired
+      // cleanup, which removes ONLY temp dirs the default resolver created
+      // (explicit ownership). An explicit override has no paired cleanup, so its
+      // path is never touched. Best-effort: a cleanup error must not mask the
+      // job result.
+      if (promptFile !== undefined && this.cleanupPromptFile !== undefined) {
+        try {
+          await this.cleanupPromptFile(promptFile);
+        } catch {
+          // Best-effort: a missing/locked temp dir must not fail the job.
+        }
+      }
     }
   }
 
@@ -697,38 +720,4 @@ function createCrabrunnerAgentResult(input: {
 
 function formatUnknownError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-/**
- * Remove the temp prompt directory the factory's default resolver created
- * (SYMPH-856, P2-2). Acts ONLY on a path whose parent directory lives directly
- * under the OS temp dir and carries {@link CRABRUNNER_TEMP_PROMPT_DIR_PREFIX},
- * so an explicit `resolvePromptFile` override pointing elsewhere is never
- * touched. Never throws — cleanup is best-effort.
- */
-async function cleanupOwnedTempPromptDir(
-  promptFile: string | null | undefined,
-): Promise<void> {
-  if (promptFile === undefined || promptFile === null) {
-    return;
-  }
-  const dir = dirname(resolve(promptFile));
-  const tempRoot = resolve(tmpdir());
-  // Owned dir is `<tmpdir>/<prefix><random>`: its parent must be exactly the
-  // temp root (no nesting), and its name must carry the owned prefix.
-  if (dirname(dir) !== tempRoot) {
-    return;
-  }
-  if (
-    !dir
-      .slice(tempRoot.length + sep.length)
-      .startsWith(CRABRUNNER_TEMP_PROMPT_DIR_PREFIX)
-  ) {
-    return;
-  }
-  try {
-    await rm(dir, { recursive: true, force: true });
-  } catch {
-    // Best-effort: a missing/locked temp dir must not fail the job.
-  }
 }

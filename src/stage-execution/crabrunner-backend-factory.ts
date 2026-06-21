@@ -1,6 +1,6 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import {
   type RenderPromptInput,
@@ -82,6 +82,13 @@ export interface CreateCrabrunnerStageExecutionBackendOptions {
    */
   renderPrompt?: CrabrunnerPromptRenderer;
   /**
+   * Injected temp-file writer (tests only); defaults to a real `writeFile`.
+   * Lets a test force a write failure after the temp dir is created to prove
+   * the dir is cleaned up before the error rethrows (recheck-2 T1). Only
+   * consulted by the default resolver.
+   */
+  writePromptFile?: (path: string, contents: string) => Promise<void>;
+  /**
    * Explicit override for prompt-path resolution (SYMPH-856). Takes precedence
    * over the default renderer; pass undefined to use the default (rendering)
    * resolver when `promptRendering` is set, or to leave the lane fail-closed
@@ -125,39 +132,79 @@ export function createCrabrunnerStageExecutionBackend(
     ...(options.noStage === undefined ? {} : { noStage: options.noStage }),
   });
 
-  const resolvePromptFile = resolveResolvePromptFile(options);
+  const prompt = resolvePromptFileHandling(options);
 
   return new CrabrunnerStageExecutionBackend({
     client,
     ...(options.dryRun === undefined ? {} : { dryRun: options.dryRun }),
-    ...(resolvePromptFile === undefined ? {} : { resolvePromptFile }),
+    ...(prompt.resolvePromptFile === undefined
+      ? {}
+      : { resolvePromptFile: prompt.resolvePromptFile }),
+    ...(prompt.cleanupPromptFile === undefined
+      ? {}
+      : { cleanupPromptFile: prompt.cleanupPromptFile }),
     ...(options.now === undefined ? {} : { now: options.now }),
   });
 }
 
+interface ResolvedPromptFileHandling {
+  resolvePromptFile?: (
+    input: StageExecutionBackendInput,
+  ) => Promise<string | null | undefined> | string | null | undefined;
+  cleanupPromptFile?: (resolvedPath: string) => Promise<void>;
+}
+
 /**
- * Decide which `resolvePromptFile` the backend gets:
- *   1. an explicit `resolvePromptFile` override (highest precedence), else
- *   2. the default renderer when `promptRendering` is provided, else
- *   3. undefined — leaving the lane fail-closed (SYMPH-853 behavior).
+ * Decide the backend's prompt resolver AND its paired cleanup:
+ *   1. an explicit `resolvePromptFile` override (highest precedence) — NO paired
+ *      cleanup, so an override-supplied path is never removed (recheck-2 P2-1);
+ *   2. the default renderer when `promptRendering` is provided — paired with a
+ *      cleanup that removes ONLY the temp dirs THIS resolver created (tracked
+ *      explicitly in a closed-over Set, never inferred from the pathname);
+ *   3. neither — fail-closed (SYMPH-853), no resolver and no cleanup.
  */
-function resolveResolvePromptFile(
+function resolvePromptFileHandling(
   options: CreateCrabrunnerStageExecutionBackendOptions,
-):
-  | ((
-      input: StageExecutionBackendInput,
-    ) => Promise<string | null | undefined> | string | null | undefined)
-  | undefined {
+): ResolvedPromptFileHandling {
   if (options.resolvePromptFile !== undefined) {
-    return options.resolvePromptFile;
+    // An override owns its own path lifecycle; the backend must never delete it.
+    return { resolvePromptFile: options.resolvePromptFile };
   }
   if (options.promptRendering !== undefined) {
     const promptRendering = options.promptRendering;
     const render = options.renderPrompt ?? defaultRenderPrompt;
-    return (input) =>
-      renderStagePromptToFile({ input, promptRendering, render });
+    const writePromptFile = options.writePromptFile ?? defaultWritePromptFile;
+    // Explicit ownership ledger: the resolver records every temp dir it creates;
+    // cleanup removes a path ONLY if its dir is in this set. A colliding
+    // pathname from an override can never land here, so it is never deleted.
+    const ownedDirs = new Set<string>();
+    return {
+      resolvePromptFile: (input) =>
+        renderStagePromptToFile({
+          input,
+          promptRendering,
+          render,
+          writePromptFile,
+          ownedDirs,
+        }),
+      cleanupPromptFile: async (resolvedPath) => {
+        const dir = dirname(resolve(resolvedPath));
+        if (!ownedDirs.has(dir)) {
+          return;
+        }
+        ownedDirs.delete(dir);
+        await rm(dir, { recursive: true, force: true });
+      },
+    };
   }
-  return undefined;
+  return {};
+}
+
+async function defaultWritePromptFile(
+  path: string,
+  contents: string,
+): Promise<void> {
+  await writeFile(path, contents, "utf8");
 }
 
 /**
@@ -175,29 +222,37 @@ function resolveResolvePromptFile(
  *     present template that renders to empty/whitespace) is allowed to THROW.
  *     The backend's `execute()` catches it and yields a failed result carrying
  *     the real error — never an empty/placeholder prompt.
- *   - A GENUINELY ABSENT template (empty/blank source) returns undefined so the
- *     scheduler client fails closed at submit
- *     (`crabrunner_prompt_required_symph_856`).
+ *   - A GENUINELY ABSENT template SOURCE (no `stage.prompt` and a blank
+ *     `promptTemplate` config string) returns undefined so the scheduler client
+ *     fails closed at submit (`crabrunner_prompt_required_symph_856`).
  *
- * The empty-render-vs-absent-template distinction matters (Codex P2-1): a
- * non-empty Liquid template that resolves to nothing is an operator-visible
- * template bug, not a "no prompt configured" case, so it must surface as a
- * render failure rather than the absent-template rejection.
+ * The empty-render-vs-absent-template distinction matters (Codex P2-1 / recheck-2
+ * P2-2): only a genuinely absent SOURCE is "no prompt configured". A PRESENT
+ * source — including a prompt-file path whose file is blank — is rendered, and a
+ * resulting empty/whitespace prompt is an operator-visible template bug that must
+ * surface as a render failure, never the absent-template rejection.
+ *
+ * Every temp dir this resolver creates is recorded in `ownedDirs` so the factory's
+ * paired cleanup removes ONLY dirs this resolver created (explicit ownership, not
+ * pathname inference — recheck-2 P2-1). If the write fails after the dir is
+ * created, the dir is removed before the error rethrows (recheck-2 T1).
  */
 async function renderStagePromptToFile(args: {
   input: StageExecutionBackendInput;
   promptRendering: CrabrunnerPromptRenderingConfig;
   render: CrabrunnerPromptRenderer;
+  writePromptFile: (path: string, contents: string) => Promise<void>;
+  ownedDirs: Set<string>;
 }): Promise<string | undefined> {
-  const { input, promptRendering, render } = args;
+  const { input, promptRendering, render, writePromptFile, ownedDirs } = args;
   const runnerInput = input.runnerInput;
 
   // stage?.prompt ?? config.promptTemplate — identical to AgentRunner.run().
   const templateSource =
     runnerInput.stage?.prompt ?? promptRendering.promptTemplate;
   if (templateSource === null || templateSource.trim().length === 0) {
-    // No template to render: fail closed at submit rather than emit an empty
-    // prompt. (A render failure, by contrast, throws.)
+    // Genuinely ABSENT source: fail closed at submit (required), not a render
+    // failure. (A present-but-empty template, by contrast, throws below.)
     return undefined;
   }
 
@@ -207,8 +262,16 @@ async function renderStagePromptToFile(args: {
     promptTemplate: templateSource,
     workflowPath: promptRendering.workflowPath,
   });
+
+  // recheck-2 P2-2: a PRESENT source (the source was non-blank above) whose
+  // resolved content is blank — e.g. a prompt-FILE path pointing at an empty
+  // file — is a template bug, NOT an absent template. Throw here, BEFORE
+  // renderPrompt: getEffectivePromptTemplate() would otherwise substitute the
+  // DEFAULT_WORKFLOW_PROMPT for a blank template and silently mask the bug as a
+  // generic-prompt success. (The genuinely-absent SOURCE case returned undefined
+  // above → required.)
   if (resolvedTemplate.trim().length === 0) {
-    return undefined;
+    throw new Error("rendered stage prompt is empty");
   }
 
   // Render context built field-for-field from runnerInput, matching the
@@ -229,16 +292,25 @@ async function renderStagePromptToFile(args: {
     modePolicy: runnerInput.modePolicy ?? null,
   });
 
-  // P2-1: a present template that renders to empty/whitespace is a template bug,
-  // NOT an absent template. Throw so execute() surfaces it as a failed result
-  // (crabrunner_prompt_render_failed) — never launch a lane with no instructions.
+  // A present template that renders to empty/whitespace (including a blank
+  // prompt file) is a template bug, NOT an absent template. Throw so execute()
+  // surfaces it as crabrunner_prompt_render_failed — never launch a lane with no
+  // instructions.
   if (rendered.trim().length === 0) {
     throw new Error("rendered stage prompt is empty");
   }
 
   const dir = await mkdtemp(join(tmpdir(), CRABRUNNER_TEMP_PROMPT_DIR_PREFIX));
+  ownedDirs.add(resolve(dir));
   const promptPath = join(dir, "prompt.md");
-  await writeFile(promptPath, rendered, "utf8");
+  try {
+    await writePromptFile(promptPath, rendered);
+  } catch (error) {
+    // recheck-2 T1: a write failure must not leak the just-created temp dir.
+    ownedDirs.delete(resolve(dir));
+    await rm(dir, { recursive: true, force: true });
+    throw error;
+  }
   return promptPath;
 }
 

@@ -322,6 +322,115 @@ describe("crabrunner default prompt resolver (SYMPH-856)", () => {
 
     await rm(overrideDir, { recursive: true, force: true });
   });
+
+  it("does NOT delete an override path that COLLIDES with the temp prompt prefix (recheck-2 P2-1)", async () => {
+    // Ownership must be explicit, not inferred from the pathname: an override
+    // returning a path UNDER tmpdir() WITH the crabrunner-prompt- prefix must
+    // still be left untouched, because the factory default resolver did not
+    // create it.
+    const overrideDir = await mkdtemp(
+      join(tmpdir(), "crabrunner-prompt-keep-"),
+    );
+    const overridePath = join(overrideDir, "prompt.md");
+    await writeFile(overridePath, "explicit colliding-prefix prompt", "utf8");
+
+    const capture = createManifestCaptureCli();
+    const backend = createCrabrunnerStageExecutionBackend({
+      crucibleRoot: "/tmp/crucible",
+      targetRepoRoot: "/tmp/repo",
+      pollIntervalMs: 0,
+      cli: capture.cli,
+      resolvePromptFile: () => overridePath,
+    });
+
+    const result = await backend.execute({
+      job: createJob(),
+      runnerInput: createRunnerInput(),
+    });
+
+    expect(result.result.runAttempt.status).toBe("succeeded");
+    expect(capture.manifest().prompt_file).toBe(overridePath);
+    // Provably NOT deleted despite the colliding prefix.
+    expect(await pathExists(overridePath)).toBe(true);
+
+    await rm(overrideDir, { recursive: true, force: true });
+  });
+
+  it("fails closed render_failed (not required) when a present template path points at a blank file (recheck-2 P2-2)", async () => {
+    // A present SOURCE (a real prompt-file path) whose CONTENT is blank is a
+    // present-but-empty template — it must hit the empty-render contract
+    // (crabrunner_prompt_render_failed), not the absent-template rejection.
+    const tplDir = await mkdtemp(join(tmpdir(), "blank-tpl-"));
+    const tplPath = join(tplDir, "empty.liquid");
+    await writeFile(tplPath, "   \n  ", "utf8");
+
+    const capture = createManifestCaptureCli();
+    const backend = createCrabrunnerStageExecutionBackend({
+      crucibleRoot: "/tmp/crucible",
+      targetRepoRoot: "/tmp/repo",
+      pollIntervalMs: 0,
+      cli: capture.cli,
+      promptRendering: {
+        // Path with a recognized extension + separator → resolved by reading the
+        // (blank) file, exactly as AgentRunner.run() turn-1 does.
+        promptTemplate: tplPath,
+        workflowPath: join(tplDir, "WORKFLOW.md"),
+      },
+    });
+
+    const result = await backend.execute({
+      job: createJob(),
+      runnerInput: createRunnerInput(),
+    });
+
+    expect(result.result.runAttempt.status).toBe("failed");
+    expect(result.result.runAttempt.error ?? "").toContain(
+      "crabrunner_prompt_render_failed",
+    );
+    expect(result.result.runAttempt.error ?? "").not.toContain(
+      "crabrunner_prompt_required_symph_856",
+    );
+    expect(capture.submitted()).toBe(false);
+
+    await rm(tplDir, { recursive: true, force: true });
+  });
+
+  it("cleans up the temp dir if writeFile throws after mkdtemp (recheck-2 T1)", async () => {
+    // Force a write failure AFTER the temp dir is created; the resolver must
+    // remove the dir before rethrowing so it does not leak.
+    const createdDirs: string[] = [];
+    const capture = createManifestCaptureCli();
+    const backend = createCrabrunnerStageExecutionBackend({
+      crucibleRoot: "/tmp/crucible",
+      targetRepoRoot: "/tmp/repo",
+      pollIntervalMs: 0,
+      cli: capture.cli,
+      promptRendering: {
+        promptTemplate: "Work on {{ issue.identifier }}",
+        workflowPath: "/tmp/workflow/WORKFLOW.md",
+      },
+      // Internal seam (tests only): capture the dir then fail the write.
+      writePromptFile: async (path) => {
+        createdDirs.push(dirname(path));
+        throw new Error("disk full");
+      },
+    });
+
+    const result = await backend.execute({
+      job: createJob(),
+      runnerInput: createRunnerInput(),
+    });
+
+    expect(result.result.runAttempt.status).toBe("failed");
+    expect(result.result.runAttempt.error ?? "").toContain(
+      "crabrunner_prompt_render_failed",
+    );
+    expect(result.result.runAttempt.error ?? "").toContain("disk full");
+    expect(capture.submitted()).toBe(false);
+    expect(createdDirs.length).toBe(1);
+    // The temp dir created by mkdtemp must have been removed despite the throw.
+    expect(await pathExists(createdDirs[0] as string)).toBe(false);
+  });
 });
 
 // --- helpers ---------------------------------------------------------------
