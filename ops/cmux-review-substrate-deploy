@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-RUNBOOK="$REPO_ROOT/docs/operations/cmux-review-substrate-deploy.md"
+RUNBOOK="$REPO_ROOT/docs/operations/01-cmux-review-substrate-deploy.md"
 REMOTE_HOST="${CMUX_REVIEW_PRIMARY_HOST:-clawdilize@pro16.local}"
 LOCAL_CRUCIBLE="${LOCAL_CRUCIBLE:-$HOME/projects/crucible}"
 REMOTE_SYMPHONY="${REMOTE_SYMPHONY:-~/projects/symphony-ts}"

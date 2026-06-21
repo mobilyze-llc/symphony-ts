@@ -33,7 +33,7 @@ it("prints the runbook and lightweight Kimi review contract in help", () => {
 
   expect(result.status).toBe(0);
   expect(result.stdout).toContain(
-    "docs/operations/cmux-review-substrate-deploy.md",
+    "docs/operations/01-cmux-review-substrate-deploy.md",
   );
   expect(result.stdout).toContain("Kimi review lane");
   expect(result.stdout).toContain("Fix meaningful correctness");
