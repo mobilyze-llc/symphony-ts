@@ -63,8 +63,9 @@ export interface CrabrunnerJobSpec {
    * Path to the rendered stage prompt for the lane worker (SYMPH-856). When
    * present, the scheduler client maps it to manifest `prompt_file` and uses the
    * lane-worker.v1 protocol; when absent (and no worker_argv), the client fails
-   * closed at submit rather than emitting an unrunnable manifest.
-   * TODO(SYMPH-856): live dispatch must render the stage prompt and populate this.
+   * closed at submit rather than emitting an unrunnable manifest. The factory's
+   * default resolver renders the stage prompt and populates this at dispatch
+   * (see `crabrunner-backend-factory.ts`).
    */
   promptFile?: string;
 }
@@ -146,10 +147,15 @@ export interface CrabrunnerStageExecutionBackendOptions {
    * (undefined) leaves `spec.promptFile` absent, so the scheduler client fails
    * closed at submit rather than emitting an unrunnable manifest. Live dispatch
    * supplies this once it renders the stage prompt.
+   *
+   * Async because the production resolver (the factory's default) renders the
+   * LiquidJS stage prompt and writes it to a temp file. A render failure (e.g. a
+   * strictVariables miss) must REJECT, not resolve: `execute()` lets the
+   * rejection surface as a failed result rather than emitting an empty prompt.
    */
   resolvePromptFile?: (
     input: StageExecutionBackendInput,
-  ) => string | null | undefined;
+  ) => Promise<string | null | undefined> | string | null | undefined;
   now?: () => Date;
 }
 
@@ -163,7 +169,9 @@ export class CrabrunnerStageExecutionBackend
   private readonly dryRun: boolean;
 
   private readonly resolvePromptFile:
-    | ((input: StageExecutionBackendInput) => string | null | undefined)
+    | ((
+        input: StageExecutionBackendInput,
+      ) => Promise<string | null | undefined> | string | null | undefined)
     | undefined;
 
   private readonly now: () => Date;
@@ -178,7 +186,27 @@ export class CrabrunnerStageExecutionBackend
   async execute(
     input: StageExecutionBackendInput,
   ): Promise<StageExecutionBackendResult<CrabrunnerStageExecutionEvidence>> {
-    const promptFile = this.resolvePromptFile?.(input) ?? undefined;
+    // SYMPH-856: resolve (render) the stage prompt before building the job spec.
+    // A render failure must FAIL CLOSED with the real error surfaced, never an
+    // empty/placeholder prompt — so we return a failed result rather than
+    // letting an unrendered job reach submit.
+    let promptFile: string | null | undefined;
+    try {
+      promptFile = (await this.resolvePromptFile?.(input)) ?? undefined;
+    } catch (error) {
+      return this.toBackendResult(input, {
+        admission: {
+          status: "rejected",
+          jobId: null,
+          reason: `crabrunner_prompt_render_failed: ${formatUnknownError(error)}`,
+        },
+        terminal: null,
+        artifactRefs: [],
+        usage: null,
+        status: "failed",
+        error: `crabrunner_prompt_render_failed: ${formatUnknownError(error)}`,
+      });
+    }
     const spec = createCrabrunnerJobSpec(input, this.dryRun, promptFile);
     const enforcementFailure = validateCrabrunnerLaneEnforcementContract(spec);
     if (enforcementFailure !== null) {
@@ -406,8 +434,9 @@ export function createCrabrunnerJobSpec(
       title: input.runnerInput.issue.title,
       url: input.runnerInput.issue.url,
     },
-    // SYMPH-856: live dispatch renders the stage prompt and passes its path
-    // here; absent (the default today) makes the scheduler client fail closed.
+    // SYMPH-856: the factory's default resolver renders the stage prompt and
+    // passes its path here; absent (no resolver/render) makes the scheduler
+    // client fail closed at submit.
     ...(promptFile === undefined || promptFile === null ? {} : { promptFile }),
   };
 }
