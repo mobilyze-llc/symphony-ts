@@ -157,6 +157,101 @@ describe("standing-plan store", () => {
     }
   });
 
+  it("pins the first revision's rationale and labels when only prose changes (SYMPH-827)", async () => {
+    // PR #613 excludes rationale/labels from computePlanContentHash, so a
+    // structurally-identical re-plan with FRESH reasoning is a no-op: the store
+    // returns the current plan, PINNING the original rationale and labels. This
+    // locks that intended churn-suppression (decision: accept pinning) and
+    // documents that the displayed reasoning stays the first revision's until the
+    // STRUCTURE actually changes — operators see a stable, not rotating, plan.
+    const root = tmpRoot();
+    try {
+      const firstBatch = lookahead("b1", "SYMPH-1");
+      firstBatch.rationale = "Original: the highest-value eligible issue.";
+      const first = await recordPlanRevision(
+        root,
+        {
+          ...body([firstBatch]),
+          options: [{ marker: "[opt-1]", label: "Release b1", intent: null }],
+          rationale: "Original plan rationale.",
+        },
+        { planId: "plan-1", createdAt: "2026-06-18T00:00:00.000Z" },
+      );
+      expect(first.recorded).toBe(true);
+
+      const secondBatch = lookahead("b1", "SYMPH-1");
+      secondBatch.rationale = "Reworded: same batch, fresh prose.";
+      const again = await recordPlanRevision(
+        root,
+        {
+          ...body([secondBatch]),
+          options: [
+            {
+              marker: "[opt-1]",
+              label: "Reworded label, same option",
+              intent: null,
+            },
+          ],
+          rationale: "Reworded plan rationale — structure unchanged.",
+        },
+        { createdAt: "2026-06-18T00:10:00.000Z" },
+      );
+
+      // No rotation, and the returned plan keeps the ORIGINAL (pinned) prose.
+      expect(again.recorded).toBe(false);
+      expect(again.plan.revision).toBe(1);
+      expect(again.plan.rationale).toBe("Original plan rationale.");
+      expect(again.plan.batches[0]?.rationale).toBe(
+        "Original: the highest-value eligible issue.",
+      );
+      expect(again.plan.options[0]?.label).toBe("Release b1");
+
+      // A fresh projection (restart) also returns the pinned original.
+      const reloaded = await loadStandingPlan(root);
+      expect(reloaded?.revision).toBe(1);
+      expect(reloaded?.rationale).toBe("Original plan rationale.");
+      expect(reloaded?.batches[0]?.rationale).toBe(
+        "Original: the highest-value eligible issue.",
+      );
+      expect(reloaded?.options[0]?.label).toBe("Release b1");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("updates rationale when the structure DOES change (the pinning counterpart, SYMPH-827)", async () => {
+    // The flip side of pinning: a structural change rotates the revision and the
+    // NEW rationale takes effect — rationale is pinned only while the structure
+    // is identical, never across a real re-plan. Guards against over-pinning.
+    const root = tmpRoot();
+    try {
+      await recordPlanRevision(
+        root,
+        {
+          ...body([lookahead("b1", "SYMPH-1")]),
+          rationale: "First rationale.",
+        },
+        { planId: "plan-1", createdAt: "2026-06-18T00:00:00.000Z" },
+      );
+      const changed = await recordPlanRevision(
+        root,
+        {
+          ...body([lookahead("b2", "SYMPH-2")]),
+          rationale: "Second rationale — new structure.",
+        },
+        { createdAt: "2026-06-18T00:01:00.000Z" },
+      );
+      expect(changed.recorded).toBe(true);
+      expect(changed.plan.revision).toBe(2);
+      expect(changed.plan.rationale).toBe("Second rationale — new structure.");
+      expect((await loadStandingPlan(root))?.rationale).toBe(
+        "Second rationale — new structure.",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("rotates the revision when the plan body changes", async () => {
     const root = tmpRoot();
     try {

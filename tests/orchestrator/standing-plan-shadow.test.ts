@@ -14,7 +14,10 @@ import {
   runStandingPlanShadowTick,
   shouldRunShadowPlanCycle,
 } from "../../src/orchestrator/standing-plan-shadow.js";
-import { loadStandingPlan } from "../../src/orchestrator/standing-plan-store.js";
+import {
+  loadStandingPlan,
+  recordPlanRevision,
+} from "../../src/orchestrator/standing-plan-store.js";
 
 const ENVELOPE: PlanEnvelope = {
   version: 1,
@@ -412,7 +415,9 @@ describe("runStandingPlanShadowTick", () => {
         expect(second.recorded).toBe(false);
         expect(second.revision).toBe(1);
       }
-      expect(third).toEqual({ status: "skipped", reason: "heartbeat" });
+      // After SYMPH-828 this within-window skip is served by the attempted-run
+      // gate (the marker advanced on the no-op cycle) → reason "cadence".
+      expect(third).toEqual({ status: "skipped", reason: "cadence" });
       expect(plannerCalls).toBe(2);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -473,6 +478,137 @@ describe("runStandingPlanShadowTick", () => {
       });
       expect(result.status).toBe("skipped");
       expect(logs).toContain("queue_triage_shadow_failed");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("runStandingPlanShadowTick — error rate-limiting (SYMPH-828)", () => {
+  it("rate-limits a persistently throwing cycle to the heartbeat cadence", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-err-"));
+    let fetchCalls = 0;
+    const logs: string[] = [];
+    const tick = (iso: string) =>
+      runStandingPlanShadowTick({
+        config: triageConfig(), // heartbeatMs 900_000 (15m)
+        workspaceRoot: root,
+        fetchCandidates: async () => {
+          fetchCalls += 1;
+          throw new Error("tracker down");
+        },
+        getInFlight: () => [],
+        createPlannerRunner: () => okPlanner().runClaude,
+        log: (event) => {
+          logs.push(event);
+        },
+        now: () => new Date(iso),
+      });
+    try {
+      const first = await tick("2026-06-18T01:00:00.000Z"); // attempts → throws
+      const second = await tick("2026-06-18T01:01:00.000Z"); // <15m → skip
+      const third = await tick("2026-06-18T01:05:00.000Z"); // <15m → skip
+      const fourth = await tick("2026-06-18T01:20:00.000Z"); // 20m → attempts
+
+      expect(first).toEqual({ status: "skipped", reason: "error" });
+      // Rate-limited by the attempted-run gate (reason "cadence"), distinct from
+      // the plan-freshness "heartbeat" gate.
+      expect(second).toEqual({ status: "skipped", reason: "cadence" });
+      expect(third).toEqual({ status: "skipped", reason: "cadence" });
+      expect(fourth).toEqual({ status: "skipped", reason: "error" });
+      // The expensive fetch ran once per heartbeat window, NOT every poll. The
+      // pre-SYMPH-828 tick advanced the marker only on success and ignored it
+      // when no plan exists, so it would have re-fetched on all four ticks.
+      expect(fetchCalls).toBe(2);
+      // …and the operator-visible degradation log fired only on real attempts.
+      expect(
+        logs.filter((e) => e === "queue_triage_shadow_failed").length,
+      ).toBe(2);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("a forced tick bypasses the error cadence (operator re-plan still runs)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-err-"));
+    let fetchCalls = 0;
+    const failingFetch = async (): Promise<Issue[]> => {
+      fetchCalls += 1;
+      throw new Error("tracker down");
+    };
+    try {
+      await runStandingPlanShadowTick({
+        config: triageConfig(),
+        workspaceRoot: root,
+        fetchCandidates: failingFetch,
+        getInFlight: () => [],
+        createPlannerRunner: () => okPlanner().runClaude,
+        log: () => undefined,
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+      });
+      // 1 minute later (inside the cadence) but FORCED → must still attempt.
+      const forced = await runStandingPlanShadowTick({
+        config: triageConfig(),
+        workspaceRoot: root,
+        fetchCandidates: failingFetch,
+        getInFlight: () => [],
+        createPlannerRunner: () => okPlanner().runClaude,
+        log: () => undefined,
+        now: () => new Date("2026-06-18T01:01:00.000Z"),
+        force: true,
+      });
+      expect(forced).toEqual({ status: "skipped", reason: "error" });
+      expect(fetchCalls).toBe(2);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("after a restart (marker lost), a fresh plan within the window skips via the plan-freshness gate", async () => {
+    // The attempted-run marker is in-memory, so a restart loses it. The next poll
+    // then falls through to shouldRunShadowPlanCycle, which skips on the plan's
+    // own freshness — reason "heartbeat", distinct from the "cadence" rate-limit
+    // gate. Covers the old gate's integration, which the cadence gate now fronts.
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-restart-"));
+    let plannerBuilt = false;
+    try {
+      // Persist a fresh plan directly (no tick → no in-memory marker = restart).
+      await recordPlanRevision(
+        root,
+        {
+          batches: [
+            {
+              batchId: "b1",
+              mode: "parallel-isolated",
+              status: "lookahead",
+              members: [{ issueId: "1", issueIdentifier: "SYMPH-1" }],
+              rationale: "r",
+              canary: null,
+            },
+          ],
+          options: [],
+          envelope: ENVELOPE,
+          rationale: "seed",
+          source: "planner",
+          dependencyEdges: [],
+        },
+        { planId: "plan-1", createdAt: "2026-06-18T01:00:00.000Z" },
+      );
+      const result = await runStandingPlanShadowTick({
+        config: triageConfig(),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        createPlannerRunner: () => {
+          plannerBuilt = true;
+          return okPlanner().runClaude;
+        },
+        log: () => undefined,
+        // 1 min after the recorded plan — inside the 15m heartbeat window.
+        now: () => new Date("2026-06-18T01:01:00.000Z"),
+      });
+      expect(result).toEqual({ status: "skipped", reason: "heartbeat" });
+      expect(plannerBuilt).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
