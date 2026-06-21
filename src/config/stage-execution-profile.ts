@@ -216,6 +216,19 @@ function parseStageExecutionSubStages(
       return;
     }
 
+    // Each sub-stage must be bounded: a token ceiling is required so cumulative
+    // implement spend stays bounded by the sum of the per-sub-stage ceilings
+    // (SYMPH-835). An unbounded sub-stage would defeat budget isolation.
+    if (parsed.profile.budget.maxTokens === null) {
+      errors.push(
+        executionValidationError(
+          `${entryPath}.execution.budget.max_tokens`,
+          record.execution,
+          `${entryPath}.execution.budget.max_tokens is required: each sub-stage must declare its own token ceiling.`,
+        ),
+      );
+    }
+
     if (name === null) {
       return;
     }

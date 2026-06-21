@@ -88,6 +88,13 @@ export interface DecomposedSubStageOutcome {
   consumeCapsules: readonly StageExecutionCapsuleRef[];
   producedCapsulePaths: readonly string[];
   missingCapsules: readonly string[];
+  /**
+   * Backend result for a dispatched sub-stage. Present (non-null) even when
+   * `status` is "budget_exceeded" — in that case `producedCapsulePaths` is
+   * empty because the breaching sub-stage's capsules are withheld from the
+   * handoff. Null when the sub-stage never ran (missing required capsule) or
+   * its dispatch threw.
+   */
   result: StageExecutionBackendResult | null;
   error: unknown;
 }
@@ -124,7 +131,9 @@ export interface RunDecomposedStageInput {
    * result (e.g. artifact evidence or a filesystem check). Only these paths
    * become available to later sub-stages — config `capsules.produce`
    * declarations alone never satisfy the handoff, so a declared-but-unproduced
-   * capsule fails the next sub-stage closed.
+   * capsule fails the next sub-stage closed. Intentionally required (no
+   * default): a default that trusted config `capsules.produce` would silently
+   * re-break the fail-closed handoff contract.
    */
   resolveProducedCapsules: (
     input: ResolveProducedCapsulesInput,
@@ -254,7 +263,8 @@ export async function runDecomposedStage(
 
     // Per-sub-stage budget isolation: a ceiling breach stops at the boundary,
     // the next sub-stage is NOT dispatched, and the breaching sub-stage's
-    // produced capsules are withheld from the handoff.
+    // produced capsules are withheld from the handoff. Spending exactly the
+    // ceiling is permitted; only strict-exceed (> ceiling) triggers the stop.
     if (ceilingTokens !== null && spentTokens > ceilingTokens) {
       outcomes.push({
         name: subStage.name,

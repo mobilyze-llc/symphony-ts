@@ -356,6 +356,36 @@ describe("resolveStagesConfig", () => {
     expect(validateStagesConfig(result).ok).toBe(false);
   });
 
+  it("requires each sub-stage to declare its own budget token ceiling", () => {
+    const result = resolveStagesConfig({
+      implement: {
+        type: "agent",
+        on_complete: "done",
+        execution: {
+          role: "implementer",
+          phase: "implement",
+          backend: "crabrunner",
+          sub_stages: [
+            {
+              name: "patch-plan",
+              // no budget.max_tokens -> unbounded sub-stage, rejected
+              execution: { role: "implementer", phase: "implement" },
+            },
+          ],
+        },
+      },
+      done: { type: "terminal" },
+    });
+
+    const errorPaths = (
+      result!.stages.implement!.executionValidationErrors ?? []
+    ).map((error) => error.path);
+    expect(errorPaths).toContain(
+      "stages.implement.execution.sub_stages.0.execution.budget.max_tokens",
+    );
+    expect(validateStagesConfig(result).ok).toBe(false);
+  });
+
   it("parses thinking as the delegated execution reasoning_effort fallback", () => {
     const result = resolveStagesConfig({
       plan: {
