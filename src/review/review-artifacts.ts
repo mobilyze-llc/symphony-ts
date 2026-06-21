@@ -515,7 +515,11 @@ function artifactVerdictTokenAtLineStart(
   const line = trimTrailingCarriageReturn(
     artifact.slice(offset, lineEnd),
   ).trimEnd();
-  if (equalsIgnoreCase(line, "## Verdict")) {
+  const heading = artifactMarkdownHeadingAtLine(artifact, offset, lineEnd);
+  if (
+    heading !== null &&
+    heading.normalizedText === normalizeArtifactHeadingText("Verdict")
+  ) {
     return artifactVerdictTokenAfterHeadingLine(artifact, lineEnd);
   }
 

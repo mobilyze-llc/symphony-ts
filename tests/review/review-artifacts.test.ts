@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   artifactSectionContent,
   artifactSectionHasContent,
+  artifactStartingVerdictToken,
   buildArtifactSectionHeadingKeys,
   normalizeArtifactStart,
   sectionFindingEntries,
@@ -48,6 +49,37 @@ describe("review artifact contracts", () => {
         ].join("\n"),
       ),
     ).toEqual(["src/a.ts:1 first line more detail", "src/b.ts:2 second"]);
+  });
+
+  it("normalizes a BOM and safe prose before the first verdict", () => {
+    expect(normalizeArtifactStart("\uFEFF\n## Verdict\nPASS")).toBe(
+      "## Verdict\nPASS",
+    );
+    expect(
+      normalizeArtifactStart(
+        ["\uFEFFBrief preamble.", "", "## Verdict", "FINDINGS"].join("\n"),
+      ),
+    ).toBe("## Verdict\nFINDINGS");
+  });
+
+  it("accepts normalized verdict heading variants", () => {
+    expect(artifactStartingVerdictToken("## Verdict:\nFAIL")).toBe("FAIL");
+    expect(artifactStartingVerdictToken("### Verdict\nPASS")).toBe("PASS");
+  });
+
+  it("requires verdict token word boundaries", () => {
+    expect(artifactStartingVerdictToken("Verdict: PASS")).toBe("PASS");
+    expect(artifactStartingVerdictToken("Verdict: PASS.")).toBe("PASS");
+    expect(artifactStartingVerdictToken("Verdict: PASSED")).toBeNull();
+    expect(artifactStartingVerdictToken("Verdict: FAILING")).toBeNull();
+  });
+
+  it("ignores emphasized empty-section markers", () => {
+    expect(
+      sectionFindingEntries(
+        ["- **None found.**", "- _None_", "- real finding"].join("\n"),
+      ),
+    ).toEqual(["real finding"]);
   });
 
   it("normalizes safe prose before the verdict but keeps suspicious heading labels", () => {

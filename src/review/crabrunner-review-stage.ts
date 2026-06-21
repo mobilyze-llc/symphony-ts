@@ -23,6 +23,7 @@ import type {
   CouncilRoutingMode,
   HeadlessCouncilGateResult,
   ReviewBundleReference,
+  StructuredReviewerArtifact,
   TargetedConvergenceHypothesis,
 } from "./headless-council-gate.js";
 import {
@@ -129,6 +130,10 @@ export interface CrabrunnerReviewStageDispatchContext {
   /** Run-group artifact root the review-result.json is written under. */
   artifactRoot: string;
   baseRef: string | null;
+  /** Previous reviewed head from the latest prior review-result/journal row. */
+  previousReviewedHeadSha?: string | null;
+  /** Structured artifacts from prior review rounds for targeted convergence. */
+  priorStructuredArtifacts?: readonly StructuredReviewerArtifact[];
   signal: AbortSignal;
   /** The resolved crabrunner backend (the only dispatch surface). */
   backend: StageExecutionBackendRunner<CrabrunnerStageExecutionEvidence>;

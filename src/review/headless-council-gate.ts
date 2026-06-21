@@ -6681,6 +6681,9 @@ function parseUnquotedDiffGitPaths(
   }
 
   const separator = " b/";
+  // Unquoted `diff --git` lines are fundamentally ambiguous when either path
+  // itself contains ` b/`. Preserve the legacy greedy split by taking the last
+  // separator; quoted paths remain the exact, unambiguous representation.
   const separatorIndex = line.lastIndexOf(separator);
   if (separatorIndex === -1) {
     return null;

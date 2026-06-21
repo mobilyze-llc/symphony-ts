@@ -161,6 +161,7 @@ import type {
   CrabrunnerReviewStageDispatchContext,
   CrabrunnerReviewStageDispatcher,
 } from "../review/crabrunner-review-stage.js";
+import type { StructuredReviewerArtifact } from "../review/headless-council-gate.js";
 import { createRunnerFromConfig, isAiSdkRunner } from "../runners/factory.js";
 import type { RunnerKind } from "../runners/types.js";
 import { getDurableCodexSessionArtifactDirectory } from "../shared/codex-session-artifacts.js";
@@ -4885,6 +4886,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         "crabrunner review dispatch selected without a review dispatcher",
       );
     }
+    const priorReview = await loadPriorCrabrunnerReviewState({
+      journal: this.orchestrator.getState().dispatcherRunJournal,
+      issueId: input.issue.id,
+    });
     const context: CrabrunnerReviewStageDispatchContext = {
       issue: input.issue,
       issueId: input.issue.id,
@@ -4895,6 +4900,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       attempt: input.attempt,
       artifactRoot: input.artifactRoot,
       baseRef: input.baseRef,
+      previousReviewedHeadSha: priorReview.previousReviewedHeadSha,
+      priorStructuredArtifacts: priorReview.priorStructuredArtifacts,
       signal: input.signal,
       backend:
         input.backend as StageExecutionBackendRunner<CrabrunnerStageExecutionEvidence>,
@@ -7270,6 +7277,178 @@ function truncateTraceText(text: string, maxLength = 200): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+interface PriorCrabrunnerReviewState {
+  previousReviewedHeadSha: string | null;
+  priorStructuredArtifacts: StructuredReviewerArtifact[];
+}
+
+interface PriorReviewResultRecord {
+  review_metadata: Record<string, unknown>;
+  lanes: PriorReviewLaneRecord[];
+}
+
+interface PriorReviewLaneRecord {
+  structuredArtifact?: unknown;
+}
+
+async function loadPriorCrabrunnerReviewState(input: {
+  journal: readonly DispatcherRunJournalEntry[];
+  issueId: string;
+}): Promise<PriorCrabrunnerReviewState> {
+  const priorGate = findLatestPriorReviewGateResult(
+    input.journal,
+    input.issueId,
+  );
+  if (priorGate === null) {
+    return { previousReviewedHeadSha: null, priorStructuredArtifacts: [] };
+  }
+
+  const journalReviewedHeadSha = stringMetadata(
+    priorGate.metadata.reviewed_head_sha,
+  );
+  const reviewResultPath = stringMetadata(
+    priorGate.metadata.review_result_path,
+  );
+  if (reviewResultPath === null) {
+    return {
+      previousReviewedHeadSha: journalReviewedHeadSha,
+      priorStructuredArtifacts: [],
+    };
+  }
+
+  const reviewResult = await readPriorReviewResult(reviewResultPath);
+  if (reviewResult === null) {
+    return {
+      previousReviewedHeadSha: journalReviewedHeadSha,
+      priorStructuredArtifacts: [],
+    };
+  }
+
+  return {
+    previousReviewedHeadSha:
+      stringMetadata(reviewResult.review_metadata.reviewed_head_sha) ??
+      journalReviewedHeadSha,
+    priorStructuredArtifacts: collectPriorStructuredArtifacts(reviewResult),
+  };
+}
+
+function findLatestPriorReviewGateResult(
+  journal: readonly DispatcherRunJournalEntry[],
+  issueId: string,
+): DispatcherRunJournalEntry | null {
+  for (let index = journal.length - 1; index >= 0; index -= 1) {
+    const entry = journal[index];
+    if (
+      entry !== undefined &&
+      entry.issueId === issueId &&
+      entry.kind === "review_gate_result"
+    ) {
+      return entry;
+    }
+  }
+  return null;
+}
+
+async function readPriorReviewResult(
+  path: string,
+): Promise<PriorReviewResultRecord | null> {
+  try {
+    const parsed = JSON.parse(await readFile(path, "utf8")) as unknown;
+    return isPriorReviewResultRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function isPriorReviewResultRecord(
+  value: unknown,
+): value is PriorReviewResultRecord {
+  return (
+    isRecord(value) &&
+    isRecord(value.review_metadata) &&
+    Array.isArray(value.lanes) &&
+    value.lanes.every(isPriorReviewLaneRecord)
+  );
+}
+
+function isPriorReviewLaneRecord(
+  value: unknown,
+): value is PriorReviewLaneRecord {
+  return isRecord(value);
+}
+
+function collectPriorStructuredArtifacts(
+  result: PriorReviewResultRecord,
+): StructuredReviewerArtifact[] {
+  return result.lanes.flatMap((lane) =>
+    isPriorStructuredArtifactRecord(lane.structuredArtifact)
+      ? [lane.structuredArtifact]
+      : [],
+  );
+}
+
+function isPriorStructuredArtifactRecord(
+  value: unknown,
+): value is StructuredReviewerArtifact {
+  if (!isRecord(value)) {
+    return false;
+  }
+  const lane = value.lane;
+  const routing = value.routing;
+  return (
+    value.schemaVersion === 1 &&
+    value.kind === "symphony-headless-council-reviewer-artifact" &&
+    isRecord(lane) &&
+    typeof lane.laneId === "string" &&
+    isRecord(routing) &&
+    typeof routing.round === "number" &&
+    Array.isArray(value.findings) &&
+    value.findings.every(isPriorStructuredFindingRecord) &&
+    Array.isArray(value.familySyntheses) &&
+    value.familySyntheses.every(isPriorStructuredFamilySynthesisRecord)
+  );
+}
+
+function isPriorStructuredFindingRecord(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (
+    typeof value.fingerprint !== "string" ||
+    typeof value.severity !== "string" ||
+    typeof value.leadDisposition !== "string" ||
+    typeof value.introducedIn !== "string" ||
+    typeof value.title !== "string"
+  ) {
+    return false;
+  }
+  const family = value.family;
+  return (
+    family === null || (isRecord(family) && typeof family.name === "string")
+  );
+}
+
+function isPriorStructuredFamilySynthesisRecord(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    typeof value.name === "string" &&
+    (value.safetyClaim === null || typeof value.safetyClaim === "string") &&
+    (value.nextRoundQuestion === null ||
+      typeof value.nextRoundQuestion === "string") &&
+    isStringArray(value.fixedSymptoms) &&
+    isStringArray(value.remainingSymptoms) &&
+    isStringArray(value.findingFingerprints)
+  );
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) && value.every((item) => typeof item === "string")
+  );
 }
 
 function isStoredIssueTraceStatus(
