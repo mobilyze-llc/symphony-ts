@@ -238,6 +238,34 @@ describe("CrabrunnerCliSchedulerClient.submit", () => {
     expect(recorder.invocations).toEqual([]);
   });
 
+  it("rejects remote hosts with no prompt before invoking crabrunner", async () => {
+    const recorder = createCliRecorder({
+      run: () =>
+        cliOk(
+          runResultJson({
+            state: "complete",
+            job_id: "should-not-run",
+          }),
+        ),
+    });
+    const client = new CrabrunnerCliSchedulerClient({
+      crucibleRoot: CRUCIBLE_ROOT,
+      targetRepoRoot: TARGET_REPO_ROOT,
+      host: "crabbox-studio1",
+      remoteUser: "ericlitman",
+      cli: recorder.cli,
+    });
+
+    const admission = await client.submit(createSpec({ promptFile: null }));
+
+    expect(admission).toEqual({
+      status: "rejected",
+      jobId: null,
+      reason: "crabrunner_prompt_required_symph_856",
+    });
+    expect(recorder.invocations).toEqual([]);
+  });
+
   it("uses crabrunner run with workspace materialization for configured remote hosts", async () => {
     const invocations: CrabrunnerCliInvocation[] = [];
     const cli: CrabrunnerCli = async (args, opts) => {
@@ -305,6 +333,31 @@ describe("CrabrunnerCliSchedulerClient.submit", () => {
       "test-version",
     );
     expect(runCall.opts.cwd).toBe(CRUCIBLE_ROOT);
+  });
+
+  it("passes abort signals and a remote-sized subprocess timeout to crabrunner run", async () => {
+    const controller = new AbortController();
+    const invocations: CrabrunnerCliInvocation[] = [];
+    const cli: CrabrunnerCli = async (args, opts) => {
+      invocations.push({ args: [...args], opts });
+      const jobId = args[args.indexOf("--job-id") + 1]!;
+      return cliOk(runResultJson({ state: "complete", job_id: jobId }));
+    };
+    const client = new CrabrunnerCliSchedulerClient({
+      crucibleRoot: CRUCIBLE_ROOT,
+      targetRepoRoot: TARGET_REPO_ROOT,
+      host: "crabbox-studio1",
+      remoteUser: "ericlitman",
+      cliTimeoutMs: 120_000,
+      pollIntervalMs: 1_000,
+      maxPolls: 10,
+      cli,
+    });
+
+    await client.submit(createSpec(), controller.signal);
+
+    expect(invocations[0]?.opts.signal).toBe(controller.signal);
+    expect(invocations[0]?.opts.timeoutMs).toBe(670_000);
   });
 
   it("does not pass the local state root as a remote state root by default", async () => {
@@ -639,6 +692,9 @@ describe("CrabrunnerCliSchedulerClient.collect", () => {
       outputTokens: 5,
       totalTokens: 15,
     });
+    await expect(client.status(admission.jobId!)).rejects.toThrow(
+      /no cached run result/,
+    );
   });
 
   it("maps complete -> succeeded with usage and artifact refs", async () => {

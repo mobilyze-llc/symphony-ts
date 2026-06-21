@@ -306,7 +306,10 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     this.noStage = options.noStage ?? false;
   }
 
-  async submit(spec: CrabrunnerJobSpec): Promise<CrabrunnerAdmissionResult> {
+  async submit(
+    spec: CrabrunnerJobSpec,
+    signal?: AbortSignal,
+  ): Promise<CrabrunnerAdmissionResult> {
     // Fail closed rather than emit an unrunnable manifest (Codex P1-2 /
     // SYMPH-856): the lane worker needs a prompt_file (or worker_argv, not
     // sourced yet). A manifest with neither always-fails the job lane-side.
@@ -323,7 +326,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     }
 
     if (this.requiresRemoteRun()) {
-      return await this.submitRemote(spec);
+      return await this.submitRemote(spec, signal);
     }
 
     const manifest = this.buildManifest(spec);
@@ -331,18 +334,21 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     const manifestPath = join(dir, "manifest.json");
     try {
       await writeFile(manifestPath, JSON.stringify(manifest), "utf8");
-      const result = await this.run([
-        "submit",
-        "--manifest-file",
-        manifestPath,
-        // --repo-root is the CRUCIBLE checkout: crabrunner/src/cli.ts and
-        // lane_workers/run.ts load from there (confirmed against a real smoke
-        // manifest). The TARGET repo is the manifest `workspace` (Codex P1-1).
-        "--repo-root",
-        this.crucibleRoot,
-        ...this.stateRootArgs(),
-        ...(this.noStage ? ["--no-stage"] : []),
-      ]);
+      const result = await this.run(
+        [
+          "submit",
+          "--manifest-file",
+          manifestPath,
+          // --repo-root is the CRUCIBLE checkout: crabrunner/src/cli.ts and
+          // lane_workers/run.ts load from there (confirmed against a real smoke
+          // manifest). The TARGET repo is the manifest `workspace` (Codex P1-1).
+          "--repo-root",
+          this.crucibleRoot,
+          ...this.stateRootArgs(),
+          ...(this.noStage ? ["--no-stage"] : []),
+        ],
+        signal,
+      );
       const status = this.parseStatus(result, "submit");
       if (!CRABRUNNER_ADMITTED_STATES.has(status.state)) {
         return {
@@ -414,7 +420,9 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     throwIfAborted(signal);
     const remoteRun = this.remoteRunResults.get(jobId);
     if (remoteRun !== undefined) {
-      return await this.collectRemoteRunEvidence(remoteRun);
+      const evidence = await this.collectRemoteRunEvidence(remoteRun);
+      this.remoteRunResults.delete(jobId);
+      return evidence;
     }
     if (this.requiresRemoteRun()) {
       throw new Error(
@@ -568,6 +576,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
 
   private async submitRemote(
     spec: CrabrunnerJobSpec,
+    signal: AbortSignal | undefined,
   ): Promise<CrabrunnerAdmissionResult> {
     if (this.remoteUser === null) {
       return {
@@ -589,6 +598,8 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     const jobId = buildJobId(spec);
     const result = await this.run(
       this.buildRemoteRunArgs(spec, jobId, this.remoteUser, model),
+      signal,
+      this.remoteRunCliTimeoutMs(spec),
     );
     const runResult = this.parseRunResult(result, jobId);
     this.remoteRunResults.set(runResult.job_id, runResult);
@@ -661,6 +672,13 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     return args;
   }
 
+  private remoteRunCliTimeoutMs(spec: CrabrunnerJobSpec): number {
+    const laneTimeoutMs =
+      spec.enforcement.timing.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS;
+    const pollBudgetMs = this.maxPolls * this.pollIntervalMs;
+    return Math.max(this.cliTimeoutMs, laneTimeoutMs + pollBudgetMs + 60_000);
+  }
+
   private async collectRemoteRunEvidence(
     runResult: CrabrunnerRunResult,
   ): Promise<CrabrunnerTerminalEvidence> {
@@ -726,6 +744,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
   private async run(
     args: readonly string[],
     signal?: AbortSignal,
+    timeoutMs = this.cliTimeoutMs,
   ): Promise<{
     stdout: string;
     stderr: string;
@@ -733,7 +752,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
   }> {
     return await this.cli(args, {
       cwd: this.crucibleRoot,
-      timeoutMs: this.cliTimeoutMs,
+      timeoutMs,
       ...(signal === undefined ? {} : { signal }),
     });
   }
