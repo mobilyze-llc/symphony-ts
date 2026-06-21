@@ -41,7 +41,7 @@ function reviewerArtifact(input: {
       independentReviewer: true,
       mergeAuthoritative: true,
     },
-    routing: { mode: "council", routingMode: null, round: 1 },
+    routing: { mode: "full", routingMode: null, round: 1 },
     reviewBundle: null,
     verdict: input.verdict,
     confidence: 0.9,
@@ -1493,6 +1493,166 @@ describe("runCrabrunnerReviewJobGroup", () => {
     expect(result.degradedConditions).toContain(
       "lane_unavailable:codex-high-lead",
     );
+  });
+
+  // SYMPH-855 Track (a): a job group that resolves ZERO usable reviewer lanes
+  // must fail closed BEFORE any dispatch with an explicit machine-readable
+  // condition, never an unexplained `error` verdict. aggregateHeadlessVerdict
+  // already returns "error" for zero authoritative lanes, but without this guard
+  // the cause is invisible (empty degradedConditions) — and a QA-only group
+  // would otherwise dispatch a QA lane with no reviewer ever gating it.
+  it("fails closed with no_reviewer_lanes when the group has zero reviewer lanes", async () => {
+    const backend = fakeBackend({});
+
+    const result = await runCrabrunnerReviewJobGroup({
+      ...baseInput({ lanes: [], backend }),
+      collectArtifact: async (lane: ReviewJobGroupLaneEvidence) =>
+        backendArtifactFor(backend, lane),
+    });
+
+    expect(result.verdict).toBe("error");
+    expect(result.degradedConditions).toContain("no_reviewer_lanes");
+    expect(result.lanes).toEqual([]);
+    // Guard runs before dispatch: nothing is submitted to the backend.
+    expect(backend.submitted).toEqual([]);
+  });
+
+  // SYMPH-855 Track (a): a QA-only group (one browser-QA lane, no reviewer
+  // lanes) also fails closed — a QA lane can only gate a group that has a
+  // reviewer verdict to gate; on its own there is no merge-authoritative signal.
+  it("fails closed with no_reviewer_lanes when only a browser-QA lane is present", async () => {
+    const backend = fakeBackend({
+      "browser-qa": {
+        terminal: { state: "succeeded", artifactRefs: ["/qa.json"] },
+        collectedArtifact: qaArtifact(),
+      },
+    });
+
+    const result = await runCrabrunnerReviewJobGroup({
+      ...baseInput({ lanes: [qaLane()], backend }),
+      collectArtifact: async (lane: ReviewJobGroupLaneEvidence) =>
+        backendArtifactFor(backend, lane),
+    });
+
+    expect(result.verdict).toBe("error");
+    expect(result.degradedConditions).toContain("no_reviewer_lanes");
+    expect(backend.submitted).toEqual([]);
+  });
+
+  // SYMPH-855 Track (b): the reviewer artifact's routing mode is validated, not
+  // trusted. A `routing.mode` outside the council review modes (full|convergence)
+  // is contract drift / a spoofed artifact and fails the lane closed as
+  // malformed, even on a verdict:"pass" artifact.
+  it("fails closed when a reviewer artifact routing.mode is not a council review mode", async () => {
+    const spoofed = reviewerArtifact({
+      laneId: "codex-high-lead",
+      agent: "codex",
+      modelFamily: "codex",
+      verdict: "pass",
+    });
+    (spoofed.routing as Record<string, unknown>).mode = "garbage-mode";
+    const backend = fakeBackend({
+      "codex-high-lead": {
+        terminal: { state: "succeeded", artifactRefs: ["/a.json"] },
+        collectedArtifact: spoofed,
+      },
+    });
+
+    const result = await runCrabrunnerReviewJobGroup({
+      ...baseInput({
+        lanes: [
+          reviewerLane({
+            laneId: "codex-high-lead",
+            agent: "codex",
+            modelFamily: "codex",
+          }),
+        ],
+        backend,
+      }),
+      collectArtifact: async (lane: ReviewJobGroupLaneEvidence) =>
+        backendArtifactFor(backend, lane),
+    });
+
+    expect(result.verdict).toBe("error");
+    expect(result.degradedConditions).toContain(
+      "malformed_artifact:codex-high-lead",
+    );
+  });
+
+  // SYMPH-855 Track (b): a present `routing.routingMode` must be one of the
+  // known council routing modes (or null). A bogus routing mode fails closed.
+  it("fails closed when a reviewer artifact routing.routingMode is unknown", async () => {
+    const spoofed = reviewerArtifact({
+      laneId: "codex-high-lead",
+      agent: "codex",
+      modelFamily: "codex",
+      verdict: "pass",
+    });
+    (spoofed.routing as Record<string, unknown>).routingMode = "turbo";
+    const backend = fakeBackend({
+      "codex-high-lead": {
+        terminal: { state: "succeeded", artifactRefs: ["/a.json"] },
+        collectedArtifact: spoofed,
+      },
+    });
+
+    const result = await runCrabrunnerReviewJobGroup({
+      ...baseInput({
+        lanes: [
+          reviewerLane({
+            laneId: "codex-high-lead",
+            agent: "codex",
+            modelFamily: "codex",
+          }),
+        ],
+        backend,
+      }),
+      collectArtifact: async (lane: ReviewJobGroupLaneEvidence) =>
+        backendArtifactFor(backend, lane),
+    });
+
+    expect(result.verdict).toBe("error");
+    expect(result.degradedConditions).toContain(
+      "malformed_artifact:codex-high-lead",
+    );
+  });
+
+  // SYMPH-855 Track (b): a null routing.routingMode is the legitimate "no forced
+  // routing mode" value and must NOT fail the artifact (regression guard so the
+  // tightened validation does not over-reject the common case).
+  it("accepts a reviewer artifact whose routing.routingMode is null", async () => {
+    const artifact = reviewerArtifact({
+      laneId: "codex-high-lead",
+      agent: "codex",
+      modelFamily: "codex",
+      verdict: "pass",
+    });
+    expect(
+      (artifact.routing as Record<string, unknown>).routingMode,
+    ).toBeNull();
+    const backend = fakeBackend({
+      "codex-high-lead": {
+        terminal: { state: "succeeded", artifactRefs: ["/a.json"] },
+        collectedArtifact: artifact,
+      },
+    });
+
+    const result = await runCrabrunnerReviewJobGroup({
+      ...baseInput({
+        lanes: [
+          reviewerLane({
+            laneId: "codex-high-lead",
+            agent: "codex",
+            modelFamily: "codex",
+          }),
+        ],
+        backend,
+      }),
+      collectArtifact: async (lane: ReviewJobGroupLaneEvidence) =>
+        backendArtifactFor(backend, lane),
+    });
+
+    expect(result.verdict).toBe("pass");
   });
 });
 

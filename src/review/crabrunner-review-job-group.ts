@@ -5,12 +5,13 @@ import type {
   StageExecutionJobSpec,
 } from "../stage-execution/backend.js";
 import type { CrabrunnerStageExecutionEvidence } from "../stage-execution/crabrunner-backend.js";
-import type {
-  HeadlessGateVerdict,
-  HeadlessLaneResult,
-  HeadlessReviewerAgent,
-  LaneDegradedReason,
-  StructuredReviewerArtifact,
+import {
+  COUNCIL_ROUTING_MODES,
+  type HeadlessGateVerdict,
+  type HeadlessLaneResult,
+  type HeadlessReviewerAgent,
+  type LaneDegradedReason,
+  type StructuredReviewerArtifact,
 } from "./headless-council-gate.js";
 import {
   type BrowserQaAssessment,
@@ -18,6 +19,7 @@ import {
   assessBrowserQaEvidence,
   parseBrowserQaEvidence,
 } from "./qa-evidence.js";
+import { recordOrNull } from "./record-utils.js";
 import {
   type ReviewGateVerdict,
   type RoutingGuaranteeLane,
@@ -187,6 +189,30 @@ export async function runCrabrunnerReviewJobGroup(
       runGroupId: input.runGroupId,
       lanes: [],
       degradedConditions: ["multiple_browser_qa_lanes"],
+      provenance: {
+        runGroupId: input.runGroupId,
+        currentHeadSha: input.currentHeadSha,
+        lanes: [],
+      },
+      qa: null,
+    };
+  }
+
+  // SYMPH-855 Track (a): a group with ZERO reviewer lanes has no
+  // merge-authoritative verdict to produce — a clean PASS is impossible and a
+  // QA-only group would dispatch a QA lane that nothing gates. Fail closed
+  // BEFORE any dispatch with an explicit condition rather than relying on the
+  // empty-aggregate "error" (which would otherwise be an unexplained verdict
+  // with no degraded reason).
+  const reviewerLaneCount = input.lanes.filter(
+    (lane) => lane.kind === "reviewer",
+  ).length;
+  if (reviewerLaneCount === 0) {
+    return {
+      verdict: "error",
+      runGroupId: input.runGroupId,
+      lanes: [],
+      degradedConditions: ["no_reviewer_lanes"],
       provenance: {
         runGroupId: input.runGroupId,
         currentHeadSha: input.currentHeadSha,
@@ -749,13 +775,42 @@ function isWellFormedReviewerLane(value: unknown): boolean {
   );
 }
 
+/** Council review loop modes the reviewer artifact routing may declare. */
+const COUNCIL_REVIEW_MODES: ReadonlySet<string> = new Set([
+  "full",
+  "convergence",
+]);
+const COUNCIL_ROUTING_MODE_SET: ReadonlySet<string> = new Set(
+  COUNCIL_ROUTING_MODES,
+);
+
+/**
+ * SYMPH-855 Track (b): validate the routing/guarantee MODE rather than trusting
+ * it. SYMPH-810 only checked that `routing.mode` was *a string* and `round` a
+ * finite number, so a spoofed/drifted artifact could carry any mode and still
+ * be counted. The mode must be a real council review mode, and a present
+ * `routingMode` must be a known council routing mode (or null = "no forced
+ * mode"). An unknown value is contract drift and fails the artifact closed.
+ */
 function isWellFormedReviewerRouting(value: unknown): boolean {
   const routing = recordOrNull(value);
+  if (
+    routing === null ||
+    typeof routing.mode !== "string" ||
+    !COUNCIL_REVIEW_MODES.has(routing.mode) ||
+    typeof routing.round !== "number" ||
+    !Number.isFinite(routing.round)
+  ) {
+    return false;
+  }
+  // routingMode is `CouncilRoutingMode | null`. null/absent is the legitimate
+  // "no forced routing mode"; a present string must be a known routing mode.
+  const routingMode = routing.routingMode;
+  if (routingMode === null || routingMode === undefined) {
+    return true;
+  }
   return (
-    routing !== null &&
-    typeof routing.mode === "string" &&
-    typeof routing.round === "number" &&
-    Number.isFinite(routing.round)
+    typeof routingMode === "string" && COUNCIL_ROUTING_MODE_SET.has(routingMode)
   );
 }
 
@@ -784,10 +839,4 @@ function collectArtifactHashes(
   // stays an explicit empty — never a fabricated hash.
   void usage;
   return [];
-}
-
-function recordOrNull(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
 }

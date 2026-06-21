@@ -144,6 +144,10 @@ export function resolveWorkflowConfig(
   const acGate = asRecord(config.ac_gate);
   const mergeActuator = asRecord(config.merge_actuator);
   const specFidelity = asRecord(config.spec_fidelity);
+  const reviewExecution = asRecord(config.review_execution);
+  const reviewCrabrunnerJobGroup = asRecord(
+    reviewExecution.crabrunner_job_group,
+  );
   const admissionCard = asRecord(config.admission_card);
   const codeGrounding = asRecord(config.code_grounding);
   const operatorAnchors = asRecord(config.operator_anchors);
@@ -335,6 +339,13 @@ export function resolveWorkflowConfig(
     },
     specFidelity: {
       enabled: specFidelity.enabled === true,
+    },
+    reviewExecution: {
+      crabrunnerJobGroup: {
+        // Default-closed (SYMPH-855): only an explicit boolean `true` opts a
+        // workflow into the crabrunner review job-group path.
+        enabled: reviewCrabrunnerJobGroup.enabled === true,
+      },
     },
     admissionCard: {
       enabled: admissionCard.enabled === true,

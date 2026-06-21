@@ -269,6 +269,55 @@ describe("config-resolver", () => {
     );
   });
 
+  it("defaults the crabrunner review job-group gate closed (SYMPH-855)", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {},
+    });
+
+    // Default-closed: the live review path is unchanged unless an operator opts
+    // a workflow in, so it can shadow before cutover.
+    expect(resolved.reviewExecution).toEqual({
+      crabrunnerJobGroup: { enabled: false },
+    });
+  });
+
+  it("resolves the crabrunner review job-group gate from frontmatter (SYMPH-855)", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        review_execution: {
+          crabrunner_job_group: {
+            enabled: true,
+          },
+        },
+      },
+    });
+
+    expect(resolved.reviewExecution).toEqual({
+      crabrunnerJobGroup: { enabled: true },
+    });
+  });
+
+  it("keeps the crabrunner review job-group gate closed unless enabled is exactly true (SYMPH-855)", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        review_execution: {
+          crabrunner_job_group: {
+            enabled: "true",
+          },
+        },
+      },
+    });
+
+    // A non-boolean (stringy) value must not flip the gate on.
+    expect(resolved.reviewExecution?.crabrunnerJobGroup.enabled).toBe(false);
+  });
+
   it("resolves managed code-grounding config", () => {
     const resolved = resolveWorkflowConfig({
       workflowPath: "/repo/WORKFLOW.md",
