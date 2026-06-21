@@ -85,6 +85,12 @@ function enclosingMethodName(node: ts.Node): string | null {
  * Walks `Identifier` and string-literal nodes (the latter covers bracket access
  * `this["dispatchIssue"]`); the name pre-filter just avoids resolving every
  * identifier in a 15k-line file.
+ *
+ * Known limit (SYMPH-861): a const-folded computed key
+ * (`const k = "dispatchIssue"; this[k]()`) is not counted — its element-access
+ * argument is an identifier, not a literal, so the name pre-filter skips it.
+ * Truly runtime-dynamic keys are inherently unprovable by static analysis;
+ * relocating dispatchIssue out of core.ts is caught by the declaration-count test.
  */
 function symbolReferences(target: ts.MethodDeclaration): ts.Node[] {
   if (!ts.isIdentifier(target.name)) {

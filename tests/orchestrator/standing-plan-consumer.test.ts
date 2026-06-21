@@ -699,6 +699,24 @@ describe("resolvePlanDrivenDispatchForTick — single-snapshot read (SYMPH-830)"
     // head SYMPH-1 merged ⇒ tail releases; the merged head is not re-dispatched.
     expect(decision.orderedIssueIdentifiers).toEqual(["SYMPH-2", "SYMPH-3"]);
   });
+
+  it("propagates a readJournal rejection so the host owns the degrade (SYMPH-830)", async () => {
+    // The resolver does NOT swallow a store-read failure — the host's
+    // computePlanDrivenDispatch try/catch degrades to the comparator and logs.
+    // Locking this preserves the degrade-on-store-error posture across refactors.
+    await expect(
+      resolvePlanDrivenDispatchForTick({
+        config: triageConfig,
+        readJournal: async () => {
+          throw new Error("journal read failed");
+        },
+        candidates,
+        runningIssueIdentifiers: new Set(),
+        nowMs,
+        teamScoped: true,
+      }),
+    ).rejects.toThrow("journal read failed");
+  });
 });
 
 describe("collectMergedOutcomesFromJournal (SYMPH-830)", () => {
@@ -757,5 +775,16 @@ describe("collectMergedOutcomesFromJournal (SYMPH-830)", () => {
     );
     expect(result.sinceCount).toBe(0);
     expect([...result.identifiers]).toEqual([]);
+  });
+
+  it("does not count an outcome exactly at the cutoff (strictly after)", () => {
+    // sinceCount uses outcomeMs > sinceMs — an outcome recorded AT the plan's
+    // createdAt is not "since" the plan, but is still a merged identifier.
+    const result = collectMergedOutcomesFromJournal(
+      journalOf(p, [], [merged("b1", p.createdAt, ["SYMPH-1"])]),
+      p.createdAt,
+    );
+    expect(result.sinceCount).toBe(0);
+    expect([...result.identifiers]).toEqual(["SYMPH-1"]);
   });
 });
