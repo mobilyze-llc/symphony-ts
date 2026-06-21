@@ -153,7 +153,10 @@ export async function runShadowPlanCycle(
 
 export type StandingPlanShadowTickResult =
   | ShadowPlanCycleResult
-  | { status: "skipped"; reason: "disabled" | "heartbeat" | "error" };
+  | {
+      status: "skipped";
+      reason: "disabled" | "heartbeat" | "cadence" | "error";
+    };
 
 export interface StandingPlanShadowTickDeps {
   config: WorkflowQueueTriageConfig | undefined;
@@ -205,13 +208,16 @@ export async function runStandingPlanShadowTick(
     // cannot: that helper returns `true` whenever plan === null, ignoring the
     // marker, so without this a planner outage with no plan recorded would re-run
     // every poll. A forced re-plan (operator intent / tripped predicate) bypasses
-    // the cadence.
+    // the cadence. The skip reason is distinct ("cadence" — rate-limited by a
+    // recent attempt, success OR failure) from the plan-freshness "heartbeat"
+    // gate below, so the two remain separable if a result consumer is ever added
+    // (today the tick result is fire-and-forget at the poll-loop call site).
     if (
       deps.force !== true &&
       lastRunAtMs !== undefined &&
       nowMs - lastRunAtMs < config.heartbeatMs
     ) {
-      return { status: "skipped", reason: "heartbeat" };
+      return { status: "skipped", reason: "cadence" };
     }
     const plan = await loadStandingPlan(deps.workspaceRoot);
     if (

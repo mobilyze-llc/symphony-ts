@@ -219,6 +219,39 @@ describe("standing-plan store", () => {
     }
   });
 
+  it("updates rationale when the structure DOES change (the pinning counterpart, SYMPH-827)", async () => {
+    // The flip side of pinning: a structural change rotates the revision and the
+    // NEW rationale takes effect — rationale is pinned only while the structure
+    // is identical, never across a real re-plan. Guards against over-pinning.
+    const root = tmpRoot();
+    try {
+      await recordPlanRevision(
+        root,
+        {
+          ...body([lookahead("b1", "SYMPH-1")]),
+          rationale: "First rationale.",
+        },
+        { planId: "plan-1", createdAt: "2026-06-18T00:00:00.000Z" },
+      );
+      const changed = await recordPlanRevision(
+        root,
+        {
+          ...body([lookahead("b2", "SYMPH-2")]),
+          rationale: "Second rationale — new structure.",
+        },
+        { createdAt: "2026-06-18T00:01:00.000Z" },
+      );
+      expect(changed.recorded).toBe(true);
+      expect(changed.plan.revision).toBe(2);
+      expect(changed.plan.rationale).toBe("Second rationale — new structure.");
+      expect((await loadStandingPlan(root))?.rationale).toBe(
+        "Second rationale — new structure.",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("rotates the revision when the plan body changes", async () => {
     const root = tmpRoot();
     try {

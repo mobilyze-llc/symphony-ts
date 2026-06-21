@@ -14,7 +14,10 @@ import {
   runStandingPlanShadowTick,
   shouldRunShadowPlanCycle,
 } from "../../src/orchestrator/standing-plan-shadow.js";
-import { loadStandingPlan } from "../../src/orchestrator/standing-plan-store.js";
+import {
+  loadStandingPlan,
+  recordPlanRevision,
+} from "../../src/orchestrator/standing-plan-store.js";
 
 const ENVELOPE: PlanEnvelope = {
   version: 1,
@@ -412,7 +415,9 @@ describe("runStandingPlanShadowTick", () => {
         expect(second.recorded).toBe(false);
         expect(second.revision).toBe(1);
       }
-      expect(third).toEqual({ status: "skipped", reason: "heartbeat" });
+      // After SYMPH-828 this within-window skip is served by the attempted-run
+      // gate (the marker advanced on the no-op cycle) → reason "cadence".
+      expect(third).toEqual({ status: "skipped", reason: "cadence" });
       expect(plannerCalls).toBe(2);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -506,8 +511,10 @@ describe("runStandingPlanShadowTick — error rate-limiting (SYMPH-828)", () => 
       const fourth = await tick("2026-06-18T01:20:00.000Z"); // 20m → attempts
 
       expect(first).toEqual({ status: "skipped", reason: "error" });
-      expect(second).toEqual({ status: "skipped", reason: "heartbeat" });
-      expect(third).toEqual({ status: "skipped", reason: "heartbeat" });
+      // Rate-limited by the attempted-run gate (reason "cadence"), distinct from
+      // the plan-freshness "heartbeat" gate.
+      expect(second).toEqual({ status: "skipped", reason: "cadence" });
+      expect(third).toEqual({ status: "skipped", reason: "cadence" });
       expect(fourth).toEqual({ status: "skipped", reason: "error" });
       // The expensive fetch ran once per heartbeat window, NOT every poll. The
       // pre-SYMPH-828 tick advanced the marker only on success and ignored it
@@ -552,6 +559,56 @@ describe("runStandingPlanShadowTick — error rate-limiting (SYMPH-828)", () => 
       });
       expect(forced).toEqual({ status: "skipped", reason: "error" });
       expect(fetchCalls).toBe(2);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("after a restart (marker lost), a fresh plan within the window skips via the plan-freshness gate", async () => {
+    // The attempted-run marker is in-memory, so a restart loses it. The next poll
+    // then falls through to shouldRunShadowPlanCycle, which skips on the plan's
+    // own freshness — reason "heartbeat", distinct from the "cadence" rate-limit
+    // gate. Covers the old gate's integration, which the cadence gate now fronts.
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-restart-"));
+    let plannerBuilt = false;
+    try {
+      // Persist a fresh plan directly (no tick → no in-memory marker = restart).
+      await recordPlanRevision(
+        root,
+        {
+          batches: [
+            {
+              batchId: "b1",
+              mode: "parallel-isolated",
+              status: "lookahead",
+              members: [{ issueId: "1", issueIdentifier: "SYMPH-1" }],
+              rationale: "r",
+              canary: null,
+            },
+          ],
+          options: [],
+          envelope: ENVELOPE,
+          rationale: "seed",
+          source: "planner",
+          dependencyEdges: [],
+        },
+        { planId: "plan-1", createdAt: "2026-06-18T01:00:00.000Z" },
+      );
+      const result = await runStandingPlanShadowTick({
+        config: triageConfig(),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        createPlannerRunner: () => {
+          plannerBuilt = true;
+          return okPlanner().runClaude;
+        },
+        log: () => undefined,
+        // 1 min after the recorded plan — inside the 15m heartbeat window.
+        now: () => new Date("2026-06-18T01:01:00.000Z"),
+      });
+      expect(result).toEqual({ status: "skipped", reason: "heartbeat" });
+      expect(plannerBuilt).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
