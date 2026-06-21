@@ -9,16 +9,21 @@ import {
   type StageExecutionPhase,
   type StageExecutionProfile,
   type StageExecutionRole,
+  type StageExecutionSubStage,
   type StageExecutionValidationError,
 } from "./types.js";
 
 export function parseStageExecutionProfile(
   value: unknown,
   path: string,
+  options?: { allowSubStages?: boolean },
 ): {
   profile: StageExecutionProfile | null;
   errors: StageExecutionValidationError[];
 } {
+  // Sub-stages are bounded to one level: a stage may decompose into sub-stages,
+  // but a sub-stage's own profile may not (SYMPH-835).
+  const allowSubStages = options?.allowSubStages ?? true;
   if (value === undefined || value === null) {
     return { profile: null, errors: [] };
   }
@@ -116,9 +121,107 @@ export function parseStageExecutionProfile(
         `${path}.capsules`,
         errors,
       ),
+      subStages: parseStageExecutionSubStages(
+        record.sub_stages,
+        `${path}.sub_stages`,
+        errors,
+        allowSubStages,
+      ),
     },
     errors,
   };
+}
+
+/**
+ * Parse an ordered list of bounded sub-stages (SYMPH-835). Each entry must be an
+ * object with a `name` and its own `execution` profile; the order is preserved
+ * so the decomposition runner dispatches them in sequence. Sub-stages cannot
+ * themselves declare sub-stages (one level only) — that is rejected via the
+ * `allow` flag, which is false when parsing a sub-stage's own profile.
+ */
+function parseStageExecutionSubStages(
+  value: unknown,
+  path: string,
+  errors: StageExecutionValidationError[],
+  allow: boolean,
+): StageExecutionSubStage[] {
+  if (value === undefined || value === null) {
+    return [];
+  }
+  if (!allow) {
+    errors.push(
+      executionValidationError(
+        path,
+        value,
+        `${path} is not supported: sub-stages cannot declare nested sub-stages.`,
+      ),
+    );
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    errors.push(
+      executionValidationError(
+        path,
+        value,
+        `${path} must be a list of sub-stages when present.`,
+      ),
+    );
+    return [];
+  }
+
+  const subStages: StageExecutionSubStage[] = [];
+  value.forEach((entry, index) => {
+    const entryPath = `${path}.${index}`;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      errors.push(
+        executionValidationError(
+          entryPath,
+          entry,
+          `${entryPath} must be an object with a name and execution profile.`,
+        ),
+      );
+      return;
+    }
+
+    const record = entry as Record<string, unknown>;
+    const name = readOptionalIdentifier(
+      record.name,
+      `${entryPath}.name`,
+      errors,
+    );
+    if (name === null && (record.name === undefined || record.name === null)) {
+      errors.push(
+        executionValidationError(
+          `${entryPath}.name`,
+          record.name,
+          `${entryPath}.name is required.`,
+        ),
+      );
+    }
+
+    const parsed = parseStageExecutionProfile(
+      record.execution,
+      `${entryPath}.execution`,
+      { allowSubStages: false },
+    );
+    errors.push(...parsed.errors);
+    if (parsed.profile === null) {
+      errors.push(
+        executionValidationError(
+          `${entryPath}.execution`,
+          record.execution,
+          `${entryPath}.execution is required and must be a valid execution profile.`,
+        ),
+      );
+      return;
+    }
+
+    if (name === null) {
+      return;
+    }
+    subStages.push({ name, execution: parsed.profile });
+  });
+  return subStages;
 }
 
 function parseStageExecutionArtifactContract(

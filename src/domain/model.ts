@@ -1211,7 +1211,7 @@ export type DelegatedStageCapsuleReadiness =
     };
 
 export function evaluateDelegatedStageCapsuleReadiness(
-  attempt: DelegatedStageAttemptRecord,
+  attempt: Pick<DelegatedStageAttemptRecord, "capsules">,
   policy: DelegatedStageMissingCapsulePolicy = "fail",
 ): DelegatedStageCapsuleReadiness {
   const missingCapsules = attempt.capsules

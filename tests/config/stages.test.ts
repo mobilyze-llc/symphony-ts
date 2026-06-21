@@ -235,9 +235,125 @@ describe("resolveStagesConfig", () => {
         consume: ["capsules/issue-snapshot.json"],
         produce: ["capsules/investigation.json"],
       },
+      subStages: [],
     });
 
     expect(validateStagesConfig(result).ok).toBe(true);
+  });
+
+  it("parses ordered implement sub-stages each carrying an independent execution profile and budget", () => {
+    const result = resolveStagesConfig({
+      implement: {
+        type: "agent",
+        on_complete: "done",
+        execution: {
+          role: "implementer",
+          phase: "implement",
+          backend: "crabrunner",
+          sub_stages: [
+            {
+              name: "patch-plan",
+              execution: {
+                role: "implementer",
+                phase: "implement",
+                backend: "crabrunner",
+                budget: { max_tokens: 20000 },
+                capsules: { produce: ["capsules/patch-plan.json"] },
+              },
+            },
+            {
+              name: "first-patch",
+              execution: {
+                role: "implementer",
+                phase: "implement",
+                backend: "crabrunner",
+                budget: { max_tokens: 40000 },
+                capsules: {
+                  consume: ["capsules/patch-plan.json"],
+                  produce: ["capsules/first-patch.json"],
+                },
+              },
+            },
+          ],
+        },
+      },
+      done: { type: "terminal" },
+    });
+
+    const stage = result!.stages.implement!;
+    expect(stage.executionValidationErrors).toEqual([]);
+    // Ordered sub-stage sequence is data-driven, not hard-coded.
+    expect(stage.execution!.subStages.map((sub) => sub.name)).toEqual([
+      "patch-plan",
+      "first-patch",
+    ]);
+    // Each sub-stage carries its own independent budget ceiling.
+    expect(stage.execution!.subStages[0]!.execution.budget).toEqual({
+      maxTokens: 20000,
+      maxUsd: null,
+    });
+    expect(stage.execution!.subStages[1]!.execution.budget).toEqual({
+      maxTokens: 40000,
+      maxUsd: null,
+    });
+    // Capsule handoff wiring (consume prior produce) is data-driven.
+    expect(stage.execution!.subStages[1]!.execution.capsules).toEqual({
+      consume: ["capsules/patch-plan.json"],
+      produce: ["capsules/first-patch.json"],
+    });
+    // The parent profile defaults to no sub-stages; nesting is bounded to one level.
+    expect(stage.execution!.subStages[0]!.execution.subStages).toEqual([]);
+    expect(validateStagesConfig(result).ok).toBe(true);
+  });
+
+  it("path-scopes sub-stage validation errors and rejects nesting and missing names", () => {
+    const result = resolveStagesConfig({
+      implement: {
+        type: "agent",
+        on_complete: "done",
+        execution: {
+          role: "implementer",
+          phase: "implement",
+          backend: "crabrunner",
+          sub_stages: [
+            {
+              // name omitted -> required error
+              execution: {
+                role: "implementer",
+                phase: "implement",
+                budget: { max_tokens: -5 },
+              },
+            },
+            {
+              name: "nested",
+              execution: {
+                role: "implementer",
+                phase: "implement",
+                sub_stages: [
+                  {
+                    name: "too-deep",
+                    execution: { role: "implementer", phase: "implement" },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      },
+      done: { type: "terminal" },
+    });
+
+    const errorPaths = (
+      result!.stages.implement!.executionValidationErrors ?? []
+    ).map((error) => error.path);
+    expect(errorPaths).toEqual(
+      expect.arrayContaining([
+        "stages.implement.execution.sub_stages.0.name",
+        "stages.implement.execution.sub_stages.0.execution.budget.max_tokens",
+        "stages.implement.execution.sub_stages.1.execution.sub_stages",
+      ]),
+    );
+    expect(validateStagesConfig(result).ok).toBe(false);
   });
 
   it("parses thinking as the delegated execution reasoning_effort fallback", () => {

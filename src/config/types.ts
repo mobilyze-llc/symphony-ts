@@ -470,6 +470,22 @@ export interface StageExecutionProfile {
   dependencies: StageExecutionDependencyPolicy;
   runGroup: StageExecutionRunGroupIdentity;
   capsules: StageExecutionCapsulePaths;
+  /**
+   * Ordered, bounded sub-stages this stage decomposes into (SYMPH-835). Empty
+   * for stages that run as a single execution. Each sub-stage carries its own
+   * StageExecutionProfile (provider/model/budget/capsules) so per-sub-stage
+   * budget isolation and capsule handoff are fully data-driven, never
+   * hard-coded. Sub-stages cannot themselves declare sub-stages (bounded to one
+   * level).
+   */
+  subStages: readonly StageExecutionSubStage[];
+}
+
+export interface StageExecutionSubStage {
+  /** Stable sub-stage name, e.g. "patch-plan" or "first-patch". */
+  name: string;
+  /** The sub-stage's own execution profile (its own subStages is always empty). */
+  execution: StageExecutionProfile;
 }
 
 export interface StageExecutionValidationError {
