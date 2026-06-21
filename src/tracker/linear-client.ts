@@ -10,6 +10,7 @@ import {
   normalizeLinearIssueState,
 } from "./linear-normalize.js";
 import {
+  LINEAR_CANDIDATE_ISSUES_BY_SCOPE_QUERY,
   LINEAR_CANDIDATE_ISSUES_BY_TEAMS_QUERY,
   LINEAR_CANDIDATE_ISSUES_QUERY,
   LINEAR_CREATE_COMMENT_MUTATION,
@@ -39,6 +40,7 @@ import {
   LINEAR_TICKET_FEATURE_ISSUES_QUERY,
   LINEAR_UPDATE_ISSUE_DESCRIPTION_MUTATION,
   LINEAR_WORKFLOW_STATES_QUERY,
+  buildCandidateScopeFilter,
 } from "./linear-queries.js";
 import {
   type TicketFeatureActor,
@@ -341,6 +343,36 @@ export class LinearTrackerClient implements IssueTracker {
     return this.fetchIssuePages(LINEAR_CANDIDATE_ISSUES_QUERY, {
       projectSlug: this.requireProjectSlug(),
       activeStates: this.activeStates,
+      first: this.pageSize,
+      relationFirst: this.pageSize,
+    });
+  }
+
+  /**
+   * Composed-scope candidate source for the manual one-shot Manager / planner
+   * CLI (symphony-manager-plan, SYMPH-858). ANDs whichever of teamKeys /
+   * projectSlug / initiative are provided (additive) plus this client's active
+   * states, via a single `$filter` query. Distinct from the dispatch-trigger
+   * `fetchCandidateIssues` above, which is intentionally left untouched. Throws
+   * when no scope is provided (never fetches the whole workspace backlog).
+   */
+  async fetchCandidateIssuesByScope(scope: {
+    teamKeys?: string[];
+    projectSlug?: string | null;
+    initiative?: string | null;
+  }): Promise<Issue[]> {
+    const filter = buildCandidateScopeFilter({
+      ...(scope.teamKeys !== undefined ? { teamKeys: scope.teamKeys } : {}),
+      ...(scope.projectSlug !== undefined
+        ? { projectSlug: scope.projectSlug }
+        : {}),
+      ...(scope.initiative !== undefined
+        ? { initiative: scope.initiative }
+        : {}),
+      activeStates: this.activeStates,
+    });
+    return this.fetchIssuePages(LINEAR_CANDIDATE_ISSUES_BY_SCOPE_QUERY, {
+      filter,
       first: this.pageSize,
       relationFirst: this.pageSize,
     });
