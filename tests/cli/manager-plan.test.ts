@@ -111,6 +111,19 @@ describe("parseManagerPlanCliArgs", () => {
     ).toEqual(["Todo"]);
   });
 
+  it("explicit multi-state list overrides the default with no Backlog injected (SYMPH-867)", () => {
+    expect(
+      parseManagerPlanCliArgs([
+        "--team",
+        "MOB",
+        "--state",
+        "Todo",
+        "--state",
+        "In Review",
+      ]).states,
+    ).toEqual(["Todo", "In Review"]);
+  });
+
   it("parses --no-canary (default false) (SYMPH-838)", () => {
     expect(
       parseManagerPlanCliArgs(["--team", "MOB", "--state", "Backlog"]).noCanary,
