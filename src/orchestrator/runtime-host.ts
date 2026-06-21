@@ -257,7 +257,7 @@ import {
   formatWatchdogTicketBody,
 } from "./signature-cluster.js";
 import { resolveAdmittedIdentifiersForTick } from "./standing-plan-admission.js";
-import { decidePlanDrivenDispatch } from "./standing-plan-consumer.js";
+import { resolvePlanDrivenDispatchForTick } from "./standing-plan-consumer.js";
 import {
   ingestControlDocComments,
   publishControlDoc,
@@ -269,7 +269,6 @@ import {
 } from "./standing-plan-outcome.js";
 import { runStandingPlanShadowTick } from "./standing-plan-shadow.js";
 import {
-  listHonoredDecisions,
   loadStandingPlan,
   recordBatchOutcome,
   recordPlanControlDecision,
@@ -3722,46 +3721,22 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     // (council R1, Pi P1). Safety never depends on the standing-plan store.
     try {
       const root = this.workspaceManager.root;
-      const plan = await loadStandingPlan(root);
-      const honoredApprovals =
-        plan === null ? [] : await listHonoredDecisions(root);
-      // SYMPH-801 re-plan predicate inputs: candidate priority bands (Linear
-      // priority, with "no priority" sorted last) and how many merges landed
-      // since the plan was computed. Only assembled when a plan exists — with no
-      // plan the decision degrades immediately and never reads them (council R1,
-      // Pi P3).
-      const candidatePriorityBands =
-        plan === null
-          ? new Map<string, number>()
-          : new Map<string, number>(
-              input.candidates.map((candidate) => [
-                candidate.identifier,
-                // Linear: 1=urgent…4=low; 0/none → least urgent (band 5).
-                candidate.priority === null || candidate.priority === 0
-                  ? 5
-                  : candidate.priority,
-              ]),
-            );
-      const mergedOutcomes =
-        plan === null
-          ? { sinceCount: 0, identifiers: new Set<string>() }
-          : await this.collectMergedOutcomes(root, plan.createdAt);
-      const decision = decidePlanDrivenDispatch({
+      // ONE journal read per tick — the plan, the honored decisions, AND the
+      // merged outcomes are projected from the SAME snapshot (SYMPH-830),
+      // mirroring the admission gate (SYMPH-823). Three independent reads
+      // (loadStandingPlan + listHonoredDecisions + collectMergedOutcomes)
+      // previously let a re-plan landing mid-tick pair plan revision N with
+      // decisions honored against N+1 inside decidePlanDrivenDispatch.
+      const decision = await resolvePlanDrivenDispatchForTick({
         config: cfg,
-        plan,
-        honoredApprovals,
-        candidateIdentifiers: new Set(
-          input.candidates.map((candidate) => candidate.identifier),
-        ),
+        readJournal: () => readStandingPlanJournal(root),
+        candidates: input.candidates,
         runningIssueIdentifiers: input.runningIssueIdentifiers,
         nowMs: this.now().getTime(),
         // Team-scoped candidate source ⇒ the plan path releases only
         // operator-approved batches, never the posture-B auto-release frontier
         // (SYMPH-794: the team backlog must never dispatch without an explicit go).
         teamScoped: (this.config.tracker.teamKeys ?? []).length > 0,
-        candidatePriorityBands,
-        mergedSincePlanCount: mergedOutcomes.sinceCount,
-        mergedIssueIdentifiers: mergedOutcomes.identifiers,
       });
       if (decision.forceReplan) {
         this.requestStandingPlanReplan();
@@ -3861,40 +3836,6 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         { outcome: "degraded", detail: toErrorMessage(error) },
       );
     }
-  }
-
-  /**
-   * Merged-outcome facts for the consumer's plan-driven decision (one journal
-   * pass): how many issues merged since `sinceIso` (the merge-moved-the-world
-   * re-plan predicate, SYMPH-801) and the set of ALL merged issue identifiers
-   * (canary contingent-release + merged-exclusion, SYMPH-800). Only called on the
-   * plan-driven path (not shadow), so the read is off the shadow hot path.
-   */
-  private async collectMergedOutcomes(
-    root: string,
-    sinceIso: string,
-  ): Promise<{ sinceCount: number; identifiers: Set<string> }> {
-    const sinceMs = Date.parse(sinceIso);
-    const journal = await readStandingPlanJournal(root);
-    let sinceCount = 0;
-    const identifiers = new Set<string>();
-    for (const entry of journal) {
-      if (entry.kind !== "plan_outcome" || entry.outcome.result !== "merged") {
-        continue;
-      }
-      for (const identifier of entry.outcome.issueIdentifiers) {
-        identifiers.add(identifier);
-      }
-      const outcomeMs = Date.parse(entry.outcome.createdAt);
-      if (
-        !Number.isNaN(sinceMs) &&
-        !Number.isNaN(outcomeMs) &&
-        outcomeMs > sinceMs
-      ) {
-        sinceCount += 1;
-      }
-    }
-    return { sinceCount, identifiers };
   }
 
   async requestAnchorFieldEdit(
