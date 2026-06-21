@@ -39,6 +39,8 @@ function createSubStageProfile(
     consume?: readonly string[];
     produce?: readonly string[];
     missingCapsule?: "fail" | "degrade";
+    profile?: string;
+    backend?: "crabrunner" | "current-runner" | "manual";
   },
 ): StageExecutionSubStage {
   return {
@@ -46,12 +48,12 @@ function createSubStageProfile(
     execution: {
       role: "implementer",
       phase: "implement",
-      backend: "crabrunner",
+      backend: overrides?.backend ?? "crabrunner",
       controlNeeding: false,
       provider: "openai",
       model: "gpt-5.3-codex",
       reasoningEffort: "medium",
-      profile: `profile.${name}`,
+      profile: overrides?.profile ?? `profile.${name}`,
       artifacts: { requires: [], produces: [] },
       timeoutMs: null,
       budget: {
@@ -140,6 +142,8 @@ interface HarnessOptions {
   ) => AgentRunResult;
   producedCapsuleFiles?: ReadonlySet<string>;
   initialCapsulePaths?: readonly string[];
+  /** Override the clock; defaults to a monotonic per-call stub. */
+  now?: () => Date;
 }
 
 function runHarness(options: HarnessOptions): {
@@ -155,6 +159,11 @@ function runHarness(options: HarnessOptions): {
   const runnerInputs: AgentRunInput[] = [];
   const jobOrder: string[] = [];
   const producedFiles = options.producedCapsuleFiles ?? new Set<string>();
+  // Monotonic default clock: each call advances 1s so successive journal
+  // entries (running vs terminal) get distinct timestamps.
+  let nowTick = 0;
+  const defaultNow = (): Date =>
+    new Date(Date.UTC(2026, 5, 20, 0, 0, nowTick++));
 
   const result = executeDecomposedStageDispatch({
     issue,
@@ -209,7 +218,7 @@ function runHarness(options: HarnessOptions): {
       journal.push(draft);
     },
     fileExists: (absolutePath) => producedFiles.has(absolutePath),
-    now: () => new Date("2026-06-20T00:00:00.000Z"),
+    now: options.now ?? defaultNow,
   });
 
   return { result, backend, journal, runnerInputs, jobOrder };
@@ -237,17 +246,17 @@ describe("executeDecomposedStageDispatch", () => {
     const aggregate = await result;
 
     expect(backend.inputs).toHaveLength(2);
-    // Each per-sub-stage job carries the PARENT stage name in its identity (so
-    // the backend correlates the run group), while the sub-stage is
-    // distinguished by its own execution profile id.
+    // Each per-sub-stage job carries a UNIQUE identity composed of the PARENT
+    // stage name + the sub-stage name (so the run group correlates AND each
+    // sub-stage is distinct even if profiles collide), and its own profile id.
     expect(backend.inputs.map((entry) => entry.job.identity.stageName)).toEqual(
-      ["implement", "implement"],
+      ["implement/patch-plan", "implement/first-patch"],
     );
     expect(backend.inputs.map((entry) => entry.job.identity.profileId)).toEqual(
       ["profile.patch-plan", "profile.first-patch"],
     );
     // resolveBackend is consulted once per dispatched sub-stage, in order.
-    expect(jobOrder).toEqual(["implement", "implement"]);
+    expect(jobOrder).toEqual(["implement/patch-plan", "implement/first-patch"]);
     expect(aggregate.hardStop ?? null).toBeNull();
   });
 
@@ -316,18 +325,19 @@ describe("executeDecomposedStageDispatch", () => {
 
     const stageNames = journal.map((entry) => entry.metadata.stageName);
     expect(stageNames).toEqual([
-      "patch-plan",
-      "patch-plan",
-      "first-patch",
-      "first-patch",
+      "implement/patch-plan",
+      "implement/patch-plan",
+      "implement/first-patch",
+      "implement/first-patch",
     ]);
-    // The projection keys per (runGroupId, sub-stage name); the journal entry's
-    // `stage` field tracks the same sub-stage name (builder contract).
+    // The projection keys per (runGroupId, composite sub-stage name); the
+    // journal entry's `stage` field tracks the same composite name (builder
+    // contract).
     expect(journal.map((entry) => entry.stage)).toEqual([
-      "patch-plan",
-      "patch-plan",
-      "first-patch",
-      "first-patch",
+      "implement/patch-plan",
+      "implement/patch-plan",
+      "implement/first-patch",
+      "implement/first-patch",
     ]);
     // Each sub-stage's attempt key is distinct, so the projection never
     // collapses two sub-stages into one row.
@@ -435,5 +445,142 @@ describe("executeDecomposedStageDispatch", () => {
     });
     await result;
     expect(stageMutations).toBe(0);
+  });
+
+  it("gives sub-stages distinct identities and journal entries even when they share a profile and run group (P2-1)", async () => {
+    // Two sub-stages with the SAME profile + same run group. Without a
+    // per-sub-stage identity, the crabrunner idempotency hash AND the SYMPH-811
+    // projection key (runGroupId + stageName) would collide and conflate them.
+    const subStages = [
+      createSubStageProfile("first", { profile: "shared.profile" }),
+      createSubStageProfile("second", { profile: "shared.profile" }),
+    ];
+
+    const { result, backend, journal } = runHarness({
+      subStages,
+      resultFor: () => makeResult(createIssue(), 100),
+    });
+
+    await result;
+
+    expect(backend.inputs).toHaveLength(2);
+    // Distinct backend job identities (the idempotency key must differ).
+    const jobKeys = backend.inputs.map(
+      (entry) => entry.job.identity.idempotencyKey,
+    );
+    expect(new Set(jobKeys).size).toBe(2);
+    // The per-sub-stage identity composes parent + sub-stage name.
+    expect(backend.inputs.map((entry) => entry.job.identity.stageName)).toEqual(
+      ["implement/first", "implement/second"],
+    );
+
+    // Distinct journal projection keys: each sub-stage gets its own
+    // (runGroupId, stageName) + attempt key, so the reducer shows both rows.
+    const delegated = journal.filter(
+      (entry) => entry.kind === "delegated_stage_attempt",
+    );
+    expect(delegated).toHaveLength(4);
+    expect(delegated.map((entry) => entry.metadata.stageName)).toEqual([
+      "implement/first",
+      "implement/first",
+      "implement/second",
+      "implement/second",
+    ]);
+    const attemptKeys = new Set(
+      delegated.map((entry) => entry.metadata.attemptIdempotencyKey),
+    );
+    expect(attemptKeys.size).toBe(2);
+    // And the journal idempotency keys (attemptKey + status) are all distinct,
+    // so neither sub-stage's running/terminal entry dedupes the other's.
+    expect(new Set(delegated.map((entry) => entry.idempotencyKey)).size).toBe(
+      4,
+    );
+  });
+
+  it("fails closed when a sub-stage declares a non-delegated backend (P2-2)", async () => {
+    const subStages = [
+      createSubStageProfile("first"),
+      createSubStageProfile("second", { backend: "current-runner" }),
+    ];
+
+    const { result, backend } = runHarness({
+      subStages,
+      resultFor: () => makeResult(createIssue(), 100),
+    });
+
+    await expect(result).rejects.toThrow(/current-runner/);
+    // Fail closed BEFORE any dispatch — no sub-stage runs.
+    expect(backend.inputs).toHaveLength(0);
+  });
+
+  it("uses the actual clock for the synthesized result's startedAt when nothing dispatched (P2-3)", async () => {
+    const subStages = [
+      createSubStageProfile("first-patch", {
+        consume: ["plan.json"],
+        produce: ["patch.json"],
+      }),
+    ];
+    const fixed = new Date("2026-06-21T12:34:56.000Z");
+
+    const { result, backend } = runHarness({
+      subStages,
+      now: () => fixed,
+      resultFor: () => makeResult(createIssue(), 100),
+    });
+
+    const aggregate = await result;
+    expect(backend.inputs).toHaveLength(0);
+    // Not the epoch (which would report a decades-long duration in finalize).
+    expect(aggregate.runAttempt.startedAt).toBe(fixed.toISOString());
+    expect(aggregate.runAttempt.startedAt).not.toBe(new Date(0).toISOString());
+  });
+
+  it("does not count a produced capsule whose declared path escapes the artifact root (Track)", async () => {
+    const subStages = [
+      createSubStageProfile("patch-plan", {
+        produce: ["../escape.json", "/etc/passwd"],
+      }),
+      createSubStageProfile("first-patch", {
+        consume: ["../escape.json"],
+        produce: ["patch.json"],
+      }),
+    ];
+
+    const { result, backend } = runHarness({
+      subStages,
+      // Both escaping targets "exist" on disk, but must NOT count as produced
+      // because they resolve outside the run-group artifact root.
+      producedCapsuleFiles: new Set([
+        "/tmp/escape.json",
+        "/etc/passwd",
+        "/tmp/artifacts/escape.json",
+      ]),
+      resultFor: () => makeResult(createIssue(), 100),
+    });
+
+    const aggregate = await result;
+    // patch-plan dispatched, but its escaping produce paths are withheld, so
+    // first-patch's required capsule is missing -> sequence fails closed.
+    expect(backend.inputs).toHaveLength(1);
+    expect(aggregate.hardStop).not.toBeNull();
+  });
+
+  it("journals running and terminal entries with distinct timestamps (observability)", async () => {
+    const subStages = [
+      createSubStageProfile("patch-plan", { produce: ["plan.json"] }),
+    ];
+
+    const { result, journal } = runHarness({
+      subStages,
+      producedCapsuleFiles: new Set(["/tmp/artifacts/issue-1/plan.json"]),
+      resultFor: () => makeResult(createIssue(), 100),
+    });
+
+    await result;
+    const delegated = journal.filter(
+      (entry) => entry.kind === "delegated_stage_attempt",
+    );
+    expect(delegated).toHaveLength(2);
+    expect(delegated[0]!.timestamp).not.toBe(delegated[1]!.timestamp);
   });
 });

@@ -1,5 +1,5 @@
 import { statSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, resolve, sep } from "node:path";
 
 import type { AgentRunInput, AgentRunResult } from "../agent/runner.js";
 import type {
@@ -46,14 +46,28 @@ import { buildDelegatedStageAttemptJournalEntry } from "../stage-execution/deleg
  * onWorkerExit/advanceStage. Finalization stays runtime-host-owned. The
  * injected-deps surface deliberately exposes no stage-advance hook.
  *
+ * Per-sub-stage identity: each sub-stage's job (and journal entry) is keyed by a
+ * COMPOSITE `${parentStageName}/${subStageName}`, so two sub-stages that share a
+ * profile and run group still get distinct backend idempotency keys and distinct
+ * SYMPH-811 projection keys (the reducer keys on `runGroupId` + `stageName`).
+ * The PARENT stage name still drives the single runtime-host stage transition.
+ *
+ * Sub-stages must be delegated lanes (crabrunner): the capsule-scoped runner
+ * input intentionally drops stage/modePolicy/AC/rework context, which a
+ * current-runner lane depends on, so a non-delegated sub-stage fails closed
+ * before any dispatch.
+ *
  * Journaling model: each considered sub-stage is journaled twice — an admission
  * (`running`) entry and a terminal (`succeeded`/`failed`/`degraded`) entry —
- * keyed in the projection by `(runGroupId, sub-stage name)`. The entries are
- * emitted from the deterministic `DecomposedStageResult.outcomes` after the
- * sequence resolves, so a fail-closed sub-stage (a missing required capsule,
- * which never dispatches) is recorded uniformly with the dispatched ones, and
- * there is no interleaving hazard with the dispatch loop. Replaying
+ * keyed in the projection by `(runGroupId, composite sub-stage name)`. The
+ * entries are emitted from the deterministic `DecomposedStageResult.outcomes`
+ * after the sequence resolves, so a fail-closed sub-stage (a missing required
+ * capsule, which never dispatches) is recorded uniformly with the dispatched
+ * ones, and there is no interleaving hazard with the dispatch loop. Replaying
  * running→terminal yields the terminal state, exactly the projection contract.
+ * (Running/terminal entries carry distinct idempotency keys; the reducer orders
+ * by journal sequence, not timestamp — the distinct timestamps are
+ * observability only.)
  */
 
 /**
@@ -121,12 +135,29 @@ export async function executeDecomposedStageDispatch(
 ): Promise<AgentRunResult> {
   const fileExists = input.fileExists ?? DEFAULT_FILE_EXISTS;
 
+  // Fail closed BEFORE any dispatch if a sub-stage targets a non-delegated
+  // backend. Decomposed sub-stages run as bounded delegated lanes; the
+  // capsule-scoped runner input deliberately drops stage/modePolicy/AC/etc.,
+  // which a current-runner (or manual) lane would need — so those would run
+  // mis-configured. The live decomposed use case is crabrunner. (SYMPH-852 P2-2)
+  assertSubStagesAreDelegated(input.subStages);
+
+  // Per-sub-stage identity: compose the PARENT stage name with the sub-stage
+  // name so each sub-stage gets a UNIQUE backend idempotency key AND a unique
+  // SYMPH-811 projection key (the reducer keys on runGroupId + stageName), even
+  // when two sub-stages share a profile and run group. The PARENT stage name
+  // still drives the single runtime-host stage transition (unchanged).
+  // (SYMPH-852 P2-1)
+  const subStageNames = input.subStages.map((subStage) =>
+    composeSubStageStageName(input.stageName, subStage.name),
+  );
+
   // Build the per-sub-stage job specs up front so the journal entries can use a
   // stable idempotency key per sub-stage. Index-aligned with `subStages`.
-  const subStageJobs = input.subStages.map((subStage) =>
+  const subStageJobs = input.subStages.map((subStage, index) =>
     input.createStageExecutionJobSpec({
       execution: subStage.execution,
-      stageName: input.stageName,
+      stageName: subStageNames[index] ?? null,
     }),
   );
 
@@ -142,7 +173,9 @@ export async function executeDecomposedStageDispatch(
         buildCapsuleScopedRunnerInput({
           issue: input.issue,
           attempt: input.attempt,
-          stageName: input.stageName,
+          // Per-sub-stage name (parent/sub-stage) so the lane is uniquely
+          // identified, matching the job identity. (SYMPH-852 P2-1)
+          stageName: subStageNames[ctx.index] ?? null,
           ...(input.signal === undefined ? {} : { signal: input.signal }),
           ctx,
         }),
@@ -165,10 +198,10 @@ export async function executeDecomposedStageDispatch(
   await journalSubStageOutcomes({
     outcomes: decomposed.outcomes,
     subStageJobs,
+    subStageNames,
     issue: input.issue,
-    parentStageName: input.stageName,
     attempt: input.attempt,
-    timestamp: input.now().toISOString(),
+    now: input.now,
     appendJournalEntry: input.appendJournalEntry,
   });
 
@@ -176,7 +209,34 @@ export async function executeDecomposedStageDispatch(
     decomposed,
     issue: input.issue,
     attempt: input.attempt,
+    now: input.now,
   });
+}
+
+function composeSubStageStageName(
+  parentStageName: string | null,
+  subStageName: string,
+): string {
+  return parentStageName === null
+    ? subStageName
+    : `${parentStageName}/${subStageName}`;
+}
+
+const DELEGATED_STAGE_EXECUTION_BACKENDS: ReadonlySet<string> = new Set([
+  "crabrunner",
+]);
+
+function assertSubStagesAreDelegated(
+  subStages: readonly StageExecutionSubStage[],
+): void {
+  for (const subStage of subStages) {
+    const backend = subStage.execution.backend;
+    if (!DELEGATED_STAGE_EXECUTION_BACKENDS.has(backend)) {
+      throw new Error(
+        `Decomposed sub-stage "${subStage.name}" declares a non-delegated backend "${backend}". Decomposed stages may only run delegated lanes (crabrunner); the capsule-scoped runner input drops the stage/modePolicy/rework context a current-runner lane needs.`,
+      );
+    }
+  }
 }
 
 function requireSubStageJob(
@@ -219,19 +279,40 @@ function verifyProducedCapsules(input: {
   const declared = input.ctx.execution.capsules.produce;
   const present: string[] = [];
   for (const capsulePath of declared) {
-    const absolutePath = resolveCapsulePath(input.artifactRoot, capsulePath);
-    if (input.fileExists(absolutePath)) {
+    const absolutePath = resolveCapsulePathWithinRoot(
+      input.artifactRoot,
+      capsulePath,
+    );
+    // A path that escapes the artifact root (absolute or `..` traversal) is
+    // rejected (null) so an unrelated existing file can never count as a
+    // produced capsule. A declared-but-absent path is also not-produced — both
+    // fail closed. (SYMPH-852 Track: path traversal)
+    if (absolutePath !== null && input.fileExists(absolutePath)) {
       present.push(capsulePath);
     }
-    // A declared-but-absent path is treated as not-produced — fail closed.
   }
   return present;
 }
 
-function resolveCapsulePath(artifactRoot: string, capsulePath: string): string {
-  return isAbsolute(capsulePath)
-    ? capsulePath
-    : resolve(artifactRoot, capsulePath);
+/**
+ * Resolve a declared capsule path against the run-group artifact root, confined
+ * to that root. Returns null for an absolute path or any `..` traversal that
+ * would escape the root, so the fail-closed "produced under the artifact root"
+ * guarantee holds.
+ */
+function resolveCapsulePathWithinRoot(
+  artifactRoot: string,
+  capsulePath: string,
+): string | null {
+  if (isAbsolute(capsulePath)) {
+    return null;
+  }
+  const root = resolve(artifactRoot);
+  const resolved = resolve(root, capsulePath);
+  if (resolved !== root && !resolved.startsWith(root + sep)) {
+    return null;
+  }
+  return resolved;
 }
 
 function readStageTotalTokens(liveSession: LiveSession): number {
@@ -245,14 +326,15 @@ function readStageTotalTokens(liveSession: LiveSession): number {
 }
 
 interface JournalSubStageOutcomesInput {
-  // `outcomes` and `subStageJobs` are index-aligned (one job per declared
-  // sub-stage, one outcome per considered sub-stage).
+  // `outcomes`, `subStageJobs`, and `subStageNames` are index-aligned (one per
+  // declared sub-stage; outcomes covers each considered sub-stage).
   outcomes: readonly DecomposedSubStageOutcome[];
   subStageJobs: readonly StageExecutionJobSpec[];
+  /** Per-sub-stage composite names (parent/sub-stage), index-aligned. */
+  subStageNames: readonly string[];
   issue: Issue;
-  parentStageName: string | null;
   attempt: number | null;
-  timestamp: string;
+  now: () => Date;
   appendJournalEntry: (draft: DispatcherRunJournalEntryDraft) => Promise<void>;
 }
 
@@ -267,24 +349,31 @@ async function journalSubStageOutcomes(
     }
     const runGroupId = job.identity.runGroupId;
     const attemptIdempotencyKey = job.identity.idempotencyKey;
+    // Composite (parent/sub-stage) name keys the SYMPH-811 projection uniquely
+    // per sub-stage, matching the job identity. Falls back to the bare outcome
+    // name only if names somehow drift out of alignment.
+    const stageName = input.subStageNames[index] ?? outcome.name;
     const usage = stageUsageOfOutcome(outcome, job);
     const producedCapsulePaths = [...outcome.producedCapsulePaths];
 
+    // Distinct timestamps for running vs terminal aid operator observability.
+    // NOTE: the projection reduces by JOURNAL SEQUENCE, not timestamp, and
+    // running/terminal already carry distinct idempotency keys — the timestamps
+    // are observability only, never the correctness ordering.
     // Admission: the sub-stage entered the sequence ("running").
     await input.appendJournalEntry(
       buildDelegatedStageAttemptJournalEntry({
         issueId: input.issue.id,
         issueIdentifier: input.issue.identifier,
         runGroupId,
-        // The projection keys per (runGroupId, sub-stage name), so each
-        // sub-stage gets its own row. The builder also sets the journal entry's
-        // `stage` field to this same sub-stage name.
-        stageName: outcome.name,
+        // The projection keys per (runGroupId, stageName); the builder also sets
+        // the journal entry's `stage` field to this same composite name.
+        stageName,
         stageAttempt,
         status: "running",
         attemptIdempotencyKey,
-        timestamp: input.timestamp,
-        summary: `delegated ${input.parentStageName ?? "stage"} / ${outcome.name} attempt ${stageAttempt}: running`,
+        timestamp: input.now().toISOString(),
+        summary: `delegated ${stageName} attempt ${stageAttempt}: running`,
       }),
     );
 
@@ -294,15 +383,15 @@ async function journalSubStageOutcomes(
         issueId: input.issue.id,
         issueIdentifier: input.issue.identifier,
         runGroupId,
-        stageName: outcome.name,
+        stageName,
         stageAttempt,
         status: terminalStatusOfOutcome(outcome),
         attemptIdempotencyKey,
         failureClass: failureClassOfOutcome(outcome),
         ...(usage === null ? {} : { usage }),
         artifactPaths: producedCapsulePaths,
-        timestamp: input.timestamp,
-        summary: `delegated ${input.parentStageName ?? "stage"} / ${outcome.name} attempt ${stageAttempt}: ${outcome.status}`,
+        timestamp: input.now().toISOString(),
+        summary: `delegated ${stageName} attempt ${stageAttempt}: ${outcome.status}`,
       }),
     );
   }
@@ -374,8 +463,22 @@ interface AggregateRunResultInput {
   decomposed: DecomposedStageResult;
   issue: Issue;
   attempt: number | null;
+  now: () => Date;
 }
 
+/**
+ * Fold the sub-stage outcomes into ONE AgentRunResult for the runtime-host's
+ * single finalization. Contract:
+ *   - Token COUNTERS on the live session are SUMMED across all dispatched
+ *     sub-stages (cumulative spend).
+ *   - All other (non-counter) LiveSession fields and the session/run identity
+ *     come from the TERMINAL (last-dispatched) sub-stage. This is correct
+ *     because `runDecomposedStage` stops at the first failure, so the
+ *     last-dispatched sub-stage IS the terminal state of the sequence.
+ *   - `hardStop` is set explicitly whenever `stopReason !== "completed"`, so a
+ *     non-completed sequence pauses finalization rather than transitioning
+ *     forward — independent of the basis sub-stage's own result.
+ */
 function aggregateRunResult(input: AggregateRunResultInput): AgentRunResult {
   const dispatched = input.decomposed.outcomes.filter(
     (
@@ -391,6 +494,8 @@ function aggregateRunResult(input: AggregateRunResultInput): AgentRunResult {
     // Nothing dispatched (e.g. first sub-stage's required capsule missing):
     // synthesize a minimal result so finalization still performs one
     // transition. The hardStop is always present here (stopReason !== completed).
+    // startedAt uses the actual clock — never the epoch — so finalization does
+    // not report a decades-long duration. (SYMPH-852 P2-3)
     return {
       issue: input.issue,
       workspace: {
@@ -403,7 +508,7 @@ function aggregateRunResult(input: AggregateRunResultInput): AgentRunResult {
         issueIdentifier: input.issue.identifier,
         attempt: input.attempt,
         workspacePath: "",
-        startedAt: new Date(0).toISOString(),
+        startedAt: input.now().toISOString(),
         status: "failed",
       },
       liveSession: createEmptyLiveSession(),

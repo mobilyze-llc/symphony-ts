@@ -8742,10 +8742,11 @@ describe("stage execution backend boundary", () => {
 
     expect(tick.dispatchedIssueIds).toEqual(["decomp-issue"]);
     // Routing: both declared sub-stages were dispatched through the seam, in
-    // order, each carrying the PARENT stage name + its own profile id.
+    // order, each carrying a UNIQUE per-sub-stage identity (parent/sub-stage)
+    // plus its own profile id.
     expect(backend.inputs).toHaveLength(2);
     expect(backend.inputs.map((entry) => entry.job.identity.stageName)).toEqual(
-      ["investigate", "investigate"],
+      ["investigate/sub-a", "investigate/sub-b"],
     );
     expect(backend.inputs.map((entry) => entry.job.identity.profileId)).toEqual(
       ["profile.sub-a", "profile.sub-b"],
@@ -8782,10 +8783,10 @@ describe("stage execution backend boundary", () => {
       "succeeded",
     ]);
     expect(delegated.map((entry) => entry.metadata.stageName)).toEqual([
-      "sub-a",
-      "sub-a",
-      "sub-b",
-      "sub-b",
+      "investigate/sub-a",
+      "investigate/sub-a",
+      "investigate/sub-b",
+      "investigate/sub-b",
     ]);
   });
 });
