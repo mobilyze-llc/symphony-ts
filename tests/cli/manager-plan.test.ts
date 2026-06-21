@@ -99,6 +99,31 @@ describe("parseManagerPlanCliArgs", () => {
     expect(opts.json).toBe(false);
   });
 
+  it("defaults --state to Backlog when no --state is given (SYMPH-867)", () => {
+    expect(parseManagerPlanCliArgs(["--team", "MOB"]).states).toEqual([
+      "Backlog",
+    ]);
+  });
+
+  it("explicit --state overrides the Backlog default (SYMPH-867)", () => {
+    expect(
+      parseManagerPlanCliArgs(["--team", "MOB", "--state", "Todo"]).states,
+    ).toEqual(["Todo"]);
+  });
+
+  it("explicit multi-state list overrides the default with no Backlog injected (SYMPH-867)", () => {
+    expect(
+      parseManagerPlanCliArgs([
+        "--team",
+        "MOB",
+        "--state",
+        "Todo",
+        "--state",
+        "In Review",
+      ]).states,
+    ).toEqual(["Todo", "In Review"]);
+  });
+
   it("parses --no-canary (default false) (SYMPH-838)", () => {
     expect(
       parseManagerPlanCliArgs(["--team", "MOB", "--state", "Backlog"]).noCanary,
@@ -244,16 +269,20 @@ describe("runManagerPlanCli", () => {
     expect(seen[0]?.initiative).toBe("Healthspanners");
   });
 
-  it("errors when --state is missing", async () => {
-    const { io, err } = captureIo();
-    const code = await runManagerPlanCli(["--team", "MOB"], {
+  it("defaults to the Backlog state when --state is omitted (SYMPH-867)", async () => {
+    const { io } = captureIo();
+    const seen: ManagerPlanCandidateQuery[] = [];
+    const code = await runManagerPlanCli(["--team", "MOB", "--prompt-only"], {
       io,
       env: {},
-      loadCandidates: async () => [],
+      loadCandidates: async (input) => {
+        seen.push(input);
+        return [issue("u1", "MOB-1")];
+      },
       createPlannerRunner: okRunner,
     });
-    expect(code).toBe(1);
-    expect(err()).toMatch(/--state/);
+    expect(code).toBe(0);
+    expect(seen[0]?.activeStates).toEqual(["Backlog"]);
   });
 
   it("errors when a --state value is empty", async () => {

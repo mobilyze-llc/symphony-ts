@@ -39,6 +39,8 @@ import { LinearTrackerClient } from "../tracker/linear-client.js";
 /** CLI default operating-envelope concurrency ceiling (tunable via --concurrency-ceiling). */
 export const DEFAULT_MANAGER_PLAN_CONCURRENCY_CEILING = 3;
 export const DEFAULT_MANAGER_PLAN_MODEL = "opus";
+/** Default eligible-to-start state when --state is omitted (SYMPH-867). */
+export const DEFAULT_MANAGER_PLAN_STATE = "Backlog";
 
 export const MANAGER_PLAN_EXIT = {
   ok: 0,
@@ -192,6 +194,13 @@ export function parseManagerPlanCliArgs(
     }
   }
 
+  // Default the eligible-to-start state to Backlog when none is given (SYMPH-867).
+  // An explicit --state (one or more) overrides this entirely; an explicit empty
+  // value is still rejected downstream.
+  if (states.length === 0) {
+    states.push(DEFAULT_MANAGER_PLAN_STATE);
+  }
+
   return {
     team,
     project,
@@ -248,12 +257,6 @@ export async function runManagerPlanCli(
   if (teamKeys.length === 0 && projectSlug === null && initiative === null) {
     io.stderr(
       `Provide at least one scope: --team <KEY>, --project <slugId>, or --initiative <name|uuid>.\n${renderUsage()}`,
-    );
-    return MANAGER_PLAN_EXIT.usage;
-  }
-  if (options.states.length === 0) {
-    io.stderr(
-      `Missing required --state <name> (the eligible-to-start state, e.g. "Backlog" or "Todo"). Repeatable.\n${renderUsage()}`,
     );
     return MANAGER_PLAN_EXIT.usage;
   }
@@ -523,7 +526,7 @@ function stamp(now: () => Date): string {
 
 export function renderUsage(): string {
   return [
-    "Usage: symphony-manager-plan (--team <KEY> | --project <slugId> | --initiative <name|uuid>)... --state <name> [--state <name>...] [options]",
+    "Usage: symphony-manager-plan (--team <KEY> | --project <slugId> | --initiative <name|uuid>)... [--state <name>...] [options]",
     "",
     "Run the Queue Triage v2 backlog Manager (planner) ONE-SHOT against the scoped",
     "eligible backlog and print the suggested batch plan. Output-only: it spends one",
@@ -535,10 +538,8 @@ export function renderUsage(): string {
     "  --project <slugId>           Linear project slugId to scope candidates to",
     "  --initiative <name|uuid>     Linear initiative (UUID matches by id, else by name)",
     "",
-    "Required:",
-    "  --state <name>               Eligible-to-start state name (repeatable, e.g. Backlog)",
-    "",
     "Options:",
+    `  --state <name>               Eligible-to-start state (repeatable; default ${DEFAULT_MANAGER_PLAN_STATE})`,
     `  --concurrency-ceiling <n>    Operating-envelope ceiling (default ${DEFAULT_MANAGER_PLAN_CONCURRENCY_CEILING})`,
     "  --risk <low|medium|high>     Allowed risk tier (default medium)",
     "  --modes <csv>                Allowed batch modes (default parallel-isolated,canary-chain)",
