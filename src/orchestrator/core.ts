@@ -1212,6 +1212,23 @@ export class OrchestratorCore {
     }
   }
 
+  /**
+   * SYMPH-852 — commit a delegated-stage-attempt journal draft through the
+   * single-writer commit path (in-memory append + ordered disk flush via the
+   * configured writer). Used by the runtime-host's decomposed-stage dispatch so
+   * delegated sub-stage attempts are journaled as the SYMPH-811 projection
+   * expects, and the in-memory journal/replay stay consistent. Symphony stays
+   * the only writer; the draft's idempotency key dedupes repeats. The draft is
+   * expected to carry the "delegated_stage_attempt" kind (built via
+   * buildDelegatedStageAttemptJournalEntry); the orchestrator does not advance
+   * any stage state from it.
+   */
+  async recordDelegatedStageAttempt(
+    draft: DispatcherRunJournalEntryDraft,
+  ): Promise<void> {
+    await this.recordRunJournalEntry(draft);
+  }
+
   async recordEmergencyStopRecoveryCleanup(input: {
     issueId: string;
     issueIdentifier: string;

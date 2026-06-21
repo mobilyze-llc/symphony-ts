@@ -20,6 +20,7 @@ import type {
 import type {
   ResolvedWorkflowConfig,
   StageExecutionBackend as StageExecutionBackendKind,
+  StageExecutionProfile,
 } from "../../src/config/types.js";
 import type {
   DispatcherRunJournal,
@@ -8709,7 +8710,156 @@ describe("stage execution backend boundary", () => {
     expect(fakeRunner.runInputs).toHaveLength(1);
     expect(fakeRunner.runInputs[0]?.issue.identifier).toBe("MANAGED-1");
   });
+
+  it("dispatches a decomposed stage's sub-stages through the seam and performs one transition (SYMPH-852)", async () => {
+    // An immediate-resolving backend is required: sub-stages run sequentially,
+    // so a pending FakeAgentRunner would deadlock the second sub-stage. Each
+    // sub-stage is a delegated (crabrunner) lane, which is the decomposed-stage
+    // use case and gives each sub-stage a profile-distinct idempotency key.
+    const backend = new ImmediateStageExecutionBackend("crabrunner");
+    const config = createDecomposedStagedConfig();
+    const host = new OrchestratorRuntimeHost({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "decomp-issue",
+            identifier: "SYMPH-852",
+            branchName: "codex/SYMPH-852-decomposed",
+          }),
+        ],
+        stateSnapshots: [
+          { id: "decomp-issue", identifier: "SYMPH-852", state: "In Progress" },
+        ],
+      }),
+      // No agentRunner needed — every sub-stage resolves through the backend.
+      stageExecutionBackends: new Map([["crabrunner", backend]]),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    const tick = await host.pollOnce();
+    await host.waitForIdle();
+
+    expect(tick.dispatchedIssueIds).toEqual(["decomp-issue"]);
+    // Routing: both declared sub-stages were dispatched through the seam, in
+    // order, each carrying a UNIQUE per-sub-stage identity (parent/sub-stage)
+    // plus its own profile id.
+    expect(backend.inputs).toHaveLength(2);
+    expect(backend.inputs.map((entry) => entry.job.identity.stageName)).toEqual(
+      ["investigate/sub-a", "investigate/sub-b"],
+    );
+    expect(backend.inputs.map((entry) => entry.job.identity.profileId)).toEqual(
+      ["profile.sub-a", "profile.sub-b"],
+    );
+
+    const journal = readDispatcherJournal("/tmp/workspaces");
+    // Exactly one stage transition: the worker finalized once, so a single
+    // stage_record is journaled for the issue.
+    const stageRecords = journal.filter(
+      (entry) =>
+        entry.kind === "stage_record" && entry.issueId === "decomp-issue",
+    );
+    expect(stageRecords).toHaveLength(1);
+    // The admission lease completed exactly once (one worker lifecycle).
+    const completedAdmissions = journal.filter(
+      (entry) =>
+        entry.kind === "admission" &&
+        entry.issueId === "decomp-issue" &&
+        entry.lease?.status === "completed",
+    );
+    expect(completedAdmissions).toHaveLength(1);
+    // Each sub-stage was journaled via the SYMPH-811 delegated projection
+    // (running + terminal per sub-stage = 4 entries).
+    const delegated = journal.filter(
+      (entry) =>
+        entry.kind === "delegated_stage_attempt" &&
+        entry.issueId === "decomp-issue",
+    );
+    expect(delegated).toHaveLength(4);
+    expect(delegated.map((entry) => entry.metadata.status)).toEqual([
+      "running",
+      "succeeded",
+      "running",
+      "succeeded",
+    ]);
+    expect(delegated.map((entry) => entry.metadata.stageName)).toEqual([
+      "investigate/sub-a",
+      "investigate/sub-a",
+      "investigate/sub-b",
+      "investigate/sub-b",
+    ]);
+  });
 });
+
+function createDecomposedSubStageExecution(
+  name: string,
+): StageExecutionProfile {
+  return {
+    role: "investigator",
+    phase: "investigate",
+    backend: "crabrunner",
+    controlNeeding: false,
+    provider: "openai",
+    model: "gpt-5.3-codex",
+    reasoningEffort: "medium",
+    profile: `profile.${name}`,
+    artifacts: { requires: [], produces: [] },
+    timeoutMs: null,
+    budget: { maxTokens: null, maxUsd: null },
+    dependencies: { stages: [], capsules: [], missingCapsule: "fail" },
+    runGroup: { id: "rg-852", key: null },
+    // No capsules: both sub-stages dispatch unconditionally and the sequence
+    // completes without a filesystem handoff.
+    capsules: { consume: [], produce: [] },
+    subStages: [],
+  };
+}
+
+function createDecomposedStagedConfig(): ResolvedWorkflowConfig {
+  return createStagedConfig({
+    stages: {
+      initialStage: "investigate",
+      fastTrack: null,
+      stages: {
+        investigate: {
+          ...createStagedConfig().stages!.stages.investigate!,
+          type: "agent",
+          runner: "codex",
+          model: "gpt-5.3-codex",
+          execution: {
+            role: "investigator",
+            phase: "investigate",
+            // Parent backend is unused on the decomposed path (each sub-stage
+            // carries its own); kept as crabrunner so the resolved-but-unused
+            // parent backend matches the injected map.
+            backend: "crabrunner",
+            controlNeeding: false,
+            provider: "openai",
+            model: "gpt-5.3-codex",
+            reasoningEffort: "medium",
+            profile: "readonly.pro16",
+            artifacts: { requires: [], produces: [] },
+            timeoutMs: null,
+            budget: { maxTokens: null, maxUsd: null },
+            dependencies: { stages: [], capsules: [], missingCapsule: "fail" },
+            runGroup: { id: "rg-852", key: null },
+            capsules: { consume: [], produce: [] },
+            subStages: [
+              {
+                name: "sub-a",
+                execution: createDecomposedSubStageExecution("sub-a"),
+              },
+              {
+                name: "sub-b",
+                execution: createDecomposedSubStageExecution("sub-b"),
+              },
+            ],
+          },
+        },
+      },
+    },
+  });
+}
 
 function createCrabrunnerStagedConfig(): ResolvedWorkflowConfig {
   return createStagedConfig({
@@ -8923,6 +9073,40 @@ class RecordingStageExecutionBackend implements StageExecutionBackendRunner {
     return {
       job: input.job,
       result: await this.runner.run(input.runnerInput),
+    };
+  }
+}
+
+/**
+ * A backend that resolves synchronously with a canned success result keyed to
+ * the job's issue identity. Required by the decomposed-stage dispatch test:
+ * sub-stages run sequentially, so a pending runner would deadlock.
+ */
+class ImmediateStageExecutionBackend implements StageExecutionBackendRunner {
+  readonly inputs: StageExecutionBackendInput[] = [];
+
+  constructor(readonly backend: StageExecutionBackendKind = "current-runner") {}
+
+  async execute(
+    input: StageExecutionBackendInput,
+  ): Promise<StageExecutionBackendResult> {
+    this.inputs.push(input);
+    const base = createNormalResult();
+    const issue = createIssue({
+      id: input.job.identity.issueId,
+      identifier: input.job.identity.issueIdentifier,
+    });
+    return {
+      job: input.job,
+      result: {
+        ...base,
+        issue,
+        runAttempt: {
+          ...base.runAttempt,
+          issueId: input.job.identity.issueId,
+          issueIdentifier: input.job.identity.issueIdentifier,
+        },
+      },
     };
   }
 }
