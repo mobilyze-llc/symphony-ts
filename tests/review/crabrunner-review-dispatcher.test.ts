@@ -6,9 +6,16 @@ import { describe, expect, it } from "vitest";
 
 import type { AgentRunResult } from "../../src/agent/runner.js";
 import type { Issue } from "../../src/domain/model.js";
-import { createCrabrunnerReviewStageDispatcher } from "../../src/review/crabrunner-review-dispatcher.js";
+import {
+  createCrabrunnerReviewStageDispatcher,
+  reviewLaneReasoningEffort,
+} from "../../src/review/crabrunner-review-dispatcher.js";
+import type { CrabrunnerReviewLaneSpec } from "../../src/review/crabrunner-review-job-group.js";
 import type { CrabrunnerReviewStageDispatchContext } from "../../src/review/crabrunner-review-stage.js";
-import type { CommandRunner } from "../../src/review/headless-council-gate.js";
+import type {
+  CommandRunner,
+  StructuredReviewerArtifact,
+} from "../../src/review/headless-council-gate.js";
 import type {
   StageExecutionBackendInput,
   StageExecutionBackendResult,
@@ -18,6 +25,8 @@ import type { CrabrunnerStageExecutionEvidence } from "../../src/stage-execution
 
 const BASE_SHA = "base000000000000000000000000000000000000000";
 const HEAD_SHA = "head000000000000000000000000000000000000000";
+const PRIOR_HEAD_SHA = "prior0000000000000000000000000000000000000";
+const MERGE_BASE_SHA = "merge000000000000000000000000000000000000";
 const BASE_REF = "origin/main";
 const ISSUE_BRANCH = "codex/SYMPH-862";
 
@@ -128,6 +137,42 @@ describe("createCrabrunnerReviewStageDispatcher", () => {
     }
   });
 
+  it("carries prior review state into re-review dispatch prompts and metadata", async () => {
+    const root = await mkdtemp(join(tmpdir(), "symph871-dispatcher-prior-"));
+    try {
+      const workspaceRoot = join(root, "workspace");
+      const artifactRoot = join(root, "artifacts");
+      await mkdir(workspaceRoot, { recursive: true });
+      await mkdir(artifactRoot, { recursive: true });
+      const backend = new MarkdownArtifactBackend(artifactRoot);
+      const issue = createIssue();
+      const dispatcher = createDispatcher({ runCommand: fakeGitCommand() });
+
+      const result = await dispatcher(
+        dispatchContext({
+          issue,
+          workspaceRoot,
+          artifactRoot,
+          backend,
+          previousReviewedHeadSha: PRIOR_HEAD_SHA,
+          priorStructuredArtifacts: [priorStructuredReviewerArtifact()],
+        }),
+      );
+
+      expect(result.result.review_metadata.previous_reviewed_head_sha).toBe(
+        PRIOR_HEAD_SHA,
+      );
+      expect(backend.inputs[0]?.runnerInput.stage?.prompt).toContain(
+        "Prior adjudicated findings by fingerprint:",
+      );
+      expect(backend.inputs[0]?.runnerInput.stage?.prompt).toContain(
+        "prior-fingerprint",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("prefers structured JSON reviewer refs over earlier markdown refs", async () => {
     const root = await mkdtemp(join(tmpdir(), "symph862-dispatcher-mixed-"));
     try {
@@ -213,6 +258,40 @@ describe("createCrabrunnerReviewStageDispatcher", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("normalizes and validates review lane reasoning effort", () => {
+    const lane: CrabrunnerReviewLaneSpec = {
+      laneId: "pi-deepseek",
+      kind: "reviewer",
+      agent: "pi",
+      role: "decorrelated-reviewer",
+      model: "deepseek/deepseek-v4-pro",
+      modelFamily: "pi",
+      reasoningEffort: null,
+      independentReviewer: true,
+      mergeAuthoritative: true,
+    };
+
+    expect(reviewLaneReasoningEffort(lane)).toBeNull();
+    expect(
+      reviewLaneReasoningEffort({
+        ...lane,
+        reasoningEffort: undefined as never,
+      }),
+    ).toBeNull();
+    expect(
+      reviewLaneReasoningEffort({ ...lane, reasoningEffort: "high" }),
+    ).toBe("high");
+    expect(() =>
+      reviewLaneReasoningEffort({
+        ...lane,
+        laneId: "bad-reasoning",
+        reasoningEffort: "extreme",
+      }),
+    ).toThrow(
+      'review lane bad-reasoning has unsupported reasoningEffort "extreme"',
+    );
+  });
 });
 
 class MarkdownArtifactBackend
@@ -279,7 +358,11 @@ class JsonArtifactBackend
     await mkdir(dirname(artifactPath), { recursive: true });
     await writeFile(
       artifactPath,
-      `${JSON.stringify(structuredReviewerArtifact(laneId), null, 2)}\n`,
+      `${JSON.stringify(
+        crabrunnerStructuredReviewerArtifactRecord(laneId),
+        null,
+        2,
+      )}\n`,
       "utf8",
     );
     return {
@@ -314,7 +397,7 @@ class MixedArtifactBackend
       jsonPath,
       `${JSON.stringify(
         {
-          ...structuredReviewerArtifact(laneId),
+          ...crabrunnerStructuredReviewerArtifactRecord(laneId),
           rawArtifactPath: "json-artifact",
         },
         null,
@@ -360,6 +443,8 @@ function dispatchContext(input: {
   workspaceRoot: string;
   artifactRoot: string;
   backend: StageExecutionBackendRunner<CrabrunnerStageExecutionEvidence>;
+  previousReviewedHeadSha?: string | null;
+  priorStructuredArtifacts?: readonly StructuredReviewerArtifact[];
 }): CrabrunnerReviewStageDispatchContext {
   return {
     issue: input.issue,
@@ -371,6 +456,8 @@ function dispatchContext(input: {
     attempt: null,
     artifactRoot: input.artifactRoot,
     baseRef: BASE_REF,
+    previousReviewedHeadSha: input.previousReviewedHeadSha ?? null,
+    priorStructuredArtifacts: input.priorStructuredArtifacts ?? [],
     signal: new AbortController().signal,
     backend: input.backend,
   };
@@ -406,6 +493,20 @@ function fakeGitCommand(
         stderr: "",
       };
     }
+    if (args[0] === "merge-base") {
+      return {
+        exitCode: 0,
+        stdout: `${MERGE_BASE_SHA}\n`,
+        stderr: "",
+      };
+    }
+    if (args[0] === "diff" && args[1] === "--name-only") {
+      return {
+        exitCode: 0,
+        stdout: "src/review/crabrunner-review-dispatcher.ts\n",
+        stderr: "",
+      };
+    }
     if (args[0] === "status") {
       return {
         exitCode: 0,
@@ -417,7 +518,80 @@ function fakeGitCommand(
   };
 }
 
-function structuredReviewerArtifact(laneId: string): Record<string, unknown> {
+function priorStructuredReviewerArtifact(): StructuredReviewerArtifact {
+  const base = structuredReviewerArtifact("pi-deepseek");
+  return {
+    ...base,
+    routing: {
+      mode: "full",
+      routingMode: "standard",
+      round: 1,
+    },
+    findings: [
+      {
+        fingerprint: "prior-fingerprint",
+        severity: "P2",
+        emittedSeverity: "P2",
+        title: "Prior review state was not carried forward",
+        titleStem: "prior review state was not carried forward",
+        category: "review-state",
+        confidence: 0.9,
+        evidence: [
+          {
+            path: "src/review/crabrunner-review-dispatcher.ts",
+            lineStart: 57,
+            lineEnd: 57,
+            changedPath: true,
+          },
+        ],
+        relatedPaths: ["src/review/crabrunner-review-dispatcher.ts"],
+        rationale: "Re-review prompts need prior adjudicated findings.",
+        leadDisposition: "open",
+        repeatOf: null,
+        introducedIn: "original_diff",
+        dismissalReason: null,
+        family: {
+          name: "review-state contract",
+          safetyClaim:
+            "re-review dispatch carries prior reviewer artifacts into targeting",
+          nextRoundQuestion:
+            "does the re-review prompt preserve prior finding context?",
+          fixedSymptoms: [],
+          remainingSymptoms: ["prior artifact context missing"],
+        },
+      },
+    ],
+    familySyntheses: [
+      {
+        name: "review-state contract",
+        safetyClaim:
+          "re-review dispatch carries prior reviewer artifacts into targeting",
+        nextRoundQuestion:
+          "does the re-review prompt preserve prior finding context?",
+        fixedSymptoms: [],
+        remainingSymptoms: ["prior artifact context missing"],
+        findingFingerprints: ["prior-fingerprint"],
+      },
+    ],
+  };
+}
+
+type CrabrunnerStructuredReviewerArtifactRecord = StructuredReviewerArtifact & {
+  headSha: string;
+};
+
+function crabrunnerStructuredReviewerArtifactRecord(
+  laneId: string,
+): CrabrunnerStructuredReviewerArtifactRecord {
+  return {
+    ...structuredReviewerArtifact(laneId),
+    headSha: HEAD_SHA,
+  };
+}
+
+function structuredReviewerArtifact(
+  laneId: string,
+): StructuredReviewerArtifact {
   return {
     schemaVersion: 1,
     kind: "symphony-headless-council-reviewer-artifact",
@@ -451,7 +625,6 @@ function structuredReviewerArtifact(laneId: string): Record<string, unknown> {
     },
     findings: [],
     familySyntheses: [],
-    headSha: HEAD_SHA,
   };
 }
 

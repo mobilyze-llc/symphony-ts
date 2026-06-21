@@ -74,7 +74,10 @@ import type {
   CrabrunnerReviewStageResult,
 } from "../../src/review/crabrunner-review-stage.js";
 import { runCrabrunnerReviewStage } from "../../src/review/crabrunner-review-stage.js";
-import type { HeadlessCouncilGateResult } from "../../src/review/headless-council-gate.js";
+import type {
+  HeadlessCouncilGateResult,
+  StructuredReviewerArtifact,
+} from "../../src/review/headless-council-gate.js";
 import type {
   ProcessIdentitySnapshot,
   ProcessTreeTerminationResult,
@@ -9003,6 +9006,219 @@ describe("stage execution backend boundary", () => {
     expect(result.runAttempt.attempt).toBe(2);
   });
 
+  it("hydrates prior review state from the journal before crabrunner re-review dispatch (SYMPH-871)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph871-runtime-prior-"));
+    try {
+      const reviewResultPath = join(root, "prior-review-result.json");
+      const priorArtifact = runtimePriorStructuredArtifact();
+      writeFileSync(
+        reviewResultPath,
+        `${JSON.stringify(
+          runtimePriorReviewResult({
+            reviewResultPath,
+            structuredArtifact: priorArtifact,
+          }),
+          null,
+          2,
+        )}\n`,
+      );
+
+      const crabrunnerBackend = new ImmediateStageExecutionBackend(
+        "crabrunner",
+      );
+      const seenContexts: CrabrunnerReviewStageDispatchContext[] = [];
+      const host = new OrchestratorRuntimeHost({
+        config: createReviewGatedConfig({ gateEnabled: true }),
+        tracker: createTracker({ candidates: [] }),
+        agentRunner: new FakeAgentRunner(),
+        stageExecutionBackends: new Map([["crabrunner", crabrunnerBackend]]),
+        reviewStageDispatcher: async (context) => {
+          seenContexts.push(context);
+          return fakeReviewStageResult(context);
+        },
+        now: () => new Date("2026-06-21T00:00:05.000Z"),
+      });
+      host.getState().dispatcherRunJournal.push({
+        sequence: 1,
+        idempotencyKey: "review:review-issue:gate:prior",
+        timestamp: "2026-06-21T00:00:00.000Z",
+        kind: "review_gate_result",
+        issueId: "review-issue",
+        issueIdentifier: "SYMPH-871",
+        operation: "dispatcher",
+        stage: "review",
+        attempt: 1,
+        ownerId: "owner-1",
+        lease: null,
+        summary: "prior review gate result for SYMPH-871",
+        metadata: {
+          reviewed_head_sha: "prior-head",
+          review_result_path: reviewResultPath,
+        },
+      } satisfies DispatcherRunJournalEntry);
+
+      await (
+        host as unknown as {
+          executeCrabrunnerReviewStageDispatch(input: {
+            issue: Issue;
+            attempt: number | null;
+            stage: StageDefinition | null;
+            stageName: string | null;
+            signal: AbortSignal;
+            baseRef: string;
+            artifactRoot: string;
+            backend: unknown;
+          }): Promise<AgentRunResult>;
+        }
+      ).executeCrabrunnerReviewStageDispatch({
+        issue: createIssue({ id: "review-issue", identifier: "SYMPH-871" }),
+        attempt: 2,
+        stage: null,
+        stageName: "review",
+        signal: new AbortController().signal,
+        baseRef: "main",
+        artifactRoot: join(root, "artifacts"),
+        backend: crabrunnerBackend,
+      });
+
+      const seenContext = seenContexts.at(-1);
+      expect(seenContext?.previousReviewedHeadSha).toBe("prior-head");
+      expect(seenContext?.priorStructuredArtifacts).toEqual([priorArtifact]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("drops malformed prior structured artifacts from the latest review journal entry", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph871-runtime-prior-bad-"));
+    try {
+      const olderReviewResultPath = join(root, "older-review-result.json");
+      const latestReviewResultPath = join(root, "latest-review-result.json");
+      const olderArtifact = runtimePriorStructuredArtifact();
+      const malformedLatestArtifact = {
+        ...runtimePriorStructuredArtifact(),
+        familySyntheses: [
+          {
+            name: "bad synthesis",
+            safetyClaim: null,
+            nextRoundQuestion: null,
+            fixedSymptoms: "not-an-array",
+            remainingSymptoms: [],
+            findingFingerprints: [],
+          },
+        ],
+      } as unknown as StructuredReviewerArtifact;
+      writeFileSync(
+        olderReviewResultPath,
+        `${JSON.stringify(
+          runtimePriorReviewResult({
+            reviewResultPath: olderReviewResultPath,
+            reviewedHeadSha: "older-head",
+            structuredArtifact: olderArtifact,
+          }),
+          null,
+          2,
+        )}\n`,
+      );
+      writeFileSync(
+        latestReviewResultPath,
+        `${JSON.stringify(
+          runtimePriorReviewResult({
+            reviewResultPath: latestReviewResultPath,
+            reviewedHeadSha: "latest-head",
+            structuredArtifact: malformedLatestArtifact,
+          }),
+          null,
+          2,
+        )}\n`,
+      );
+
+      const crabrunnerBackend = new ImmediateStageExecutionBackend(
+        "crabrunner",
+      );
+      const seenContexts: CrabrunnerReviewStageDispatchContext[] = [];
+      const host = new OrchestratorRuntimeHost({
+        config: createReviewGatedConfig({ gateEnabled: true }),
+        tracker: createTracker({ candidates: [] }),
+        agentRunner: new FakeAgentRunner(),
+        stageExecutionBackends: new Map([["crabrunner", crabrunnerBackend]]),
+        reviewStageDispatcher: async (context) => {
+          seenContexts.push(context);
+          return fakeReviewStageResult(context);
+        },
+        now: () => new Date("2026-06-21T00:00:05.000Z"),
+      });
+      host.getState().dispatcherRunJournal.push(
+        {
+          sequence: 1,
+          idempotencyKey: "review:review-issue:gate:older",
+          timestamp: "2026-06-21T00:00:00.000Z",
+          kind: "review_gate_result",
+          issueId: "review-issue",
+          issueIdentifier: "SYMPH-871",
+          operation: "dispatcher",
+          stage: "review",
+          attempt: 1,
+          ownerId: "owner-1",
+          lease: null,
+          summary: "older prior review gate result for SYMPH-871",
+          metadata: {
+            reviewed_head_sha: "older-head",
+            review_result_path: olderReviewResultPath,
+          },
+        } satisfies DispatcherRunJournalEntry,
+        {
+          sequence: 2,
+          idempotencyKey: "review:review-issue:gate:latest",
+          timestamp: "2026-06-21T00:00:01.000Z",
+          kind: "review_gate_result",
+          issueId: "review-issue",
+          issueIdentifier: "SYMPH-871",
+          operation: "dispatcher",
+          stage: "review",
+          attempt: 2,
+          ownerId: "owner-1",
+          lease: null,
+          summary: "latest prior review gate result for SYMPH-871",
+          metadata: {
+            reviewed_head_sha: "latest-head",
+            review_result_path: latestReviewResultPath,
+          },
+        } satisfies DispatcherRunJournalEntry,
+      );
+
+      await (
+        host as unknown as {
+          executeCrabrunnerReviewStageDispatch(input: {
+            issue: Issue;
+            attempt: number | null;
+            stage: StageDefinition | null;
+            stageName: string | null;
+            signal: AbortSignal;
+            baseRef: string;
+            artifactRoot: string;
+            backend: unknown;
+          }): Promise<AgentRunResult>;
+        }
+      ).executeCrabrunnerReviewStageDispatch({
+        issue: createIssue({ id: "review-issue", identifier: "SYMPH-871" }),
+        attempt: 3,
+        stage: null,
+        stageName: "review",
+        signal: new AbortController().signal,
+        baseRef: "main",
+        artifactRoot: join(root, "artifacts"),
+        backend: crabrunnerBackend,
+      });
+
+      const seenContext = seenContexts.at(-1);
+      expect(seenContext?.previousReviewedHeadSha).toBe("latest-head");
+      expect(seenContext?.priorStructuredArtifacts).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("warns once when the review gate is enabled but no dispatcher is wired (SYMPH-855 P2-2)", async () => {
     const logEntries: StructuredLogEntry[] = [];
     const logger = new StructuredLogger([
@@ -9326,6 +9542,104 @@ function fakeReviewStageResult(
       provenance: { runGroupId: "rg-855", currentHeadSha: "head", lanes: [] },
       qa: null,
     },
+  };
+}
+
+function runtimePriorReviewResult(input: {
+  reviewResultPath: string;
+  structuredArtifact: StructuredReviewerArtifact;
+  reviewedHeadSha?: string;
+}): HeadlessCouncilGateResult {
+  return {
+    schemaVersion: 1,
+    issueId: "SYMPH-871",
+    verdict: "fail",
+    startedAt: "2026-06-21T00:00:00.000Z",
+    completedAt: "2026-06-21T00:00:01.000Z",
+    pr: {
+      repo: "mobilyze-llc/symphony-ts",
+      number: 637,
+      baseRef: "main",
+      headRef: "codex/SYMPH-871",
+    },
+    review_metadata: {
+      reviewed_head_sha: input.reviewedHeadSha ?? "prior-head",
+      previous_reviewed_head_sha: null,
+      base_sha: "base-head",
+      round: 1,
+      mode: "full",
+      verdict: "fail",
+    },
+    review_routing: null,
+    review_bundle: null,
+    targeted_convergence: null,
+    lanes: [
+      {
+        laneId: "pi-deepseek",
+        agent: "pi",
+        role: "reviewer",
+        model: "deepseek/deepseek-v4-pro",
+        state: "complete",
+        verdict: "fail",
+        artifactPath: "/tmp/prior.md",
+        promptPath: null,
+        stderrPath: null,
+        cliJsonPath: null,
+        reasoningEffort: null,
+        independentReviewer: true,
+        mergeAuthoritative: true,
+        message: null,
+        degradedReason: null,
+        reviewBundle: null,
+        wallTimeMs: null,
+        tokenUsage: null,
+        structuredArtifactPath: "/tmp/prior.structured.json",
+        structuredArtifact: input.structuredArtifact,
+      },
+    ],
+    degradedConditions: [],
+    artifactPaths: {
+      artifactDir: dirname(input.reviewResultPath),
+      diff: null,
+      reviewBundle: null,
+      structuredArtifacts: ["/tmp/prior.structured.json"],
+      resultJson: input.reviewResultPath,
+      councilReport: join(dirname(input.reviewResultPath), "council-report.md"),
+    },
+    summary: "prior",
+  };
+}
+
+function runtimePriorStructuredArtifact(): StructuredReviewerArtifact {
+  return {
+    schemaVersion: 1,
+    kind: "symphony-headless-council-reviewer-artifact",
+    lane: {
+      laneId: "pi-deepseek",
+      agent: "pi",
+      role: "reviewer",
+      model: "deepseek/deepseek-v4-pro",
+      modelFamily: "pi",
+      reasoningEffort: null,
+      independentReviewer: true,
+      mergeAuthoritative: true,
+    },
+    routing: { mode: "full", routingMode: "standard", round: 1 },
+    reviewBundle: null,
+    verdict: "fail",
+    confidence: 0.9,
+    parseStatus: "synthesized_from_markdown",
+    rawArtifactPath: "/tmp/prior.md",
+    malformedReason: null,
+    sections: {
+      p1: "",
+      p2: "prior finding",
+      track: "",
+      dismissedOrTheoretical: "",
+      triage: "",
+    },
+    findings: [],
+    familySyntheses: [],
   };
 }
 

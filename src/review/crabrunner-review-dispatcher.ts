@@ -64,6 +64,14 @@ export function createCrabrunnerReviewStageDispatcher(
         provenance: authorProvenance(env),
         env,
         ...(context.baseRef === null ? {} : { baseRef: context.baseRef }),
+        ...(context.previousReviewedHeadSha === undefined ||
+        context.previousReviewedHeadSha === null
+          ? {}
+          : { previousReviewedHeadSha: context.previousReviewedHeadSha }),
+        ...(context.priorStructuredArtifacts === undefined ||
+        context.priorStructuredArtifacts.length === 0
+          ? {}
+          : { priorStructuredArtifacts: context.priorStructuredArtifacts }),
       },
       options.runCommand === undefined
         ? {}
@@ -95,6 +103,7 @@ export function createCrabrunnerReviewStageDispatcher(
         lane: requireLaneConfig(laneConfigs, laneId),
         reviewBundle: plan.reviewBundle,
         targetedConvergence: plan.targetedConvergence,
+        priorStructuredArtifacts: context.priorStructuredArtifacts ?? [],
       });
       lanePrompts.set(laneId, prompt);
       return prompt;
@@ -120,6 +129,7 @@ export function createCrabrunnerReviewStageDispatcher(
       reviewBundle: plan.reviewBundle,
       targetedConvergence: plan.targetedConvergence,
       diffPath: plan.diffPath,
+      previousReviewedHeadSha: context.previousReviewedHeadSha ?? null,
       lanes,
       backend: context.backend,
       buildJobSpec: (lane) =>
@@ -196,13 +206,14 @@ function buildReviewLaneRunnerInput(input: {
   runGroupId: string;
   prompt: string;
 }): AgentRunInput {
+  const reasoningEffort = reviewLaneReasoningEffort(input.lane);
   return {
     issue: input.context.issue,
     attempt: input.context.attempt,
     signal: input.context.signal,
     stage: reviewLaneStage(input),
     stageName: input.lane.laneId,
-    reasoningEffort: input.lane.reasoningEffort as ReasoningEffort | null,
+    reasoningEffort,
   };
 }
 
@@ -217,11 +228,12 @@ function reviewLaneStage(input: {
     input.laneConfig.timeoutSeconds === undefined
       ? (input.context.stage?.timeoutMs ?? null)
       : input.laneConfig.timeoutSeconds * 1000;
+  const reasoningEffort = reviewLaneReasoningEffort(input.lane);
   return {
     ...baseReviewStage(input.context.issue, input.context.stage),
     runner: runnerKindForLane(input.laneConfig),
     model: input.lane.model,
-    reasoningEffort: input.lane.reasoningEffort as ReasoningEffort | null,
+    reasoningEffort,
     prompt: input.prompt,
     timeoutMs,
     execution: {
@@ -231,7 +243,7 @@ function reviewLaneStage(input: {
       controlNeeding: false,
       provider: providerForLane(input.laneConfig),
       model: input.lane.model,
-      reasoningEffort: input.lane.reasoningEffort as ReasoningEffort | null,
+      reasoningEffort,
       profile: `crabrunner-review.${input.lane.laneId}`,
       artifacts: {
         requires: [],
@@ -297,10 +309,15 @@ async function collectReviewerArtifact(input: {
   for (const artifactRef of input.laneEvidence.artifactRefs) {
     const artifact = await readArtifactRef(artifactRef);
     if (artifact === null) {
+      // Unreadable refs are skipped; if no readable reviewer artifact remains,
+      // the job-group validator records `malformed_artifact:<laneId>`.
       continue;
     }
     const parsed = parseJsonObject(artifact);
     if (parsed !== null) {
+      // JSON refs are intentionally returned to the validator even when they are
+      // not reviewer artifacts, so lane-aware anti-spoof diagnostics name the
+      // rejected lane instead of hiding the bad ref during collection.
       return withStructuredArtifactPath(parsed, artifactRef);
     }
     firstMarkdownArtifact ??= { artifactRef, artifact };
@@ -396,6 +413,24 @@ function providerForLane(lane: HeadlessReviewerLaneConfig): string | null {
     return "openai";
   }
   return null;
+}
+
+export function reviewLaneReasoningEffort(
+  lane: CrabrunnerReviewLaneSpec,
+): ReasoningEffort | null {
+  if (lane.reasoningEffort == null) {
+    return null;
+  }
+  if (
+    lane.reasoningEffort === "low" ||
+    lane.reasoningEffort === "medium" ||
+    lane.reasoningEffort === "high"
+  ) {
+    return lane.reasoningEffort;
+  }
+  throw new Error(
+    `review lane ${lane.laneId} has unsupported reasoningEffort "${lane.reasoningEffort}"`,
+  );
 }
 
 function authorProvenance(
