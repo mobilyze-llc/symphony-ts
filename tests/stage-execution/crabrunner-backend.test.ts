@@ -517,10 +517,16 @@ describe("CrabrunnerStageExecutionBackend", () => {
       status: vi.fn(async (jobId) => {
         calls.push(`status:${jobId}`);
       }),
-      collect: vi.fn((jobId) => {
+      // Realistic: an abort kills the in-flight collect subprocess, so collect
+      // REJECTS fast (it does not hang). The backend must route that aborted
+      // rejection to cancelJob and yield cancellation evidence — not
+      // artifact_collection_failed (recheck-2 P2).
+      collect: vi.fn(async (jobId) => {
         calls.push(`collect:${jobId}`);
         controller.abort("stall_timeout");
-        return new Promise<CrabrunnerTerminalEvidence>(() => {});
+        const abortError = new Error("collect aborted");
+        abortError.name = "AbortError";
+        throw abortError;
       }),
       cancel: vi.fn(async (jobId, request) => {
         calls.push(`cancel:${jobId}`);
@@ -553,10 +559,70 @@ describe("CrabrunnerStageExecutionBackend", () => {
     ]);
     expect(cancelRequests).toHaveLength(1);
     expect(result.result.runAttempt.status).toBe("canceled_by_reconciliation");
+    expect(result.evidence?.terminal?.state).toBe("canceled");
     expect(result.evidence?.terminal?.cancellation).toMatchObject({
       killed: true,
       processGroup: true,
     });
+  });
+
+  it("routes an abort during in-flight status to cancellation evidence, not runner_failed", async () => {
+    // recheck-2 P2: a fast-rejecting status (execFile kill) must NOT be
+    // reported as runner_failed when the cause was an abort; it must yield
+    // cancellation evidence, and cancelJob must run exactly once.
+    const controller = new AbortController();
+    const calls: string[] = [];
+    const cancelRequests: CrabrunnerCancellationRequest[] = [];
+    const client: CrabrunnerSchedulerClient & { calls: string[] } = {
+      calls,
+      submit: vi.fn(async () => {
+        calls.push("submit");
+        return { status: "accepted" as const, jobId: "job-status-abort" };
+      }),
+      status: vi.fn(async (jobId) => {
+        calls.push(`status:${jobId}`);
+        controller.abort("stall_timeout");
+        const abortError = new Error("status aborted");
+        abortError.name = "AbortError";
+        throw abortError;
+      }),
+      collect: vi.fn(async (jobId) => {
+        calls.push(`collect:${jobId}`);
+        return { state: "succeeded" as const };
+      }),
+      cancel: vi.fn(async (jobId, request) => {
+        calls.push(`cancel:${jobId}`);
+        cancelRequests.push(request);
+        return {
+          state: "canceled" as const,
+          message: "canceled during status",
+          cancellation: {
+            requested: true,
+            signal: request.signal,
+            processGroup: request.processGroup,
+            killed: true,
+            failure: null,
+          },
+        };
+      }),
+    };
+    const backend = new CrabrunnerStageExecutionBackend({ client });
+
+    const result = await backend.execute({
+      job: createJob(),
+      runnerInput: createRunnerInput({ signal: controller.signal }),
+    });
+
+    // collect must NOT run (status aborted); cancel runs exactly once.
+    expect(calls).toEqual([
+      "submit",
+      "status:job-status-abort",
+      "cancel:job-status-abort",
+    ]);
+    expect(cancelRequests).toHaveLength(1);
+    expect(result.result.runAttempt.status).toBe("canceled_by_reconciliation");
+    expect(result.evidence?.terminal?.state).toBe("canceled");
+    expect(result.result.runAttempt.error).not.toContain("runner_failed");
   });
 
   it("surfaces kill failure distinctly when cancellation cannot be delivered", async () => {

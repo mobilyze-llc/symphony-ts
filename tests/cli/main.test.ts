@@ -9,6 +9,7 @@ import {
   CLI_ACKNOWLEDGEMENT_FLAG,
   type StartCliHostInput,
   applyCliOverrides,
+  buildCrabrunnerStageExecutionBackends,
   parseCliArgs,
   runCli,
   shouldRunAsCli,
@@ -265,6 +266,42 @@ describe("cli", () => {
     expect(parseCliArgs(["--version"])).toEqual(
       expect.objectContaining({ version: true }),
     );
+  });
+});
+
+describe("buildCrabrunnerStageExecutionBackends", () => {
+  it("returns null when SYMPHONY_CRABRUNNER_ROOT is absent (production-inert)", () => {
+    expect(buildCrabrunnerStageExecutionBackends({})).toBeNull();
+  });
+
+  it("returns null when SYMPHONY_CRABRUNNER_ROOT is blank", () => {
+    expect(
+      buildCrabrunnerStageExecutionBackends({ SYMPHONY_CRABRUNNER_ROOT: "  " }),
+    ).toBeNull();
+  });
+
+  it("registers only the crabrunner backend when the env is enabled", () => {
+    const map = buildCrabrunnerStageExecutionBackends({
+      SYMPHONY_CRABRUNNER_ROOT: "/tmp/crucible",
+      SYMPHONY_CRABRUNNER_TARGET_REPO: "/tmp/repo",
+      SYMPHONY_CRABRUNNER_HOST: "crabbox-studio1",
+    });
+
+    expect(map).not.toBeNull();
+    expect([...map!.keys()]).toEqual(["crabrunner"]);
+    expect(map!.get("crabrunner")?.backend).toBe("crabrunner");
+  });
+
+  it("still enables with an empty REPO_URL falling through to cwd (DeepSeek P2-2)", () => {
+    // `??` would have resolved to "" here; `||`/firstNonEmpty must fall through
+    // to process.cwd(), so the backend is still built without crashing.
+    const map = buildCrabrunnerStageExecutionBackends({
+      SYMPHONY_CRABRUNNER_ROOT: "/tmp/crucible",
+      REPO_URL: "",
+    });
+
+    expect(map).not.toBeNull();
+    expect(map!.get("crabrunner")?.backend).toBe("crabrunner");
   });
 });
 
