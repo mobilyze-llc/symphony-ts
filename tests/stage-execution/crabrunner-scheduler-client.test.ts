@@ -360,6 +360,33 @@ describe("CrabrunnerCliSchedulerClient.submit", () => {
     expect(invocations[0]?.opts.timeoutMs).toBe(670_000);
   });
 
+  it("uses the same default timeout for remote lane args and subprocess budget", async () => {
+    const invocations: CrabrunnerCliInvocation[] = [];
+    const cli: CrabrunnerCli = async (args, opts) => {
+      invocations.push({ args: [...args], opts });
+      const jobId = args[args.indexOf("--job-id") + 1]!;
+      return cliOk(runResultJson({ state: "complete", job_id: jobId }));
+    };
+    const client = new CrabrunnerCliSchedulerClient({
+      crucibleRoot: CRUCIBLE_ROOT,
+      targetRepoRoot: TARGET_REPO_ROOT,
+      host: "crabbox-studio1",
+      remoteUser: "ericlitman",
+      cliTimeoutMs: 120_000,
+      pollIntervalMs: 1_000,
+      maxPolls: 10,
+      cli,
+    });
+
+    await client.submit(nullTimeout(createSpec()));
+
+    const runCall = invocations[0]!;
+    expect(runCall.args[runCall.args.indexOf("--timeout-seconds") + 1]).toBe(
+      "120",
+    );
+    expect(runCall.opts.timeoutMs).toBe(190_000);
+  });
+
   it("does not pass the local state root as a remote state root by default", async () => {
     const invocations: CrabrunnerCliInvocation[] = [];
     const cli: CrabrunnerCli = async (args, opts) => {
@@ -695,6 +722,96 @@ describe("CrabrunnerCliSchedulerClient.collect", () => {
     await expect(client.status(admission.jobId!)).rejects.toThrow(
       /no cached run result/,
     );
+  });
+
+  it("downgrades a successful remote run when the downloaded archive is missing", async () => {
+    const { mkdtemp } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const artifactDir = await mkdtemp(join(tmpdir(), "crabrunner-remote-"));
+    const cli: CrabrunnerCli = async (args) => {
+      const jobId = args[args.indexOf("--job-id") + 1]!;
+      return cliOk(runResultJson({ state: "complete", job_id: jobId }));
+    };
+    const client = new CrabrunnerCliSchedulerClient({
+      crucibleRoot: CRUCIBLE_ROOT,
+      targetRepoRoot: TARGET_REPO_ROOT,
+      host: "crabbox-studio1",
+      remoteUser: "ericlitman",
+      remoteRunArtifactDir: artifactDir,
+      cli,
+    });
+
+    const admission = await client.submit(createSpec());
+    const evidence = await client.collect(admission.jobId!);
+
+    expect(evidence.state).toBe("artifact_parse_failed");
+    expect(evidence.artifactRefs).toBeUndefined();
+    expect(evidence.usage).toEqual({
+      status: "unavailable",
+      reason: "remote crabrunner collect archive missing or empty",
+    });
+  });
+
+  it("reports remote collect archive usage failures as unavailable", async () => {
+    const { mkdtemp, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+
+    for (const [entries, reason] of [
+      [
+        { "attempts/01/artifact/result.md": "# result" },
+        "usage artifact not found in remote collect archive",
+      ],
+      [
+        { "attempts/01/artifact/result.usage.json": "not json" },
+        "usage artifact in remote collect archive is not valid JSON",
+      ],
+      [
+        {
+          "attempts/01/artifact/result.usage.json": JSON.stringify({
+            schema: "unexpected.schema",
+            measurement_kind: "true",
+            input_tokens: 1,
+            output_tokens: 1,
+            total_tokens: 2,
+          }),
+        },
+        'unexpected usage schema "unexpected.schema"',
+      ],
+      [
+        {
+          "attempts/01/artifact/result.usage.json": JSON.stringify({
+            input_tokens: "not-a-number",
+          }),
+        },
+        "usage artifact in remote collect archive failed schema validation",
+      ],
+    ] as const) {
+      const artifactDir = await mkdtemp(join(tmpdir(), "crabrunner-remote-"));
+      const cli: CrabrunnerCli = async (args) => {
+        const jobId = args[args.indexOf("--job-id") + 1]!;
+        await writeFile(
+          join(artifactDir, `${jobId}.tar`),
+          createTarBuffer(entries),
+        );
+        return cliOk(runResultJson({ state: "complete", job_id: jobId }));
+      };
+      const client = new CrabrunnerCliSchedulerClient({
+        crucibleRoot: CRUCIBLE_ROOT,
+        targetRepoRoot: TARGET_REPO_ROOT,
+        host: "crabbox-studio1",
+        remoteUser: "ericlitman",
+        remoteRunArtifactDir: artifactDir,
+        cli,
+      });
+
+      const admission = await client.submit(createSpec());
+      const evidence = await client.collect(admission.jobId!);
+
+      expect(evidence.state).toBe("succeeded");
+      expect(evidence.usage).toEqual({ status: "unavailable", reason });
+    }
   });
 
   it("maps complete -> succeeded with usage and artifact refs", async () => {
@@ -1549,6 +1666,19 @@ function createSpec(
     return base;
   }
   return { ...base, promptFile: overrides.promptFile ?? "/tmp/prompt.md" };
+}
+
+function nullTimeout(spec: CrabrunnerJobSpec): CrabrunnerJobSpec {
+  return {
+    ...spec,
+    enforcement: {
+      ...spec.enforcement,
+      timing: {
+        ...spec.enforcement.timing,
+        timeoutMs: null,
+      },
+    },
+  };
 }
 
 function createJob(): StageExecutionJobSpec {

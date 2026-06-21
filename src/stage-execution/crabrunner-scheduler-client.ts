@@ -519,10 +519,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     // Floor to 1s (TK-1): 0 is NOT "unlimited" — it would be a degenerate
     // instant timeout. In practice this floor is unreachable for required lanes
     // (enforcement validation rejects timeoutMs<=0 before submit).
-    const timeoutSeconds = Math.max(
-      1,
-      Math.ceil((spec.enforcement.timing.timeoutMs ?? 0) / 1_000),
-    );
+    const timeoutSeconds = this.laneTimeoutSeconds(spec);
     // submit() guarantees a prompt_file is present, so this is always a
     // lane-worker.v1 prompt-file lane. WORKER_ARGV_PROTOCOL is reserved for a
     // future worker_argv manifest that this client does not yet source.
@@ -617,10 +614,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
       throw new Error("remote crabrunner run requires a prompt_file");
     }
 
-    const timeoutSeconds = Math.max(
-      1,
-      Math.ceil((spec.enforcement.timing.timeoutMs ?? 0) / 1_000),
-    );
+    const timeoutSeconds = this.laneTimeoutSeconds(spec);
     const phase = spec.phase ?? "review";
     const args = [
       "run",
@@ -673,10 +667,17 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
   }
 
   private remoteRunCliTimeoutMs(spec: CrabrunnerJobSpec): number {
-    const laneTimeoutMs =
-      spec.enforcement.timing.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS;
+    const laneTimeoutMs = this.laneTimeoutMs(spec);
     const pollBudgetMs = this.maxPolls * this.pollIntervalMs;
     return Math.max(this.cliTimeoutMs, laneTimeoutMs + pollBudgetMs + 60_000);
+  }
+
+  private laneTimeoutMs(spec: CrabrunnerJobSpec): number {
+    return spec.enforcement.timing.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS;
+  }
+
+  private laneTimeoutSeconds(spec: CrabrunnerJobSpec): number {
+    return Math.max(1, Math.ceil(this.laneTimeoutMs(spec) / 1_000));
   }
 
   private async collectRemoteRunEvidence(
@@ -705,12 +706,6 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     const artifactRefs: string[] = [];
     if (archivePresent) {
       artifactRefs.push(localArchivePath);
-    } else if (
-      runResult.collect.archive_path !== null &&
-      runResult.collect.archive_path !== undefined &&
-      runResult.collect.archive_path.trim().length > 0
-    ) {
-      artifactRefs.push(runResult.collect.archive_path);
     }
 
     const workspaceSyncPath =
