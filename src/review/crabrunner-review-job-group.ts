@@ -514,6 +514,7 @@ async function mapReviewerLane(input: {
     reviewBundle: null,
     wallTimeMs: null,
     tokenUsage: null,
+    structuredArtifactPath: artifact.structuredArtifactPath,
     structuredArtifact: artifact.structuredArtifact,
   };
 
@@ -635,6 +636,7 @@ function resolveGroupVerdict(input: {
 interface ParsedReviewerArtifact {
   headSha: string;
   structuredArtifact: StructuredReviewerArtifact;
+  structuredArtifactPath: string | null;
 }
 
 const REQUIRED_REVIEWER_SECTION_KEYS = [
@@ -726,6 +728,11 @@ function parseReviewerArtifact(value: unknown): ParsedReviewerArtifact | null {
   return {
     headSha,
     structuredArtifact: record as unknown as StructuredReviewerArtifact,
+    structuredArtifactPath:
+      typeof record.structuredArtifactPath === "string" &&
+      record.structuredArtifactPath.trim() !== ""
+        ? record.structuredArtifactPath
+        : null,
   };
 }
 

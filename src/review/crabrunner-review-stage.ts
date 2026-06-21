@@ -1,6 +1,8 @@
 import { resolve } from "node:path";
 
 import type { AgentRunInput } from "../agent/runner.js";
+import type { StageDefinition } from "../config/types.js";
+import type { Issue } from "../domain/model.js";
 import type {
   StageExecutionBackendRunner,
   StageExecutionJobSpec,
@@ -12,6 +14,7 @@ import {
   type ReviewJobGroupLaneEvidence,
   runCrabrunnerReviewJobGroup,
 } from "./crabrunner-review-job-group.js";
+import { finalizeHeadlessCouncilRouting } from "./headless-council-gate.js";
 import type {
   CouncilDecorrelatedReviewerArtifact,
   CouncilReviewMetadata,
@@ -19,7 +22,13 @@ import type {
   CouncilReviewRouting,
   CouncilRoutingMode,
   HeadlessCouncilGateResult,
+  ReviewBundleReference,
+  TargetedConvergenceHypothesis,
 } from "./headless-council-gate.js";
+import {
+  collectRoutingGuaranteeDegradedConditions,
+  reviewVerdictWithRoutingGuarantees,
+} from "./review-verdict.js";
 
 /**
  * SYMPH-855 — adapt the crabrunner review job group (SYMPH-810) into the EXACT
@@ -64,6 +73,11 @@ export interface RunCrabrunnerReviewStageInput {
   round: number;
   mode: CouncilReviewMode;
   routingMode?: CouncilRoutingMode | null;
+  reviewRouting?: CouncilReviewRouting;
+  reviewBundle?: ReviewBundleReference | null;
+  targetedConvergence?: TargetedConvergenceHypothesis | null;
+  diffPath?: string | null;
+  previousReviewedHeadSha?: string | null;
   lanes: readonly CrabrunnerReviewLaneSpec[];
   backend: StageExecutionBackendRunner<CrabrunnerStageExecutionEvidence>;
   buildJobSpec: (lane: CrabrunnerReviewLaneSpec) => StageExecutionJobSpec;
@@ -100,8 +114,11 @@ export interface CrabrunnerReviewStageResult {
  * stays thin and review intelligence never leaks into the orchestrator.
  */
 export interface CrabrunnerReviewStageDispatchContext {
+  issue: Issue;
   issueId: string;
   issueIdentifier: string;
+  workspaceRoot: string;
+  stage: StageDefinition | null;
   stageName: string | null;
   /**
    * The stage attempt index. Threaded through so a rework (re-review) attempt is
@@ -160,29 +177,47 @@ export async function runCrabrunnerReviewStage(
   const councilReportPath = `${artifactDir}/council-report.md`;
   const completedAt = now().toISOString();
 
-  const mergeEligible = jobGroup.verdict === "pass";
-  const reviewRouting = buildReviewRouting({
-    mode: input.routingMode ?? "standard",
-    mergeEligible,
-    lanes: jobGroup.lanes,
+  const reviewRouting =
+    input.reviewRouting === undefined
+      ? buildReviewRouting({
+          mode: input.routingMode ?? "standard",
+          mergeEligible: jobGroup.verdict === "pass",
+          lanes: jobGroup.lanes,
+        })
+      : finalizeHeadlessCouncilRouting(input.reviewRouting, jobGroup.lanes);
+  const finalRoutingGuaranteeConditions =
+    input.reviewRouting === undefined
+      ? []
+      : collectRoutingGuaranteeDegradedConditions(
+          reviewRouting,
+          jobGroup.lanes,
+        );
+  const degradedConditions = uniqueStrings([
+    ...jobGroup.degradedConditions,
+    ...finalRoutingGuaranteeConditions,
+  ]);
+  const verdict = reviewVerdictWithRoutingGuarantees({
+    laneVerdict: jobGroup.verdict,
+    routingGuaranteeConditions: finalRoutingGuaranteeConditions,
   });
 
   const reviewMetadata: CouncilReviewMetadata = {
     reviewed_head_sha: input.currentHeadSha,
-    previous_reviewed_head_sha: null,
+    previous_reviewed_head_sha: input.previousReviewedHeadSha ?? null,
     base_sha: input.baseSha,
     round: input.round,
     mode: input.mode,
-    ...(input.routingMode === undefined || input.routingMode === null
+    ...(input.reviewRouting === undefined &&
+    (input.routingMode === undefined || input.routingMode === null)
       ? {}
-      : { routing_mode: input.routingMode }),
-    verdict: jobGroup.verdict,
+      : { routing_mode: reviewRouting.mode }),
+    verdict,
   };
 
   const result: HeadlessCouncilGateResult = {
     schemaVersion: 1,
     issueId: input.issueIdentifier,
-    verdict: jobGroup.verdict,
+    verdict,
     startedAt,
     completedAt,
     pr: {
@@ -193,21 +228,21 @@ export async function runCrabrunnerReviewStage(
     },
     review_metadata: reviewMetadata,
     review_routing: reviewRouting,
-    review_bundle: null,
-    targeted_convergence: null,
+    review_bundle: input.reviewBundle ?? null,
+    targeted_convergence: input.targetedConvergence ?? null,
     lanes: jobGroup.lanes,
-    degradedConditions: jobGroup.degradedConditions,
+    degradedConditions,
     artifactPaths: {
       artifactDir,
-      diff: null,
-      reviewBundle: null,
+      diff: input.diffPath ?? null,
+      reviewBundle: input.reviewBundle?.path ?? null,
       structuredArtifacts: jobGroup.lanes
         .map((lane) => lane.structuredArtifactPath ?? null)
         .filter((path): path is string => path !== null),
       resultJson: reviewResultPath,
       councilReport: councilReportPath,
     },
-    summary: buildSummary(jobGroup),
+    summary: buildSummary(jobGroup, verdict, degradedConditions),
   };
 
   await input.mkdir(artifactDir);
@@ -292,13 +327,19 @@ function buildReviewRouting(input: {
   };
 }
 
-function buildSummary(jobGroup: CrabrunnerReviewJobGroupResult): string {
+function buildSummary(
+  jobGroup: CrabrunnerReviewJobGroupResult,
+  verdict = jobGroup.verdict,
+  degradedConditions = jobGroup.degradedConditions,
+): string {
   const laneCount = jobGroup.lanes.length;
   const degraded =
-    jobGroup.degradedConditions.length > 0
-      ? ` (${jobGroup.degradedConditions.join(", ")})`
-      : "";
-  return `Crabrunner review job group ${jobGroup.verdict} over ${laneCount} reviewer lane(s)${degraded}.`;
+    degradedConditions.length > 0 ? ` (${degradedConditions.join(", ")})` : "";
+  return `Crabrunner review job group ${verdict} over ${laneCount} reviewer lane(s)${degraded}.`;
+}
+
+function uniqueStrings(values: readonly string[]): string[] {
+  return [...new Set(values)];
 }
 
 /**

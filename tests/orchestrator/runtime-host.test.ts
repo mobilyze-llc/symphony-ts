@@ -19,6 +19,7 @@ import type {
 } from "../../src/agent/runner.js";
 import type {
   ResolvedWorkflowConfig,
+  StageDefinition,
   StageExecutionBackend as StageExecutionBackendKind,
   StageExecutionProfile,
 } from "../../src/config/types.js";
@@ -8977,6 +8978,7 @@ describe("stage execution backend boundary", () => {
         executeCrabrunnerReviewStageDispatch(input: {
           issue: Issue;
           attempt: number | null;
+          stage: StageDefinition | null;
           stageName: string | null;
           signal: AbortSignal;
           baseRef: string;
@@ -8987,6 +8989,7 @@ describe("stage execution backend boundary", () => {
     ).executeCrabrunnerReviewStageDispatch({
       issue: createIssue({ id: "review-issue", identifier: "SYMPH-855" }),
       attempt: 2,
+      stage: null,
       stageName: "review",
       signal: new AbortController().signal,
       baseRef: "main",

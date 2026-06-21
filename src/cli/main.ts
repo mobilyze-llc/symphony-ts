@@ -19,6 +19,7 @@ import {
   type RuntimeServiceHandle,
   startRuntimeService,
 } from "../orchestrator/runtime-host.js";
+import { createCrabrunnerReviewStageDispatcher } from "../review/crabrunner-review-dispatcher.js";
 import type { StageExecutionBackendRunner } from "../stage-execution/backend.js";
 import {
   type CrabrunnerPromptRenderingConfig,
@@ -240,12 +241,27 @@ export async function startCliHost(
       workflowPath: input.runtime.config.workflowPath,
     },
   );
+  const reviewStageDispatcher =
+    stageExecutionBackends === null
+      ? null
+      : createCrabrunnerReviewStageDispatcher({
+          env: input.env,
+          defaultRunnerKind: input.runtime.config.runner.kind,
+          defaultRunnerModel: input.runtime.config.runner.model,
+          defaultRunnerProvider: input.runtime.config.runner.provider ?? null,
+          defaultTurnTimeoutMs: input.runtime.config.codex.turnTimeoutMs,
+          defaultStallTimeoutMs: input.runtime.config.codex.stallTimeoutMs,
+          ...(input.runtime.config.hardStops === undefined
+            ? {}
+            : { hardStops: input.runtime.config.hardStops }),
+        });
 
   return startRuntimeService({
     config: input.runtime.config,
     logsRoot: input.runtime.logsRoot,
     notifier,
     ...(stageExecutionBackends === null ? {} : { stageExecutionBackends }),
+    ...(reviewStageDispatcher === null ? {} : { reviewStageDispatcher }),
   });
 }
 
