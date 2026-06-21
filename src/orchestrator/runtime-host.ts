@@ -81,6 +81,7 @@ import type {
   RightSizingDecision,
   RunningEntry,
 } from "../domain/model.js";
+import { createEmptyLiveSession } from "../domain/model.js";
 import { ERROR_CODES } from "../errors/codes.js";
 import type { ErrorSignatureClass } from "../errors/signature.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
@@ -156,6 +157,10 @@ import {
   type LinearWebhookAcceptedDelivery,
   runPortfolioWebhookRepair,
 } from "../portfolio/linear-webhook-reconciler.js";
+import type {
+  CrabrunnerReviewStageDispatchContext,
+  CrabrunnerReviewStageDispatcher,
+} from "../review/crabrunner-review-stage.js";
 import { createRunnerFromConfig, isAiSdkRunner } from "../runners/factory.js";
 import type { RunnerKind } from "../runners/types.js";
 import { getDurableCodexSessionArtifactDirectory } from "../shared/codex-session-artifacts.js";
@@ -180,6 +185,7 @@ import {
   type StageExecutionJobSpec,
   UnsupportedStageExecutionBackendError,
 } from "../stage-execution/backend.js";
+import type { CrabrunnerStageExecutionEvidence } from "../stage-execution/crabrunner-backend.js";
 import { createStageExecutionJobSpec } from "../stage-execution/job-spec.js";
 import { serializeTrackerErrorDetails } from "../tracker/errors.js";
 import {
@@ -429,6 +435,15 @@ export interface RuntimeHostOptions {
     StageExecutionBackendKind,
     StageExecutionBackendRunner
   >;
+  /**
+   * Crabrunner review job-group dispatcher (SYMPH-855). Injected so the gated
+   * review branch is a thin selector and is deterministically testable with a
+   * fake. The branch only fires when ALL of: the per-workflow
+   * `reviewExecution.crabrunnerJobGroup` gate is enabled, a "crabrunner" backend
+   * is registered, the stage is "review", AND this dispatcher is present. Absent
+   * (the default) => the live review path is byte-for-byte unchanged.
+   */
+  reviewStageDispatcher?: CrabrunnerReviewStageDispatcher;
   deliverWorkerStopSignal?: DeliverWorkerStopSignal;
   /**
    * Injectable deploy-drift capture (SYMPH-407). Default runs git rev-parse
@@ -468,6 +483,12 @@ export interface RuntimeServiceOptions {
     StageExecutionBackendKind,
     StageExecutionBackendRunner
   >;
+  /**
+   * Crabrunner review job-group dispatcher (SYMPH-855), forwarded to the
+   * default-constructed host. Ignored when a pre-built `runtimeHost` is
+   * supplied. Absent => the live review path is unchanged.
+   */
+  reviewStageDispatcher?: CrabrunnerReviewStageDispatcher;
 }
 
 export interface RuntimeServiceHandle {
@@ -628,15 +649,28 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
   private agentRunner: AgentRunnerLike;
 
+  // The MERGED, live backend map (default current-runner + any custom entries),
+  // resolved at construction and on config reload — this is what dispatch reads.
   private stageExecutionBackends: ReadonlyMap<
     StageExecutionBackendKind,
     StageExecutionBackendRunner
   >;
 
+  // The RAW custom backends from options, retained so config reloads can re-merge
+  // them onto a fresh current-runner default. Distinct from the merged map above.
   private readonly customStageExecutionBackends: ReadonlyMap<
     StageExecutionBackendKind,
     StageExecutionBackendRunner
   > | null;
+
+  private readonly reviewStageDispatcher: CrabrunnerReviewStageDispatcher | null;
+
+  /**
+   * One-shot latch so the "gate enabled but no review dispatcher wired" warning
+   * (SYMPH-855 council P2-2) is logged once per host lifetime, not on every
+   * review dispatch.
+   */
+  private reviewGateMismatchWarned = false;
 
   private readonly now: () => Date;
 
@@ -757,6 +791,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     this.continuousFeedbackCommand =
       options.runContinuousFeedbackCommand ?? runContinuousFeedbackCommand;
     this.customStageExecutionBackends = options.stageExecutionBackends ?? null;
+    this.reviewStageDispatcher = options.reviewStageDispatcher ?? null;
     this.readWorkspaceChangedFiles =
       options.readWorkspaceChangedFiles ?? readGitChangedFiles;
     this.readWorkspaceBaseRevision =
@@ -4623,33 +4658,53 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           effectiveHardStops.maxDollarBudgetUsd * Math.max(1, budgetMultiplier),
       }),
     };
+    // SYMPH-855: a review stage runs its reviewer (+ optional browser-QA) lanes
+    // as a crabrunner job group when the per-workflow gate is on AND a crabrunner
+    // backend is registered AND a dispatcher is wired (default-closed, so the
+    // live review path is unchanged otherwise). The dispatcher produces the SAME
+    // review-result.json + [REVIEW_GATE_RESULT_PATH:] marker the legacy path
+    // emits, surfaced here as an AgentRunResult whose final message carries the
+    // marker — so the orchestrator's unchanged finalization extracts/validates
+    // it and rework/merge-readiness stay journal-derived.
+    //
     // SYMPH-852: a stage that declares execution.subStages runs its sub-stages
     // in sequence through the StageExecutionBackend seam and folds them into ONE
     // aggregate result; otherwise dispatch the single execution unchanged.
-    // Either branch resolves to one AgentRunResult fed into the SAME
-    // finalization below, so the orchestrator still performs exactly one stage
-    // transition (rework / merge-readiness stay journal-derived). The dispatch
-    // module returns data only — it never advances stage state.
+    // Every branch resolves to one AgentRunResult fed into the SAME finalization
+    // below, so the orchestrator still performs exactly one stage transition.
+    const crabrunnerReviewBackend =
+      this.resolveCrabrunnerReviewBackend(stageName);
     const resultPromise: Promise<AgentRunResult> =
-      stage?.execution?.subStages && stage.execution.subStages.length > 0
-        ? this.executeDecomposedStageDispatch({
+      crabrunnerReviewBackend !== null
+        ? this.executeCrabrunnerReviewStageDispatch({
             issue,
             attempt,
-            stage,
             stageName,
-            subStages: stage.execution.subStages,
-            effectiveHardStops,
             signal: controller.signal,
             baseRef:
               executionJob.identity.baseRef ?? resolveStageExecutionBaseRef(),
             artifactRoot: executionJob.identity.artifactRoot,
+            backend: crabrunnerReviewBackend,
           })
-        : stageExecutionBackend
-            .execute({
-              job: executionJob,
-              runnerInput,
+        : stage?.execution?.subStages && stage.execution.subStages.length > 0
+          ? this.executeDecomposedStageDispatch({
+              issue,
+              attempt,
+              stage,
+              stageName,
+              subStages: stage.execution.subStages,
+              effectiveHardStops,
+              signal: controller.signal,
+              baseRef:
+                executionJob.identity.baseRef ?? resolveStageExecutionBaseRef(),
+              artifactRoot: executionJob.identity.artifactRoot,
             })
-            .then(({ result }) => result);
+          : stageExecutionBackend
+              .execute({
+                job: executionJob,
+                runnerInput,
+              })
+              .then(({ result }) => result);
     const completion = resultPromise
       .then(async (result) => {
         execution.lastResult = result;
@@ -4737,6 +4792,145 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         this.orchestrator.recordDelegatedStageAttempt(draft),
       now: this.now,
     });
+  }
+
+  /**
+   * SYMPH-855 — resolve the crabrunner backend for a review stage IFF the gate
+   * fires, else null. The gate is default-closed and DOUBLY inert: it requires
+   * (1) the per-workflow `reviewExecution.crabrunnerJobGroup` flag on,
+   * (2) the stage to be "review", (3) an injected review dispatcher, AND (4) a
+   * registered "crabrunner" StageExecutionBackend. Absent any of these, the live
+   * review path is byte-for-byte unchanged. Returning the resolved backend (not
+   * a boolean) lets the dispatch adapter route every lane through the one seam.
+   */
+  private resolveCrabrunnerReviewBackend(
+    stageName: string | null,
+  ): StageExecutionBackendRunner | null {
+    if (stageName !== "review") {
+      return null;
+    }
+    if (this.config.reviewExecution?.crabrunnerJobGroup.enabled !== true) {
+      return null;
+    }
+    const backend = this.stageExecutionBackends.get("crabrunner");
+    const hasCrabrunnerBackend =
+      backend !== undefined && backend.backend === "crabrunner";
+
+    if (this.reviewStageDispatcher === null) {
+      // SYMPH-855 council P2-2: an operator who enabled the gate AND registered
+      // the crabrunner backend but has no dispatcher wired (the production
+      // dispatcher is SYMPH-862) would otherwise SILENTLY get the legacy path.
+      // Make the inert fallback observable — once per host lifetime — so the
+      // mismatch is diagnosable instead of looking like the gate "did nothing".
+      if (hasCrabrunnerBackend && !this.reviewGateMismatchWarned) {
+        this.reviewGateMismatchWarned = true;
+        void this.logger?.warn(
+          "crabrunner_review_dispatcher_unwired",
+          "crabrunner review gate enabled but no review dispatcher wired (SYMPH-862); falling back to legacy review path",
+          { outcome: "degraded", stage: stageName },
+        );
+      }
+      return null;
+    }
+    if (!hasCrabrunnerBackend) {
+      return null;
+    }
+    return backend ?? null;
+  }
+
+  /**
+   * SYMPH-855 — run the review stage as a crabrunner job group via the injected
+   * dispatcher and surface its aggregate result as an AgentRunResult whose final
+   * message carries the `[REVIEW_GATE_RESULT_PATH: <path>]` marker. The legacy
+   * review path emits this marker from the workspace agent's last message; the
+   * orchestrator's UNCHANGED finalization extracts it, validates the written
+   * review-result.json (issue/verdict/pr/review_metadata + path-equality
+   * anti-spoof), and reduces it to the canonical review_gate_result +
+   * merge_candidate rows. So rework/merge-readiness stay journal-derived and the
+   * orchestrator still performs exactly one stage transition. A dispatcher
+   * rejection propagates and finalizes the worker abnormally (fail closed).
+   */
+  private async executeCrabrunnerReviewStageDispatch(input: {
+    issue: Issue;
+    attempt: number | null;
+    stageName: string | null;
+    signal: AbortSignal;
+    baseRef: string;
+    artifactRoot: string;
+    backend: StageExecutionBackendRunner;
+  }): Promise<AgentRunResult> {
+    if (this.reviewStageDispatcher === null) {
+      // Unreachable: resolveCrabrunnerReviewBackend already guarded this. Kept
+      // as a typed fail-closed guard rather than a non-null assertion.
+      throw new Error(
+        "crabrunner review dispatch selected without a review dispatcher",
+      );
+    }
+    const context: CrabrunnerReviewStageDispatchContext = {
+      issueId: input.issue.id,
+      issueIdentifier: input.issue.identifier,
+      stageName: input.stageName,
+      attempt: input.attempt,
+      artifactRoot: input.artifactRoot,
+      baseRef: input.baseRef,
+      signal: input.signal,
+      backend:
+        input.backend as StageExecutionBackendRunner<CrabrunnerStageExecutionEvidence>,
+    };
+    const dispatched = await this.reviewStageDispatcher(context);
+    return this.buildReviewMarkerRunResult(
+      input.issue,
+      input.attempt,
+      dispatched.markerMessage,
+    );
+  }
+
+  /**
+   * Wrap a crabrunner review dispatch into the AgentRunResult shape the worker
+   * finalization expects, carrying the review-gate marker as the final agent
+   * message (lastTurn.message — the same field finalizeWorkerExecution reads to
+   * derive the agentMessage the review completion path consumes).
+   */
+  private buildReviewMarkerRunResult(
+    issue: Issue,
+    attempt: number | null,
+    markerMessage: string,
+  ): AgentRunResult {
+    const startedAt = this.now().toISOString();
+    const workspaceInfo = this.workspaceManager.resolveForIssue(issue.id);
+    return {
+      issue,
+      workspace: {
+        path: workspaceInfo.workspacePath,
+        workspaceKey: workspaceInfo.workspaceKey,
+        createdNow: false,
+      },
+      runAttempt: {
+        issueId: issue.id,
+        issueIdentifier: issue.identifier,
+        // SYMPH-855 council P2-1: preserve the real stage attempt so a rework
+        // re-review is journaled/correlated as its own attempt.
+        attempt,
+        workspacePath: workspaceInfo.workspacePath,
+        startedAt,
+        status: "succeeded",
+      },
+      liveSession: {
+        ...createEmptyLiveSession(),
+        lastCodexMessage: markerMessage,
+      },
+      turnsCompleted: 1,
+      lastTurn: {
+        status: "completed",
+        threadId: "",
+        turnId: "",
+        sessionId: "",
+        usage: null,
+        rateLimits: null,
+        message: markerMessage,
+      },
+      rateLimits: null,
+    };
   }
 
   private createStageExecutionJobSpec(input: {
@@ -5802,6 +5996,9 @@ export async function startRuntimeService(
       ...(options.stageExecutionBackends === undefined
         ? {}
         : { stageExecutionBackends: options.stageExecutionBackends }),
+      ...(options.reviewStageDispatcher === undefined
+        ? {}
+        : { reviewStageDispatcher: options.reviewStageDispatcher }),
     });
   const usesManagedTracker = options.tracker === undefined;
   const usesManagedWorkspaceManager = options.workspaceManager === undefined;

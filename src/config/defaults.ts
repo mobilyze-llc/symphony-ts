@@ -232,6 +232,11 @@ export const SPEC_DEFAULTS = Object.freeze({
   specFidelity: {
     enabled: false,
   },
+  reviewExecution: {
+    crabrunnerJobGroup: {
+      enabled: false,
+    },
+  },
   admissionCard: {
     enabled: false,
   },

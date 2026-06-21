@@ -65,6 +65,16 @@ import type {
   TrackFindingFilingResult,
 } from "../../src/orchestrator/track-finding-filing.js";
 import type {
+  CrabrunnerReviewLaneSpec,
+  ReviewJobGroupLaneEvidence,
+} from "../../src/review/crabrunner-review-job-group.js";
+import type {
+  CrabrunnerReviewStageDispatchContext,
+  CrabrunnerReviewStageResult,
+} from "../../src/review/crabrunner-review-stage.js";
+import { runCrabrunnerReviewStage } from "../../src/review/crabrunner-review-stage.js";
+import type { HeadlessCouncilGateResult } from "../../src/review/headless-council-gate.js";
+import type {
   ProcessIdentitySnapshot,
   ProcessTreeTerminationResult,
 } from "../../src/shared/process-tree.js";
@@ -73,6 +83,7 @@ import type {
   StageExecutionBackendResult,
   StageExecutionBackendRunner,
 } from "../../src/stage-execution/backend.js";
+import type { CrabrunnerStageExecutionEvidence } from "../../src/stage-execution/crabrunner-backend.js";
 import { TrackerError } from "../../src/tracker/errors.js";
 import { LinearTrackerClient } from "../../src/tracker/linear-client.js";
 import type {
@@ -8789,6 +8800,320 @@ describe("stage execution backend boundary", () => {
       "investigate/sub-b",
     ]);
   });
+
+  it("routes a review stage through the crabrunner review dispatcher when the gate is on (SYMPH-855)", async () => {
+    const crabrunnerBackend = new ImmediateStageExecutionBackend("crabrunner");
+    const dispatchCalls: CrabrunnerReviewStageDispatchContext[] = [];
+    const fakeRunner = new FakeAgentRunner();
+    const host = new OrchestratorRuntimeHost({
+      config: createReviewGatedConfig({ gateEnabled: true }),
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "review-issue",
+            identifier: "SYMPH-855",
+            branchName: "claude/SYMPH-855-review",
+          }),
+        ],
+        stateSnapshots: [
+          { id: "review-issue", identifier: "SYMPH-855", state: "In Review" },
+        ],
+      }),
+      agentRunner: fakeRunner,
+      stageExecutionBackends: new Map([["crabrunner", crabrunnerBackend]]),
+      reviewStageDispatcher: async (context) => {
+        dispatchCalls.push(context);
+        return fakeReviewStageResult(context);
+      },
+      now: () => new Date("2026-06-21T00:00:05.000Z"),
+    });
+
+    const tick = await host.pollOnce();
+    await host.waitForIdle();
+
+    expect(tick.dispatchedIssueIds).toEqual(["review-issue"]);
+    // The gated branch fired: the review dispatcher ran exactly once with this
+    // issue's identity and the resolved crabrunner backend.
+    expect(dispatchCalls).toHaveLength(1);
+    expect(dispatchCalls[0]?.issueId).toBe("review-issue");
+    expect(dispatchCalls[0]?.stageName).toBe("review");
+    expect(dispatchCalls[0]?.backend).toBe(crabrunnerBackend);
+    // The legacy single-execution path did NOT run review through the agent
+    // runner or the backend's execute() (the dispatcher owns the review).
+    expect(fakeRunner.runInputs).toHaveLength(0);
+    expect(crabrunnerBackend.inputs).toHaveLength(0);
+  });
+
+  it("leaves the review path unchanged when the gate is off (SYMPH-855 regression)", async () => {
+    const crabrunnerBackend = new ImmediateStageExecutionBackend("crabrunner");
+    let dispatcherCalled = false;
+    const fakeRunner = new FakeAgentRunner();
+    const host = new OrchestratorRuntimeHost({
+      config: createReviewGatedConfig({ gateEnabled: false }),
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "review-issue",
+            identifier: "SYMPH-855",
+            branchName: "claude/SYMPH-855-review",
+          }),
+        ],
+        stateSnapshots: [
+          { id: "review-issue", identifier: "SYMPH-855", state: "In Review" },
+        ],
+      }),
+      agentRunner: fakeRunner,
+      // Even with a crabrunner backend AND a dispatcher present, the gate being
+      // OFF must keep the legacy path: the dispatcher is never consulted.
+      stageExecutionBackends: new Map([["crabrunner", crabrunnerBackend]]),
+      reviewStageDispatcher: async (context) => {
+        dispatcherCalled = true;
+        return fakeReviewStageResult(context);
+      },
+      now: () => new Date("2026-06-21T00:00:05.000Z"),
+    });
+
+    const tick = await host.pollOnce();
+
+    expect(tick.dispatchedIssueIds).toEqual(["review-issue"]);
+    // Default-closed: the crabrunner review dispatcher is never invoked, and the
+    // review stage runs through the unchanged agent-runner path.
+    expect(dispatcherCalled).toBe(false);
+    expect(fakeRunner.runInputs).toHaveLength(1);
+    expect(fakeRunner.runInputs[0]?.stageName).toBe("review");
+
+    fakeRunner.resolve("review-issue", createNormalResult());
+    await host.waitForIdle();
+  });
+
+  it("leaves the review path unchanged when no crabrunner backend is registered (SYMPH-855)", async () => {
+    let dispatcherCalled = false;
+    const fakeRunner = new FakeAgentRunner();
+    const host = new OrchestratorRuntimeHost({
+      config: createReviewGatedConfig({ gateEnabled: true }),
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "review-issue",
+            identifier: "SYMPH-855",
+            branchName: "claude/SYMPH-855-review",
+          }),
+        ],
+        stateSnapshots: [
+          { id: "review-issue", identifier: "SYMPH-855", state: "In Review" },
+        ],
+      }),
+      agentRunner: fakeRunner,
+      // Gate ON + dispatcher present, but NO crabrunner backend registered =>
+      // doubly-inert: the branch must not fire (it has no backend to route to).
+      reviewStageDispatcher: async (context) => {
+        dispatcherCalled = true;
+        return fakeReviewStageResult(context);
+      },
+      now: () => new Date("2026-06-21T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+
+    expect(dispatcherCalled).toBe(false);
+    expect(fakeRunner.runInputs).toHaveLength(1);
+
+    fakeRunner.resolve("review-issue", createNormalResult());
+    await host.waitForIdle();
+  });
+
+  it("preserves the stage attempt through the crabrunner review dispatch (SYMPH-855 P2-1)", async () => {
+    // A rework re-review must be journaled/correlated as its own attempt, not
+    // collapsed into the initial one. Exercise the dispatch adapter directly so
+    // the attempt thread is asserted end-to-end (context -> fabricated result).
+    const crabrunnerBackend = new ImmediateStageExecutionBackend("crabrunner");
+    let seenAttempt: number | null | undefined;
+    const host = new OrchestratorRuntimeHost({
+      config: createReviewGatedConfig({ gateEnabled: true }),
+      tracker: createTracker({ candidates: [] }),
+      agentRunner: new FakeAgentRunner(),
+      stageExecutionBackends: new Map([["crabrunner", crabrunnerBackend]]),
+      reviewStageDispatcher: async (context) => {
+        seenAttempt = context.attempt;
+        return fakeReviewStageResult(context);
+      },
+      now: () => new Date("2026-06-21T00:00:05.000Z"),
+    });
+
+    const result = await (
+      host as unknown as {
+        executeCrabrunnerReviewStageDispatch(input: {
+          issue: Issue;
+          attempt: number | null;
+          stageName: string | null;
+          signal: AbortSignal;
+          baseRef: string;
+          artifactRoot: string;
+          backend: unknown;
+        }): Promise<AgentRunResult>;
+      }
+    ).executeCrabrunnerReviewStageDispatch({
+      issue: createIssue({ id: "review-issue", identifier: "SYMPH-855" }),
+      attempt: 2,
+      stageName: "review",
+      signal: new AbortController().signal,
+      baseRef: "main",
+      artifactRoot: "/tmp/artifacts/review-issue",
+      backend: crabrunnerBackend,
+    });
+
+    // The real attempt reaches both the dispatcher context and the fabricated
+    // AgentRunResult.runAttempt (which finalization journals as the attempt).
+    expect(seenAttempt).toBe(2);
+    expect(result.runAttempt.attempt).toBe(2);
+  });
+
+  it("warns once when the review gate is enabled but no dispatcher is wired (SYMPH-855 P2-2)", async () => {
+    const logEntries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          logEntries.push(entry);
+        },
+      },
+    ]);
+    const crabrunnerBackend = new ImmediateStageExecutionBackend("crabrunner");
+    const host = new OrchestratorRuntimeHost({
+      config: createReviewGatedConfig({ gateEnabled: true }),
+      tracker: createTracker({ candidates: [] }),
+      agentRunner: new FakeAgentRunner(),
+      logger,
+      // Gate ON + crabrunner backend registered, but NO reviewStageDispatcher:
+      // the exact mismatch that must be made observable instead of silent.
+      stageExecutionBackends: new Map([["crabrunner", crabrunnerBackend]]),
+      now: () => new Date("2026-06-21T00:00:05.000Z"),
+    });
+
+    const resolve = (
+      host as unknown as {
+        resolveCrabrunnerReviewBackend(stageName: string | null): unknown;
+      }
+    ).resolveCrabrunnerReviewBackend.bind(host);
+
+    // First review resolution => inert fallback + a single warning.
+    expect(resolve("review")).toBeNull();
+    // Second resolution must NOT re-warn (one-shot latch).
+    expect(resolve("review")).toBeNull();
+
+    const warnings = logEntries.filter(
+      (entry) => entry.event === "crabrunner_review_dispatcher_unwired",
+    );
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.level).toBe("warn");
+  });
+
+  it("does not warn when the review gate is off or a dispatcher is wired (SYMPH-855 P2-2)", async () => {
+    const logEntries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          logEntries.push(entry);
+        },
+      },
+    ]);
+    const crabrunnerBackend = new ImmediateStageExecutionBackend("crabrunner");
+
+    // Gate OFF + crabrunner backend present, no dispatcher: no mismatch warning.
+    const gateOffHost = new OrchestratorRuntimeHost({
+      config: createReviewGatedConfig({ gateEnabled: false }),
+      tracker: createTracker({ candidates: [] }),
+      agentRunner: new FakeAgentRunner(),
+      logger,
+      stageExecutionBackends: new Map([["crabrunner", crabrunnerBackend]]),
+      now: () => new Date("2026-06-21T00:00:05.000Z"),
+    });
+    (
+      gateOffHost as unknown as {
+        resolveCrabrunnerReviewBackend(stageName: string | null): unknown;
+      }
+    ).resolveCrabrunnerReviewBackend("review");
+
+    // Gate ON + dispatcher present: the branch fires, so no mismatch warning.
+    const wiredHost = new OrchestratorRuntimeHost({
+      config: createReviewGatedConfig({ gateEnabled: true }),
+      tracker: createTracker({ candidates: [] }),
+      agentRunner: new FakeAgentRunner(),
+      logger,
+      stageExecutionBackends: new Map([["crabrunner", crabrunnerBackend]]),
+      reviewStageDispatcher: async (context) => fakeReviewStageResult(context),
+      now: () => new Date("2026-06-21T00:00:05.000Z"),
+    });
+    (
+      wiredHost as unknown as {
+        resolveCrabrunnerReviewBackend(stageName: string | null): unknown;
+      }
+    ).resolveCrabrunnerReviewBackend("review");
+
+    expect(
+      logEntries.filter(
+        (entry) => entry.event === "crabrunner_review_dispatcher_unwired",
+      ),
+    ).toEqual([]);
+  });
+
+  it("finalization extracts and validates a real review-result.json the dispatcher writes (SYMPH-855 integration)", async () => {
+    // The fake dispatcher WRITES a real review-result.json at the marker path
+    // (the host-supplied artifactRoot under the workspace), proving the
+    // unchanged finalization can extract the marker, validate the artifact
+    // (path-equality anti-spoof intact), and reduce it to the canonical
+    // review_gate_result + merge_candidate rows.
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph855-ws-"));
+    try {
+      const crabrunnerBackend = new ImmediateStageExecutionBackend(
+        "crabrunner",
+      );
+      const config = createReviewGatedConfig({ gateEnabled: true });
+      config.workspace.root = workspaceRoot;
+      const host = new OrchestratorRuntimeHost({
+        config,
+        tracker: createTracker({
+          candidates: [
+            createIssue({
+              id: "review-issue",
+              identifier: "SYMPH-855",
+              branchName: "claude/SYMPH-855-review",
+            }),
+          ],
+          stateSnapshots: [
+            { id: "review-issue", identifier: "SYMPH-855", state: "In Review" },
+          ],
+        }),
+        agentRunner: new FakeAgentRunner(),
+        stageExecutionBackends: new Map([["crabrunner", crabrunnerBackend]]),
+        reviewStageDispatcher: (context) => writeRealReviewResult(context),
+        now: () => new Date("2026-06-21T00:00:05.000Z"),
+      });
+
+      await host.pollOnce();
+      await host.waitForIdle();
+
+      const journal = readDispatcherJournal(workspaceRoot);
+      // Extraction + validation + journal reduction all succeeded: the canonical
+      // review rows exist for this round (would be absent if the marker path
+      // mismatched the artifact's self-declared resultJson — anti-spoof).
+      expect(
+        journal.some(
+          (entry) =>
+            entry.kind === "review_gate_result" &&
+            entry.issueId === "review-issue",
+        ),
+      ).toBe(true);
+      expect(
+        journal.some(
+          (entry) =>
+            entry.kind === "merge_candidate" &&
+            entry.issueId === "review-issue",
+        ),
+      ).toBe(true);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 function createDecomposedSubStageExecution(
@@ -8857,6 +9182,291 @@ function createDecomposedStagedConfig(): ResolvedWorkflowConfig {
           },
         },
       },
+    },
+  });
+}
+
+/**
+ * SYMPH-855 — a config whose initial stage is "review", with the crabrunner
+ * review job-group gate set to `gateEnabled`. Used to drive the gated-branch
+ * selection deterministically.
+ */
+function createReviewGatedConfig(input: {
+  gateEnabled: boolean;
+}): ResolvedWorkflowConfig {
+  // Production (WORKFLOW.md) models review as a `type: agent` worker stage that
+  // runs the council gate and emits the [REVIEW_GATE_RESULT_PATH:] marker, with
+  // on_complete -> merge. Mirror that exactly so the dispatch path matches live.
+  const baseStage = createStagedConfig().stages!.stages.investigate!;
+  return createStagedConfig({
+    reviewExecution: {
+      crabrunnerJobGroup: { enabled: input.gateEnabled },
+    },
+    stages: {
+      initialStage: "review",
+      fastTrack: null,
+      stages: {
+        review: {
+          ...baseStage,
+          type: "agent",
+          runner: "codex",
+          maxRework: 3,
+          transitions: {
+            onComplete: "merge",
+            onApprove: null,
+            onRework: "implement",
+          },
+        },
+        implement: {
+          ...baseStage,
+          type: "agent",
+          transitions: {
+            onComplete: "review",
+            onApprove: null,
+            onRework: null,
+          },
+        },
+        merge: {
+          ...baseStage,
+          type: "agent",
+          transitions: { onComplete: "done", onApprove: null, onRework: null },
+        },
+        done: {
+          ...baseStage,
+          type: "terminal",
+          transitions: { onComplete: null, onApprove: null, onRework: null },
+        },
+      },
+    },
+  });
+}
+
+/**
+ * Minimal CrabrunnerReviewStageResult for the dispatcher fake — just enough for
+ * the runtime host to wrap the marker into an AgentRunResult. No disk I/O.
+ */
+function fakeReviewStageResult(
+  context: CrabrunnerReviewStageDispatchContext,
+): CrabrunnerReviewStageResult {
+  const reviewResultPath = `${context.artifactRoot}/review-result.json`;
+  const result = {
+    schemaVersion: 1,
+    issueId: context.issueIdentifier,
+    verdict: "pass",
+    startedAt: "2026-06-21T00:00:00.000Z",
+    completedAt: "2026-06-21T00:00:01.000Z",
+    pr: { repo: null, number: null, baseRef: null, headRef: null },
+    review_metadata: {
+      reviewed_head_sha: "head",
+      previous_reviewed_head_sha: null,
+      base_sha: "base",
+      round: 1,
+      mode: "full",
+      verdict: "pass",
+    },
+    review_routing: null,
+    review_bundle: null,
+    targeted_convergence: null,
+    lanes: [],
+    degradedConditions: [],
+    artifactPaths: {
+      artifactDir: context.artifactRoot,
+      diff: null,
+      reviewBundle: null,
+      structuredArtifacts: [],
+      resultJson: reviewResultPath,
+      councilReport: `${context.artifactRoot}/council-report.md`,
+    },
+    summary: "fake",
+  } as unknown as HeadlessCouncilGateResult;
+  return {
+    result,
+    reviewResultPath,
+    markerMessage: `[REVIEW_GATE_RESULT_PATH: ${reviewResultPath}]`,
+    jobGroup: {
+      verdict: "pass",
+      runGroupId: "rg-855",
+      lanes: [],
+      degradedConditions: [],
+      provenance: { runGroupId: "rg-855", currentHeadSha: "head", lanes: [] },
+      qa: null,
+    },
+  };
+}
+
+/**
+ * SYMPH-855 integration helper: runs the REAL `runCrabrunnerReviewStage` with a
+ * scripted passing reviewer lane and ACTUAL fs writes, so the review-result.json
+ * lands on disk at the marker path the orchestrator finalization will read.
+ */
+async function writeRealReviewResult(
+  context: CrabrunnerReviewStageDispatchContext,
+): Promise<CrabrunnerReviewStageResult> {
+  const head = "head-integration-855";
+  const laneId = "codex-high-lead";
+  const reviewerArtifact: Record<string, unknown> = {
+    schemaVersion: 1,
+    kind: "symphony-headless-council-reviewer-artifact",
+    lane: {
+      laneId,
+      agent: "codex",
+      role: "reviewer",
+      model: "codex-model",
+      modelFamily: "codex",
+      reasoningEffort: null,
+      independentReviewer: true,
+      mergeAuthoritative: true,
+    },
+    routing: { mode: "full", routingMode: null, round: 1 },
+    reviewBundle: null,
+    verdict: "pass",
+    confidence: 0.9,
+    parseStatus: "synthesized_from_markdown",
+    rawArtifactPath: null,
+    malformedReason: null,
+    headSha: head,
+    sections: {
+      p1: "",
+      p2: "",
+      track: "",
+      dismissedOrTheoretical: "",
+      triage: "",
+    },
+    findings: [],
+    familySyntheses: [],
+  };
+  const lane: CrabrunnerReviewLaneSpec = {
+    laneId,
+    kind: "reviewer",
+    agent: "codex",
+    role: "reviewer",
+    model: "codex-model",
+    modelFamily: "codex",
+    reasoningEffort: null,
+    independentReviewer: true,
+    mergeAuthoritative: true,
+  };
+  const backend =
+    context.backend as StageExecutionBackendRunner<CrabrunnerStageExecutionEvidence>;
+  void backend;
+  const stageBackend: StageExecutionBackendRunner<CrabrunnerStageExecutionEvidence> =
+    {
+      backend: "crabrunner",
+      async execute(input) {
+        return {
+          job: input.job,
+          evidence: {
+            admission: { status: "accepted", jobId: `job-${laneId}` },
+            terminal: { state: "succeeded", artifactRefs: ["/a.json"] },
+            artifactRefs: ["/a.json"],
+            usage: null,
+          },
+          result: {
+            issue: input.runnerInput.issue,
+            workspace: {
+              path: "/artifacts",
+              workspaceKey: input.runnerInput.issue.id,
+              createdNow: false,
+            },
+            runAttempt: {
+              issueId: input.runnerInput.issue.id,
+              issueIdentifier: input.runnerInput.issue.identifier,
+              attempt: input.runnerInput.attempt,
+              workspacePath: "/artifacts",
+              startedAt: "2026-06-21T00:00:00.000Z",
+              status: "succeeded",
+            },
+            liveSession: {} as never,
+            turnsCompleted: 0,
+            lastTurn: null,
+            rateLimits: null,
+          },
+        };
+      },
+    };
+
+  return runCrabrunnerReviewStage({
+    issueId: context.issueId,
+    issueIdentifier: context.issueIdentifier,
+    runGroupId: "rg-integration-855",
+    currentHeadSha: head,
+    artifactDir: context.artifactRoot,
+    pr: {
+      repo: "mobilyze-llc/symphony-ts",
+      number: 632,
+      baseRef: "main",
+      headRef: "claude/SYMPH-855-review",
+    },
+    baseSha: "base-integration-855",
+    round: 1,
+    mode: "full",
+    lanes: [lane],
+    backend: stageBackend,
+    buildJobSpec: (laneSpec) => ({
+      backend: "crabrunner",
+      role: null,
+      phase: null,
+      identity: {
+        issueId: context.issueId,
+        issueIdentifier: context.issueIdentifier,
+        stageName: laneSpec.laneId,
+        stageAttempt: 0,
+        runGroupId: "rg-integration-855",
+        profileId: null,
+        baseRef: "main",
+        targetHeadRef: head,
+        artifactRoot: context.artifactRoot,
+        idempotencyKey: `idem-${laneSpec.laneId}`,
+      },
+      runner: {
+        runnerKind: "crabrunner",
+        model: laneSpec.model,
+        provider: null,
+        reasoningEffort: laneSpec.reasoningEffort,
+      },
+      enforcement: {
+        required: true,
+        budget: {
+          maxTokens: 1000,
+          maxUsd: 1,
+          estimatedCostPer1kTokensUsd: 0.05,
+          cachedTokenCostRatio: 0.1,
+          liveBudgetGraceRatio: 0.2,
+        },
+        timing: {
+          timeoutMs: 1000,
+          stallTimeoutMs: 1000,
+          noProgressTurns: 1,
+          maxIterations: 1,
+        },
+        telemetry: {
+          heartbeatIntervalMs: 1,
+          progressIntervalMs: 1,
+          usageIntervalMs: 1,
+        },
+        cancellation: {
+          jobIdRequired: true,
+          cooperativeAbort: true,
+          processGroupKill: true,
+          killGraceMs: 1,
+        },
+      },
+    }),
+    buildRunnerInput: () => ({
+      issue: createIssue({
+        id: context.issueId,
+        identifier: context.issueIdentifier,
+      }),
+      attempt: context.attempt,
+      stageName: "review",
+    }),
+    collectArtifact: (laneEvidence: ReviewJobGroupLaneEvidence) =>
+      laneEvidence.laneId === laneId ? reviewerArtifact : null,
+    mkdir: async (path: string) => {
+      mkdirSync(path, { recursive: true });
+    },
+    writeFile: async (path: string, contents: string) => {
+      writeFileSync(path, contents);
     },
   });
 }

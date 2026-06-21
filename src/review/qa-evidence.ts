@@ -15,6 +15,8 @@
  * verdict aggregation (those live in review-verdict / the orchestrator).
  */
 
+import { readString, recordOrNull } from "./record-utils.js";
+
 export type BrowserQaConsoleLevel = "log" | "info" | "warn" | "error";
 
 export interface BrowserQaAssertion {
@@ -334,14 +336,4 @@ function parseArrayField<T>(
     }
   }
   return parsed;
-}
-
-function readString(value: unknown): string {
-  return typeof value === "string" ? value : "";
-}
-
-function recordOrNull(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
 }
