@@ -1142,6 +1142,358 @@ describe("runCrabrunnerReviewJobGroup", () => {
     expect(result.verdict).toBe("error");
     expect(result.degradedConditions).toContain("multiple_browser_qa_lanes");
   });
+
+  // P2-C: the FULL StructuredReviewerArtifact top-level contract must be present
+  // before an artifact is accepted. parseStatus/reviewBundle/rawArtifactPath/
+  // malformedReason/familySyntheses are part of that contract; omitting them on a
+  // verdict:"pass" artifact must still fail closed.
+  it("fails closed when a pass-verdict artifact omits parseStatus", async () => {
+    const artifact = reviewerArtifact({
+      laneId: "codex-high-lead",
+      agent: "codex",
+      modelFamily: "codex",
+      verdict: "pass",
+    });
+    artifact.parseStatus = undefined;
+    const backend = fakeBackend({
+      "codex-high-lead": {
+        terminal: { state: "succeeded", artifactRefs: ["/a.json"] },
+        collectedArtifact: artifact,
+      },
+    });
+
+    const result = await runCrabrunnerReviewJobGroup({
+      ...baseInput({
+        lanes: [
+          reviewerLane({
+            laneId: "codex-high-lead",
+            agent: "codex",
+            modelFamily: "codex",
+          }),
+        ],
+        backend,
+      }),
+      collectArtifact: async (lane: ReviewJobGroupLaneEvidence) =>
+        backendArtifactFor(backend, lane),
+    });
+
+    expect(result.verdict).toBe("error");
+    expect(result.lanes[0]?.degradedReason).toBe("malformed_artifact");
+    expect(result.degradedConditions).toContain(
+      "malformed_artifact:codex-high-lead",
+    );
+  });
+
+  it("fails closed when a pass-verdict artifact self-declares a malformed parse", async () => {
+    // parseStatus:"malformed" (or a non-null malformedReason) is a self-declared
+    // bad parse and must fail closed regardless of the verdict field.
+    const artifact = reviewerArtifact({
+      laneId: "codex-high-lead",
+      agent: "codex",
+      modelFamily: "codex",
+      verdict: "pass",
+    });
+    artifact.parseStatus = "malformed";
+    artifact.malformedReason = "reviewer emitted unparseable sections";
+    const backend = fakeBackend({
+      "codex-high-lead": {
+        terminal: { state: "succeeded", artifactRefs: ["/a.json"] },
+        collectedArtifact: artifact,
+      },
+    });
+
+    const result = await runCrabrunnerReviewJobGroup({
+      ...baseInput({
+        lanes: [
+          reviewerLane({
+            laneId: "codex-high-lead",
+            agent: "codex",
+            modelFamily: "codex",
+          }),
+        ],
+        backend,
+      }),
+      collectArtifact: async (lane: ReviewJobGroupLaneEvidence) =>
+        backendArtifactFor(backend, lane),
+    });
+
+    expect(result.verdict).toBe("error");
+    expect(result.degradedConditions).toContain(
+      "malformed_artifact:codex-high-lead",
+    );
+  });
+
+  it("fails closed when a pass-verdict artifact omits reviewBundle", async () => {
+    const artifact = reviewerArtifact({
+      laneId: "codex-high-lead",
+      agent: "codex",
+      modelFamily: "codex",
+      verdict: "pass",
+    });
+    artifact.reviewBundle = undefined;
+    const backend = fakeBackend({
+      "codex-high-lead": {
+        terminal: { state: "succeeded", artifactRefs: ["/a.json"] },
+        collectedArtifact: artifact,
+      },
+    });
+
+    const result = await runCrabrunnerReviewJobGroup({
+      ...baseInput({
+        lanes: [
+          reviewerLane({
+            laneId: "codex-high-lead",
+            agent: "codex",
+            modelFamily: "codex",
+          }),
+        ],
+        backend,
+      }),
+      collectArtifact: async (lane: ReviewJobGroupLaneEvidence) =>
+        backendArtifactFor(backend, lane),
+    });
+
+    expect(result.verdict).toBe("error");
+    expect(result.degradedConditions).toContain(
+      "malformed_artifact:codex-high-lead",
+    );
+  });
+
+  it("fails closed when a pass-verdict artifact's familySyntheses is not an array", async () => {
+    const artifact = reviewerArtifact({
+      laneId: "codex-high-lead",
+      agent: "codex",
+      modelFamily: "codex",
+      verdict: "pass",
+    });
+    artifact.familySyntheses = undefined;
+    const backend = fakeBackend({
+      "codex-high-lead": {
+        terminal: { state: "succeeded", artifactRefs: ["/a.json"] },
+        collectedArtifact: artifact,
+      },
+    });
+
+    const result = await runCrabrunnerReviewJobGroup({
+      ...baseInput({
+        lanes: [
+          reviewerLane({
+            laneId: "codex-high-lead",
+            agent: "codex",
+            modelFamily: "codex",
+          }),
+        ],
+        backend,
+      }),
+      collectArtifact: async (lane: ReviewJobGroupLaneEvidence) =>
+        backendArtifactFor(backend, lane),
+    });
+
+    expect(result.verdict).toBe("error");
+    expect(result.degradedConditions).toContain(
+      "malformed_artifact:codex-high-lead",
+    );
+  });
+
+  it("fails closed when a pass-verdict artifact omits the nullable reasoningEffort lane key", async () => {
+    // DeepSeek TR-1: the "all lane fields present" guarantee must include the
+    // nullable reasoningEffort key (present, null allowed).
+    const artifact = reviewerArtifact({
+      laneId: "codex-high-lead",
+      agent: "codex",
+      modelFamily: "codex",
+      verdict: "pass",
+    });
+    // Rebuild the lane WITHOUT the reasoningEffort key (truly absent).
+    const { reasoningEffort: _omitted, ...laneWithoutReasoningEffort } =
+      artifact.lane as Record<string, unknown>;
+    artifact.lane = laneWithoutReasoningEffort;
+    const backend = fakeBackend({
+      "codex-high-lead": {
+        terminal: { state: "succeeded", artifactRefs: ["/a.json"] },
+        collectedArtifact: artifact,
+      },
+    });
+
+    const result = await runCrabrunnerReviewJobGroup({
+      ...baseInput({
+        lanes: [
+          reviewerLane({
+            laneId: "codex-high-lead",
+            agent: "codex",
+            modelFamily: "codex",
+          }),
+        ],
+        backend,
+      }),
+      collectArtifact: async (lane: ReviewJobGroupLaneEvidence) =>
+        backendArtifactFor(backend, lane),
+    });
+
+    expect(result.verdict).toBe("error");
+    expect(result.degradedConditions).toContain(
+      "malformed_artifact:codex-high-lead",
+    );
+  });
+
+  it("accepts a fully-formed artifact (regression guard for the stricter validator)", async () => {
+    const backend = fakeBackend({
+      "codex-high-lead": {
+        terminal: { state: "succeeded", artifactRefs: ["/a.json"] },
+        collectedArtifact: reviewerArtifact({
+          laneId: "codex-high-lead",
+          agent: "codex",
+          modelFamily: "codex",
+          verdict: "pass",
+        }),
+      },
+    });
+
+    const result = await runCrabrunnerReviewJobGroup({
+      ...baseInput({
+        lanes: [
+          reviewerLane({
+            laneId: "codex-high-lead",
+            agent: "codex",
+            modelFamily: "codex",
+          }),
+        ],
+        backend,
+      }),
+      collectArtifact: async (lane: ReviewJobGroupLaneEvidence) =>
+        backendArtifactFor(backend, lane),
+    });
+
+    expect(result.verdict).toBe("pass");
+    expect(result.lanes[0]?.state).toBe("complete");
+  });
+
+  // P2-D: a lane's job spec must belong to THIS run group. A buildJobSpec that
+  // returns a mismatched runGroupId would dispatch a lane outside the intended
+  // group while provenance claims membership — fail closed before dispatch.
+  it("fails closed when a lane's job spec runGroupId does not match the group", async () => {
+    const backend = fakeBackend({
+      "codex-high-lead": {
+        terminal: { state: "succeeded", artifactRefs: ["/a.json"] },
+        collectedArtifact: reviewerArtifact({
+          laneId: "codex-high-lead",
+          agent: "codex",
+          modelFamily: "codex",
+          verdict: "pass",
+        }),
+      },
+    });
+
+    const base = baseInput({
+      lanes: [
+        reviewerLane({
+          laneId: "codex-high-lead",
+          agent: "codex",
+          modelFamily: "codex",
+        }),
+      ],
+      backend,
+    });
+
+    const result = await runCrabrunnerReviewJobGroup({
+      ...base,
+      // Override buildJobSpec to return a DIFFERENT runGroupId than the group.
+      buildJobSpec: (lane: CrabrunnerReviewLaneSpec): StageExecutionJobSpec => {
+        const job = base.buildJobSpec(lane);
+        return {
+          ...job,
+          identity: { ...job.identity, runGroupId: "rg-WRONG-group" },
+        };
+      },
+      collectArtifact: async (lane: ReviewJobGroupLaneEvidence) =>
+        backendArtifactFor(backend, lane),
+    });
+
+    expect(result.verdict).toBe("error");
+    expect(result.lanes[0]?.state).toBe("error");
+    expect(result.degradedConditions).toContain(
+      "run_group_mismatch:codex-high-lead",
+    );
+    // The lane must NOT have been dispatched (fail closed BEFORE execute).
+    expect(backend.execute).not.toHaveBeenCalled();
+  });
+
+  // TR-3 (DeepSeek): qaMissingPolicy:"degrade" passes through to the assessor so
+  // a missing QA artifact degrades (still gating) rather than hard-blocking.
+  it('passes qaMissingPolicy:"degrade" through to the QA assessor', async () => {
+    const backend = fakeBackend({
+      "codex-high-lead": {
+        terminal: { state: "succeeded", artifactRefs: ["/a.json"] },
+        collectedArtifact: reviewerArtifact({
+          laneId: "codex-high-lead",
+          agent: "codex",
+          modelFamily: "codex",
+          verdict: "pass",
+        }),
+      },
+      "browser-qa": {
+        terminal: { state: "succeeded", artifactRefs: ["/qa.json"] },
+        // No collected QA artifact -> missing QA evidence.
+        collectedArtifact: undefined,
+      },
+    });
+
+    const result = await runCrabrunnerReviewJobGroup({
+      ...baseInput({
+        lanes: [
+          reviewerLane({
+            laneId: "codex-high-lead",
+            agent: "codex",
+            modelFamily: "codex",
+          }),
+          qaLane(),
+        ],
+        backend,
+      }),
+      qaMissingPolicy: "degrade",
+      collectArtifact: async (lane: ReviewJobGroupLaneEvidence) =>
+        backendArtifactFor(backend, lane),
+    });
+
+    expect(result.qa?.assessment.disposition).toBe("degrade");
+    expect(result.qa?.assessment.blocking).toBe(true);
+    expect(result.qa?.assessment.reasons).toContain("qa_evidence_missing");
+    // A degraded QA still gates the group (not a silent PASS).
+    expect(result.verdict).toBe("error");
+  });
+
+  // TR-4 (DeepSeek): a terminal that is null/undefined despite an accepted
+  // admission with a job id must fail closed (no terminal evidence => unprovable).
+  it("fails closed when terminal evidence is null despite an accepted admission with a job id", async () => {
+    const backend = fakeBackend({
+      "codex-high-lead": {
+        admission: { status: "accepted", jobId: "job-codex-high-lead" },
+        terminal: null,
+        runStatus: "failed",
+      },
+    });
+
+    const result = await runCrabrunnerReviewJobGroup({
+      ...baseInput({
+        lanes: [
+          reviewerLane({
+            laneId: "codex-high-lead",
+            agent: "codex",
+            modelFamily: "codex",
+          }),
+        ],
+        backend,
+      }),
+      collectArtifact: async (lane: ReviewJobGroupLaneEvidence) =>
+        backendArtifactFor(backend, lane),
+    });
+
+    expect(result.verdict).toBe("error");
+    expect(result.lanes[0]?.state).toBe("error");
+    expect(result.degradedConditions).toContain(
+      "lane_unavailable:codex-high-lead",
+    );
+  });
 });
 
 /**

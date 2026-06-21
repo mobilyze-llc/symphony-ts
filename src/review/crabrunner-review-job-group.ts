@@ -203,6 +203,39 @@ export async function runCrabrunnerReviewJobGroup(
 
   for (const lane of input.lanes) {
     const job = input.buildJobSpec(lane);
+
+    // Group integrity: a lane's job spec MUST belong to this run group. A
+    // mismatched runGroupId would dispatch the lane outside the intended group
+    // while provenance claims membership — fail closed BEFORE dispatch (no
+    // submit), recording the condition per lane kind.
+    if (job.identity.runGroupId !== input.runGroupId) {
+      const condition = `run_group_mismatch:${lane.laneId}`;
+      if (lane.kind === "browser-qa") {
+        const assessment = assessBrowserQaEvidence(null, {
+          policy: input.qaMissingPolicy ?? "block",
+        });
+        qaResult = {
+          laneId: lane.laneId,
+          evidence: null,
+          assessment: {
+            ...assessment,
+            reasons: [...assessment.reasons, condition],
+          },
+        };
+        degradedConditions.push(...qaResult.assessment.reasons);
+        continue;
+      }
+      const mapping = errorReviewerMapping({
+        lane,
+        condition,
+        degradedReason: "malformed_artifact",
+        message: `lane job spec runGroupId ${job.identity.runGroupId} does not match group ${input.runGroupId}`,
+      });
+      reviewerMappings.push(mapping);
+      degradedConditions.push(...mapping.conditions);
+      continue;
+    }
+
     const backendResult = await input.backend.execute({
       job,
       runnerInput: input.buildRunnerInput(lane),
@@ -632,14 +665,72 @@ function parseReviewerArtifact(value: unknown): ParsedReviewerArtifact | null {
   if (!isWellFormedReviewerSections(record.sections)) {
     return null;
   }
-  // Findings must be a present array (entries may be empty, e.g. a clean PASS).
+  // Findings + familySyntheses must be present arrays (entries may be empty,
+  // e.g. a clean PASS).
   if (!Array.isArray(record.findings)) {
+    return null;
+  }
+  if (!Array.isArray(record.familySyntheses)) {
+    return null;
+  }
+  // parseStatus is the artifact's self-report of its own parse. The only
+  // well-formed value is "synthesized_from_markdown"; "malformed" (or any other
+  // value / absence) is a self-declared bad parse and fails closed regardless of
+  // the verdict field.
+  if (record.parseStatus !== "synthesized_from_markdown") {
+    return null;
+  }
+  // A non-null malformedReason is a self-declared malformed artifact even if
+  // parseStatus somehow says otherwise — belt and suspenders, fail closed.
+  if (record.malformedReason !== null) {
+    return null;
+  }
+  // The remaining nullable top-level fields must still be PRESENT and correctly
+  // typed (string | null): an omitted field is contract drift, not a valid null.
+  if (!isPresentNullableString(record, "rawArtifactPath")) {
+    return null;
+  }
+  // reviewBundle is `ReviewBundleReference | null`; require it present (null or a
+  // non-array object). Deep ReviewBundleReference field validation stays owned by
+  // the council gate.
+  if (!isPresentNullableObject(record, "reviewBundle")) {
     return null;
   }
   return {
     headSha,
     structuredArtifact: record as unknown as StructuredReviewerArtifact,
   };
+}
+
+/**
+ * True when `key` is an OWN property of `record` and its value is `string` or
+ * `null` (a present nullable string). An absent key is contract drift, not a
+ * valid null, so it returns false.
+ */
+function isPresentNullableString(
+  record: Record<string, unknown>,
+  key: string,
+): boolean {
+  if (!Object.hasOwn(record, key)) {
+    return false;
+  }
+  const value = record[key];
+  return value === null || typeof value === "string";
+}
+
+/**
+ * True when `key` is an OWN property of `record` and its value is `null` or a
+ * non-array object (a present nullable object).
+ */
+function isPresentNullableObject(
+  record: Record<string, unknown>,
+  key: string,
+): boolean {
+  if (!Object.hasOwn(record, key)) {
+    return false;
+  }
+  const value = record[key];
+  return value === null || recordOrNull(value) !== null;
 }
 
 function isWellFormedReviewerLane(value: unknown): boolean {
@@ -651,6 +742,8 @@ function isWellFormedReviewerLane(value: unknown): boolean {
     typeof lane.role === "string" &&
     typeof lane.model === "string" &&
     typeof lane.modelFamily === "string" &&
+    // reasoningEffort is `string | null` — present, nullable allowed (TR-1).
+    isPresentNullableString(lane, "reasoningEffort") &&
     typeof lane.independentReviewer === "boolean" &&
     typeof lane.mergeAuthoritative === "boolean"
   );
