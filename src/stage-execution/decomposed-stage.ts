@@ -211,9 +211,11 @@ export async function runDecomposedStage(
     );
     let degraded = false;
     if (!readiness.ok) {
-      if (readiness.status === "failed") {
+      if (readiness.status !== "degraded") {
         // Fail closed: a required handoff capsule is missing — stop the
-        // sequence before dispatch and do not run the sub-stage.
+        // sequence before dispatch and do not run the sub-stage. Only an
+        // explicit "degrade" status proceeds; any other non-ok status
+        // (today only "failed") fails closed.
         outcomes.push({
           name: subStage.name,
           status: "failed",
@@ -259,6 +261,24 @@ export async function runDecomposedStage(
     }
 
     const spentTokens = spendTokensOf(result);
+    if (!Number.isFinite(spentTokens) || spentTokens < 0) {
+      // A bogus usage reading must not silently defeat budget isolation
+      // (NaN > ceiling is always false). Fail closed at the boundary.
+      outcomes.push({
+        name: subStage.name,
+        status: "failed",
+        spentTokens: 0,
+        ceilingTokens,
+        consumeCapsules,
+        producedCapsulePaths: [],
+        missingCapsules: readiness.ok ? [] : readiness.missingCapsules,
+        result,
+        error: new Error(
+          `spendTokensOf returned a non-finite or negative value for sub-stage "${subStage.name}".`,
+        ),
+      });
+      return finish("sub_stage_failed");
+    }
     cumulativeSpentTokens += spentTokens;
 
     // Per-sub-stage budget isolation: a ceiling breach stops at the boundary,
@@ -281,7 +301,25 @@ export async function runDecomposedStage(
     }
 
     // Only capsules the backend actually produced become available downstream.
-    const producedCapsulePaths = resolveProducedCapsules({ ctx, result });
+    // A resolver that throws (e.g. failed artifact verification) fails closed
+    // with a recorded outcome rather than escaping mid-sequence.
+    let producedCapsulePaths: readonly string[];
+    try {
+      producedCapsulePaths = resolveProducedCapsules({ ctx, result });
+    } catch (error) {
+      outcomes.push({
+        name: subStage.name,
+        status: "failed",
+        spentTokens,
+        ceilingTokens,
+        consumeCapsules,
+        producedCapsulePaths: [],
+        missingCapsules: readiness.ok ? [] : readiness.missingCapsules,
+        result,
+        error,
+      });
+      return finish("sub_stage_failed");
+    }
     for (const capsulePath of producedCapsulePaths) {
       available.add(capsulePath);
     }

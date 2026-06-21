@@ -192,7 +192,10 @@ stages:
     execution:
       role: implementer
       phase: implement
-      backend: crabrunner
+      # Undecomposed, implement is control-needing (decision doc 17.3), so the
+      # parent stage stays on the in-loop current-runner path. The bounded
+      # sub-stages below are the delegated (crabrunner) units that Wave 3 wires.
+      backend: current-runner
       sub_stages:
         - name: patch-plan
           execution:

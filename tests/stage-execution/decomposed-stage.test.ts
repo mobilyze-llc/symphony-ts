@@ -347,6 +347,78 @@ describe("runDecomposedStage", () => {
     expect(firstPatch?.status).toBe("degraded");
     expect(firstPatch?.missingCapsules).toEqual(["capsules/missing.json"]);
   });
+
+  it("stops with a failed outcome when resolveProducedCapsules throws", async () => {
+    const { backend, calls } = fakeBackend({
+      "patch-plan": 10,
+      "first-patch": 20,
+    });
+
+    const result = await runDecomposedStage({
+      subStages: [
+        sub("patch-plan", {
+          maxTokens: 100,
+          produce: ["capsules/patch-plan.json"],
+        }),
+        sub("first-patch", {
+          maxTokens: 100,
+          consume: ["capsules/patch-plan.json"],
+        }),
+      ],
+      resolveBackend: () => backend,
+      buildJobSpec: makeJob,
+      buildRunnerInput,
+      spendTokensOf,
+      resolveProducedCapsules: () => {
+        throw new Error("artifact verification failed");
+      },
+    });
+
+    expect(result.stopReason).toBe("sub_stage_failed");
+    expect(result.completedAll).toBe(false);
+    // patch-plan ran and spent before produced-capsule verification threw.
+    expect(calls.map((job) => job.identity.stageName)).toEqual(["patch-plan"]);
+    const patchPlan = result.outcomes.find(
+      (outcome) => outcome.name === "patch-plan",
+    );
+    expect(patchPlan?.status).toBe("failed");
+    expect(patchPlan?.spentTokens).toBe(10);
+    expect(patchPlan?.error).toBeInstanceOf(Error);
+  });
+
+  it("stops with a failed outcome when spendTokensOf returns a non-finite value", async () => {
+    const { backend, calls } = fakeBackend({
+      "patch-plan": 10,
+      "first-patch": 20,
+    });
+
+    const result = await runDecomposedStage({
+      subStages: [
+        sub("patch-plan", {
+          maxTokens: 100,
+          produce: ["capsules/patch-plan.json"],
+        }),
+        sub("first-patch", {
+          maxTokens: 100,
+          consume: ["capsules/patch-plan.json"],
+        }),
+      ],
+      resolveBackend: () => backend,
+      buildJobSpec: makeJob,
+      buildRunnerInput,
+      // A bogus usage reading must not silently defeat budget isolation.
+      spendTokensOf: () => Number.NaN,
+      resolveProducedCapsules: resolveProducedFromConfig,
+    });
+
+    expect(result.stopReason).toBe("sub_stage_failed");
+    expect(result.completedAll).toBe(false);
+    expect(calls.map((job) => job.identity.stageName)).toEqual(["patch-plan"]);
+    const patchPlan = result.outcomes.find(
+      (outcome) => outcome.name === "patch-plan",
+    );
+    expect(patchPlan?.status).toBe("failed");
+  });
 });
 
 // ---- helpers ----------------------------------------------------------------
