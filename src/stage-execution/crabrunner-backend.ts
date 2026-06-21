@@ -266,48 +266,35 @@ export class CrabrunnerStageExecutionBackend
       return await this.cancelJob(jobId, spec);
     }
 
-    if (signal === undefined) {
-      return await this.collectTerminalEvidenceWithoutCancellation(
-        jobId,
-        undefined,
-      );
-    }
-
-    let removeAbortListener = (): void => {};
-    const abortPromise = new Promise<CrabrunnerTerminalEvidence>((resolve) => {
-      const onAbort = () => {
-        resolve(this.cancelJob(jobId, spec));
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-      removeAbortListener = () => signal.removeEventListener("abort", onAbort);
-    });
-
-    if (signal.aborted) {
-      removeAbortListener();
-      return await this.cancelJob(jobId, spec);
-    }
-
-    try {
-      return await Promise.race([
-        // Pass the signal so the client's poll loop aborts promptly instead of
-        // orphaning a long poll; the abort race still maps abort to cancelJob.
-        this.collectTerminalEvidenceWithoutCancellation(jobId, signal),
-        abortPromise,
-      ]);
-    } finally {
-      removeAbortListener();
-    }
+    // The signal is threaded into status/collect; the poll loop fails fast on
+    // abort (its own throwIfAborted + abortable sleep), and both catch blocks
+    // route an aborted in-flight call to cancelJob. So a single deterministic
+    // path yields cancellation evidence — no Promise.race needed (a fast-failing
+    // status/collect catch could otherwise beat the slow cancel subprocess and
+    // mislabel an aborted job as runner_failed/artifact_collection_failed).
+    return await this.collectTerminalEvidenceWithoutCancellation(
+      jobId,
+      signal,
+      spec,
+    );
   }
 
   private async collectTerminalEvidenceWithoutCancellation(
     jobId: string,
     signal: AbortSignal | undefined,
+    spec: CrabrunnerJobSpec,
   ): Promise<CrabrunnerTerminalEvidence> {
     try {
       // Status is a cheap fail-closed scheduler/readiness check. The collected
       // artifact remains the terminal source of truth for Symphony.
       await this.client.status(jobId, signal);
     } catch (error) {
+      // An abort while status was in flight must yield cancellation evidence,
+      // not a generic runner_failed (recheck-2 P2). cancelJob runs at most once
+      // per abort because this branch returns immediately.
+      if (signal?.aborted) {
+        return await this.cancelJob(jobId, spec);
+      }
       return {
         state: "runner_failed",
         message: `crabrunner_status_failed: ${formatUnknownError(error)}`,
@@ -317,6 +304,11 @@ export class CrabrunnerStageExecutionBackend
     try {
       return await this.client.collect(jobId, signal);
     } catch (error) {
+      // Same routing for an abort during collect: prefer cancellation evidence
+      // over artifact_collection_failed (recheck-2 P2).
+      if (signal?.aborted) {
+        return await this.cancelJob(jobId, spec);
+      }
       return {
         state: "artifact_collection_failed",
         message: `crabrunner_artifact_collection_failed: ${formatUnknownError(error)}`,

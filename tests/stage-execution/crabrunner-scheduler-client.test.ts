@@ -392,6 +392,26 @@ describe("CrabrunnerCliSchedulerClient.status", () => {
     await expect(client.status("j")).rejects.toThrow();
   });
 
+  it("fails closed when status returns a different job_id than requested (Codex Track)", async () => {
+    const client = createClient(
+      staticCli({
+        status: () =>
+          cliOk(
+            statusJson({
+              state: "complete",
+              job_id: "some-other-job",
+              collectible: true,
+            }),
+          ),
+      }),
+      { pollIntervalMs: 0 },
+    );
+
+    await expect(client.status("requested-job")).rejects.toThrow(
+      /job_id.*some-other-job.*expected.*requested-job/i,
+    );
+  });
+
   it("aborts immediately when the signal is already aborted (no CLI call)", async () => {
     const controller = new AbortController();
     controller.abort();
@@ -665,6 +685,29 @@ describe("CrabrunnerCliSchedulerClient.collect", () => {
     );
 
     await expect(client.collect("j")).rejects.toThrow(/exit/i);
+  });
+
+  it("fails closed when collect returns a different job_id than requested (Codex Track)", async () => {
+    const client = createClient(
+      staticCli({
+        collect: () =>
+          cliOk(
+            collectJson({
+              state: "complete",
+              status: statusObject({
+                state: "complete",
+                job_id: "wrong-job",
+                collectible: true,
+              }),
+              archive_path: "/tmp/a.tgz",
+            }),
+          ),
+      }),
+    );
+
+    await expect(client.collect("right-job")).rejects.toThrow(
+      /job_id.*wrong-job.*expected.*right-job/i,
+    );
   });
 
   it("resolves job-relative artifact/usage paths under stateRoot (real shape)", async () => {

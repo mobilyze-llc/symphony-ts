@@ -274,7 +274,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
         ["status", "--job-id", jobId, ...this.stateRootArgs()],
         signal,
       );
-      const status = this.parseStatus(result, "status");
+      const status = this.parseStatus(result, "status", jobId);
 
       if (status.collectible === true) {
         return;
@@ -312,7 +312,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
       ["collect", "--job-id", jobId, ...this.stateRootArgs()],
       signal,
     );
-    const collect = this.parseCollect(result);
+    const collect = this.parseCollect(result, jobId);
     const status = collect.status;
 
     const lifecycleState = collect.state;
@@ -360,7 +360,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
       jobId,
       ...this.stateRootArgs(),
     ]);
-    const status = this.parseStatus(result, "cancel");
+    const status = this.parseStatus(result, "cancel", jobId);
     // Only a TERMINAL "stopped" counts as killed. "stopping" is non-terminal
     // (still shutting down) and must NOT be reported as canceled, or consumers
     // misread an in-flight job as killed (Codex P2 / DeepSeek P2-6).
@@ -395,6 +395,9 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     const profile = resolveProfile(spec);
     const model = resolveModelSlug(spec);
     const thinking = spec.runner.reasoningEffort ?? "medium";
+    // Floor to 1s (TK-1): 0 is NOT "unlimited" — it would be a degenerate
+    // instant timeout. In practice this floor is unreachable for required lanes
+    // (enforcement validation rejects timeoutMs<=0 before submit).
     const timeoutSeconds = Math.max(
       1,
       Math.ceil((spec.enforcement.timing.timeoutMs ?? 0) / 1_000),
@@ -464,6 +467,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
   private parseStatus(
     result: { stdout: string; stderr: string; exitCode: number },
     command: string,
+    expectedJobId?: string,
   ): CrabrunnerStatus {
     if (result.exitCode !== 0) {
       throw new Error(
@@ -487,14 +491,18 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     if (status.data.job_id.trim().length === 0) {
       throw new Error(`crabrunner ${command} status is missing a job_id`);
     }
+    assertJobIdMatches(command, expectedJobId, status.data.job_id);
     return status.data;
   }
 
-  private parseCollect(result: {
-    stdout: string;
-    stderr: string;
-    exitCode: number;
-  }): z.infer<typeof crabrunnerCollectSchema> {
+  private parseCollect(
+    result: {
+      stdout: string;
+      stderr: string;
+      exitCode: number;
+    },
+    expectedJobId?: string,
+  ): z.infer<typeof crabrunnerCollectSchema> {
     if (result.exitCode !== 0) {
       throw new Error(
         `crabrunner collect exited with code ${result.exitCode}: ${
@@ -514,6 +522,10 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
         `crabrunner collect returned unexpected schema "${collect.data.schema}" (expected ${CRABRUNNER_COLLECT_SCHEMA})`,
       );
     }
+    // Guard both the envelope and the nested status job_id so a stale/misrouted
+    // response can never be attributed to the wrong Symphony job (Codex Track).
+    assertJobIdMatches("collect", expectedJobId, collect.data.job_id);
+    assertJobIdMatches("collect", expectedJobId, collect.data.status.job_id);
     return collect.data;
   }
 
@@ -660,6 +672,11 @@ function mapLifecycleToTerminalState(
       return "timed_out";
     case "stopped":
     case "stopping":
+      // Intentional divergence from cancel() (TK-2): the COLLECT path treats a
+      // stopping/stopped job as "canceled" ("something/someone already stopped
+      // it"), whereas cancel() treats non-terminal "stopping" as kill_failed
+      // ("our own cancel hasn't finished yet"). Different question, different
+      // answer — not a bug.
       return "canceled";
     case "failed":
     case "lost":
@@ -863,6 +880,27 @@ function createAbortError(): Error {
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted === true) {
     throw createAbortError();
+  }
+}
+
+/**
+ * Fail closed if a crabrunner response is for a different job than requested,
+ * so a stale or misrouted response is never attributed to the wrong Symphony
+ * job (Codex Track). No-op when no expected id is supplied (e.g. submit, where
+ * the daemon assigns the id).
+ */
+function assertJobIdMatches(
+  command: string,
+  expectedJobId: string | undefined,
+  actualJobId: string,
+): void {
+  if (expectedJobId === undefined) {
+    return;
+  }
+  if (actualJobId !== expectedJobId) {
+    throw new Error(
+      `crabrunner ${command} returned job_id "${actualJobId}" but expected "${expectedJobId}"`,
+    );
   }
 }
 
