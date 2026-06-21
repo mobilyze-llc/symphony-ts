@@ -3,7 +3,12 @@ import type {
   PlanDecision,
   PlanEnvelope,
   StandingPlan,
+  StandingPlanJournal,
 } from "../domain/standing-plan.js";
+import {
+  projectHonoredDecisions,
+  projectStandingPlan,
+} from "./standing-plan-store.js";
 
 // ---------------------------------------------------------------------------
 // Deterministic consumer (SYMPH-787) + posture-B auto-release frontier
@@ -375,4 +380,119 @@ export function decidePlanDrivenDispatch(
     forceReplan: false,
     orderedIssueIdentifiers: selection.dispatchIssueIdentifiers,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Single-snapshot tick resolver (SYMPH-830)
+//
+// The dispatch-hot-path entry point for the plan-driven release path. It reads
+// the standing-plan journal ONCE (via the injected readJournal) and projects the
+// plan, the honored decisions, AND the merged outcomes from that SAME snapshot,
+// then runs the pure decidePlanDrivenDispatch over them. Mirrors the admission
+// gate's resolveAdmittedIdentifiersForTick (SYMPH-823): three independent journal
+// reads (loadStandingPlan + listHonoredDecisions + collectMergedOutcomes)
+// previously let a re-plan landing mid-tick pair plan revision N with decisions
+// honored against N+1. The read is injected so the single-read coupling is
+// unit-testable without a host. ZERO model calls.
+// ---------------------------------------------------------------------------
+
+/**
+ * Merged-outcome facts for the consumer decision, projected from an already-read
+ * journal snapshot (one pass): how many issues merged strictly after `sinceIso`
+ * (the merge-moved-the-world re-plan predicate, SYMPH-801) and the set of ALL
+ * merged issue identifiers regardless of time (canary contingent-release +
+ * merged-exclusion, SYMPH-800).
+ */
+export function collectMergedOutcomesFromJournal(
+  journal: StandingPlanJournal,
+  sinceIso: string,
+): { sinceCount: number; identifiers: Set<string> } {
+  const sinceMs = Date.parse(sinceIso);
+  let sinceCount = 0;
+  const identifiers = new Set<string>();
+  for (const entry of journal) {
+    if (entry.kind !== "plan_outcome" || entry.outcome.result !== "merged") {
+      continue;
+    }
+    for (const identifier of entry.outcome.issueIdentifiers) {
+      identifiers.add(identifier);
+    }
+    const outcomeMs = Date.parse(entry.outcome.createdAt);
+    if (
+      !Number.isNaN(sinceMs) &&
+      !Number.isNaN(outcomeMs) &&
+      outcomeMs > sinceMs
+    ) {
+      sinceCount += 1;
+    }
+  }
+  return { sinceCount, identifiers };
+}
+
+export interface PlanDrivenDispatchTickInput {
+  config: WorkflowQueueTriageConfig;
+  /**
+   * The single journal read for this tick. Injected (rather than reading the
+   * store directly) so the single-read coupling is unit-testable without a host,
+   * and so a host can supply `() => readStandingPlanJournal(root)`.
+   */
+  readJournal: () => Promise<StandingPlanJournal>;
+  /** The eligible candidate frontier (identifier + Linear priority). */
+  candidates: readonly { identifier: string; priority: number | null }[];
+  runningIssueIdentifiers: ReadonlySet<string>;
+  nowMs: number;
+  /**
+   * Team-scoped candidate source (SYMPH-794): forces posture-B auto-release OFF
+   * so only operator-approved batches release on the plan path.
+   */
+  teamScoped: boolean;
+}
+
+/**
+ * Resolve the full plan-driven dispatch decision for one tick from a SINGLE
+ * journal snapshot (SYMPH-830). The plan, the honored decisions, and the merged
+ * outcomes are all derived from the same read, so a re-plan landing mid-tick can
+ * never pair plan revision N with decisions honored against N+1. Delegates the
+ * actual decision to the pure decidePlanDrivenDispatch. ZERO model calls.
+ */
+export async function resolvePlanDrivenDispatchForTick(
+  input: PlanDrivenDispatchTickInput,
+): Promise<PlanDispatchDecision> {
+  // ONE read; plan + decisions + merged outcomes all derive from this snapshot.
+  const journal = await input.readJournal();
+  const plan = projectStandingPlan(journal);
+  const honoredApprovals =
+    plan === null ? [] : projectHonoredDecisions(journal);
+  // Assembled only when a plan exists — with no plan the decision degrades
+  // immediately and never reads these (parity with the pre-SYMPH-830 host).
+  const candidatePriorityBands =
+    plan === null
+      ? new Map<string, number>()
+      : new Map<string, number>(
+          input.candidates.map((candidate) => [
+            candidate.identifier,
+            // Linear: 1=urgent…4=low; 0/none → least urgent (band 5).
+            candidate.priority === null || candidate.priority === 0
+              ? 5
+              : candidate.priority,
+          ]),
+        );
+  const mergedOutcomes =
+    plan === null
+      ? { sinceCount: 0, identifiers: new Set<string>() }
+      : collectMergedOutcomesFromJournal(journal, plan.createdAt);
+  return decidePlanDrivenDispatch({
+    config: input.config,
+    plan,
+    honoredApprovals,
+    candidateIdentifiers: new Set(
+      input.candidates.map((candidate) => candidate.identifier),
+    ),
+    runningIssueIdentifiers: input.runningIssueIdentifiers,
+    nowMs: input.nowMs,
+    teamScoped: input.teamScoped,
+    candidatePriorityBands,
+    mergedSincePlanCount: mergedOutcomes.sinceCount,
+    mergedIssueIdentifiers: mergedOutcomes.identifiers,
+  });
 }

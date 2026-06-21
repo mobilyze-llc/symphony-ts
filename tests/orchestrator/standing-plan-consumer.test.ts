@@ -5,11 +5,17 @@ import type {
   PlanBatch,
   PlanDecision,
   PlanEnvelope,
+  PlanOutcome,
+  PlanRevision,
   StandingPlan,
+  StandingPlanJournal,
+  StandingPlanJournalEntry,
 } from "../../src/domain/standing-plan.js";
 import {
+  collectMergedOutcomesFromJournal,
   decidePlanDrivenDispatch,
   evaluateReplanPredicates,
+  resolvePlanDrivenDispatchForTick,
   selectDispatchableBatchMembers,
   shouldDegradeToComparator,
 } from "../../src/orchestrator/standing-plan-consumer.js";
@@ -524,5 +530,261 @@ describe("decidePlanDrivenDispatch (hot-path composition)", () => {
     });
     expect(d.action).toBe("plan");
     expect(d.orderedIssueIdentifiers).toEqual(["SYMPH-1"]); // auto-release intact
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SYMPH-830 — single-snapshot tick resolver. The release path must read the
+// journal ONCE and project the plan, the honored decisions, AND the merged
+// outcomes from that same snapshot (mirroring the SYMPH-823 admission gate), so
+// a re-plan landing mid-tick can't pair plan revision N with decisions honored
+// against N+1.
+// ---------------------------------------------------------------------------
+
+/** A journal that projects to `p` plus `decisions` plus `outcomes` (one snapshot). */
+function journalOf(
+  p: StandingPlan,
+  decisions: readonly PlanDecision[] = [],
+  outcomes: readonly PlanOutcome[] = [],
+): StandingPlanJournal {
+  const revision: PlanRevision = {
+    revision: p.revision,
+    planId: p.planId,
+    contentHash: p.contentHash,
+    supersedes: null,
+    createdAt: p.createdAt,
+    envelope: p.envelope,
+    batches: p.batches,
+    options: p.options,
+    rationale: p.rationale,
+    source: "planner",
+  };
+  const entries: StandingPlanJournalEntry[] = [
+    {
+      sequence: 1,
+      idempotencyKey: `${p.planId}:rev:${p.revision}`,
+      timestamp: p.updatedAt,
+      kind: "plan_revision",
+      planId: p.planId,
+      revision,
+    },
+  ];
+  for (const decision of decisions) {
+    entries.push({
+      sequence: entries.length + 1,
+      idempotencyKey: `${decision.planId}:decision:${decision.decisionId}`,
+      timestamp: decision.createdAt,
+      kind: "plan_decision",
+      planId: decision.planId,
+      decision,
+    });
+  }
+  for (const outcome of outcomes) {
+    entries.push({
+      sequence: entries.length + 1,
+      idempotencyKey: `${outcome.planId}:outcome:${outcome.outcomeId}`,
+      timestamp: outcome.createdAt,
+      kind: "plan_outcome",
+      planId: outcome.planId,
+      outcome,
+    });
+  }
+  return entries;
+}
+
+describe("resolvePlanDrivenDispatchForTick — single-snapshot read (SYMPH-830)", () => {
+  const triageConfig: WorkflowQueueTriageConfig = {
+    enabled: true,
+    shadowMode: false,
+    plannerModel: "opus",
+    heartbeatMs: 900_000,
+    autoReleaseFrontier: 1,
+    controlDoc: { enabled: false, teamId: null },
+    admissionGuardrail: { enabled: false },
+    envelope: ENVELOPE,
+  };
+  const freshPlan = () =>
+    plan([batch("b1", ["SYMPH-1"]), batch("b2", ["SYMPH-2"])], {
+      updatedAt: "2026-06-18T00:00:00.000Z",
+    });
+  const nowMs = Date.parse("2026-06-18T00:05:00.000Z");
+  const candidates = [
+    { identifier: "SYMPH-1", priority: 2 },
+    { identifier: "SYMPH-2", priority: 2 },
+    { identifier: "SYMPH-3", priority: 2 },
+  ];
+
+  it("reads the journal ONCE and computes the release against one consistent revision", async () => {
+    // A readJournal returning DIFFERENT snapshots on successive calls models a
+    // re-plan landing mid-tick. The pre-SYMPH-830 host read the journal THREE
+    // times (loadStandingPlan + listHonoredDecisions + collectMergedOutcomes),
+    // so reading the rev-99 snapshot for the decisions would have suppressed the
+    // release (no approval there) — pairing plan revision N with decisions
+    // honored against N+1. One read ⇒ exactly one self-consistent revision.
+    let calls = 0;
+    const decision = await resolvePlanDrivenDispatchForTick({
+      config: triageConfig,
+      readJournal: async () => {
+        calls += 1;
+        return calls === 1
+          ? journalOf(freshPlan(), [approve("b1")])
+          : journalOf({ ...freshPlan(), revision: 99 }, []);
+      },
+      candidates,
+      runningIssueIdentifiers: new Set(),
+      nowMs,
+      teamScoped: true, // only an operator-approved batch releases
+    });
+    expect(calls).toBe(1);
+    expect(decision.action).toBe("plan");
+    expect(decision.orderedIssueIdentifiers).toEqual(["SYMPH-1"]);
+  });
+
+  it("degrades from a single read when the journal has no plan", async () => {
+    let calls = 0;
+    const decision = await resolvePlanDrivenDispatchForTick({
+      config: triageConfig,
+      readJournal: async () => {
+        calls += 1;
+        return [];
+      },
+      candidates,
+      runningIssueIdentifiers: new Set(),
+      nowMs,
+      teamScoped: true,
+    });
+    expect(calls).toBe(1);
+    expect(decision.action).toBe("degrade");
+    expect(decision.orderedIssueIdentifiers).toEqual([]);
+  });
+
+  it("threads merged outcomes from the SAME snapshot (canary tail releases on a merged head)", async () => {
+    // The merged-outcome set must come from the same read as the plan: a canary
+    // head recorded `merged` in this snapshot releases the contingent tail.
+    const canaryPlan = plan(
+      [
+        batch("b1", ["SYMPH-1", "SYMPH-2", "SYMPH-3"], {
+          mode: "canary-chain",
+          canary: {
+            headIssueIdentifiers: ["SYMPH-1"],
+            contingentIssueIdentifiers: ["SYMPH-2", "SYMPH-3"],
+          },
+        }),
+      ],
+      { updatedAt: "2026-06-18T00:00:00.000Z" },
+    );
+    const mergedHead: PlanOutcome = {
+      outcomeId: "o-1",
+      planId: canaryPlan.planId,
+      revision: canaryPlan.revision,
+      batchId: "b1",
+      result: "merged",
+      issueIdentifiers: ["SYMPH-1"],
+      createdAt: "2026-06-18T00:02:00.000Z",
+    };
+    let calls = 0;
+    const decision = await resolvePlanDrivenDispatchForTick({
+      config: triageConfig,
+      readJournal: async () => {
+        calls += 1;
+        return journalOf(canaryPlan, [approve("b1")], [mergedHead]);
+      },
+      candidates,
+      runningIssueIdentifiers: new Set(),
+      nowMs,
+      teamScoped: true,
+    });
+    expect(calls).toBe(1);
+    expect(decision.action).toBe("plan");
+    // head SYMPH-1 merged ⇒ tail releases; the merged head is not re-dispatched.
+    expect(decision.orderedIssueIdentifiers).toEqual(["SYMPH-2", "SYMPH-3"]);
+  });
+
+  it("propagates a readJournal rejection so the host owns the degrade (SYMPH-830)", async () => {
+    // The resolver does NOT swallow a store-read failure — the host's
+    // computePlanDrivenDispatch try/catch degrades to the comparator and logs.
+    // Locking this preserves the degrade-on-store-error posture across refactors.
+    await expect(
+      resolvePlanDrivenDispatchForTick({
+        config: triageConfig,
+        readJournal: async () => {
+          throw new Error("journal read failed");
+        },
+        candidates,
+        runningIssueIdentifiers: new Set(),
+        nowMs,
+        teamScoped: true,
+      }),
+    ).rejects.toThrow("journal read failed");
+  });
+});
+
+describe("collectMergedOutcomesFromJournal (SYMPH-830)", () => {
+  const p = plan([batch("b1", ["SYMPH-1"])], {
+    createdAt: "2026-06-18T00:00:00.000Z",
+  });
+  const merged = (
+    id: string,
+    at: string,
+    identifiers: string[],
+  ): PlanOutcome => ({
+    outcomeId: `o-${id}`,
+    planId: p.planId,
+    revision: p.revision,
+    batchId: id,
+    result: "merged",
+    issueIdentifiers: identifiers,
+    createdAt: at,
+  });
+
+  it("counts merges strictly after the cutoff and collects ALL merged identifiers", () => {
+    const journal = journalOf(
+      p,
+      [],
+      [
+        merged("b0", "2026-06-17T23:00:00.000Z", ["SYMPH-9"]), // before cutoff
+        merged("b1", "2026-06-18T01:00:00.000Z", ["SYMPH-1"]), // after cutoff
+        merged("b2", "2026-06-18T02:00:00.000Z", ["SYMPH-2"]), // after cutoff
+      ],
+    );
+    const result = collectMergedOutcomesFromJournal(journal, p.createdAt);
+    // sinceCount counts only outcomes strictly after createdAt …
+    expect(result.sinceCount).toBe(2);
+    // … but the identifier set is ALL merged members regardless of time (canary
+    // contingent-release + merged-exclusion read this).
+    expect([...result.identifiers].sort()).toEqual([
+      "SYMPH-1",
+      "SYMPH-2",
+      "SYMPH-9",
+    ]);
+  });
+
+  it("ignores non-merged outcomes", () => {
+    const parked: PlanOutcome = {
+      outcomeId: "o-parked",
+      planId: p.planId,
+      revision: p.revision,
+      batchId: "b1",
+      result: "parked",
+      issueIdentifiers: ["SYMPH-1"],
+      createdAt: "2026-06-18T01:00:00.000Z",
+    };
+    const result = collectMergedOutcomesFromJournal(
+      journalOf(p, [], [parked]),
+      p.createdAt,
+    );
+    expect(result.sinceCount).toBe(0);
+    expect([...result.identifiers]).toEqual([]);
+  });
+
+  it("does not count an outcome exactly at the cutoff (strictly after)", () => {
+    // sinceCount uses outcomeMs > sinceMs — an outcome recorded AT the plan's
+    // createdAt is not "since" the plan, but is still a merged identifier.
+    const result = collectMergedOutcomesFromJournal(
+      journalOf(p, [], [merged("b1", p.createdAt, ["SYMPH-1"])]),
+      p.createdAt,
+    );
+    expect(result.sinceCount).toBe(0);
+    expect([...result.identifiers]).toEqual(["SYMPH-1"]);
   });
 });
