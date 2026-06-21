@@ -80,6 +80,22 @@ describe("CrabrunnerStageExecutionBackend", () => {
     ]);
   });
 
+  it("threads the runner abort signal into scheduler submit", async () => {
+    const controller = new AbortController();
+    const client = createClient({
+      admission: { status: "accepted", jobId: "job-signal" },
+      terminal: { state: "succeeded" },
+    });
+    const backend = new CrabrunnerStageExecutionBackend({ client });
+
+    await backend.execute({
+      job: createJob(),
+      runnerInput: createRunnerInput({ signal: controller.signal }),
+    });
+
+    expect(client.submittedSignals).toEqual([controller.signal]);
+  });
+
   it("normalizes crabrunner legacy counters through the usage contract", async () => {
     const backend = new CrabrunnerStageExecutionBackend({
       client: createClient({
@@ -719,16 +735,20 @@ function createClient(input: {
 }): CrabrunnerSchedulerClient & {
   calls: string[];
   submittedSpecs: CrabrunnerJobSpec[];
+  submittedSignals: Array<AbortSignal | undefined>;
 } {
   const calls: string[] = [];
   const submittedSpecs: CrabrunnerJobSpec[] = [];
+  const submittedSignals: Array<AbortSignal | undefined> = [];
   const cancel = input.cancel;
   return {
     calls,
     submittedSpecs,
-    submit: vi.fn(async (spec) => {
+    submittedSignals,
+    submit: vi.fn(async (spec, signal) => {
       calls.push("submit");
       submittedSpecs.push(spec);
+      submittedSignals.push(signal);
       return input.admission;
     }),
     status: vi.fn(async (jobId) => {

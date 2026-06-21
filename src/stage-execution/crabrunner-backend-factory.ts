@@ -65,6 +65,20 @@ export interface CreateCrabrunnerStageExecutionBackendOptions {
   host?: string;
   /** Manifest provider; defaults by host ("local" -> "local", else "ssh"). */
   provider?: string;
+  /** SSH user for remote/non-local crabbox runs. Required once host is remote. */
+  remoteUser?: string;
+  /** Optional SSH port for remote crabbox runs. */
+  remotePort?: string;
+  /** Optional remote crabbox static work root override. */
+  remoteWorkRoot?: string;
+  /** Optional crabbox binary override for remote runs. */
+  crabboxBin?: string;
+  /** Optional remote crabrunner state root override. */
+  remoteStateRoot?: string;
+  /** Optional local directory for remote run collect downloads. */
+  remoteRunArtifactDir?: string;
+  /** Optional crabrunner version override for remote runs. */
+  crabrunnerVersion?: string;
   /** Marks job specs as dry-run on the backend. */
   dryRun?: boolean;
   /**
@@ -123,6 +137,27 @@ export function createCrabrunnerStageExecutionBackend(
       : { stateRoot: options.stateRoot }),
     ...(options.host === undefined ? {} : { host: options.host }),
     ...(options.provider === undefined ? {} : { provider: options.provider }),
+    ...(options.remoteUser === undefined
+      ? {}
+      : { remoteUser: options.remoteUser }),
+    ...(options.remotePort === undefined
+      ? {}
+      : { remotePort: options.remotePort }),
+    ...(options.remoteWorkRoot === undefined
+      ? {}
+      : { remoteWorkRoot: options.remoteWorkRoot }),
+    ...(options.crabboxBin === undefined
+      ? {}
+      : { crabboxBin: options.crabboxBin }),
+    ...(options.remoteStateRoot === undefined
+      ? {}
+      : { remoteStateRoot: options.remoteStateRoot }),
+    ...(options.remoteRunArtifactDir === undefined
+      ? {}
+      : { remoteRunArtifactDir: options.remoteRunArtifactDir }),
+    ...(options.crabrunnerVersion === undefined
+      ? {}
+      : { crabrunnerVersion: options.crabrunnerVersion }),
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.cli === undefined ? {} : { cli: options.cli }),
     ...(options.pollIntervalMs === undefined

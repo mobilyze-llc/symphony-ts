@@ -120,7 +120,10 @@ export interface CrabrunnerStageExecutionEvidence {
 }
 
 export interface CrabrunnerSchedulerClient {
-  submit(spec: CrabrunnerJobSpec): Promise<CrabrunnerAdmissionResult>;
+  submit(
+    spec: CrabrunnerJobSpec,
+    signal?: AbortSignal,
+  ): Promise<CrabrunnerAdmissionResult>;
   /**
    * Resolves only after the job is terminal and collectible. Throw to fail
    * closed before collection. The optional signal lets a polling client abort
@@ -269,7 +272,7 @@ export class CrabrunnerStageExecutionBackend
         });
       }
 
-      const admission = await this.submit(spec);
+      const admission = await this.submit(spec, input.runnerInput.signal);
 
       if (admission.status === "rejected") {
         return this.toBackendResult(input, {
@@ -332,9 +335,10 @@ export class CrabrunnerStageExecutionBackend
 
   private async submit(
     spec: CrabrunnerJobSpec,
+    signal: AbortSignal | undefined,
   ): Promise<CrabrunnerAdmissionResult> {
     try {
-      return await this.client.submit(spec);
+      return await this.client.submit(spec, signal);
     } catch (error) {
       return {
         status: "rejected",
