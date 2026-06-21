@@ -256,7 +256,13 @@ export async function startCliHost(
  * Enabled iff `SYMPHONY_CRABRUNNER_ROOT` is set and non-empty (the Crucible
  * repo root). `SYMPHONY_CRABRUNNER_TARGET_REPO` selects the target repo root
  * (falls back to a non-empty `REPO_URL`, then cwd); `SYMPHONY_CRABRUNNER_HOST`
- * and `SYMPHONY_CRABRUNNER_STATE_ROOT` are optional overrides.
+ * and `SYMPHONY_CRABRUNNER_STATE_ROOT` are optional local overrides. Remote
+ * hosts additionally need `SYMPHONY_CRABRUNNER_REMOTE_USER`; optional remote
+ * run knobs are `SYMPHONY_CRABRUNNER_REMOTE_PORT`,
+ * `SYMPHONY_CRABRUNNER_REMOTE_WORK_ROOT`,
+ * `SYMPHONY_CRABRUNNER_REMOTE_STATE_ROOT`,
+ * `SYMPHONY_CRABRUNNER_REMOTE_ARTIFACT_DIR`,
+ * `SYMPHONY_CRABRUNNER_CRABBOX_BIN`, and `SYMPHONY_CRABRUNNER_VERSION`.
  */
 export function buildCrabrunnerStageExecutionBackends(
   env: NodeJS.ProcessEnv,
@@ -275,6 +281,13 @@ export function buildCrabrunnerStageExecutionBackends(
     process.cwd();
   const host = env.SYMPHONY_CRABRUNNER_HOST;
   const stateRoot = env.SYMPHONY_CRABRUNNER_STATE_ROOT;
+  const remoteUser = env.SYMPHONY_CRABRUNNER_REMOTE_USER;
+  const remotePort = env.SYMPHONY_CRABRUNNER_REMOTE_PORT;
+  const remoteWorkRoot = env.SYMPHONY_CRABRUNNER_REMOTE_WORK_ROOT;
+  const remoteStateRoot = env.SYMPHONY_CRABRUNNER_REMOTE_STATE_ROOT;
+  const remoteRunArtifactDir = env.SYMPHONY_CRABRUNNER_REMOTE_ARTIFACT_DIR;
+  const crabboxBin = env.SYMPHONY_CRABRUNNER_CRABBOX_BIN;
+  const crabrunnerVersion = env.SYMPHONY_CRABRUNNER_VERSION;
 
   logToStderr({
     timestamp: formatEasternTimestamp(new Date()),
@@ -284,6 +297,12 @@ export function buildCrabrunnerStageExecutionBackends(
     targetRepoRoot,
     host: host ?? "local",
     stateRootOverride: stateRoot !== undefined && stateRoot.trim() !== "",
+    remoteUserConfigured:
+      remoteUser !== undefined && remoteUser.trim().length > 0,
+    remoteStateRootOverride:
+      remoteStateRoot !== undefined && remoteStateRoot.trim() !== "",
+    remoteArtifactDirOverride:
+      remoteRunArtifactDir !== undefined && remoteRunArtifactDir.trim() !== "",
   });
 
   return createCrabrunnerStageExecutionBackends({
@@ -293,6 +312,27 @@ export function buildCrabrunnerStageExecutionBackends(
     ...(stateRoot === undefined || stateRoot.trim() === ""
       ? {}
       : { stateRoot: stateRoot.trim() }),
+    ...(remoteUser === undefined || remoteUser.trim() === ""
+      ? {}
+      : { remoteUser: remoteUser.trim() }),
+    ...(remotePort === undefined || remotePort.trim() === ""
+      ? {}
+      : { remotePort: remotePort.trim() }),
+    ...(remoteWorkRoot === undefined || remoteWorkRoot.trim() === ""
+      ? {}
+      : { remoteWorkRoot: remoteWorkRoot.trim() }),
+    ...(remoteStateRoot === undefined || remoteStateRoot.trim() === ""
+      ? {}
+      : { remoteStateRoot: remoteStateRoot.trim() }),
+    ...(remoteRunArtifactDir === undefined || remoteRunArtifactDir.trim() === ""
+      ? {}
+      : { remoteRunArtifactDir: remoteRunArtifactDir.trim() }),
+    ...(crabboxBin === undefined || crabboxBin.trim() === ""
+      ? {}
+      : { crabboxBin: crabboxBin.trim() }),
+    ...(crabrunnerVersion === undefined || crabrunnerVersion.trim() === ""
+      ? {}
+      : { crabrunnerVersion: crabrunnerVersion.trim() }),
     // SYMPH-856: when the workflow config is provided, the default resolver
     // renders + threads the stage prompt; omitted only by older callers/tests
     // that just assert backend registration (the lane stays fail-closed then).

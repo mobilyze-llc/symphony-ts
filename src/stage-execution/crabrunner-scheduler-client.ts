@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { z } from "zod";
@@ -58,6 +58,30 @@ export interface CrabrunnerCliSchedulerClientOptions {
    * Override for explicit transport selection.
    */
   provider?: string;
+  /**
+   * SSH user for `bin/crabrunner run` on remote/non-local hosts. Required for
+   * remote workspace materialization; absent remote config fails closed.
+   */
+  remoteUser?: string;
+  /** Optional SSH port for remote crabbox runs (default is crabrunner's 22). */
+  remotePort?: string;
+  /** Optional remote crabbox static work root override. */
+  remoteWorkRoot?: string;
+  /** Optional crabbox binary override (default is crabrunner's "crabbox"). */
+  crabboxBin?: string;
+  /**
+   * Remote crabrunner state root for `bin/crabrunner run`. This is intentionally
+   * separate from local `stateRoot`: the run CLI interprets this path on the
+   * remote host and defaults to a user-relative root when omitted.
+   */
+  remoteStateRoot?: string;
+  /**
+   * Local directory where `bin/crabrunner run` downloads collect archives.
+   * Defaults to `<stateRoot>/remote-artifacts`.
+   */
+  remoteRunArtifactDir?: string;
+  /** Crabrunner version passed to `bin/crabrunner run` (default "dev"). */
+  crabrunnerVersion?: string;
   now?: () => Date;
   /** Injected subprocess executor (tests). Defaults to a real execFile impl. */
   cli?: CrabrunnerCli;
@@ -86,9 +110,32 @@ function defaultStateRoot(): string {
   return join(homedir(), ".crucible", "crabrunner");
 }
 
+function normalizeOptionalString(value: string | undefined): string | null {
+  if (value === undefined) {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? null : trimmed;
+}
+
+function resolveMaybeRelativePath(path: string, cwd: string): string {
+  return isAbsolute(path) ? path : resolve(cwd, path);
+}
+
+function appendOptionalArg(
+  args: string[],
+  flag: string,
+  value: string | null,
+): void {
+  if (value !== null) {
+    args.push(flag, value);
+  }
+}
+
 const CRABRUNNER_MANIFEST_SCHEMA = "crucible.crabrunner.job.v1";
 const CRABRUNNER_STATUS_SCHEMA = "crucible.crabrunner.status.v1";
 const CRABRUNNER_COLLECT_SCHEMA = "crucible.crabrunner.collect.v1";
+const CRABRUNNER_RUN_RESULT_SCHEMA = "crucible.crabrunner.run-result.v1";
 // Job-kind-dependent lane-worker protocol selector. A prompt_file+model manifest
 // uses "lane-worker.v1"; a worker_argv manifest uses "worker-argv.v1". This
 // client emits a prompt_file/model lane (the worker_argv path is not sourced
@@ -148,6 +195,27 @@ const crabrunnerCollectSchema = z
   })
   .passthrough();
 
+const crabrunnerWorkspaceSyncArtifactRefSchema = z
+  .object({
+    schema: z.string(),
+    path: z.string(),
+    sha256: z.string().nullish(),
+  })
+  .passthrough();
+
+const crabrunnerRunResultSchema = z
+  .object({
+    schema: z.string(),
+    job_id: z.string(),
+    state: z.string(),
+    status: crabrunnerStatusSchema,
+    collect: crabrunnerCollectSchema.nullish(),
+    workspace_sync_artifact: crabrunnerWorkspaceSyncArtifactRefSchema.nullish(),
+  })
+  .passthrough();
+
+type CrabrunnerRunResult = z.infer<typeof crabrunnerRunResultSchema>;
+
 // Two on-disk usage shapes both map here. The real model shape is the
 // `crucible.lane-worker.usage.v2` contract keyed by `measurement_kind` with
 // snake_case token fields. The simple/smoke shape is `{available:boolean,
@@ -189,6 +257,13 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
   private readonly stateRoot: string;
   private readonly host: string;
   private readonly provider: string;
+  private readonly remoteUser: string | null;
+  private readonly remotePort: string | null;
+  private readonly remoteWorkRoot: string | null;
+  private readonly crabboxBin: string | null;
+  private readonly remoteStateRoot: string | null;
+  private readonly remoteRunArtifactDir: string;
+  private readonly crabrunnerVersion: string;
   private readonly now: () => Date;
   private readonly cli: CrabrunnerCli;
   private readonly pollIntervalMs: number;
@@ -196,6 +271,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
   private readonly noStage: boolean;
   private readonly cliTimeoutMs: number;
   private readonly maxBufferBytes: number;
+  private readonly remoteRunResults = new Map<string, CrabrunnerRunResult>();
 
   constructor(options: CrabrunnerCliSchedulerClientOptions) {
     this.crucibleRoot = options.crucibleRoot;
@@ -204,6 +280,18 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     this.host = options.host ?? "local";
     this.provider =
       options.provider ?? (this.host === "local" ? "local" : "ssh");
+    this.remoteUser = normalizeOptionalString(options.remoteUser);
+    this.remotePort = normalizeOptionalString(options.remotePort);
+    this.remoteWorkRoot = normalizeOptionalString(options.remoteWorkRoot);
+    this.crabboxBin = normalizeOptionalString(options.crabboxBin);
+    this.remoteStateRoot = normalizeOptionalString(options.remoteStateRoot);
+    this.remoteRunArtifactDir = resolveMaybeRelativePath(
+      normalizeOptionalString(options.remoteRunArtifactDir) ??
+        join(this.stateRoot, "remote-artifacts"),
+      this.crucibleRoot,
+    );
+    this.crabrunnerVersion =
+      normalizeOptionalString(options.crabrunnerVersion) ?? "dev";
     this.now = options.now ?? (() => new Date());
     this.maxBufferBytes = options.maxBufferBytes ?? DEFAULT_MAX_BUFFER_BYTES;
     this.cliTimeoutMs = options.cliTimeoutMs ?? DEFAULT_CLI_TIMEOUT_MS;
@@ -232,6 +320,10 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
         jobId: null,
         reason: "crabrunner_prompt_required_symph_856",
       };
+    }
+
+    if (this.requiresRemoteRun()) {
+      return await this.submitRemote(spec);
     }
 
     const manifest = this.buildManifest(spec);
@@ -267,6 +359,15 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
   }
 
   async status(jobId: string, signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal);
+    if (this.remoteRunResults.has(jobId)) {
+      return;
+    }
+    if (this.requiresRemoteRun()) {
+      throw new Error(
+        `crabrunner remote job ${jobId} has no cached run result; provider=ssh uses crabrunner run and cannot poll split status`,
+      );
+    }
     // Count consecutive terminal-but-not-collectible polls. The daemon can
     // write a terminal lifecycle state before flipping `collectible` (write
     // race); grace-retry a few polls before failing closed (DeepSeek P2-1).
@@ -311,6 +412,15 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     signal?: AbortSignal,
   ): Promise<CrabrunnerTerminalEvidence> {
     throwIfAborted(signal);
+    const remoteRun = this.remoteRunResults.get(jobId);
+    if (remoteRun !== undefined) {
+      return await this.collectRemoteRunEvidence(remoteRun);
+    }
+    if (this.requiresRemoteRun()) {
+      throw new Error(
+        `crabrunner remote job ${jobId} has no cached run result to collect`,
+      );
+    }
     const result = await this.run(
       ["collect", "--job-id", jobId, ...this.stateRootArgs()],
       signal,
@@ -426,9 +536,9 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
       // from); the TARGET repo is `workspace` (Codex P1-1, confirmed against a
       // real smoke manifest).
       remote_repo: this.crucibleRoot,
-      // TODO(SYMPH-853-followup): workspace materialization semantics are not
-      // sourced from the spec; the first canary points workspace at the target
-      // repo root directly.
+      // Local submit uses the target checkout directly. Remote/non-local hosts
+      // never take this path; they go through `crabrunner run`, which
+      // materializes this workspace onto the host and rewrites the manifest.
       workspace: this.targetRepoRoot,
       artifact_name: sanitizeSlug(spec.identity.stageName ?? "stage"),
       phase: spec.phase,
@@ -450,6 +560,167 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     // Always forward --state-root (even the default ~/.crucible/crabrunner) so
     // the CLI and resolveJobPath agree on the job directory (DeepSeek P2-4).
     return ["--state-root", this.stateRoot];
+  }
+
+  private requiresRemoteRun(): boolean {
+    return this.provider === "ssh" || this.host !== "local";
+  }
+
+  private async submitRemote(
+    spec: CrabrunnerJobSpec,
+  ): Promise<CrabrunnerAdmissionResult> {
+    if (this.remoteUser === null) {
+      return {
+        status: "rejected",
+        jobId: null,
+        reason: "crabrunner_remote_user_required_symph_864",
+      };
+    }
+
+    const model = resolveModelSlug(spec);
+    if (model === null) {
+      return {
+        status: "rejected",
+        jobId: null,
+        reason: "crabrunner_remote_model_required_symph_864",
+      };
+    }
+
+    const jobId = buildJobId(spec);
+    const result = await this.run(
+      this.buildRemoteRunArgs(spec, jobId, this.remoteUser, model),
+    );
+    const runResult = this.parseRunResult(result, jobId);
+    this.remoteRunResults.set(runResult.job_id, runResult);
+    return { status: "accepted", jobId: runResult.job_id };
+  }
+
+  private buildRemoteRunArgs(
+    spec: CrabrunnerJobSpec,
+    jobId: string,
+    remoteUser: string,
+    model: string,
+  ): string[] {
+    const promptFile = spec.promptFile;
+    if (promptFile === undefined) {
+      throw new Error("remote crabrunner run requires a prompt_file");
+    }
+
+    const timeoutSeconds = Math.max(
+      1,
+      Math.ceil((spec.enforcement.timing.timeoutMs ?? 0) / 1_000),
+    );
+    const phase = spec.phase ?? "review";
+    const args = [
+      "run",
+      "--host",
+      this.host,
+      "--user",
+      remoteUser,
+      "--job-id",
+      jobId,
+      "--version",
+      this.crabrunnerVersion,
+      "--artifact-name",
+      sanitizeSlug(spec.identity.stageName ?? "stage"),
+      "--phase",
+      phase,
+      "--profile",
+      resolveProfile(spec),
+      "--thinking",
+      spec.runner.reasoningEffort ?? "medium",
+      "--timeout-seconds",
+      String(timeoutSeconds),
+      "--lane-key",
+      jobId,
+      "--issue-ids-json",
+      JSON.stringify([spec.issue.identifier]),
+      "--closeout-policy",
+      "disabled",
+      "--workspace",
+      this.targetRepoRoot,
+      "--materialize-workspace-from",
+      this.targetRepoRoot,
+      "--prompt-file",
+      promptFile,
+      "--model",
+      model,
+      "--repo-root",
+      this.crucibleRoot,
+      "--artifact-dir",
+      this.remoteRunArtifactDir,
+      "--poll-interval-ms",
+      String(this.pollIntervalMs),
+      "--max-polls",
+      String(this.maxPolls),
+    ];
+    appendOptionalArg(args, "--port", this.remotePort);
+    appendOptionalArg(args, "--work-root", this.remoteWorkRoot);
+    appendOptionalArg(args, "--crabbox-bin", this.crabboxBin);
+    appendOptionalArg(args, "--state-root", this.remoteStateRoot);
+    return args;
+  }
+
+  private async collectRemoteRunEvidence(
+    runResult: CrabrunnerRunResult,
+  ): Promise<CrabrunnerTerminalEvidence> {
+    if (runResult.collect === null || runResult.collect === undefined) {
+      throw new Error(
+        `crabrunner run result ${runResult.job_id} did not include a collect payload`,
+      );
+    }
+
+    const status = runResult.collect.status;
+    let terminalState = mapLifecycleToTerminalState(
+      runResult.collect.state,
+      status,
+    );
+    const localArchivePath = join(
+      this.remoteRunArtifactDir,
+      `${runResult.job_id}.tar`,
+    );
+    const archivePresent = await this.isFilePresent(localArchivePath);
+    if (terminalState === "succeeded" && !archivePresent) {
+      terminalState = "artifact_parse_failed";
+    }
+
+    const artifactRefs: string[] = [];
+    if (archivePresent) {
+      artifactRefs.push(localArchivePath);
+    } else if (
+      runResult.collect.archive_path !== null &&
+      runResult.collect.archive_path !== undefined &&
+      runResult.collect.archive_path.trim().length > 0
+    ) {
+      artifactRefs.push(runResult.collect.archive_path);
+    }
+
+    const workspaceSyncPath =
+      runResult.workspace_sync_artifact?.path ??
+      join(
+        this.remoteRunArtifactDir,
+        `${runResult.job_id}.workspace-sync.json`,
+      );
+    if (await this.isFilePresent(workspaceSyncPath)) {
+      artifactRefs.push(workspaceSyncPath);
+    }
+
+    const usage = archivePresent
+      ? await this.readUsageFromCollectArchive(localArchivePath)
+      : {
+          status: "unavailable" as const,
+          reason: "remote crabrunner collect archive missing or empty",
+        };
+
+    return {
+      state: terminalState,
+      ...(artifactRefs.length > 0 ? { artifactRefs } : {}),
+      workspacePath: status.workspace ?? null,
+      usage,
+      message: status.message ?? null,
+      progress: buildProgress(status),
+      process: buildProcess(status),
+    };
   }
 
   private async run(
@@ -532,6 +803,52 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     return collect.data;
   }
 
+  private parseRunResult(
+    result: {
+      stdout: string;
+      stderr: string;
+      exitCode: number;
+    },
+    expectedJobId: string,
+  ): CrabrunnerRunResult {
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `crabrunner run exited with code ${result.exitCode}: ${
+          result.stderr.trim() || "no stderr"
+        }`,
+      );
+    }
+    const parsed = parseJson(result.stdout, "run");
+    const runResult = crabrunnerRunResultSchema.safeParse(parsed);
+    if (!runResult.success) {
+      throw new Error(
+        `crabrunner run returned an invalid payload: ${runResult.error.message}`,
+      );
+    }
+    if (runResult.data.schema !== CRABRUNNER_RUN_RESULT_SCHEMA) {
+      throw new Error(
+        `crabrunner run returned unexpected schema "${runResult.data.schema}" (expected ${CRABRUNNER_RUN_RESULT_SCHEMA})`,
+      );
+    }
+    if (runResult.data.job_id.trim().length === 0) {
+      throw new Error("crabrunner run result is missing a job_id");
+    }
+    assertJobIdMatches("run", expectedJobId, runResult.data.job_id);
+    assertJobIdMatches("run", expectedJobId, runResult.data.status.job_id);
+    if (
+      runResult.data.collect !== null &&
+      runResult.data.collect !== undefined
+    ) {
+      assertJobIdMatches("run", expectedJobId, runResult.data.collect.job_id);
+      assertJobIdMatches(
+        "run",
+        expectedJobId,
+        runResult.data.collect.status.job_id,
+      );
+    }
+    return runResult.data;
+  }
+
   /**
    * Resolve a CrabrunnerStatus artifact/usage path. These are RELATIVE to the
    * job dir `<stateRoot>/jobs/<jobId>/`; absolute values are returned as-is.
@@ -567,6 +884,15 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     }
   }
 
+  private async isFilePresent(path: string): Promise<boolean> {
+    try {
+      const metadata = await stat(path);
+      return metadata.isFile() && metadata.size > 0;
+    } catch {
+      return false;
+    }
+  }
+
   private async readUsage(
     usagePath: string | null | undefined,
   ): Promise<CrabrunnerUsage> {
@@ -596,6 +922,48 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
       return {
         status: "unavailable",
         reason: "usage artifact failed schema validation",
+      };
+    }
+    return mapLaneWorkerUsage(usage.data);
+  }
+
+  private async readUsageFromCollectArchive(
+    archivePath: string,
+  ): Promise<CrabrunnerUsage> {
+    let archive: Buffer;
+    try {
+      archive = await readFile(archivePath);
+    } catch {
+      return {
+        status: "unavailable",
+        reason: "remote collect archive missing or unreadable",
+      };
+    }
+    const raw = findTarEntryText(
+      archive,
+      (name) => name.includes("/artifact/") && name.endsWith(".usage.json"),
+    );
+    if (raw === null) {
+      return {
+        status: "unavailable",
+        reason: "usage artifact not found in remote collect archive",
+      };
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return {
+        status: "unavailable",
+        reason: "usage artifact in remote collect archive is not valid JSON",
+      };
+    }
+    const usage = laneWorkerUsageSchema.safeParse(parsed);
+    if (!usage.success) {
+      return {
+        status: "unavailable",
+        reason:
+          "usage artifact in remote collect archive failed schema validation",
       };
     }
     return mapLaneWorkerUsage(usage.data);
@@ -921,6 +1289,64 @@ function parseJson(stdout: string, command: string): unknown {
       }`,
     );
   }
+}
+
+function findTarEntryText(
+  archive: Buffer,
+  predicate: (name: string) => boolean,
+): string | null {
+  let offset = 0;
+  while (offset + 512 <= archive.length) {
+    if (isZeroTarBlock(archive, offset)) {
+      return null;
+    }
+    const size = parseTarEntrySize(archive, offset);
+    if (size === null || offset + 512 + size > archive.length) {
+      return null;
+    }
+    const name = parseTarEntryName(archive, offset);
+    const typeflag = archive.toString("utf8", offset + 156, offset + 157);
+    const dataStart = offset + 512;
+    if (typeflag !== "5" && predicate(name)) {
+      return archive.toString("utf8", dataStart, dataStart + size);
+    }
+    offset = dataStart + Math.ceil(size / 512) * 512;
+  }
+  return null;
+}
+
+function isZeroTarBlock(archive: Buffer, offset: number): boolean {
+  for (let index = offset; index < offset + 512; index += 1) {
+    if (archive[index] !== 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function parseTarEntryName(archive: Buffer, offset: number): string {
+  const name = readTarString(archive, offset, 100);
+  const prefix = readTarString(archive, offset + 345, 155);
+  return prefix.length === 0 ? name : `${prefix}/${name}`;
+}
+
+function parseTarEntrySize(archive: Buffer, offset: number): number | null {
+  const raw = readTarString(archive, offset + 124, 12).trim();
+  if (raw.length === 0 || !/^[0-7]+$/.test(raw)) {
+    return null;
+  }
+  const size = Number.parseInt(raw, 8);
+  return Number.isFinite(size) && size >= 0 ? size : null;
+}
+
+function readTarString(
+  archive: Buffer,
+  offset: number,
+  length: number,
+): string {
+  const raw = archive.toString("utf8", offset, offset + length);
+  const nullIndex = raw.indexOf("\0");
+  return (nullIndex === -1 ? raw : raw.slice(0, nullIndex)).trim();
 }
 
 function buildJobId(spec: CrabrunnerJobSpec): string {
