@@ -141,7 +141,7 @@ The smoke runs `symphony-council-review-gate --help` and
 `cmux-spawn preflight --caffeinate --json`.
 
 For Mobilyze review-substrate deploys, use the repo-owned runbook and helper:
-`docs/operations/cmux-review-substrate-deploy.md` and
+`docs/operations/01-cmux-review-substrate-deploy.md` and
 `ops/cmux-review-substrate-deploy`. They make Pro16 the remote-primary CMUX
 substrate, write an evidence bundle, audit stale local CMUX callers, and define
 the lightweight Kimi review loop for deploy/runbook/helper changes.
