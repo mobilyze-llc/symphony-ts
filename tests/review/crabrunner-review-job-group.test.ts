@@ -921,6 +921,227 @@ describe("runCrabrunnerReviewJobGroup", () => {
       "routing_absent_decorrelated_reviewer_artifact",
     );
   });
+
+  // P2-A: an artifact with verdict:"pass" but a structurally incomplete
+  // StructuredReviewerArtifact (missing sections/findings/routing/confidence)
+  // must NOT produce a group PASS — it fails closed as malformed.
+  it("fails closed when a pass-verdict artifact is structurally incomplete", async () => {
+    const incomplete = {
+      schemaVersion: 1,
+      kind: "symphony-headless-council-reviewer-artifact",
+      lane: {
+        laneId: "codex-high-lead",
+        agent: "codex",
+        role: "reviewer",
+        model: "codex-model",
+        modelFamily: "codex",
+        reasoningEffort: null,
+        independentReviewer: true,
+        mergeAuthoritative: true,
+      },
+      verdict: "pass",
+      headSha: CURRENT_HEAD,
+      // MISSING: routing, confidence, sections, findings.
+    };
+    const backend = fakeBackend({
+      "codex-high-lead": {
+        terminal: { state: "succeeded", artifactRefs: ["/a.json"] },
+        collectedArtifact: incomplete,
+      },
+    });
+
+    const result = await runCrabrunnerReviewJobGroup({
+      ...baseInput({
+        lanes: [
+          reviewerLane({
+            laneId: "codex-high-lead",
+            agent: "codex",
+            modelFamily: "codex",
+          }),
+        ],
+        backend,
+      }),
+      collectArtifact: async (lane: ReviewJobGroupLaneEvidence) =>
+        backendArtifactFor(backend, lane),
+    });
+
+    expect(result.verdict).toBe("error");
+    const lane = result.lanes[0];
+    expect(lane?.state).toBe("error");
+    expect(lane?.degradedReason).toBe("malformed_artifact");
+    expect(result.degradedConditions).toContain(
+      "malformed_artifact:codex-high-lead",
+    );
+  });
+
+  // Track-B: verdict aggregation coverage beyond "pass".
+  it("aggregates a reviewer FAIL verdict to a group FAIL", async () => {
+    const backend = fakeBackend({
+      "codex-high-lead": {
+        terminal: { state: "succeeded", artifactRefs: ["/a.json"] },
+        collectedArtifact: reviewerArtifact({
+          laneId: "codex-high-lead",
+          agent: "codex",
+          modelFamily: "codex",
+          verdict: "fail",
+        }),
+      },
+    });
+
+    const result = await runCrabrunnerReviewJobGroup({
+      ...baseInput({
+        lanes: [
+          reviewerLane({
+            laneId: "codex-high-lead",
+            agent: "codex",
+            modelFamily: "codex",
+          }),
+        ],
+        backend,
+      }),
+      collectArtifact: async (lane: ReviewJobGroupLaneEvidence) =>
+        backendArtifactFor(backend, lane),
+    });
+
+    expect(result.verdict).toBe("fail");
+    const lane = result.lanes[0];
+    expect(lane?.state).toBe("complete");
+    expect(lane?.verdict).toBe("fail");
+  });
+
+  it("aggregates a reviewer ERROR verdict to a group ERROR", async () => {
+    const backend = fakeBackend({
+      "codex-high-lead": {
+        terminal: { state: "succeeded", artifactRefs: ["/a.json"] },
+        collectedArtifact: reviewerArtifact({
+          laneId: "codex-high-lead",
+          agent: "codex",
+          modelFamily: "codex",
+          verdict: "error",
+        }),
+      },
+    });
+
+    const result = await runCrabrunnerReviewJobGroup({
+      ...baseInput({
+        lanes: [
+          reviewerLane({
+            laneId: "codex-high-lead",
+            agent: "codex",
+            modelFamily: "codex",
+          }),
+        ],
+        backend,
+      }),
+      collectArtifact: async (lane: ReviewJobGroupLaneEvidence) =>
+        backendArtifactFor(backend, lane),
+    });
+
+    expect(result.verdict).toBe("error");
+  });
+
+  it("a reviewer FAIL alongside a PASS still aggregates to FAIL", async () => {
+    const backend = fakeBackend({
+      "codex-high-lead": {
+        terminal: { state: "succeeded", artifactRefs: ["/a.json"] },
+        collectedArtifact: reviewerArtifact({
+          laneId: "codex-high-lead",
+          agent: "codex",
+          modelFamily: "codex",
+          verdict: "pass",
+        }),
+      },
+      "pi-deepseek": {
+        terminal: { state: "succeeded", artifactRefs: ["/pi.json"] },
+        collectedArtifact: reviewerArtifact({
+          laneId: "pi-deepseek",
+          agent: "pi",
+          modelFamily: "deepseek",
+          verdict: "fail",
+        }),
+      },
+    });
+
+    const result = await runCrabrunnerReviewJobGroup({
+      ...baseInput({
+        lanes: [
+          reviewerLane({
+            laneId: "codex-high-lead",
+            agent: "codex",
+            modelFamily: "codex",
+          }),
+          reviewerLane({
+            laneId: "pi-deepseek",
+            agent: "pi",
+            modelFamily: "deepseek",
+          }),
+        ],
+        backend,
+      }),
+      collectArtifact: async (lane: ReviewJobGroupLaneEvidence) =>
+        backendArtifactFor(backend, lane),
+    });
+
+    expect(result.verdict).toBe("fail");
+  });
+
+  // P2-B: the contract is a SINGLE optional browser-QA lane. More than one must
+  // fail the group closed rather than letting a later passing QA overwrite an
+  // earlier blocking one.
+  it("fails closed when more than one browser-QA lane is present", async () => {
+    const secondQaLane: CrabrunnerReviewLaneSpec = {
+      ...qaLane(),
+      laneId: "browser-qa-2",
+    };
+    const backend = fakeBackend({
+      "codex-high-lead": {
+        terminal: { state: "succeeded", artifactRefs: ["/a.json"] },
+        collectedArtifact: reviewerArtifact({
+          laneId: "codex-high-lead",
+          agent: "codex",
+          modelFamily: "codex",
+          verdict: "pass",
+        }),
+      },
+      "browser-qa": {
+        terminal: { state: "succeeded", artifactRefs: ["/qa1.json"] },
+        // First QA lane BLOCKS (failure rule violated).
+        collectedArtifact: qaArtifact({
+          consoleFindings: [{ level: "error", message: "boom" }],
+          failureRule: {
+            id: "no-console-errors",
+            description: "rule",
+            violated: true,
+          },
+        }),
+      },
+      "browser-qa-2": {
+        terminal: { state: "succeeded", artifactRefs: ["/qa2.json"] },
+        // Second QA lane passes — must NOT mask the first.
+        collectedArtifact: qaArtifact(),
+      },
+    });
+
+    const result = await runCrabrunnerReviewJobGroup({
+      ...baseInput({
+        lanes: [
+          reviewerLane({
+            laneId: "codex-high-lead",
+            agent: "codex",
+            modelFamily: "codex",
+          }),
+          qaLane(),
+          secondQaLane,
+        ],
+        backend,
+      }),
+      collectArtifact: async (lane: ReviewJobGroupLaneEvidence) =>
+        backendArtifactFor(backend, lane),
+    });
+
+    expect(result.verdict).toBe("error");
+    expect(result.degradedConditions).toContain("multiple_browser_qa_lanes");
+  });
 });
 
 /**

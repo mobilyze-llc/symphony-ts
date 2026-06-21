@@ -172,8 +172,14 @@ export function assessBrowserQaEvidence(
  * Parse an unknown record (e.g. a collected crabrunner artifact) into typed
  * browser-QA evidence. Returns `null` for any non-object, wrong-kind, or
  * wrong-schema input so the assessor fails closed rather than throwing.
- * Malformed nested entries are dropped, not fatal — the assessor then sees an
- * incomplete (and therefore blocking) artifact.
+ *
+ * Array-field handling distinguishes two cases:
+ *   - field ABSENT (undefined) -> legitimately empty `[]`.
+ *   - field PRESENT but not an array -> malformed -> the whole parse fails
+ *     closed (null), because a non-array where an array is required is corrupt
+ *     evidence, not an empty list.
+ * Malformed *entries within* a valid array are dropped (not fatal); the
+ * assessor then sees an incomplete (and therefore blocking) artifact.
  */
 export function parseBrowserQaEvidence(
   value: unknown,
@@ -194,16 +200,36 @@ export function parseBrowserQaEvidence(
     return null;
   }
 
+  const assertions = parseArrayField(record.assertions, parseAssertion);
+  const mediaRefs = parseArrayField(record.mediaRefs, parseMediaRef);
+  const consoleFindings = parseArrayField(
+    record.consoleFindings,
+    parseConsoleFinding,
+  );
+  const networkFindings = parseArrayField(
+    record.networkFindings,
+    parseNetworkFinding,
+  );
+  // A present-but-non-array field is malformed: fail the whole parse closed.
+  if (
+    assertions === null ||
+    mediaRefs === null ||
+    consoleFindings === null ||
+    networkFindings === null
+  ) {
+    return null;
+  }
+
   return {
     schemaVersion: 1,
     kind: "symphony-browser-qa-evidence",
     targetUrl: readString(record.targetUrl),
     headSha: readString(record.headSha),
     scenario: readString(record.scenario),
-    assertions: readArray(record.assertions, parseAssertion),
-    mediaRefs: readArray(record.mediaRefs, parseMediaRef),
-    consoleFindings: readArray(record.consoleFindings, parseConsoleFinding),
-    networkFindings: readArray(record.networkFindings, parseNetworkFinding),
+    assertions,
+    mediaRefs,
+    consoleFindings,
+    networkFindings,
     failureRule,
   };
 }
@@ -283,12 +309,22 @@ function parseNetworkFinding(value: unknown): BrowserQaNetworkFinding | null {
   };
 }
 
-function readArray<T>(
+/**
+ * Parse an array field. Returns:
+ *   - `[]` when the field is absent (undefined) — legitimately empty.
+ *   - `null` when the field is present but not an array — malformed (caller
+ *     fails closed).
+ *   - the parsed entries (malformed entries dropped) when it is an array.
+ */
+function parseArrayField<T>(
   value: unknown,
   parse: (entry: unknown) => T | null,
-): T[] {
-  if (!Array.isArray(value)) {
+): T[] | null {
+  if (value === undefined) {
     return [];
+  }
+  if (!Array.isArray(value)) {
+    return null;
   }
   const parsed: T[] = [];
   for (const entry of value) {

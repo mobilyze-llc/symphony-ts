@@ -162,18 +162,68 @@ describe("parseBrowserQaEvidence", () => {
     ).toBeNull();
   });
 
-  it("coerces malformed nested arrays without throwing", () => {
+  it("drops malformed entries within an otherwise-valid array without throwing", () => {
     const raw = JSON.parse(JSON.stringify(completeEvidence())) as Record<
       string,
       unknown
     >;
     raw.assertions = [{ description: "ok", passed: true }, "garbage", null];
-    raw.consoleFindings = "not-an-array";
     const evidence = parseBrowserQaEvidence(raw);
     expect(evidence).not.toBeNull();
     // The single well-formed assertion survives; malformed entries are dropped.
     expect(evidence?.assertions).toHaveLength(1);
+  });
+
+  it("treats a legitimately absent array field as empty (not malformed)", () => {
+    const raw = JSON.parse(JSON.stringify(completeEvidence())) as Record<
+      string,
+      unknown
+    >;
+    // These optional finding arrays are simply not present (undefined).
+    raw.consoleFindings = undefined;
+    raw.networkFindings = undefined;
+    raw.mediaRefs = undefined;
+    const evidence = parseBrowserQaEvidence(raw);
+    expect(evidence).not.toBeNull();
     expect(evidence?.consoleFindings).toEqual([]);
+    expect(evidence?.networkFindings).toEqual([]);
+    expect(evidence?.mediaRefs).toEqual([]);
+  });
+
+  it("fails closed (null) when consoleFindings is present but not an array (malformed)", () => {
+    const raw = JSON.parse(JSON.stringify(completeEvidence())) as Record<
+      string,
+      unknown
+    >;
+    raw.consoleFindings = "not-an-array";
+    expect(parseBrowserQaEvidence(raw)).toBeNull();
+  });
+
+  it("fails closed (null) when networkFindings is present but not an array (malformed)", () => {
+    const raw = JSON.parse(JSON.stringify(completeEvidence())) as Record<
+      string,
+      unknown
+    >;
+    raw.networkFindings = { 0: { url: "x" } };
+    expect(parseBrowserQaEvidence(raw)).toBeNull();
+  });
+
+  it("fails closed (null) when mediaRefs is present but not an array (malformed)", () => {
+    const raw = JSON.parse(JSON.stringify(completeEvidence())) as Record<
+      string,
+      unknown
+    >;
+    raw.mediaRefs = "screenshot.png";
+    expect(parseBrowserQaEvidence(raw)).toBeNull();
+  });
+
+  it("fails closed (null) when assertions is present but not an array (malformed)", () => {
+    const raw = JSON.parse(JSON.stringify(completeEvidence())) as Record<
+      string,
+      unknown
+    >;
+    raw.assertions = "submit enabled";
+    expect(parseBrowserQaEvidence(raw)).toBeNull();
   });
 
   it("treats a failed parse-able assertion as a violated rule via the assessor", () => {

@@ -174,6 +174,28 @@ export async function runCrabrunnerReviewJobGroup(
     );
   }
 
+  // Contract: at most ONE optional browser-QA lane. More than one would let a
+  // later passing QA result overwrite an earlier blocking one (only the last
+  // qaResult is retained), so a multi-QA-lane group fails closed BEFORE any
+  // dispatch rather than risking a masked blocking QA.
+  const browserQaLaneCount = input.lanes.filter(
+    (lane) => lane.kind === "browser-qa",
+  ).length;
+  if (browserQaLaneCount > 1) {
+    return {
+      verdict: "error",
+      runGroupId: input.runGroupId,
+      lanes: [],
+      degradedConditions: ["multiple_browser_qa_lanes"],
+      provenance: {
+        runGroupId: input.runGroupId,
+        currentHeadSha: input.currentHeadSha,
+        lanes: [],
+      },
+      qa: null,
+    };
+  }
+
   const reviewerMappings: ReviewerLaneMapping[] = [];
   const provenanceLanes: ReviewJobGroupLaneProvenance[] = [];
   const degradedConditions: string[] = [];
@@ -555,11 +577,26 @@ interface ParsedReviewerArtifact {
   structuredArtifact: StructuredReviewerArtifact;
 }
 
+const REQUIRED_REVIEWER_SECTION_KEYS = [
+  "p1",
+  "p2",
+  "track",
+  "dismissedOrTheoretical",
+  "triage",
+] as const;
+
 /**
  * Parse a collected reviewer artifact record into the existing
  * `StructuredReviewerArtifact` contract plus the head SHA it was bound to.
- * Returns null for any non-object / wrong-kind / wrong-schema / missing-field
- * input so the lane fails closed as malformed.
+ * Returns null for any non-object / wrong-kind / wrong-schema input so the lane
+ * fails closed as malformed.
+ *
+ * This validates the FULL structured-artifact envelope — not just the lane
+ * identity — so a structurally incomplete artifact (e.g. verdict:"pass" but
+ * missing routing/confidence/sections/findings) can never produce a group PASS
+ * (P2-A). Deep per-finding/section *content* validation remains owned by the
+ * council gate's validator; here we require every top-level field to be present
+ * and well-typed.
  */
 function parseReviewerArtifact(value: unknown): ParsedReviewerArtifact | null {
   const record = recordOrNull(value);
@@ -572,10 +609,6 @@ function parseReviewerArtifact(value: unknown): ParsedReviewerArtifact | null {
   ) {
     return null;
   }
-  const laneRecord = recordOrNull(record.lane);
-  if (laneRecord === null) {
-    return null;
-  }
   const verdict = record.verdict;
   if (verdict !== "pass" && verdict !== "fail" && verdict !== "error") {
     return null;
@@ -584,20 +617,63 @@ function parseReviewerArtifact(value: unknown): ParsedReviewerArtifact | null {
   if (typeof headSha !== "string" || headSha.trim() === "") {
     return null;
   }
+  if (!isWellFormedReviewerLane(record.lane)) {
+    return null;
+  }
+  if (!isWellFormedReviewerRouting(record.routing)) {
+    return null;
+  }
   if (
-    typeof laneRecord.laneId !== "string" ||
-    typeof laneRecord.agent !== "string" ||
-    typeof laneRecord.modelFamily !== "string"
+    typeof record.confidence !== "number" ||
+    !Number.isFinite(record.confidence)
   ) {
     return null;
   }
-  // The record already conforms to the structured artifact contract — pass it
-  // through as the typed artifact (the council gate's full validator owns deeper
-  // section/finding validation; here we only need a well-formed envelope).
+  if (!isWellFormedReviewerSections(record.sections)) {
+    return null;
+  }
+  // Findings must be a present array (entries may be empty, e.g. a clean PASS).
+  if (!Array.isArray(record.findings)) {
+    return null;
+  }
   return {
     headSha,
     structuredArtifact: record as unknown as StructuredReviewerArtifact,
   };
+}
+
+function isWellFormedReviewerLane(value: unknown): boolean {
+  const lane = recordOrNull(value);
+  return (
+    lane !== null &&
+    typeof lane.laneId === "string" &&
+    typeof lane.agent === "string" &&
+    typeof lane.role === "string" &&
+    typeof lane.model === "string" &&
+    typeof lane.modelFamily === "string" &&
+    typeof lane.independentReviewer === "boolean" &&
+    typeof lane.mergeAuthoritative === "boolean"
+  );
+}
+
+function isWellFormedReviewerRouting(value: unknown): boolean {
+  const routing = recordOrNull(value);
+  return (
+    routing !== null &&
+    typeof routing.mode === "string" &&
+    typeof routing.round === "number" &&
+    Number.isFinite(routing.round)
+  );
+}
+
+function isWellFormedReviewerSections(value: unknown): boolean {
+  const sections = recordOrNull(value);
+  if (sections === null) {
+    return false;
+  }
+  return REQUIRED_REVIEWER_SECTION_KEYS.every(
+    (key) => typeof sections[key] === "string",
+  );
 }
 
 function collectArtifactHashes(
@@ -608,10 +684,11 @@ function collectArtifactHashes(
     return [];
   }
   const usage = terminal.usage;
-  // Crabrunner terminal evidence does not currently carry per-artifact hashes;
-  // the artifact refs ARE the host-owned provenance. When a future scheduler
-  // adds hashes, surface them here. Until then this stays an explicit empty
-  // (never a fabricated hash).
+  // TODO(SYMPH-853): the production CrabrunnerSchedulerClient will surface real
+  // per-artifact content hashes on terminal evidence; map them here so cross-
+  // host provenance carries integrity hashes alongside the artifact refs. Until
+  // that client exists, the artifact refs ARE the host-owned provenance and this
+  // stays an explicit empty — never a fabricated hash.
   void usage;
   return [];
 }
