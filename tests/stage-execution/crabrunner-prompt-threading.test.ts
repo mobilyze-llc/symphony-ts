@@ -1,8 +1,8 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { AgentRunInput } from "../../src/agent/runner.js";
 import type { StageDefinition } from "../../src/config/types.js";
@@ -49,8 +49,9 @@ describe("crabrunner default prompt resolver (SYMPH-856)", () => {
     expect(typeof promptFile).toBe("string");
     expect((promptFile as string).length).toBeGreaterThan(0);
 
-    const contents = await readFile(promptFile as string, "utf8");
     // strictVariables is on; the rendered prompt carries the issue context.
+    // Contents snapshotted at submit (execute() cleans up the temp file after).
+    const contents = capture.promptContents() ?? "";
     expect(contents).toContain("Work on SYMPH-1: Thread the stage prompt");
     expect(contents).toContain("State: In Progress");
   });
@@ -79,10 +80,7 @@ describe("crabrunner default prompt resolver (SYMPH-856)", () => {
     });
 
     expect(result.result.runAttempt.status).toBe("succeeded");
-    const contents = await readFile(
-      capture.manifest().prompt_file as string,
-      "utf8",
-    );
+    const contents = capture.promptContents() ?? "";
     expect(contents).toContain("STAGE prompt wins for SYMPH-1");
     expect(contents).not.toContain("GLOBAL fallback");
   });
@@ -138,6 +136,10 @@ describe("crabrunner default prompt resolver (SYMPH-856)", () => {
   });
 
   it("an explicit resolvePromptFile override still wins over the default renderer", async () => {
+    const overrideDir = await mkdtemp(join(tmpdir(), "override-wins-"));
+    const overridePath = join(overrideDir, "explicit-prompt.md");
+    await writeFile(overridePath, "precomputed override prompt", "utf8");
+
     const capture = createManifestCaptureCli();
     const backend = createCrabrunnerStageExecutionBackend({
       crucibleRoot: "/tmp/crucible",
@@ -149,7 +151,7 @@ describe("crabrunner default prompt resolver (SYMPH-856)", () => {
         workflowPath: "/tmp/workflow/WORKFLOW.md",
       },
       // An injected override (e.g. a precomputed path) must bypass the renderer.
-      resolvePromptFile: () => "/tmp/explicit-prompt.md",
+      resolvePromptFile: () => overridePath,
     });
 
     const result = await backend.execute({
@@ -158,7 +160,10 @@ describe("crabrunner default prompt resolver (SYMPH-856)", () => {
     });
 
     expect(result.result.runAttempt.status).toBe("succeeded");
-    expect(capture.manifest().prompt_file).toBe("/tmp/explicit-prompt.md");
+    expect(capture.manifest().prompt_file).toBe(overridePath);
+    expect(capture.promptContents()).toBe("precomputed override prompt");
+
+    await rm(overrideDir, { recursive: true, force: true });
   });
 
   it("supports an injected renderer fake for fully deterministic tests", async () => {
@@ -186,11 +191,136 @@ describe("crabrunner default prompt resolver (SYMPH-856)", () => {
 
     expect(result.result.runAttempt.status).toBe("succeeded");
     expect(seenStageName).toBe("implement");
-    const contents = await readFile(
-      capture.manifest().prompt_file as string,
-      "utf8",
-    );
+    const contents = capture.promptContents() ?? "";
     expect(contents).toBe("RENDERED:SYMPH-1:unused when renderer injected");
+  });
+
+  it("fails closed when a present template renders to whitespace (P2-1) — no prompt_file, no submit", async () => {
+    const capture = createManifestCaptureCli();
+    const backend = createCrabrunnerStageExecutionBackend({
+      crucibleRoot: "/tmp/crucible",
+      targetRepoRoot: "/tmp/repo",
+      pollIntervalMs: 0,
+      cli: capture.cli,
+      promptRendering: {
+        // Present, non-blank SOURCE, but renders to only whitespace — a template
+        // bug the operator must see, distinct from an absent template.
+        promptTemplate: "{{ issue.description }}   \n  ",
+        workflowPath: "/tmp/workflow/WORKFLOW.md",
+      },
+    });
+
+    const result = await backend.execute({
+      job: createJob(),
+      runnerInput: createRunnerInput(),
+    });
+
+    expect(result.result.runAttempt.status).toBe("failed");
+    expect(result.result.runAttempt.error ?? "").toContain(
+      "crabrunner_prompt_render_failed",
+    );
+    expect(result.result.runAttempt.error ?? "").toMatch(/empty/i);
+    expect(capture.submitted()).toBe(false);
+  });
+
+  it("removes the owned temp prompt dir after a successful job (P2-2)", async () => {
+    const capture = createManifestCaptureCli();
+    const backend = createCrabrunnerStageExecutionBackend({
+      crucibleRoot: "/tmp/crucible",
+      targetRepoRoot: "/tmp/repo",
+      pollIntervalMs: 0,
+      cli: capture.cli,
+      promptRendering: {
+        promptTemplate: "Work on {{ issue.identifier }}",
+        workflowPath: "/tmp/workflow/WORKFLOW.md",
+      },
+    });
+
+    const result = await backend.execute({
+      job: createJob(),
+      runnerInput: createRunnerInput(),
+    });
+
+    expect(result.result.runAttempt.status).toBe("succeeded");
+    const promptFile = capture.manifest().prompt_file as string;
+    // The lane consumed it during submit/collect (captured above); after
+    // execute() returns terminal, the owned temp dir must be gone.
+    const dir = dirname(promptFile);
+    expect(dir).toContain("crabrunner-prompt-");
+    expect(await pathExists(dir)).toBe(false);
+  });
+
+  it("removes the owned temp prompt dir even when the job fails after render (P2-2)", async () => {
+    // Render succeeds (temp dir created), but submit is rejected — the finally
+    // must still clean the owned dir on the non-success path.
+    let capturedPromptFile: string | null = null;
+    const cli: CrabrunnerCli = async (args) => {
+      if (args[0] === "submit") {
+        const manifest = JSON.parse(
+          await readFile(manifestPathFromArgs(args), "utf8"),
+        ) as Record<string, unknown>;
+        capturedPromptFile =
+          typeof manifest.prompt_file === "string"
+            ? manifest.prompt_file
+            : null;
+        return ok(
+          statusJson({ state: "failed", job_id: "j1", collectible: false }),
+        );
+      }
+      throw new Error(`unexpected subcommand ${args[0]}`);
+    };
+    const backend = createCrabrunnerStageExecutionBackend({
+      crucibleRoot: "/tmp/crucible",
+      targetRepoRoot: "/tmp/repo",
+      pollIntervalMs: 0,
+      cli,
+      promptRendering: {
+        promptTemplate: "Work on {{ issue.identifier }}",
+        workflowPath: "/tmp/workflow/WORKFLOW.md",
+      },
+    });
+
+    const result = await backend.execute({
+      job: createJob(),
+      runnerInput: createRunnerInput(),
+    });
+
+    expect(result.result.runAttempt.status).toBe("failed");
+    const promptFile: string | null = capturedPromptFile;
+    if (promptFile === null) {
+      throw new Error("expected the manifest to carry a prompt_file");
+    }
+    const dir = dirname(promptFile);
+    expect(dir).toContain("crabrunner-prompt-");
+    expect(await pathExists(dir)).toBe(false);
+  });
+
+  it("does NOT delete an explicit resolvePromptFile override path (P2-2)", async () => {
+    const overrideDir = await mkdtemp(join(tmpdir(), "override-keep-"));
+    const overridePath = join(overrideDir, "prompt.md");
+    await writeFile(overridePath, "explicit prompt", "utf8");
+
+    const capture = createManifestCaptureCli();
+    const backend = createCrabrunnerStageExecutionBackend({
+      crucibleRoot: "/tmp/crucible",
+      targetRepoRoot: "/tmp/repo",
+      pollIntervalMs: 0,
+      cli: capture.cli,
+      // Override points outside the owned crabrunner-prompt- prefix; cleanup
+      // must leave it untouched.
+      resolvePromptFile: () => overridePath,
+    });
+
+    const result = await backend.execute({
+      job: createJob(),
+      runnerInput: createRunnerInput(),
+    });
+
+    expect(result.result.runAttempt.status).toBe("succeeded");
+    expect(capture.manifest().prompt_file).toBe(overridePath);
+    expect(await pathExists(overridePath)).toBe(true);
+
+    await rm(overrideDir, { recursive: true, force: true });
   });
 });
 
@@ -198,13 +328,14 @@ describe("crabrunner default prompt resolver (SYMPH-856)", () => {
 
 // Real on-disk artifact/usage files so the collect step resolves a present
 // artifact and reaches a succeeded terminal — without spawning any subprocess.
+let fixtureDir = "";
 let artifactPath = "";
 let usagePath = "";
 
 beforeAll(async () => {
-  const dir = await mkdtemp(join(tmpdir(), "crabrunner-pt-fixtures-"));
-  artifactPath = join(dir, "artifact.json");
-  usagePath = join(dir, "usage.json");
+  fixtureDir = await mkdtemp(join(tmpdir(), "crabrunner-pt-fixtures-"));
+  artifactPath = join(fixtureDir, "artifact.json");
+  usagePath = join(fixtureDir, "usage.json");
   await writeFile(artifactPath, JSON.stringify({ ok: true }), "utf8");
   await writeFile(
     usagePath,
@@ -219,17 +350,40 @@ beforeAll(async () => {
   );
 });
 
+afterAll(async () => {
+  // Clean the fixture dir this suite created (DeepSeek noted these leak too).
+  if (fixtureDir !== "") {
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * A fake CrabrunnerCli that captures the manifest the scheduler client writes on
  * `submit`, and records whether submit was ever reached. status/collect succeed
  * so a submitted job round-trips to a succeeded terminal.
+ *
+ * It also snapshots the rendered prompt_file CONTENTS at submit time — the only
+ * point the file is guaranteed to exist, since execute() cleans up the owned
+ * temp dir after the job is terminal (P2-2). Tests assert on these snapshotted
+ * contents rather than re-reading the (cleaned) file after execute() returns.
  */
 function createManifestCaptureCli(): {
   cli: CrabrunnerCli;
   manifest: () => Record<string, unknown>;
+  promptContents: () => string | null;
   submitted: () => boolean;
 } {
   let captured: Record<string, unknown> | null = null;
+  let capturedPrompt: string | null = null;
   let didSubmit = false;
   const cli: CrabrunnerCli = async (args) => {
     switch (args[0]) {
@@ -240,6 +394,11 @@ function createManifestCaptureCli(): {
           string,
           unknown
         >;
+        const promptFile = captured.prompt_file;
+        capturedPrompt =
+          typeof promptFile === "string"
+            ? await readFile(promptFile, "utf8")
+            : null;
         return ok(
           statusJson({ state: "queued", job_id: "j1", collectible: false }),
         );
@@ -275,6 +434,7 @@ function createManifestCaptureCli(): {
       }
       return captured;
     },
+    promptContents: () => capturedPrompt,
     submitted: () => didSubmit,
   };
 }

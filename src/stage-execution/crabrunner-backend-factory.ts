@@ -15,7 +15,10 @@ import type {
   StageExecutionBackendInput,
   StageExecutionBackendRunner,
 } from "./backend.js";
-import { CrabrunnerStageExecutionBackend } from "./crabrunner-backend.js";
+import {
+  CRABRUNNER_TEMP_PROMPT_DIR_PREFIX,
+  CrabrunnerStageExecutionBackend,
+} from "./crabrunner-backend.js";
 import {
   type CrabrunnerCli,
   CrabrunnerCliSchedulerClient,
@@ -168,12 +171,18 @@ function resolveResolvePromptFile(
  *   - The render context is built field-for-field from `runnerInput`.
  *
  * Fail-closed contract:
- *   - A RENDER FAILURE (strictVariables miss, parse error, unreadable file) is
- *     allowed to THROW. The backend's `execute()` catches it and yields a failed
- *     result carrying the real error — never an empty/placeholder prompt.
- *   - A GENUINELY ABSENT template (empty source after resolution) returns
- *     undefined so the scheduler client fails closed at submit
+ *   - A RENDER FAILURE (strictVariables miss, parse error, unreadable file, or a
+ *     present template that renders to empty/whitespace) is allowed to THROW.
+ *     The backend's `execute()` catches it and yields a failed result carrying
+ *     the real error — never an empty/placeholder prompt.
+ *   - A GENUINELY ABSENT template (empty/blank source) returns undefined so the
+ *     scheduler client fails closed at submit
  *     (`crabrunner_prompt_required_symph_856`).
+ *
+ * The empty-render-vs-absent-template distinction matters (Codex P2-1): a
+ * non-empty Liquid template that resolves to nothing is an operator-visible
+ * template bug, not a "no prompt configured" case, so it must surface as a
+ * render failure rather than the absent-template rejection.
  */
 async function renderStagePromptToFile(args: {
   input: StageExecutionBackendInput;
@@ -220,7 +229,14 @@ async function renderStagePromptToFile(args: {
     modePolicy: runnerInput.modePolicy ?? null,
   });
 
-  const dir = await mkdtemp(join(tmpdir(), "crabrunner-prompt-"));
+  // P2-1: a present template that renders to empty/whitespace is a template bug,
+  // NOT an absent template. Throw so execute() surfaces it as a failed result
+  // (crabrunner_prompt_render_failed) — never launch a lane with no instructions.
+  if (rendered.trim().length === 0) {
+    throw new Error("rendered stage prompt is empty");
+  }
+
+  const dir = await mkdtemp(join(tmpdir(), CRABRUNNER_TEMP_PROMPT_DIR_PREFIX));
   const promptPath = join(dir, "prompt.md");
   await writeFile(promptPath, rendered, "utf8");
   return promptPath;

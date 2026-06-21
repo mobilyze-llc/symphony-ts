@@ -1,3 +1,7 @@
+import { rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, resolve, sep } from "node:path";
+
 import type { AgentRunResult } from "../agent/runner.js";
 import {
   type RunAttemptPhase,
@@ -14,6 +18,15 @@ import type {
 } from "./backend.js";
 
 export const CRABRUNNER_JOB_SPEC_VERSION = "symphony.crabrunner.job.v1";
+
+/**
+ * Prefix for the OS-temp directories the factory's default prompt resolver
+ * creates (SYMPH-856). `execute()` cleans up only directories under
+ * `tmpdir()` whose name carries this prefix, so an explicit `resolvePromptFile`
+ * override pointing elsewhere is never deleted. The factory imports this
+ * constant so the create-side and clean-side stay in lockstep.
+ */
+export const CRABRUNNER_TEMP_PROMPT_DIR_PREFIX = "crabrunner-prompt-";
 
 export type CrabrunnerTerminalState =
   | "succeeded"
@@ -150,8 +163,16 @@ export interface CrabrunnerStageExecutionBackendOptions {
    *
    * Async because the production resolver (the factory's default) renders the
    * LiquidJS stage prompt and writes it to a temp file. A render failure (e.g. a
-   * strictVariables miss) must REJECT, not resolve: `execute()` lets the
-   * rejection surface as a failed result rather than emitting an empty prompt.
+   * strictVariables miss, or a present template that renders to empty) must
+   * REJECT, not resolve: `execute()` catches the rejection and surfaces it as a
+   * failed result rather than emitting an empty prompt.
+   *
+   * Error-code contract (DeepSeek P2-3): when this throws, `execute()` labels the
+   * failure `crabrunner_prompt_render_failed`. The factory's DEFAULT resolver
+   * throws ONLY LiquidJS render / template-resolution failures, so that code is
+   * accurate for it. A CUSTOM override that can fail for unrelated reasons
+   * (network, permission) either surfaces its own classification upstream or
+   * accepts this code — the backend does not attempt to distinguish causes.
    */
   resolvePromptFile?: (
     input: StageExecutionBackendInput,
@@ -207,68 +228,83 @@ export class CrabrunnerStageExecutionBackend
         error: `crabrunner_prompt_render_failed: ${formatUnknownError(error)}`,
       });
     }
-    const spec = createCrabrunnerJobSpec(input, this.dryRun, promptFile);
-    const enforcementFailure = validateCrabrunnerLaneEnforcementContract(spec);
-    if (enforcementFailure !== null) {
-      return this.toBackendResult(input, {
-        admission: {
-          status: "rejected",
-          jobId: null,
-          reason: enforcementFailure.message ?? "enforcement_contract_missing",
-        },
-        terminal: enforcementFailure,
-        artifactRefs: [],
-        usage: null,
-        status: "failed",
-        error: `crabrunner_${enforcementFailure.state}: ${
-          enforcementFailure.message ?? enforcementFailure.state
-        }`,
-      });
-    }
+    // P2-2: clean up the temp prompt dir WE own after the job is terminal. The
+    // lane worker consumes the file before the job becomes terminal, and this
+    // method only returns after collect() (terminal), so cleanup-after-execute
+    // is safe for the local-host path. (For future REMOTE hosts, materialization
+    // copies the prompt first; cleanup-after-terminal still holds.) An explicit
+    // resolvePromptFile override pointing outside the owned prefix is left
+    // untouched.
+    try {
+      const spec = createCrabrunnerJobSpec(input, this.dryRun, promptFile);
+      const enforcementFailure =
+        validateCrabrunnerLaneEnforcementContract(spec);
+      if (enforcementFailure !== null) {
+        return this.toBackendResult(input, {
+          admission: {
+            status: "rejected",
+            jobId: null,
+            reason:
+              enforcementFailure.message ?? "enforcement_contract_missing",
+          },
+          terminal: enforcementFailure,
+          artifactRefs: [],
+          usage: null,
+          status: "failed",
+          error: `crabrunner_${enforcementFailure.state}: ${
+            enforcementFailure.message ?? enforcementFailure.state
+          }`,
+        });
+      }
 
-    const admission = await this.submit(spec);
+      const admission = await this.submit(spec);
 
-    if (admission.status === "rejected") {
+      if (admission.status === "rejected") {
+        return this.toBackendResult(input, {
+          admission,
+          terminal: null,
+          artifactRefs: [],
+          usage: null,
+          status: "failed",
+          error: `crabrunner_admission_rejected: ${admission.reason ?? "rejected"}`,
+        });
+      }
+
+      if (admission.jobId === null || admission.jobId.trim().length === 0) {
+        return this.toBackendResult(input, {
+          admission,
+          terminal: null,
+          artifactRefs: [],
+          usage: null,
+          status: "failed",
+          error: "crabrunner_admission_accepted_without_job_id",
+        });
+      }
+
+      const terminal = await this.collectTerminalEvidence(
+        admission.jobId,
+        input.runnerInput.signal,
+        spec,
+      );
+      const status = mapCrabrunnerTerminalStateToRunAttemptPhase(
+        terminal.state,
+      );
+      const error =
+        status === "succeeded"
+          ? undefined
+          : `crabrunner_${terminal.state}: ${terminal.message ?? terminal.state}`;
+
       return this.toBackendResult(input, {
         admission,
-        terminal: null,
-        artifactRefs: [],
-        usage: null,
-        status: "failed",
-        error: `crabrunner_admission_rejected: ${admission.reason ?? "rejected"}`,
+        terminal,
+        artifactRefs: terminal.artifactRefs ?? [],
+        usage: terminal.usage ?? null,
+        status,
+        ...(error === undefined ? {} : { error }),
       });
+    } finally {
+      await cleanupOwnedTempPromptDir(promptFile);
     }
-
-    if (admission.jobId === null || admission.jobId.trim().length === 0) {
-      return this.toBackendResult(input, {
-        admission,
-        terminal: null,
-        artifactRefs: [],
-        usage: null,
-        status: "failed",
-        error: "crabrunner_admission_accepted_without_job_id",
-      });
-    }
-
-    const terminal = await this.collectTerminalEvidence(
-      admission.jobId,
-      input.runnerInput.signal,
-      spec,
-    );
-    const status = mapCrabrunnerTerminalStateToRunAttemptPhase(terminal.state);
-    const error =
-      status === "succeeded"
-        ? undefined
-        : `crabrunner_${terminal.state}: ${terminal.message ?? terminal.state}`;
-
-    return this.toBackendResult(input, {
-      admission,
-      terminal,
-      artifactRefs: terminal.artifactRefs ?? [],
-      usage: terminal.usage ?? null,
-      status,
-      ...(error === undefined ? {} : { error }),
-    });
   }
 
   private async submit(
@@ -661,4 +697,38 @@ function createCrabrunnerAgentResult(input: {
 
 function formatUnknownError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Remove the temp prompt directory the factory's default resolver created
+ * (SYMPH-856, P2-2). Acts ONLY on a path whose parent directory lives directly
+ * under the OS temp dir and carries {@link CRABRUNNER_TEMP_PROMPT_DIR_PREFIX},
+ * so an explicit `resolvePromptFile` override pointing elsewhere is never
+ * touched. Never throws — cleanup is best-effort.
+ */
+async function cleanupOwnedTempPromptDir(
+  promptFile: string | null | undefined,
+): Promise<void> {
+  if (promptFile === undefined || promptFile === null) {
+    return;
+  }
+  const dir = dirname(resolve(promptFile));
+  const tempRoot = resolve(tmpdir());
+  // Owned dir is `<tmpdir>/<prefix><random>`: its parent must be exactly the
+  // temp root (no nesting), and its name must carry the owned prefix.
+  if (dirname(dir) !== tempRoot) {
+    return;
+  }
+  if (
+    !dir
+      .slice(tempRoot.length + sep.length)
+      .startsWith(CRABRUNNER_TEMP_PROMPT_DIR_PREFIX)
+  ) {
+    return;
+  }
+  try {
+    await rm(dir, { recursive: true, force: true });
+  } catch {
+    // Best-effort: a missing/locked temp dir must not fail the job.
+  }
 }
