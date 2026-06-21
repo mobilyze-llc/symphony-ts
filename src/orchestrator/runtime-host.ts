@@ -5265,7 +5265,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       endedAt?: Date;
     },
   ): Promise<void> {
-    this.workers.delete(execution.issueId);
+    const wasActiveExecution = this.workers.delete(execution.issueId);
     this.expectedBaseRevisions.delete(execution.issueId);
 
     // Kill orphaned child processes (vitest, pnpm, bash) that survive the abort signal.
@@ -5555,6 +5555,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         preExhaustedHas,
         capturedFirstDispatchedAt,
         durationMs,
+        wasActiveExecution,
       });
     }
   }
@@ -5811,6 +5812,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       preExhaustedHas: boolean;
       capturedFirstDispatchedAt: string | null;
       durationMs: number;
+      wasActiveExecution: boolean;
     },
   ): void {
     // biome-ignore lint/style/noNonNullAssertion: caller guards notifier !== null
@@ -5862,6 +5864,24 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     }
 
     if (state.resumeRequired.has(execution.issueId)) {
+      if (captured.wasActiveExecution) {
+        const hardStop = execution.lastResult?.hardStop ?? null;
+        const pauseReason =
+          execution.stopRequest !== null
+            ? `stopped after ${execution.stopRequest.reason}`
+            : hardStop !== null
+              ? `${hardStop.trigger.replaceAll("_", " ")} - ${hardStop.reason}`
+              : (input.reason ?? "resume required");
+        notifier.notify({
+          type: "issue_paused",
+          issueIdentifier: execution.issueIdentifier,
+          issueTitle: captured.capturedTitle,
+          issueUrl: captured.capturedUrl,
+          stageName: execution.stageName,
+          reason: pauseReason,
+          operatorAction: "Move the issue to Resume after review.",
+        });
+      }
       return;
     }
 

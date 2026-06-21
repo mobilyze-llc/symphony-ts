@@ -6691,7 +6691,7 @@ describe("pipeline notifications", () => {
     );
   });
 
-  it("does not emit issue_failed for an intentional manual stop", async () => {
+  it("emits issue_paused instead of issue_failed for an intentional manual stop", async () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();
     const notifier = createMockNotifier();
@@ -6707,6 +6707,8 @@ describe("pipeline notifications", () => {
     });
 
     await host.pollOnce();
+    // biome-ignore lint/suspicious/noExplicitAny: accessing private field for duplicate-finalization regression setup
+    const worker = (host as any).workers.get("1");
     const stopResponse = await host.requestIssueStop("ISSUE-1");
     await host.waitForIdle();
 
@@ -6716,13 +6718,42 @@ describe("pipeline notifications", () => {
     });
     expect(notifier.events).toEqual([
       expect.objectContaining({ type: "issue_dispatched" }),
+      expect.objectContaining({
+        type: "issue_paused",
+        issueIdentifier: "ISSUE-1",
+        issueTitle: "Issue 1",
+        issueUrl: null,
+        stageName: null,
+        reason: "stopped after manual_stop",
+        operatorAction: "Move the issue to Resume after review.",
+      }),
     ]);
+    expect(notifier.events).not.toContainEqual(
+      expect.objectContaining({ type: "issue_failed" }),
+    );
+    expect(notifier.events).not.toContainEqual(
+      expect.objectContaining({ type: "infra_error" }),
+    );
 
     const snapshot = await host.getRuntimeSnapshot();
     expect(snapshot.counts.failed).toBe(0);
 
     const stillActive = await host.pollOnce();
     expect(stillActive.dispatchedIssueIds).toEqual([]);
+    expect(
+      notifier.events.filter((event) => event.type === "issue_paused"),
+    ).toHaveLength(1);
+    // A duplicate finalization must not double-ping operators for an already
+    // parked issue.
+    // biome-ignore lint/suspicious/noExplicitAny: exercising private finalizer guard directly
+    await (host as any).finalizeWorkerExecution(worker, {
+      outcome: "abnormal",
+      reason: "stopped after manual_stop",
+      endedAt: new Date("2026-03-06T00:00:06.000Z"),
+    });
+    expect(
+      notifier.events.filter((event) => event.type === "issue_paused"),
+    ).toHaveLength(1);
   });
 
   it("aborts workers before awaiting stop-request telemetry logging", async () => {
@@ -6861,10 +6892,22 @@ describe("pipeline notifications", () => {
     );
     expect(notifier.events).toEqual([
       expect.objectContaining({ type: "issue_dispatched" }),
+      expect.objectContaining({
+        type: "issue_paused",
+        issueIdentifier: "ISSUE-1",
+        issueTitle: "Issue 1",
+        issueUrl: null,
+        stageName: null,
+        reason: "stopped after manual_stop",
+        operatorAction: "Move the issue to Resume after review.",
+      }),
     ]);
 
     const stillActive = await host.pollOnce();
     expect(stillActive.dispatchedIssueIds).toEqual([]);
+    expect(
+      notifier.events.filter((event) => event.type === "issue_paused"),
+    ).toHaveLength(1);
   });
 
   it("targets the tracked app-server pid for stop signal delivery", async () => {
@@ -7121,6 +7164,15 @@ describe("pipeline notifications", () => {
     );
     expect(notifier.events).toEqual([
       expect.objectContaining({ type: "issue_dispatched" }),
+      expect.objectContaining({
+        type: "issue_paused",
+        issueIdentifier: "ISSUE-1",
+        issueTitle: "Issue 1",
+        issueUrl: null,
+        stageName: null,
+        reason: "stopped after manual_stop",
+        operatorAction: "Move the issue to Resume after review.",
+      }),
     ]);
   });
 
@@ -7764,7 +7816,7 @@ describe("pipeline notifications", () => {
     ]);
   });
 
-  it("does not emit issue_failed for a budget hard stop pause", async () => {
+  it("emits issue_paused without issue_failed for a budget hard stop pause", async () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();
     const notifier = createMockNotifier();
@@ -7802,14 +7854,29 @@ describe("pipeline notifications", () => {
     });
     await host.waitForIdle();
 
-    // Events: dispatched + hard_stop_budget (SYMPH-397)
+    // Events: dispatched + hard_stop_budget (SYMPH-397) + explicit pause notification.
     expect(notifier.events).toEqual([
       expect.objectContaining({ type: "issue_dispatched" }),
       expect.objectContaining({
         type: "hard_stop_budget",
         issueIdentifier: "ISSUE-1",
       }),
+      expect.objectContaining({
+        type: "issue_paused",
+        issueIdentifier: "ISSUE-1",
+        issueTitle: "Issue 1",
+        issueUrl: null,
+        stageName: null,
+        reason: "token budget - Token budget exceeded.",
+        operatorAction: "Move the issue to Resume after review.",
+      }),
     ]);
+    expect(notifier.events).not.toContainEqual(
+      expect.objectContaining({ type: "issue_failed" }),
+    );
+    expect(notifier.events).not.toContainEqual(
+      expect.objectContaining({ type: "infra_error" }),
+    );
 
     const snapshot = await host.getRuntimeSnapshot();
     expect(snapshot.counts.failed).toBe(0);
@@ -7836,6 +7903,9 @@ describe("pipeline notifications", () => {
 
     const stillActive = await host.pollOnce();
     expect(stillActive.dispatchedIssueIds).toEqual([]);
+    expect(
+      notifier.events.filter((event) => event.type === "issue_paused"),
+    ).toHaveLength(1);
   });
 
   it("logs Codex input-required exits as paused and avoids retry burn", async () => {
@@ -7872,6 +7942,16 @@ describe("pipeline notifications", () => {
 
     expect(notifier.events).toEqual([
       expect.objectContaining({ type: "issue_dispatched" }),
+      expect.objectContaining({
+        type: "issue_paused",
+        issueIdentifier: "ISSUE-1",
+        issueTitle: "Issue 1",
+        issueUrl: null,
+        stageName: null,
+        reason:
+          "codex_user_input_required: Codex requested operator input during a turn.",
+        operatorAction: "Move the issue to Resume after review.",
+      }),
     ]);
     const snapshot = await host.getRuntimeSnapshot();
     expect(snapshot.counts.failed).toBe(0);
@@ -7894,6 +7974,9 @@ describe("pipeline notifications", () => {
 
     const stillActive = await host.pollOnce();
     expect(stillActive.dispatchedIssueIds).toEqual([]);
+    expect(
+      notifier.events.filter((event) => event.type === "issue_paused"),
+    ).toHaveLength(1);
   });
 
   it("fires stall_killed when a stall timeout aborts a worker", async () => {

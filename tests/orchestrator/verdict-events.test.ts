@@ -1096,6 +1096,22 @@ describe("dispatch verdict events (SYMPH-405)", () => {
   });
 
   it("formats the new notifier events with attribution", () => {
+    const paused = formatNotification({
+      type: "issue_paused",
+      issueIdentifier: "ISSUE-1",
+      issueTitle: "Pause notifications",
+      issueUrl: "https://linear.app/test/issue/ISSUE-1",
+      stageName: "implementation",
+      reason: "token budget - Token budget exceeded.",
+      operatorAction: "Move the issue to Resume after review.",
+    });
+    expect(paused.text).toContain("Issue paused");
+    expect(paused.text).toContain("Resume required");
+    expect(paused.text).toContain("https://linear.app/test/issue/ISSUE-1");
+    expect(paused.text).toContain("Stage: implementation");
+    expect(paused.text).toContain("token budget - Token budget exceeded.");
+    expect(paused.text).toContain("Move the issue to Resume after review.");
+
     const verdict = formatNotification({
       type: "dispatch_verdict_alert",
       issueIdentifier: "ISSUE-1",
