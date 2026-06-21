@@ -182,6 +182,79 @@ stages:
           - code-review-graph
           - serve
     on_complete: review
+    # SYMPH-835: implement is decomposed into bounded, capsule-scoped sub-stages.
+    # The sequence is data-driven here (not hard-coded): each sub-stage carries
+    # its own budget ceiling, and capsules hand off BY PATH (never the full prior
+    # transcript). Stage transitions, the rework counter, and merge-readiness
+    # stay orchestrator-owned; no sub-stage advances stage state. Wave 3 wires
+    # this sequence into runtime-host dispatch behind the StageExecutionBackend
+    # seam (deterministic first, then a live crabrunner canary).
+    execution:
+      role: implementer
+      phase: implement
+      # Undecomposed, implement is control-needing (decision doc 17.3), so the
+      # parent stage stays on the in-loop current-runner path. The bounded
+      # sub-stages below are the delegated (crabrunner) units that Wave 3 wires.
+      backend: current-runner
+      sub_stages:
+        - name: patch-plan
+          execution:
+            role: implementer
+            phase: implement
+            backend: crabrunner
+            budget:
+              max_tokens: 40000
+            capsules:
+              produce:
+                - capsules/patch-plan.json
+        - name: first-patch
+          execution:
+            role: implementer
+            phase: implement
+            backend: crabrunner
+            budget:
+              max_tokens: 80000
+            capsules:
+              consume:
+                - capsules/patch-plan.json
+              produce:
+                - capsules/first-patch.json
+        - name: focused-tests
+          execution:
+            role: implementer
+            phase: implement
+            backend: crabrunner
+            budget:
+              max_tokens: 60000
+            capsules:
+              consume:
+                - capsules/first-patch.json
+              produce:
+                - capsules/focused-tests.json
+        - name: repair
+          execution:
+            role: implementer
+            phase: implement
+            backend: crabrunner
+            budget:
+              max_tokens: 80000
+            capsules:
+              consume:
+                - capsules/focused-tests.json
+              produce:
+                - capsules/repair.json
+        - name: pr-assembly
+          execution:
+            role: implementer
+            phase: implement
+            backend: crabrunner
+            budget:
+              max_tokens: 30000
+            capsules:
+              consume:
+                - capsules/repair.json
+              produce:
+                - capsules/pr-assembly.json
 
   review:
     type: agent

@@ -1210,8 +1210,16 @@ export type DelegatedStageCapsuleReadiness =
       reason: "missing_required_capsule_ref";
     };
 
+/**
+ * Evaluate whether a delegated stage attempt's required capsules are present.
+ * Only `attempt.capsules` is read, so the parameter is narrowed to
+ * `Pick<DelegatedStageAttemptRecord, "capsules">` — full attempt records remain
+ * valid arguments, and lighter callers (e.g. the SYMPH-835 decomposition
+ * runner) can pass just a capsule list. A required capsule with an empty path
+ * fails closed (`"fail"`) or degrades (`"degrade"`).
+ */
 export function evaluateDelegatedStageCapsuleReadiness(
-  attempt: DelegatedStageAttemptRecord,
+  attempt: Pick<DelegatedStageAttemptRecord, "capsules">,
   policy: DelegatedStageMissingCapsulePolicy = "fail",
 ): DelegatedStageCapsuleReadiness {
   const missingCapsules = attempt.capsules
