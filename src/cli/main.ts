@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { resolveWorkflowConfig } from "../config/config-resolver.js";
 import { WORKFLOW_FILENAME } from "../config/defaults.js";
+import type { StageExecutionBackend as StageExecutionBackendKind } from "../config/types.js";
 import { loadWorkflowDefinition } from "../config/workflow-loader.js";
 import { ERROR_CODES } from "../errors/codes.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
@@ -18,6 +19,8 @@ import {
   type RuntimeServiceHandle,
   startRuntimeService,
 } from "../orchestrator/runtime-host.js";
+import type { StageExecutionBackendRunner } from "../stage-execution/backend.js";
+import { createCrabrunnerStageExecutionBackends } from "../stage-execution/crabrunner-backend-factory.js";
 import { getDisplayVersion } from "../version.js";
 
 export const CLI_ACKNOWLEDGEMENT_FLAG = "--acknowledge-high-trust-preview";
@@ -222,10 +225,60 @@ export async function startCliHost(
     tokenPresent: slackToken !== undefined,
   });
 
+  // Gated-canary crabrunner backend (SYMPH-853): registered only when
+  // SYMPHONY_CRABRUNNER_ROOT is set and non-empty. Absent => production is
+  // unchanged (no crabrunner backend; the host keeps only current-runner).
+  const stageExecutionBackends = buildCrabrunnerStageExecutionBackends(
+    input.env,
+  );
+
   return startRuntimeService({
     config: input.runtime.config,
     logsRoot: input.runtime.logsRoot,
     notifier,
+    ...(stageExecutionBackends === null ? {} : { stageExecutionBackends }),
+  });
+}
+
+/**
+ * Build the gated crabrunner stage-execution backend map from environment, or
+ * return null when the canary is not enabled (the common production path).
+ *
+ * Enabled iff `SYMPHONY_CRABRUNNER_ROOT` is set and non-empty (the Crucible
+ * repo root). `SYMPHONY_CRABRUNNER_TARGET_REPO` selects the target repo root
+ * (defaults to `REPO_URL`, then cwd); `SYMPHONY_CRABRUNNER_HOST` and
+ * `SYMPHONY_CRABRUNNER_STATE_ROOT` are optional overrides.
+ */
+export function buildCrabrunnerStageExecutionBackends(
+  env: NodeJS.ProcessEnv,
+): ReadonlyMap<StageExecutionBackendKind, StageExecutionBackendRunner> | null {
+  const crucibleRoot = env.SYMPHONY_CRABRUNNER_ROOT;
+  if (crucibleRoot === undefined || crucibleRoot.trim() === "") {
+    return null;
+  }
+
+  const targetRepoRoot =
+    env.SYMPHONY_CRABRUNNER_TARGET_REPO ?? env.REPO_URL ?? process.cwd();
+  const host = env.SYMPHONY_CRABRUNNER_HOST;
+  const stateRoot = env.SYMPHONY_CRABRUNNER_STATE_ROOT;
+
+  logToStderr({
+    timestamp: formatEasternTimestamp(new Date()),
+    level: "info",
+    event: "crabrunner_backend_enabled",
+    crucibleRoot,
+    targetRepoRoot,
+    host: host ?? "local",
+    stateRootOverride: stateRoot !== undefined && stateRoot.trim() !== "",
+  });
+
+  return createCrabrunnerStageExecutionBackends({
+    crucibleRoot: crucibleRoot.trim(),
+    targetRepoRoot: targetRepoRoot.trim(),
+    ...(host === undefined || host.trim() === "" ? {} : { host: host.trim() }),
+    ...(stateRoot === undefined || stateRoot.trim() === ""
+      ? {}
+      : { stateRoot: stateRoot.trim() }),
   });
 }
 

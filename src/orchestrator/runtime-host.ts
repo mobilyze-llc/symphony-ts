@@ -459,6 +459,16 @@ export interface RuntimeServiceOptions {
    * pre-built `runtimeHost` is supplied (that host owns its own command).
    */
   runContinuousFeedbackCommand?: ContinuousFeedbackCommandExecutor;
+  /**
+   * Additional stage-execution backends forwarded to the default-constructed
+   * host (SYMPH-853). The host always keeps its own current-runner default;
+   * this only adds entries (e.g. the gated crabrunner backend). Ignored when a
+   * pre-built `runtimeHost` is supplied.
+   */
+  stageExecutionBackends?: ReadonlyMap<
+    StageExecutionBackendKind,
+    StageExecutionBackendRunner
+  >;
 }
 
 export interface RuntimeServiceHandle {
@@ -5848,6 +5858,9 @@ export async function startRuntimeService(
         : {
             runContinuousFeedbackCommand: options.runContinuousFeedbackCommand,
           }),
+      ...(options.stageExecutionBackends === undefined
+        ? {}
+        : { stageExecutionBackends: options.stageExecutionBackends }),
     });
   const usesManagedTracker = options.tracker === undefined;
   const usesManagedWorkspaceManager = options.workspaceManager === undefined;

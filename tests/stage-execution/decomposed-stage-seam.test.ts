@@ -41,11 +41,20 @@ describe("decomposed-stage seam insulation", () => {
   });
 
   it("keeps the crabrunner scheduler client confined to the crabrunner backend", async () => {
+    // The CrabrunnerSchedulerClient interface may only appear in:
+    //  - crabrunner-backend.ts: the interface declaration + its consumer.
+    //  - crabrunner-scheduler-client.ts (SYMPH-853): the production
+    //    `implements CrabrunnerSchedulerClient` over `bin/crabrunner`.
+    // No decomposed-stage runner or other consumer may couple to it directly.
+    const allowed = new Set([
+      "crabrunner-backend.ts",
+      "crabrunner-scheduler-client.ts",
+    ]);
     const dirUrl = new URL("../../src/stage-execution/", import.meta.url);
     const entries = await readdir(dirUrl);
     const offenders: string[] = [];
     for (const entry of entries) {
-      if (!entry.endsWith(".ts") || entry === "crabrunner-backend.ts") {
+      if (!entry.endsWith(".ts") || allowed.has(entry)) {
         continue;
       }
       const source = await readFile(new URL(entry, dirUrl), "utf8");
