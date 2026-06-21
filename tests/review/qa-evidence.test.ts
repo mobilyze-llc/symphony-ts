@@ -114,6 +114,27 @@ describe("assessBrowserQaEvidence", () => {
     expect(assessment.disposition).toBe("block");
     expect(assessment.reasons).toContain("qa_evidence_malformed:headSha");
   });
+
+  it("passes when the QA head sha matches the expected current head (freshness)", () => {
+    const assessment = assessBrowserQaEvidence(
+      completeEvidence({ headSha: "abc123def456" }),
+      { currentHeadSha: "abc123def456" },
+    );
+    expect(assessment.disposition).toBe("pass");
+    expect(assessment.reasons).toEqual([]);
+  });
+
+  it("blocks (fail closed) when the QA artifact targets a stale head", () => {
+    // A QA run captured against an older commit must not count toward a PASS,
+    // even if every assertion passed and the failure rule is not violated.
+    const assessment = assessBrowserQaEvidence(
+      completeEvidence({ headSha: "stale-head-zzz" }),
+      { currentHeadSha: "current-head-aaa" },
+    );
+    expect(assessment.disposition).toBe("block");
+    expect(assessment.blocking).toBe(true);
+    expect(assessment.reasons).toContain("qa_stale_review");
+  });
 });
 
 describe("parseBrowserQaEvidence", () => {
@@ -165,5 +186,59 @@ describe("parseBrowserQaEvidence", () => {
     expect(evidence).not.toBeNull();
     const assessment = assessBrowserQaEvidence(evidence);
     expect(assessment.disposition).toBe("block");
+  });
+
+  it("fails closed (null) when failureRule.violated is omitted", () => {
+    // An omitted `violated` must NOT silently parse as false (which would let a
+    // malformed artifact PASS). The contract is fail-closed on malformed QA.
+    const raw = JSON.parse(JSON.stringify(completeEvidence())) as Record<
+      string,
+      unknown
+    >;
+    raw.failureRule = {
+      id: "no-console-errors",
+      description: "no console errors and all assertions pass",
+    };
+    const evidence = parseBrowserQaEvidence(raw);
+    expect(evidence).toBeNull();
+    // The missing artifact then fails closed at the assessor.
+    expect(assessBrowserQaEvidence(evidence).disposition).toBe("block");
+  });
+
+  it("fails closed (null) when failureRule.violated is a string instead of a boolean", () => {
+    const raw = JSON.parse(JSON.stringify(completeEvidence())) as Record<
+      string,
+      unknown
+    >;
+    raw.failureRule = {
+      id: "no-console-errors",
+      description: "no console errors and all assertions pass",
+      violated: "true",
+    };
+    expect(parseBrowserQaEvidence(raw)).toBeNull();
+  });
+
+  it("accepts an explicit boolean violated of either value", () => {
+    const rawTrue = JSON.parse(JSON.stringify(completeEvidence())) as Record<
+      string,
+      unknown
+    >;
+    rawTrue.failureRule = {
+      id: "no-console-errors",
+      description: "rule",
+      violated: true,
+    };
+    expect(parseBrowserQaEvidence(rawTrue)?.failureRule.violated).toBe(true);
+
+    const rawFalse = JSON.parse(JSON.stringify(completeEvidence())) as Record<
+      string,
+      unknown
+    >;
+    rawFalse.failureRule = {
+      id: "no-console-errors",
+      description: "rule",
+      violated: false,
+    };
+    expect(parseBrowserQaEvidence(rawFalse)?.failureRule.violated).toBe(false);
   });
 });

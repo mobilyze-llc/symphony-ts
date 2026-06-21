@@ -221,6 +221,7 @@ export async function runCrabrunnerReviewJobGroup(
         lane,
         laneEvidence,
         substrateCondition,
+        currentHeadSha: input.currentHeadSha,
         collectArtifact: input.collectArtifact,
         qaMissingPolicy: input.qaMissingPolicy ?? "block",
       });
@@ -239,11 +240,22 @@ export async function runCrabrunnerReviewJobGroup(
     degradedConditions.push(...mapping.conditions);
   }
 
+  const routingGuaranteeConditions = input.routingGuaranteeConditions ?? [];
   const verdict = resolveGroupVerdict({
     reviewerMappings,
-    routingGuaranteeConditions: input.routingGuaranteeConditions ?? [],
+    routingGuaranteeConditions,
     qaResult,
   });
+
+  // Routing-guarantee conditions are machine-readable reasons for a non-pass
+  // verdict; surface them in degradedConditions (they feed the verdict but were
+  // otherwise invisible there). Appended after lane/QA conditions to preserve
+  // ordering, deduped against anything already recorded.
+  for (const condition of routingGuaranteeConditions) {
+    if (!degradedConditions.includes(condition)) {
+      degradedConditions.push(condition);
+    }
+  }
 
   return {
     verdict,
@@ -369,6 +381,25 @@ async function mapReviewerLane(input: {
     });
   }
 
+  // Anti-spoof: the collected artifact must be bound to THIS lane. An artifact
+  // whose self-reported lane identity (laneId/agent/modelFamily) does not match
+  // the lane spec it was collected for could be a misattributed artifact from
+  // another lane/head and must never be counted in verdict aggregation.
+  const artifactLane = artifact.structuredArtifact.lane;
+  if (
+    artifactLane.laneId !== lane.laneId ||
+    artifactLane.agent !== lane.agent ||
+    artifactLane.modelFamily !== lane.modelFamily
+  ) {
+    return errorReviewerMapping({
+      lane,
+      condition: `artifact_lane_mismatch:${lane.laneId}`,
+      degradedReason: "malformed_artifact",
+      message: `reviewer artifact lane ${artifactLane.agent}/${artifactLane.modelFamily}#${artifactLane.laneId} does not match expected lane ${lane.agent}/${lane.modelFamily}#${lane.laneId}`,
+      structuredArtifact: artifact.structuredArtifact,
+    });
+  }
+
   // Freshness: the rerun must assert the current PR head. A reviewer artifact
   // bound to any other head SHA is stale and fails closed.
   if (artifact.headSha !== input.currentHeadSha) {
@@ -464,6 +495,7 @@ async function assessQaLane(input: {
   lane: CrabrunnerReviewLaneSpec;
   laneEvidence: ReviewJobGroupLaneEvidence;
   substrateCondition: LaneSubstrateCondition;
+  currentHeadSha: string;
   collectArtifact: (
     lane: ReviewJobGroupLaneEvidence,
   ) => Promise<unknown> | unknown;
@@ -488,8 +520,11 @@ async function assessQaLane(input: {
 
   const collected = await input.collectArtifact(input.laneEvidence);
   const evidence = parseBrowserQaEvidence(collected);
+  // Freshness is asserted here too: the QA evidence must target the current PR
+  // head, mirroring the reviewer-lane stale-head check.
   const assessment = assessBrowserQaEvidence(evidence, {
     policy: input.qaMissingPolicy,
+    currentHeadSha: input.currentHeadSha,
   });
   return { laneId: input.lane.laneId, evidence, assessment };
 }

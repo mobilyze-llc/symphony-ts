@@ -82,6 +82,13 @@ export interface AssessBrowserQaEvidenceOptions {
    * `"degrade"` records an explicit degraded disposition (still gating).
    */
   policy?: "block" | "degrade";
+  /**
+   * The current PR head SHA the QA run must have targeted (freshness). When
+   * provided, a QA artifact bound to any other head SHA is stale and fails
+   * closed — the same head-assertion the reviewer lanes enforce. When omitted,
+   * only the presence of `headSha` is checked (back-compat).
+   */
+  currentHeadSha?: string;
 }
 
 const CONSOLE_LEVELS: ReadonlySet<string> = new Set([
@@ -125,6 +132,13 @@ export function assessBrowserQaEvidence(
   }
   if (evidence.headSha.trim() === "") {
     reasons.push("qa_evidence_malformed:headSha");
+  } else if (
+    options.currentHeadSha !== undefined &&
+    evidence.headSha !== options.currentHeadSha
+  ) {
+    // Freshness: a QA run captured against an older commit must not count
+    // toward a PASS, mirroring the reviewer-lane current-head assertion.
+    reasons.push("qa_stale_review");
   }
   if (evidence.scenario.trim() === "") {
     reasons.push("qa_evidence_malformed:scenario");
@@ -199,10 +213,16 @@ function parseFailureRule(value: unknown): BrowserQaFailureRule | null {
   if (record === null) {
     return null;
   }
+  // `violated` is the pass/fail decision: it MUST be an explicit boolean. An
+  // omitted or wrong-typed value is malformed and fails closed (null) rather
+  // than silently coercing to false, which would let a malformed artifact pass.
+  if (typeof record.violated !== "boolean") {
+    return null;
+  }
   return {
     id: readString(record.id),
     description: readString(record.description),
-    violated: record.violated === true,
+    violated: record.violated,
   };
 }
 
