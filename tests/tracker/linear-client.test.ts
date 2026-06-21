@@ -15,6 +15,10 @@ import {
   LinearTrackerClient,
   type TrackerError,
 } from "../../src/index.js";
+import {
+  LINEAR_CANDIDATE_ISSUES_BY_SCOPE_QUERY,
+  buildCandidateScopeFilter,
+} from "../../src/tracker/linear-queries.js";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -96,6 +100,107 @@ describe("LinearTrackerClient", () => {
       relationFirst: 50,
       after: "cursor-1",
     });
+  });
+
+  it("fetchCandidateIssuesByScope sends the composed additive filter and paginates (SYMPH-858)", async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issues: {
+              nodes: [
+                issueNode({
+                  id: "1",
+                  identifier: "MOB-1",
+                  title: "First",
+                  createdAt: "2026-06-01T00:00:00.000Z",
+                }),
+              ],
+              pageInfo: { hasNextPage: true, endCursor: "cursor-1" },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issues: {
+              nodes: [
+                issueNode({
+                  id: "2",
+                  identifier: "MOB-2",
+                  title: "Second",
+                  createdAt: "2026-06-02T00:00:00.000Z",
+                }),
+              ],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        }),
+      );
+
+    const client = createClient({ fetchFn });
+    const issues = await client.fetchCandidateIssuesByScope({
+      teamKeys: ["MOB"],
+      projectSlug: "abc123",
+      initiative: "Healthspanners",
+    });
+
+    expect(issues.map((issue) => issue.identifier)).toEqual(["MOB-1", "MOB-2"]);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+
+    const firstRequest = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    // Composed single-$filter query (NOT one of the dispatch-trigger queries).
+    expect(firstRequest.query).toBe(LINEAR_CANDIDATE_ISSUES_BY_SCOPE_QUERY);
+    expect(firstRequest.variables).toEqual({
+      filter: buildCandidateScopeFilter({
+        teamKeys: ["MOB"],
+        projectSlug: "abc123",
+        initiative: "Healthspanners",
+        activeStates: ["Todo", "In Progress"],
+      }),
+      first: 50,
+      relationFirst: 50,
+      after: null,
+    });
+
+    const secondRequest = parseRequestBody(fetchFn.mock.calls[1]?.[1]);
+    expect(secondRequest.variables.after).toBe("cursor-1");
+  });
+
+  it("fetchCandidateIssuesByScope rejects an empty scope rather than fetching the whole workspace (SYMPH-858)", async () => {
+    const fetchFn = vi.fn<typeof fetch>();
+    const client = createClient({ fetchFn });
+    await expect(client.fetchCandidateIssuesByScope({})).rejects.toThrow(
+      /at least one/i,
+    );
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("fetchCandidateIssuesByScope honours a non-default page size (SYMPH-858)", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          issues: {
+            nodes: [
+              issueNode({
+                id: "1",
+                identifier: "MOB-9",
+                title: "Only",
+                createdAt: "2026-06-01T00:00:00.000Z",
+              }),
+            ],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      }),
+    );
+    const client = createClient({ fetchFn, pageSize: 7 });
+    await client.fetchCandidateIssuesByScope({ projectSlug: "abc123" });
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(request.variables.first).toBe(7);
+    expect(request.variables.relationFirst).toBe(7);
   });
 
   it("fetches candidate issues by team key (eligible backlog, no project filter) when team_keys is set (SYMPH-794)", async () => {

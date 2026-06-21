@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { PlannerRunResult } from "../../src/agent/triage-planner.js";
 import {
+  type ManagerPlanCandidateQuery,
   ManagerPlanCliUsageError,
   parseManagerPlanCliArgs,
   runManagerPlanCli,
@@ -113,6 +114,31 @@ describe("parseManagerPlanCliArgs", () => {
     ).toBe(true);
   });
 
+  it("parses --project and --initiative scope flags (SYMPH-858)", () => {
+    const opts = parseManagerPlanCliArgs([
+      "--project",
+      "abc123",
+      "--initiative",
+      "Healthspanners",
+      "--state",
+      "Backlog",
+    ]);
+    expect(opts.project).toBe("abc123");
+    expect(opts.initiative).toBe("Healthspanners");
+    expect(opts.team).toBeNull();
+  });
+
+  it("defaults --project and --initiative to null when omitted (SYMPH-858)", () => {
+    const opts = parseManagerPlanCliArgs([
+      "--team",
+      "MOB",
+      "--state",
+      "Backlog",
+    ]);
+    expect(opts.project).toBeNull();
+    expect(opts.initiative).toBeNull();
+  });
+
   it("rejects a non-integer concurrency ceiling", () => {
     expect(() =>
       parseManagerPlanCliArgs(["--concurrency-ceiling", "abc"]),
@@ -136,7 +162,7 @@ describe("parseManagerPlanCliArgs", () => {
 });
 
 describe("runManagerPlanCli", () => {
-  it("errors when --team is missing", async () => {
+  it("errors when no scope (team/project/initiative) is given (SYMPH-858)", async () => {
     const { io, err } = captureIo();
     const code = await runManagerPlanCli(["--state", "Backlog"], {
       io,
@@ -145,7 +171,77 @@ describe("runManagerPlanCli", () => {
       createPlannerRunner: okRunner,
     });
     expect(code).toBe(1);
-    expect(err()).toMatch(/--team/);
+    expect(err()).toMatch(/at least one scope/i);
+  });
+
+  it("accepts --project alone (no --team) and passes it to the loader (SYMPH-858)", async () => {
+    const { io } = captureIo();
+    const seen: ManagerPlanCandidateQuery[] = [];
+    await runManagerPlanCli(
+      ["--project", "abc123", "--state", "Backlog", "--prompt-only"],
+      {
+        io,
+        env: {},
+        loadCandidates: async (input) => {
+          seen.push(input);
+          return [issue("u1", "MOB-1")];
+        },
+        createPlannerRunner: okRunner,
+      },
+    );
+    expect(seen[0]?.teamKeys).toEqual([]);
+    expect(seen[0]?.projectSlug).toBe("abc123");
+    expect(seen[0]?.initiative).toBeNull();
+  });
+
+  it("accepts --initiative alone and passes it to the loader (SYMPH-858)", async () => {
+    const { io } = captureIo();
+    const seen: ManagerPlanCandidateQuery[] = [];
+    await runManagerPlanCli(
+      ["--initiative", "Healthspanners", "--state", "Backlog", "--prompt-only"],
+      {
+        io,
+        env: {},
+        loadCandidates: async (input) => {
+          seen.push(input);
+          return [issue("u1", "MOB-1")];
+        },
+        createPlannerRunner: okRunner,
+      },
+    );
+    expect(seen[0]?.teamKeys).toEqual([]);
+    expect(seen[0]?.projectSlug).toBeNull();
+    expect(seen[0]?.initiative).toBe("Healthspanners");
+  });
+
+  it("passes additive --team + --project + --initiative scope to the loader (SYMPH-858)", async () => {
+    const { io } = captureIo();
+    const seen: ManagerPlanCandidateQuery[] = [];
+    await runManagerPlanCli(
+      [
+        "--team",
+        "MOB",
+        "--project",
+        "abc123",
+        "--initiative",
+        "Healthspanners",
+        "--state",
+        "Backlog",
+        "--prompt-only",
+      ],
+      {
+        io,
+        env: {},
+        loadCandidates: async (input) => {
+          seen.push(input);
+          return [issue("u1", "MOB-1")];
+        },
+        createPlannerRunner: okRunner,
+      },
+    );
+    expect(seen[0]?.teamKeys).toEqual(["MOB"]);
+    expect(seen[0]?.projectSlug).toBe("abc123");
+    expect(seen[0]?.initiative).toBe("Healthspanners");
   });
 
   it("errors when --state is missing", async () => {
@@ -351,6 +447,48 @@ describe("runManagerPlanCli", () => {
     expect(code).toBe(0);
     const parsed = JSON.parse(out());
     expect(parsed.batches[0].members[0].issueIdentifier).toBe("MOB-1");
+  });
+
+  it("emits project and initiative scope in --json output (SYMPH-858)", async () => {
+    const { io, out } = captureIo();
+    const code = await runManagerPlanCli(
+      [
+        "--project",
+        "abc123",
+        "--initiative",
+        "Healthspanners",
+        "--state",
+        "Backlog",
+        "--json",
+      ],
+      {
+        io,
+        env: {},
+        loadCandidates: async () => [issue("u1", "MOB-1")],
+        createPlannerRunner: okRunner,
+      },
+    );
+    expect(code).toBe(0);
+    const parsed = JSON.parse(out());
+    expect(parsed.project).toBe("abc123");
+    expect(parsed.initiative).toBe("Healthspanners");
+    expect(parsed.team).toBeNull();
+  });
+
+  it("describes the active scope in the no-candidates message (SYMPH-858)", async () => {
+    const { io, out } = captureIo();
+    const code = await runManagerPlanCli(
+      ["--project", "abc123", "--state", "Backlog"],
+      {
+        io,
+        env: {},
+        loadCandidates: async () => [],
+        createPlannerRunner: okRunner,
+      },
+    );
+    expect(code).toBe(0);
+    expect(out()).toContain("project abc123");
+    expect(out()).not.toContain("team");
   });
 
   it("excludes portfolio-held candidates from manager planning JSON", async () => {

@@ -200,6 +200,112 @@ export const LINEAR_CANDIDATE_ISSUES_BY_TEAMS_QUERY = `
   }
 `.trim();
 
+// Composed-scope candidate source for the manual one-shot Manager / planner CLI
+// (symphony-manager-plan, SYMPH-858). Unlike the dispatch-trigger candidate
+// queries above, this takes a single `$filter: IssueFilter!` built by
+// buildCandidateScopeFilter so --team / --project / --initiative compose
+// ADDITIVELY. Used ONLY by the output-only CLI loader; the orchestrator dispatch
+// path (fetchCandidateIssues) is intentionally untouched.
+export const LINEAR_CANDIDATE_ISSUES_BY_SCOPE_QUERY = `
+  query SymphonyCandidateIssuesByScope(
+    $filter: IssueFilter!
+    $first: Int!
+    $relationFirst: Int!
+    $after: String
+  ) {
+    issues(
+      first: $first
+      after: $after
+      filter: $filter
+      orderBy: createdAt
+    ) {
+      nodes {
+        ${ISSUE_FIELDS}
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`.trim();
+
+/** Canonical 8-4-4-4-12 UUID, case-insensitive (Linear initiative ids). */
+const INITIATIVE_UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export interface CandidateScopeFilterInput {
+  /** Linear team keys; ANDed via `team.key.in`. */
+  teamKeys?: string[];
+  /** Linear project slugId; ANDed via `project.slugId.eq`. */
+  projectSlug?: string | null;
+  /**
+   * Linear initiative reference, matched by `id` when the value is a canonical
+   * UUID and by `name` otherwise (name is the identifier an operator typically
+   * knows; the UUID `id` is unambiguous).
+   */
+  initiative?: string | null;
+  /** Eligible-to-start workflow state names; always ANDed via `state.name.in`. */
+  activeStates: string[];
+}
+
+/**
+ * Build a Linear `IssueFilter` that ANDs whichever scope selectors are provided
+ * (additive --team / --project / --initiative) plus the active-state filter.
+ * `--project` and `--initiative` merge into one `project { slugId, initiatives }`
+ * object. Throws when no scope is provided (so a caller can never accidentally
+ * fetch the entire workspace backlog) and when activeStates is empty — the
+ * returned filter always constrains both scope and state (SYMPH-858).
+ */
+export function buildCandidateScopeFilter(
+  input: CandidateScopeFilterInput,
+): Record<string, unknown> {
+  const teamKeys = (input.teamKeys ?? []).filter(
+    (key) => key.trim().length > 0,
+  );
+  const projectSlug =
+    input.projectSlug && input.projectSlug.trim().length > 0
+      ? input.projectSlug.trim()
+      : null;
+  const initiative =
+    input.initiative && input.initiative.trim().length > 0
+      ? input.initiative.trim()
+      : null;
+
+  const project: Record<string, unknown> = {};
+  if (projectSlug !== null) {
+    project.slugId = { eq: projectSlug };
+  }
+  if (initiative !== null) {
+    project.initiatives = {
+      some: INITIATIVE_UUID_PATTERN.test(initiative)
+        ? { id: { eq: initiative } }
+        : { name: { eq: initiative } },
+    };
+  }
+
+  if (teamKeys.length === 0 && Object.keys(project).length === 0) {
+    throw new Error(
+      "buildCandidateScopeFilter requires at least one of teamKeys, projectSlug, or initiative.",
+    );
+  }
+  if (input.activeStates.length === 0) {
+    throw new Error(
+      "buildCandidateScopeFilter requires at least one active state.",
+    );
+  }
+
+  const filter: Record<string, unknown> = {};
+  if (teamKeys.length > 0) {
+    filter.team = { key: { in: teamKeys } };
+  }
+  if (Object.keys(project).length > 0) {
+    filter.project = project;
+  }
+  filter.state = { name: { in: input.activeStates } };
+  return filter;
+}
+
 export const LINEAR_ISSUES_BY_STATES_QUERY = `
   query SymphonyIssuesByStates(
     $projectSlug: String!

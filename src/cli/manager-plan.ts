@@ -52,6 +52,8 @@ export const MANAGER_PLAN_EXIT = {
 
 export interface ManagerPlanCliOptions {
   team: string | null;
+  project: string | null;
+  initiative: string | null;
   states: string[];
   concurrencyCeiling: number;
   risk: PlanRiskTier;
@@ -74,6 +76,8 @@ export interface ManagerPlanCandidateQuery {
   endpoint: string;
   apiKey: string | null;
   teamKeys: string[];
+  projectSlug: string | null;
+  initiative: string | null;
   activeStates: string[];
   pageSize: number | null;
 }
@@ -108,6 +112,8 @@ export function parseManagerPlanCliArgs(
   argv: readonly string[],
 ): ManagerPlanCliOptions {
   let team: string | null = null;
+  let project: string | null = null;
+  let initiative: string | null = null;
   const states: string[] = [];
   let concurrencyCeiling = DEFAULT_MANAGER_PLAN_CONCURRENCY_CEILING;
   let risk: PlanRiskTier = "medium";
@@ -151,6 +157,12 @@ export function parseManagerPlanCliArgs(
       case "--team":
         team = readValue("--team");
         break;
+      case "--project":
+        project = readValue("--project");
+        break;
+      case "--initiative":
+        initiative = readValue("--initiative");
+        break;
       case "--state":
         states.push(readValue("--state"));
         break;
@@ -182,6 +194,8 @@ export function parseManagerPlanCliArgs(
 
   return {
     team,
+    project,
+    initiative,
     states,
     concurrencyCeiling,
     risk,
@@ -219,8 +233,22 @@ export async function runManagerPlanCli(
     return MANAGER_PLAN_EXIT.ok;
   }
 
-  if (options.team === null || options.team.trim() === "") {
-    io.stderr(`Missing required --team <KEY>.\n${renderUsage()}`);
+  // Additive scope (SYMPH-858): --team / --project / --initiative AND together;
+  // at least one is required. --team-only stays exactly as before.
+  const teamKeys =
+    options.team !== null && options.team.trim() !== "" ? [options.team] : [];
+  const projectSlug =
+    options.project !== null && options.project.trim() !== ""
+      ? options.project
+      : null;
+  const initiative =
+    options.initiative !== null && options.initiative.trim() !== ""
+      ? options.initiative
+      : null;
+  if (teamKeys.length === 0 && projectSlug === null && initiative === null) {
+    io.stderr(
+      `Provide at least one scope: --team <KEY>, --project <slugId>, or --initiative <name|uuid>.\n${renderUsage()}`,
+    );
     return MANAGER_PLAN_EXIT.usage;
   }
   if (options.states.length === 0) {
@@ -272,7 +300,9 @@ export async function runManagerPlanCli(
     candidates = await loadCandidates({
       endpoint,
       apiKey,
-      teamKeys: [options.team],
+      teamKeys,
+      projectSlug,
+      initiative,
       activeStates: options.states,
       pageSize: options.pageSize,
     });
@@ -295,7 +325,7 @@ export async function runManagerPlanCli(
 
   if (context.backlog.length === 0) {
     io.stdout(
-      `No eligible candidates for team ${options.team} in state(s) [${options.states.join(", ")}].\nNothing to plan (the model was not invoked). Check --state against the team's workflow state names.\n`,
+      `No eligible candidates for ${describeScope(options)} in state(s) [${options.states.join(", ")}].\nNothing to plan (the model was not invoked). Check --state against the scope's workflow state names.\n`,
     );
     return MANAGER_PLAN_EXIT.ok;
   }
@@ -328,6 +358,21 @@ export async function runManagerPlanCli(
   return MANAGER_PLAN_EXIT.ok;
 }
 
+/** Human-readable descriptor of the active additive scope (SYMPH-858). */
+function describeScope(options: ManagerPlanCliOptions): string {
+  const parts: string[] = [];
+  if (options.team !== null && options.team.trim() !== "") {
+    parts.push(`team ${options.team}`);
+  }
+  if (options.project !== null && options.project.trim() !== "") {
+    parts.push(`project ${options.project}`);
+  }
+  if (options.initiative !== null && options.initiative.trim() !== "") {
+    parts.push(`initiative ${options.initiative}`);
+  }
+  return parts.join(" + ");
+}
+
 function renderPlanJson(
   options: ManagerPlanCliOptions,
   candidateCount: number,
@@ -337,6 +382,8 @@ function renderPlanJson(
   return JSON.stringify(
     {
       team: options.team,
+      project: options.project,
+      initiative: options.initiative,
       states: options.states,
       candidateCount,
       portfolioHeldCount,
@@ -365,7 +412,7 @@ function renderPlanHuman(
 ): string {
   const lines: string[] = [];
   lines.push(
-    `Manager plan — team ${options.team}, state(s) [${options.states.join(", ")}], ${candidateCount} candidate(s)`,
+    `Manager plan — ${describeScope(options)}, state(s) [${options.states.join(", ")}], ${candidateCount} candidate(s)`,
   );
   if (portfolioHeldCount > 0) {
     lines.push(
@@ -436,12 +483,20 @@ async function defaultLoadCandidates(
   const client = new LinearTrackerClient({
     endpoint: query.endpoint,
     apiKey: query.apiKey,
-    projectSlug: null,
+    projectSlug: query.projectSlug,
     teamKeys: query.teamKeys,
     activeStates: query.activeStates,
     ...(query.pageSize === null ? {} : { pageSize: query.pageSize }),
   });
-  return client.fetchCandidateIssues();
+  // fetchCandidateIssuesByScope composes its own filter from this scope arg; the
+  // constructor's projectSlug/teamKeys are inert for this path (only activeStates
+  // and pageSize are read from the client), so the scope is the single source of
+  // truth for what gets queried.
+  return client.fetchCandidateIssuesByScope({
+    teamKeys: query.teamKeys,
+    projectSlug: query.projectSlug,
+    initiative: query.initiative,
+  });
 }
 
 function defaultCreatePlannerRunner(
@@ -468,15 +523,19 @@ function stamp(now: () => Date): string {
 
 export function renderUsage(): string {
   return [
-    "Usage: symphony-manager-plan --team <KEY> --state <name> [--state <name>...] [options]",
+    "Usage: symphony-manager-plan (--team <KEY> | --project <slugId> | --initiative <name|uuid>)... --state <name> [--state <name>...] [options]",
     "",
-    "Run the Queue Triage v2 backlog Manager (planner) ONE-SHOT against a team's",
+    "Run the Queue Triage v2 backlog Manager (planner) ONE-SHOT against the scoped",
     "eligible backlog and print the suggested batch plan. Output-only: it spends one",
     "Opus pass (via cmux-spawn) unless --prompt-only, and writes NOTHING to Linear,",
     "the live standing-plan store, or dispatch.",
     "",
-    "Required:",
+    "Scope (provide at least one; additive — combine them to narrow):",
     "  --team <KEY>                 Linear team key whose backlog to plan (e.g. MOB)",
+    "  --project <slugId>           Linear project slugId to scope candidates to",
+    "  --initiative <name|uuid>     Linear initiative (UUID matches by id, else by name)",
+    "",
+    "Required:",
     "  --state <name>               Eligible-to-start state name (repeatable, e.g. Backlog)",
     "",
     "Options:",
