@@ -1194,7 +1194,15 @@ async function cleanupWorkspaceArtifacts(workspacePath: string): Promise<void> {
   });
 }
 
-async function resolvePromptTemplate(input: {
+/**
+ * Resolve a prompt-template source to its text. A bare single-line value with a
+ * recognized prompt extension and a path separator is read from disk (relative
+ * to the workflow dir); anything else (inline multi-line template, or a value
+ * with no path separator) is returned verbatim. Exported so the crabrunner
+ * dispatch resolver (SYMPH-856) selects the same template source as a turn-1
+ * {@link AgentRunner.run} would, rather than re-implementing the rule.
+ */
+export async function resolvePromptTemplate(input: {
   promptTemplate: string;
   workflowPath: string;
 }): Promise<string> {
@@ -1848,7 +1856,13 @@ function formatLiveBudgetGracePct(ratio: number): string {
   return `${(ratio * 100).toFixed(1).replace(/\.0$/, "")}%`;
 }
 
-function resolveWorkpadRetryContext(input: AgentRunInput): {
+/**
+ * Derive the workpad-retry context the prompt renderer consumes (the
+ * `workpad_present` / `workpad_comment_id` template vars). Exported so the
+ * crabrunner dispatch resolver (SYMPH-856) builds the SAME render context a
+ * turn-1 {@link AgentRunner.run} would, rather than re-deriving the rule.
+ */
+export function resolveWorkpadRetryContext(input: AgentRunInput): {
   present: boolean;
   commentId: string | null;
 } {

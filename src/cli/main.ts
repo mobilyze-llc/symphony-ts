@@ -20,7 +20,10 @@ import {
   startRuntimeService,
 } from "../orchestrator/runtime-host.js";
 import type { StageExecutionBackendRunner } from "../stage-execution/backend.js";
-import { createCrabrunnerStageExecutionBackends } from "../stage-execution/crabrunner-backend-factory.js";
+import {
+  type CrabrunnerPromptRenderingConfig,
+  createCrabrunnerStageExecutionBackends,
+} from "../stage-execution/crabrunner-backend-factory.js";
 import { getDisplayVersion } from "../version.js";
 
 export const CLI_ACKNOWLEDGEMENT_FLAG = "--acknowledge-high-trust-preview";
@@ -228,8 +231,14 @@ export async function startCliHost(
   // Gated-canary crabrunner backend (SYMPH-853): registered only when
   // SYMPHONY_CRABRUNNER_ROOT is set and non-empty. Absent => production is
   // unchanged (no crabrunner backend; the host keeps only current-runner).
+  // The workflow config supplies the prompt-rendering inputs (SYMPH-856) so the
+  // built backend renders + threads the stage prompt into each delegated lane.
   const stageExecutionBackends = buildCrabrunnerStageExecutionBackends(
     input.env,
+    {
+      promptTemplate: input.runtime.config.promptTemplate,
+      workflowPath: input.runtime.config.workflowPath,
+    },
   );
 
   return startRuntimeService({
@@ -251,6 +260,7 @@ export async function startCliHost(
  */
 export function buildCrabrunnerStageExecutionBackends(
   env: NodeJS.ProcessEnv,
+  promptRendering?: CrabrunnerPromptRenderingConfig,
 ): ReadonlyMap<StageExecutionBackendKind, StageExecutionBackendRunner> | null {
   const crucibleRoot = env.SYMPHONY_CRABRUNNER_ROOT;
   if (crucibleRoot === undefined || crucibleRoot.trim() === "") {
@@ -283,6 +293,10 @@ export function buildCrabrunnerStageExecutionBackends(
     ...(stateRoot === undefined || stateRoot.trim() === ""
       ? {}
       : { stateRoot: stateRoot.trim() }),
+    // SYMPH-856: when the workflow config is provided, the default resolver
+    // renders + threads the stage prompt; omitted only by older callers/tests
+    // that just assert backend registration (the lane stays fail-closed then).
+    ...(promptRendering === undefined ? {} : { promptRendering }),
   });
 }
 

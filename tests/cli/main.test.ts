@@ -303,6 +303,23 @@ describe("buildCrabrunnerStageExecutionBackends", () => {
     expect(map).not.toBeNull();
     expect(map!.get("crabrunner")?.backend).toBe("crabrunner");
   });
+
+  it("threads workflow prompt-rendering config into the backend (SYMPH-856)", () => {
+    // With the workflow config provided, the built backend carries the default
+    // prompt-rendering resolver (so an enabled lane gets a prompt_file). The
+    // rendering behavior itself is asserted in the factory test; here we only
+    // confirm main.ts forwards the config and still registers the backend.
+    const map = buildCrabrunnerStageExecutionBackends(
+      { SYMPHONY_CRABRUNNER_ROOT: "/tmp/crucible" },
+      {
+        promptTemplate: "Work on {{ issue.identifier }}",
+        workflowPath: "/repo/WORKFLOW.md",
+      },
+    );
+
+    expect(map).not.toBeNull();
+    expect(map!.get("crabrunner")?.backend).toBe("crabrunner");
+  });
 });
 
 function createConfig(

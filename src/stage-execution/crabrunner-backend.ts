@@ -15,6 +15,15 @@ import type {
 
 export const CRABRUNNER_JOB_SPEC_VERSION = "symphony.crabrunner.job.v1";
 
+/**
+ * Name prefix for the OS-temp directories the factory's default prompt resolver
+ * creates (SYMPH-856). Purely cosmetic/diagnostic — cleanup ownership is tracked
+ * explicitly by the factory (a Set of the dirs it created), NOT inferred from
+ * this prefix, so an override path that happens to share it is never deleted
+ * (recheck-2 P2-1).
+ */
+export const CRABRUNNER_TEMP_PROMPT_DIR_PREFIX = "crabrunner-prompt-";
+
 export type CrabrunnerTerminalState =
   | "succeeded"
   | "timed_out"
@@ -63,8 +72,9 @@ export interface CrabrunnerJobSpec {
    * Path to the rendered stage prompt for the lane worker (SYMPH-856). When
    * present, the scheduler client maps it to manifest `prompt_file` and uses the
    * lane-worker.v1 protocol; when absent (and no worker_argv), the client fails
-   * closed at submit rather than emitting an unrunnable manifest.
-   * TODO(SYMPH-856): live dispatch must render the stage prompt and populate this.
+   * closed at submit rather than emitting an unrunnable manifest. The factory's
+   * default resolver renders the stage prompt and populates this at dispatch
+   * (see `crabrunner-backend-factory.ts`).
    */
   promptFile?: string;
 }
@@ -146,10 +156,34 @@ export interface CrabrunnerStageExecutionBackendOptions {
    * (undefined) leaves `spec.promptFile` absent, so the scheduler client fails
    * closed at submit rather than emitting an unrunnable manifest. Live dispatch
    * supplies this once it renders the stage prompt.
+   *
+   * Async because the production resolver (the factory's default) renders the
+   * LiquidJS stage prompt and writes it to a temp file. A render failure (e.g. a
+   * strictVariables miss, or a present template that renders to empty) must
+   * REJECT, not resolve: `execute()` catches the rejection and surfaces it as a
+   * failed result rather than emitting an empty prompt.
+   *
+   * Error-code contract (DeepSeek P2-3): when this throws, `execute()` labels the
+   * failure `crabrunner_prompt_render_failed`. The factory's DEFAULT resolver
+   * throws ONLY LiquidJS render / template-resolution failures, so that code is
+   * accurate for it. A CUSTOM override that can fail for unrelated reasons
+   * (network, permission) either surfaces its own classification upstream or
+   * accepts this code — the backend does not attempt to distinguish causes.
    */
   resolvePromptFile?: (
     input: StageExecutionBackendInput,
-  ) => string | null | undefined;
+  ) => Promise<string | null | undefined> | string | null | undefined;
+  /**
+   * Paired cleanup for a prompt path produced by {@link resolvePromptFile}
+   * (SYMPH-856, recheck-2 P2-1). Invoked in `execute()`'s `finally` after the
+   * job is terminal, with the resolved prompt path. Supplied ONLY by the factory
+   * alongside its DEFAULT resolver, which tracks the temp dirs it created and
+   * removes only those — so an explicit `resolvePromptFile` override path (which
+   * has no paired cleanup) is NEVER deleted, even if it collides with the temp
+   * prefix. Must be best-effort: `execute()` swallows any cleanup error so it
+   * never masks the job result.
+   */
+  cleanupPromptFile?: (resolvedPath: string) => Promise<void> | void;
   now?: () => Date;
 }
 
@@ -163,7 +197,13 @@ export class CrabrunnerStageExecutionBackend
   private readonly dryRun: boolean;
 
   private readonly resolvePromptFile:
-    | ((input: StageExecutionBackendInput) => string | null | undefined)
+    | ((
+        input: StageExecutionBackendInput,
+      ) => Promise<string | null | undefined> | string | null | undefined)
+    | undefined;
+
+  private readonly cleanupPromptFile:
+    | ((resolvedPath: string) => Promise<void> | void)
     | undefined;
 
   private readonly now: () => Date;
@@ -172,75 +212,122 @@ export class CrabrunnerStageExecutionBackend
     this.client = options.client;
     this.dryRun = options.dryRun ?? false;
     this.resolvePromptFile = options.resolvePromptFile;
+    this.cleanupPromptFile = options.cleanupPromptFile;
     this.now = options.now ?? (() => new Date());
   }
 
   async execute(
     input: StageExecutionBackendInput,
   ): Promise<StageExecutionBackendResult<CrabrunnerStageExecutionEvidence>> {
-    const promptFile = this.resolvePromptFile?.(input) ?? undefined;
-    const spec = createCrabrunnerJobSpec(input, this.dryRun, promptFile);
-    const enforcementFailure = validateCrabrunnerLaneEnforcementContract(spec);
-    if (enforcementFailure !== null) {
+    // SYMPH-856: resolve (render) the stage prompt before building the job spec.
+    // A render failure must FAIL CLOSED with the real error surfaced, never an
+    // empty/placeholder prompt — so we return a failed result rather than
+    // letting an unrendered job reach submit.
+    let promptFile: string | null | undefined;
+    try {
+      promptFile = (await this.resolvePromptFile?.(input)) ?? undefined;
+    } catch (error) {
       return this.toBackendResult(input, {
         admission: {
           status: "rejected",
           jobId: null,
-          reason: enforcementFailure.message ?? "enforcement_contract_missing",
+          reason: `crabrunner_prompt_render_failed: ${formatUnknownError(error)}`,
         },
-        terminal: enforcementFailure,
-        artifactRefs: [],
-        usage: null,
-        status: "failed",
-        error: `crabrunner_${enforcementFailure.state}: ${
-          enforcementFailure.message ?? enforcementFailure.state
-        }`,
-      });
-    }
-
-    const admission = await this.submit(spec);
-
-    if (admission.status === "rejected") {
-      return this.toBackendResult(input, {
-        admission,
         terminal: null,
         artifactRefs: [],
         usage: null,
         status: "failed",
-        error: `crabrunner_admission_rejected: ${admission.reason ?? "rejected"}`,
+        error: `crabrunner_prompt_render_failed: ${formatUnknownError(error)}`,
       });
     }
+    // P2-2 / recheck-2 P2-1: clean up the prompt file (via the factory-supplied
+    // paired cleanup in the finally) after the job is terminal. The lane worker
+    // consumes the file before the job becomes terminal, and this method only
+    // returns after collect() (terminal), so cleanup-after-execute is safe for
+    // the local-host path. (For future REMOTE hosts, materialization copies the
+    // prompt first; cleanup-after-terminal still holds.) Only dirs the default
+    // resolver created are removed; an explicit override path is never touched.
+    try {
+      const spec = createCrabrunnerJobSpec(input, this.dryRun, promptFile);
+      const enforcementFailure =
+        validateCrabrunnerLaneEnforcementContract(spec);
+      if (enforcementFailure !== null) {
+        return this.toBackendResult(input, {
+          admission: {
+            status: "rejected",
+            jobId: null,
+            reason:
+              enforcementFailure.message ?? "enforcement_contract_missing",
+          },
+          terminal: enforcementFailure,
+          artifactRefs: [],
+          usage: null,
+          status: "failed",
+          error: `crabrunner_${enforcementFailure.state}: ${
+            enforcementFailure.message ?? enforcementFailure.state
+          }`,
+        });
+      }
 
-    if (admission.jobId === null || admission.jobId.trim().length === 0) {
+      const admission = await this.submit(spec);
+
+      if (admission.status === "rejected") {
+        return this.toBackendResult(input, {
+          admission,
+          terminal: null,
+          artifactRefs: [],
+          usage: null,
+          status: "failed",
+          error: `crabrunner_admission_rejected: ${admission.reason ?? "rejected"}`,
+        });
+      }
+
+      if (admission.jobId === null || admission.jobId.trim().length === 0) {
+        return this.toBackendResult(input, {
+          admission,
+          terminal: null,
+          artifactRefs: [],
+          usage: null,
+          status: "failed",
+          error: "crabrunner_admission_accepted_without_job_id",
+        });
+      }
+
+      const terminal = await this.collectTerminalEvidence(
+        admission.jobId,
+        input.runnerInput.signal,
+        spec,
+      );
+      const status = mapCrabrunnerTerminalStateToRunAttemptPhase(
+        terminal.state,
+      );
+      const error =
+        status === "succeeded"
+          ? undefined
+          : `crabrunner_${terminal.state}: ${terminal.message ?? terminal.state}`;
+
       return this.toBackendResult(input, {
         admission,
-        terminal: null,
-        artifactRefs: [],
-        usage: null,
-        status: "failed",
-        error: "crabrunner_admission_accepted_without_job_id",
+        terminal,
+        artifactRefs: terminal.artifactRefs ?? [],
+        usage: terminal.usage ?? null,
+        status,
+        ...(error === undefined ? {} : { error }),
       });
+    } finally {
+      // recheck-2 P2-1: clean up the prompt path via the factory-supplied paired
+      // cleanup, which removes ONLY temp dirs the default resolver created
+      // (explicit ownership). An explicit override has no paired cleanup, so its
+      // path is never touched. Best-effort: a cleanup error must not mask the
+      // job result.
+      if (promptFile !== undefined && this.cleanupPromptFile !== undefined) {
+        try {
+          await this.cleanupPromptFile(promptFile);
+        } catch {
+          // Best-effort: a missing/locked temp dir must not fail the job.
+        }
+      }
     }
-
-    const terminal = await this.collectTerminalEvidence(
-      admission.jobId,
-      input.runnerInput.signal,
-      spec,
-    );
-    const status = mapCrabrunnerTerminalStateToRunAttemptPhase(terminal.state);
-    const error =
-      status === "succeeded"
-        ? undefined
-        : `crabrunner_${terminal.state}: ${terminal.message ?? terminal.state}`;
-
-    return this.toBackendResult(input, {
-      admission,
-      terminal,
-      artifactRefs: terminal.artifactRefs ?? [],
-      usage: terminal.usage ?? null,
-      status,
-      ...(error === undefined ? {} : { error }),
-    });
   }
 
   private async submit(
@@ -406,8 +493,9 @@ export function createCrabrunnerJobSpec(
       title: input.runnerInput.issue.title,
       url: input.runnerInput.issue.url,
     },
-    // SYMPH-856: live dispatch renders the stage prompt and passes its path
-    // here; absent (the default today) makes the scheduler client fail closed.
+    // SYMPH-856: the factory's default resolver renders the stage prompt and
+    // passes its path here; absent (no resolver/render) makes the scheduler
+    // client fail closed at submit.
     ...(promptFile === undefined || promptFile === null ? {} : { promptFile }),
   };
 }

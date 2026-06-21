@@ -222,7 +222,10 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     // Fail closed rather than emit an unrunnable manifest (Codex P1-2 /
     // SYMPH-856): the lane worker needs a prompt_file (or worker_argv, not
     // sourced yet). A manifest with neither always-fails the job lane-side.
-    // TODO(SYMPH-856): dispatch will populate spec.promptFile (render the stage prompt).
+    // SYMPH-856: dispatch now renders the stage prompt into spec.promptFile via
+    // the backend factory's default resolver; this guard stays as the
+    // fail-closed backstop for any path that does not (e.g. no promptRendering
+    // config wired, or a genuinely absent template).
     if (spec.promptFile === undefined || spec.promptFile.trim().length === 0) {
       return {
         status: "rejected",
