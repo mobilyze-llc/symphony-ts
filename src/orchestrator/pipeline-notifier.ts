@@ -112,6 +112,16 @@ export interface InfraErrorEvent {
   errorReason: string;
 }
 
+export interface IssuePausedEvent {
+  type: "issue_paused";
+  issueIdentifier: string;
+  issueTitle: string;
+  issueUrl: string | null;
+  stageName: string | null;
+  reason: string;
+  operatorAction: string;
+}
+
 export interface IssueDispatchedEvent {
   type: "issue_dispatched";
   issueIdentifier: string;
@@ -351,6 +361,7 @@ export type PipelineNotificationEvent =
   | IssueFailedEvent
   | StallKilledEvent
   | InfraErrorEvent
+  | IssuePausedEvent
   | IssueDispatchedEvent
   | ResumedExistingActiveEvent
   | IssueDroppedEvent
@@ -768,6 +779,68 @@ export function formatNotification(
         {
           type: "section",
           text: { type: "mrkdwn", text: `Error: ${errorReason}` },
+        },
+        {
+          type: "context",
+          elements: [{ type: "mrkdwn", text: version }],
+        },
+      ];
+
+      return { text, blocks };
+    }
+
+    case "issue_paused": {
+      const reason = sanitizeForSlack(event.reason);
+      const operatorAction = sanitizeForSlack(event.operatorAction);
+      const parts = [
+        `:pause_button: *Issue paused — Resume required* — ${event.issueIdentifier}`,
+        `*${event.issueTitle}*`,
+      ];
+      if (event.issueUrl !== null) {
+        parts.push(event.issueUrl);
+      }
+      if (event.stageName !== null) {
+        parts.push(`Stage: ${event.stageName}`);
+      }
+      parts.push(`Reason: ${reason}`);
+      parts.push(`Action: ${operatorAction}`);
+      parts.push(version);
+      const text = parts.join("\n");
+
+      const titleText =
+        event.issueUrl !== null
+          ? `*${event.issueTitle}*\n<${event.issueUrl}|View in Linear>`
+          : `*${event.issueTitle}*`;
+
+      const fields: SlackTextObject[] = [];
+      if (event.stageName !== null) {
+        fields.push({
+          type: "mrkdwn",
+          text: `:gear: *Stage: ${event.stageName}*`,
+        });
+      }
+      fields.push({
+        type: "mrkdwn",
+        text: `:pause_button: *Reason:* ${reason}`,
+      });
+
+      const blocks: SlackBlock[] = [
+        {
+          type: "header",
+          text: {
+            type: "plain_text",
+            text: `Issue paused — Resume required — ${event.issueIdentifier}`,
+            emoji: true,
+          },
+        },
+        {
+          type: "section",
+          text: { type: "mrkdwn", text: titleText },
+        },
+        { type: "section", fields },
+        {
+          type: "section",
+          text: { type: "mrkdwn", text: `*Action:* ${operatorAction}` },
         },
         {
           type: "context",
