@@ -246,8 +246,8 @@ export async function startCliHost(
  *
  * Enabled iff `SYMPHONY_CRABRUNNER_ROOT` is set and non-empty (the Crucible
  * repo root). `SYMPHONY_CRABRUNNER_TARGET_REPO` selects the target repo root
- * (defaults to `REPO_URL`, then cwd); `SYMPHONY_CRABRUNNER_HOST` and
- * `SYMPHONY_CRABRUNNER_STATE_ROOT` are optional overrides.
+ * (falls back to a non-empty `REPO_URL`, then cwd); `SYMPHONY_CRABRUNNER_HOST`
+ * and `SYMPHONY_CRABRUNNER_STATE_ROOT` are optional overrides.
  */
 export function buildCrabrunnerStageExecutionBackends(
   env: NodeJS.ProcessEnv,
@@ -257,8 +257,12 @@ export function buildCrabrunnerStageExecutionBackends(
     return null;
   }
 
+  // Use `||` (not `??`) so an empty-string SYMPHONY_CRABRUNNER_TARGET_REPO or
+  // REPO_URL falls through to the next source instead of resolving to ""
+  // (DeepSeek P2-2).
   const targetRepoRoot =
-    env.SYMPHONY_CRABRUNNER_TARGET_REPO ?? env.REPO_URL ?? process.cwd();
+    firstNonEmpty(env.SYMPHONY_CRABRUNNER_TARGET_REPO, env.REPO_URL) ??
+    process.cwd();
   const host = env.SYMPHONY_CRABRUNNER_HOST;
   const stateRoot = env.SYMPHONY_CRABRUNNER_STATE_ROOT;
 
@@ -357,6 +361,18 @@ function safeErrorMessage(error: unknown): string {
   } catch {
     return "[non-stringifiable value]";
   }
+}
+
+/** First argument whose trimmed value is non-empty, else undefined. */
+function firstNonEmpty(
+  ...values: ReadonlyArray<string | undefined>
+): string | undefined {
+  for (const value of values) {
+    if (value !== undefined && value.trim() !== "") {
+      return value;
+    }
+  }
+  return undefined;
 }
 
 /** Best-effort structured JSON line to stderr. Never throws. */

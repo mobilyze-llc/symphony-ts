@@ -291,6 +291,18 @@ describe("buildCrabrunnerStageExecutionBackends", () => {
     expect([...map!.keys()]).toEqual(["crabrunner"]);
     expect(map!.get("crabrunner")?.backend).toBe("crabrunner");
   });
+
+  it("still enables with an empty REPO_URL falling through to cwd (DeepSeek P2-2)", () => {
+    // `??` would have resolved to "" here; `||`/firstNonEmpty must fall through
+    // to process.cwd(), so the backend is still built without crashing.
+    const map = buildCrabrunnerStageExecutionBackends({
+      SYMPHONY_CRABRUNNER_ROOT: "/tmp/crucible",
+      REPO_URL: "",
+    });
+
+    expect(map).not.toBeNull();
+    expect(map!.get("crabrunner")?.backend).toBe("crabrunner");
+  });
 });
 
 function createConfig(

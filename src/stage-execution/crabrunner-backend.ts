@@ -59,6 +59,14 @@ export interface CrabrunnerJobSpec {
     title: string;
     url: string | null;
   };
+  /**
+   * Path to the rendered stage prompt for the lane worker (SYMPH-856). When
+   * present, the scheduler client maps it to manifest `prompt_file` and uses the
+   * lane-worker.v1 protocol; when absent (and no worker_argv), the client fails
+   * closed at submit rather than emitting an unrunnable manifest.
+   * TODO(SYMPH-856): live dispatch must render the stage prompt and populate this.
+   */
+  promptFile?: string;
 }
 
 export interface CrabrunnerAdmissionResult {
@@ -105,10 +113,14 @@ export interface CrabrunnerSchedulerClient {
   submit(spec: CrabrunnerJobSpec): Promise<CrabrunnerAdmissionResult>;
   /**
    * Resolves only after the job is terminal and collectible. Throw to fail
-   * closed before collection.
+   * closed before collection. The optional signal lets a polling client abort
+   * its loop promptly instead of orphaning a long poll (SYMPH-853, DeepSeek P1-1).
    */
-  status(jobId: string): Promise<void>;
-  collect(jobId: string): Promise<CrabrunnerTerminalEvidence>;
+  status(jobId: string, signal?: AbortSignal): Promise<void>;
+  collect(
+    jobId: string,
+    signal?: AbortSignal,
+  ): Promise<CrabrunnerTerminalEvidence>;
   cancel?(
     jobId: string,
     request: CrabrunnerCancellationRequest,
@@ -129,6 +141,15 @@ export interface CrabrunnerStageExecutionBackendOptions {
    * the backend still exercises submit/status/collect so the contract is testable.
    */
   dryRun?: boolean;
+  /**
+   * Resolves the rendered stage prompt path for the job (SYMPH-856). Default
+   * (undefined) leaves `spec.promptFile` absent, so the scheduler client fails
+   * closed at submit rather than emitting an unrunnable manifest. Live dispatch
+   * supplies this once it renders the stage prompt.
+   */
+  resolvePromptFile?: (
+    input: StageExecutionBackendInput,
+  ) => string | null | undefined;
   now?: () => Date;
 }
 
@@ -141,18 +162,24 @@ export class CrabrunnerStageExecutionBackend
 
   private readonly dryRun: boolean;
 
+  private readonly resolvePromptFile:
+    | ((input: StageExecutionBackendInput) => string | null | undefined)
+    | undefined;
+
   private readonly now: () => Date;
 
   constructor(options: CrabrunnerStageExecutionBackendOptions) {
     this.client = options.client;
     this.dryRun = options.dryRun ?? false;
+    this.resolvePromptFile = options.resolvePromptFile;
     this.now = options.now ?? (() => new Date());
   }
 
   async execute(
     input: StageExecutionBackendInput,
   ): Promise<StageExecutionBackendResult<CrabrunnerStageExecutionEvidence>> {
-    const spec = createCrabrunnerJobSpec(input, this.dryRun);
+    const promptFile = this.resolvePromptFile?.(input) ?? undefined;
+    const spec = createCrabrunnerJobSpec(input, this.dryRun, promptFile);
     const enforcementFailure = validateCrabrunnerLaneEnforcementContract(spec);
     if (enforcementFailure !== null) {
       return this.toBackendResult(input, {
@@ -240,7 +267,10 @@ export class CrabrunnerStageExecutionBackend
     }
 
     if (signal === undefined) {
-      return await this.collectTerminalEvidenceWithoutCancellation(jobId);
+      return await this.collectTerminalEvidenceWithoutCancellation(
+        jobId,
+        undefined,
+      );
     }
 
     let removeAbortListener = (): void => {};
@@ -259,7 +289,9 @@ export class CrabrunnerStageExecutionBackend
 
     try {
       return await Promise.race([
-        this.collectTerminalEvidenceWithoutCancellation(jobId),
+        // Pass the signal so the client's poll loop aborts promptly instead of
+        // orphaning a long poll; the abort race still maps abort to cancelJob.
+        this.collectTerminalEvidenceWithoutCancellation(jobId, signal),
         abortPromise,
       ]);
     } finally {
@@ -269,11 +301,12 @@ export class CrabrunnerStageExecutionBackend
 
   private async collectTerminalEvidenceWithoutCancellation(
     jobId: string,
+    signal: AbortSignal | undefined,
   ): Promise<CrabrunnerTerminalEvidence> {
     try {
       // Status is a cheap fail-closed scheduler/readiness check. The collected
       // artifact remains the terminal source of truth for Symphony.
-      await this.client.status(jobId);
+      await this.client.status(jobId, signal);
     } catch (error) {
       return {
         state: "runner_failed",
@@ -282,7 +315,7 @@ export class CrabrunnerStageExecutionBackend
     }
 
     try {
-      return await this.client.collect(jobId);
+      return await this.client.collect(jobId, signal);
     } catch (error) {
       return {
         state: "artifact_collection_failed",
@@ -364,6 +397,7 @@ export class CrabrunnerStageExecutionBackend
 export function createCrabrunnerJobSpec(
   input: StageExecutionBackendInput,
   dryRun: boolean,
+  promptFile?: string | null,
 ): CrabrunnerJobSpec {
   return {
     schema: CRABRUNNER_JOB_SPEC_VERSION,
@@ -380,6 +414,9 @@ export function createCrabrunnerJobSpec(
       title: input.runnerInput.issue.title,
       url: input.runnerInput.issue.url,
     },
+    // SYMPH-856: live dispatch renders the stage prompt and passes its path
+    // here; absent (the default today) makes the scheduler client fail closed.
+    ...(promptFile === undefined || promptFile === null ? {} : { promptFile }),
   };
 }
 

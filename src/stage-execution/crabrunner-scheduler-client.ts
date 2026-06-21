@@ -38,9 +38,12 @@ export interface CrabrunnerCliInvocation {
 }
 
 export interface CrabrunnerCliSchedulerClientOptions {
-  /** Crucible repo root. `bin/crabrunner` runs with cwd set here (MOB-193). */
+  /**
+   * Crucible repo root. `bin/crabrunner` runs with cwd set here (MOB-193) and it
+   * is also the `--repo-root` value and manifest `remote_repo` (Codex P1-1).
+   */
   crucibleRoot: string;
-  /** Target repo to clone/operate on, passed via `--repo-root`. */
+  /** Target repo the lane operates on; written to manifest `workspace`. */
   targetRepoRoot: string;
   /**
    * Crabrunner state root. Passed via `--state-root` to every call when set, and
@@ -74,6 +77,10 @@ const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_MAX_POLLS = 1_800;
 const DEFAULT_CLI_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_BUFFER_BYTES = 16 * 1_024 * 1_024;
+// Grace window for the terminal-state/collectible write race: a terminal
+// lifecycle state with collectible!==true is tolerated for this many extra
+// polls before failing closed (DeepSeek P2-1).
+const STATUS_TERMINAL_GRACE_POLLS = 3;
 
 function defaultStateRoot(): string {
   return join(homedir(), ".crucible", "crabrunner");
@@ -180,8 +187,6 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
   private readonly crucibleRoot: string;
   private readonly targetRepoRoot: string;
   private readonly stateRoot: string;
-  /** Whether stateRoot was explicitly provided (drives whether --state-root is passed). */
-  private readonly stateRootExplicit: boolean;
   private readonly host: string;
   private readonly provider: string;
   private readonly now: () => Date;
@@ -195,7 +200,6 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
   constructor(options: CrabrunnerCliSchedulerClientOptions) {
     this.crucibleRoot = options.crucibleRoot;
     this.targetRepoRoot = options.targetRepoRoot;
-    this.stateRootExplicit = options.stateRoot !== undefined;
     this.stateRoot = options.stateRoot ?? defaultStateRoot();
     this.host = options.host ?? "local";
     this.provider =
@@ -215,6 +219,18 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
   }
 
   async submit(spec: CrabrunnerJobSpec): Promise<CrabrunnerAdmissionResult> {
+    // Fail closed rather than emit an unrunnable manifest (Codex P1-2 /
+    // SYMPH-856): the lane worker needs a prompt_file (or worker_argv, not
+    // sourced yet). A manifest with neither always-fails the job lane-side.
+    // TODO(SYMPH-856): dispatch will populate spec.promptFile (render the stage prompt).
+    if (spec.promptFile === undefined || spec.promptFile.trim().length === 0) {
+      return {
+        status: "rejected",
+        jobId: null,
+        reason: "crabrunner_prompt_required_symph_856",
+      };
+    }
+
     const manifest = this.buildManifest(spec);
     const dir = await mkdtemp(join(tmpdir(), "crabrunner-manifest-"));
     const manifestPath = join(dir, "manifest.json");
@@ -224,8 +240,11 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
         "submit",
         "--manifest-file",
         manifestPath,
+        // --repo-root is the CRUCIBLE checkout: crabrunner/src/cli.ts and
+        // lane_workers/run.ts load from there (confirmed against a real smoke
+        // manifest). The TARGET repo is the manifest `workspace` (Codex P1-1).
         "--repo-root",
-        this.targetRepoRoot,
+        this.crucibleRoot,
         ...this.stateRootArgs(),
         ...(this.noStage ? ["--no-stage"] : []),
       ]);
@@ -244,14 +263,17 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     }
   }
 
-  async status(jobId: string): Promise<void> {
+  async status(jobId: string, signal?: AbortSignal): Promise<void> {
+    // Count consecutive terminal-but-not-collectible polls. The daemon can
+    // write a terminal lifecycle state before flipping `collectible` (write
+    // race); grace-retry a few polls before failing closed (DeepSeek P2-1).
+    let terminalNotCollectiblePolls = 0;
     for (let attempt = 0; attempt < this.maxPolls; attempt += 1) {
-      const result = await this.run([
-        "status",
-        "--job-id",
-        jobId,
-        ...this.stateRootArgs(),
-      ]);
+      throwIfAborted(signal);
+      const result = await this.run(
+        ["status", "--job-id", jobId, ...this.stateRootArgs()],
+        signal,
+      );
       const status = this.parseStatus(result, "status");
 
       if (status.collectible === true) {
@@ -259,15 +281,20 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
       }
 
       if (CRABRUNNER_TERMINAL_LIFECYCLE_STATES.has(status.state)) {
-        throw new Error(
-          `crabrunner job ${jobId} reached terminal state "${status.state}" but is not collectible: ${
-            status.message ?? status.error_code ?? "no detail"
-          }`,
-        );
+        terminalNotCollectiblePolls += 1;
+        if (terminalNotCollectiblePolls > STATUS_TERMINAL_GRACE_POLLS) {
+          throw new Error(
+            `crabrunner job ${jobId} reached terminal state "${status.state}" but is not collectible after ${STATUS_TERMINAL_GRACE_POLLS} grace polls: ${
+              status.message ?? status.error_code ?? "no detail"
+            }`,
+          );
+        }
+      } else {
+        terminalNotCollectiblePolls = 0;
       }
 
       if (attempt < this.maxPolls - 1) {
-        await this.sleep(this.pollIntervalMs);
+        await this.sleep(this.pollIntervalMs, signal);
       }
     }
 
@@ -276,13 +303,15 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     );
   }
 
-  async collect(jobId: string): Promise<CrabrunnerTerminalEvidence> {
-    const result = await this.run([
-      "collect",
-      "--job-id",
-      jobId,
-      ...this.stateRootArgs(),
-    ]);
+  async collect(
+    jobId: string,
+    signal?: AbortSignal,
+  ): Promise<CrabrunnerTerminalEvidence> {
+    throwIfAborted(signal);
+    const result = await this.run(
+      ["collect", "--job-id", jobId, ...this.stateRootArgs()],
+      signal,
+    );
     const collect = this.parseCollect(result);
     const status = collect.status;
 
@@ -321,6 +350,10 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     jobId: string,
     request: CrabrunnerCancellationRequest,
   ): Promise<CrabrunnerTerminalEvidence> {
+    // The `bin/crabrunner cancel` CLI only accepts --job-id [--state-root]; it
+    // does not take --signal/--process-group. request.signal/processGroup are
+    // therefore diagnostics-only in the cancellation block for this phase.
+    // TODO(SYMPH-853-followup): forward signal/process-group once the CLI supports it.
     const result = await this.run([
       "cancel",
       "--job-id",
@@ -328,11 +361,18 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
       ...this.stateRootArgs(),
     ]);
     const status = this.parseStatus(result, "cancel");
+    // Only a TERMINAL "stopped" counts as killed. "stopping" is non-terminal
+    // (still shutting down) and must NOT be reported as canceled, or consumers
+    // misread an in-flight job as killed (Codex P2 / DeepSeek P2-6).
     const killed = status.state === "stopped";
-    const terminalState: CrabrunnerTerminalState =
-      status.state === "stopped" || status.state === "stopping"
-        ? "canceled"
-        : "kill_failed";
+    const terminalState: CrabrunnerTerminalState = killed
+      ? "canceled"
+      : "kill_failed";
+    const failure = killed
+      ? null
+      : status.state === "stopping"
+        ? "cancel_incomplete"
+        : (status.message ?? "cancel_incomplete");
 
     return {
       state: terminalState,
@@ -345,7 +385,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
         signal: request.signal,
         processGroup: request.processGroup,
         killed,
-        failure: killed ? null : (status.message ?? "cancel_incomplete"),
+        failure,
       },
     };
   }
@@ -359,11 +399,12 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
       1,
       Math.ceil((spec.enforcement.timing.timeoutMs ?? 0) / 1_000),
     );
-    // This client emits a prompt_file/model lane manifest, so the protocol is
-    // lane-worker.v1. A worker_argv manifest would use WORKER_ARGV_PROTOCOL; we
-    // do not source worker_argv from the spec yet (SYMPH-853-followup).
+    // submit() guarantees a prompt_file is present, so this is always a
+    // lane-worker.v1 prompt-file lane. WORKER_ARGV_PROTOCOL is reserved for a
+    // future worker_argv manifest that this client does not yet source.
+    const promptFile = spec.promptFile;
     const laneWorkerProtocol =
-      model === null ? WORKER_ARGV_PROTOCOL : LANE_WORKER_PROTOCOL;
+      promptFile === undefined ? WORKER_ARGV_PROTOCOL : LANE_WORKER_PROTOCOL;
 
     return {
       schema: CRABRUNNER_MANIFEST_SCHEMA,
@@ -375,15 +416,21 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
       // "local" for a local host, "ssh" for an SSH crabbox host.
       provider: this.provider,
       target: "macos",
+      // remote_repo is the CRUCIBLE checkout (where the lane worker code loads
+      // from); the TARGET repo is `workspace` (Codex P1-1, confirmed against a
+      // real smoke manifest).
+      remote_repo: this.crucibleRoot,
       // TODO(SYMPH-853-followup): workspace materialization semantics are not
-      // sourced from the spec; the first canary uses the target repo root
-      // directly and lets the lane clone/sync from remote_repo.
-      remote_repo: this.targetRepoRoot,
+      // sourced from the spec; the first canary points workspace at the target
+      // repo root directly.
       workspace: this.targetRepoRoot,
       artifact_name: sanitizeSlug(spec.identity.stageName ?? "stage"),
       phase: spec.phase,
       issue_ids: [spec.issue.identifier],
+      // Symphony owns closeout, so the lane does none. TODO(SYMPH-853-followup):
+      // revisit lane-side workspace cleanup semantics before rollout.
       closeout_policy: "disabled",
+      ...(promptFile === undefined ? {} : { prompt_file: promptFile }),
       ...(model === null ? {} : { model }),
       thinking,
       profile,
@@ -394,13 +441,15 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
   }
 
   private stateRootArgs(): string[] {
-    // Only forward --state-root when explicitly configured. When omitted, the
-    // CLI uses its own default (~/.crucible/crabrunner), which we mirror for
-    // job-relative path resolution.
-    return this.stateRootExplicit ? ["--state-root", this.stateRoot] : [];
+    // Always forward --state-root (even the default ~/.crucible/crabrunner) so
+    // the CLI and resolveJobPath agree on the job directory (DeepSeek P2-4).
+    return ["--state-root", this.stateRoot];
   }
 
-  private async run(args: readonly string[]): Promise<{
+  private async run(
+    args: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<{
     stdout: string;
     stderr: string;
     exitCode: number;
@@ -408,6 +457,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     return await this.cli(args, {
       cwd: this.crucibleRoot,
       timeoutMs: this.cliTimeoutMs,
+      ...(signal === undefined ? {} : { signal }),
     });
   }
 
@@ -536,12 +586,27 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     return mapLaneWorkerUsage(usage.data);
   }
 
-  private async sleep(ms: number): Promise<void> {
+  private async sleep(ms: number, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted === true) {
+      throw createAbortError();
+    }
     if (ms <= 0) {
       return;
     }
-    await new Promise<void>((resolve) => {
-      setTimeout(resolve, ms);
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (signal !== undefined) {
+          signal.removeEventListener("abort", onAbort);
+        }
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(createAbortError());
+      };
+      if (signal !== undefined) {
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
     });
   }
 }
@@ -789,6 +854,18 @@ function buildProcess(status: CrabrunnerStatus): CrabrunnerProcess | null {
   };
 }
 
+function createAbortError(): Error {
+  const error = new Error("crabrunner poll aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) {
+    throw createAbortError();
+  }
+}
+
 function parseJson(stdout: string, command: string): unknown {
   const trimmed = stdout.trim();
   if (trimmed.length === 0) {
@@ -809,7 +886,9 @@ function buildJobId(spec: CrabrunnerJobSpec): string {
   const base = sanitizeSlug(
     `${spec.issue.identifier}-${spec.identity.stageName ?? "stage"}`,
   );
-  const hash = createHash("sha1")
+  // sha256 (not sha1) for security-scanner cleanliness; the slice is only a
+  // short disambiguator, not a cryptographic commitment (DeepSeek P2-5).
+  const hash = createHash("sha256")
     .update(spec.identity.idempotencyKey)
     .digest("hex")
     .slice(0, 8);

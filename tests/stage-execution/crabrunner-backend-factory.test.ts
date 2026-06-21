@@ -78,6 +78,7 @@ describe("createCrabrunnerStageExecutionBackend", () => {
       crucibleRoot: "/tmp/crucible",
       targetRepoRoot: "/tmp/repo",
       pollIntervalMs: 0,
+      resolvePromptFile: () => "/tmp/prompt.md",
       cli,
     });
 

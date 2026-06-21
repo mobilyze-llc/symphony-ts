@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import type { AgentRunInput } from "../../src/agent/runner.js";
 import type { StageExecutionJobSpec } from "../../src/stage-execution/backend.js";
@@ -39,8 +39,12 @@ describe("CrabrunnerCliSchedulerClient.submit", () => {
     const submitCall = recorder.invocations[0]!;
     expect(submitCall.args[0]).toBe("submit");
     expect(submitCall.args).toContain("--manifest-file");
-    expect(submitCall.args).toContain("--repo-root");
-    expect(submitCall.args).toContain(TARGET_REPO_ROOT);
+    // --repo-root is the CRUCIBLE checkout, not the target repo (Codex P1-1).
+    const repoRootIndex = submitCall.args.indexOf("--repo-root");
+    expect(repoRootIndex).toBeGreaterThanOrEqual(0);
+    expect(submitCall.args[repoRootIndex + 1]).toBe(CRUCIBLE_ROOT);
+    // --state-root is always forwarded (DeepSeek P2-4).
+    expect(submitCall.args).toContain("--state-root");
     expect(submitCall.opts.cwd).toBe(CRUCIBLE_ROOT);
   });
 
@@ -155,7 +159,7 @@ describe("CrabrunnerCliSchedulerClient.submit", () => {
       { now: () => new Date("2026-06-21T10:00:00.000Z") },
     );
 
-    await client.submit(createSpec());
+    await client.submit(createSpec({ promptFile: "/tmp/render/prompt.md" }));
 
     expect(manifestPath).not.toBeNull();
     expect(manifestContent).not.toBeNull();
@@ -169,6 +173,11 @@ describe("CrabrunnerCliSchedulerClient.submit", () => {
       created_at: "2026-06-21T10:00:00.000Z",
       timeout_seconds: 600,
       profile: "write",
+      // remote_repo is the CRUCIBLE checkout; workspace is the TARGET repo
+      // (Codex P1-1).
+      remote_repo: CRUCIBLE_ROOT,
+      workspace: TARGET_REPO_ROOT,
+      prompt_file: "/tmp/render/prompt.md",
     });
     expect(manifest.issue_ids).toEqual(["SYMPH-807"]);
     expect(typeof manifest.job_id).toBe("string");
@@ -178,7 +187,31 @@ describe("CrabrunnerCliSchedulerClient.submit", () => {
     await expect(readFile(manifestPath!, "utf8")).rejects.toThrow();
   });
 
-  it("uses provider ssh for non-local hosts and worker-argv protocol without a model", async () => {
+  it("rejects (fail closed) when the spec carries no promptFile (SYMPH-856)", async () => {
+    const recorder = createCliRecorder({
+      submit: () =>
+        cliOk(
+          statusJson({
+            state: "queued",
+            job_id: "should-not-submit",
+            collectible: false,
+          }),
+        ),
+    });
+    const client = createClient(recorder.cli);
+
+    const admission = await client.submit(createSpec({ promptFile: null }));
+
+    expect(admission).toEqual({
+      status: "rejected",
+      jobId: null,
+      reason: "crabrunner_prompt_required_symph_856",
+    });
+    // The CLI must never be invoked for an unrunnable manifest.
+    expect(recorder.invocations).toEqual([]);
+  });
+
+  it("uses provider ssh for non-local hosts and omits a null model (still lane-worker.v1 with a prompt)", async () => {
     let manifest: Record<string, unknown> | null = null;
     const cli: CrabrunnerCli = async (args) => {
       const index = args.indexOf("--manifest-file");
@@ -201,21 +234,24 @@ describe("CrabrunnerCliSchedulerClient.submit", () => {
     });
 
     const job = createJob();
-    const specWithoutModel = createCrabrunnerJobSpec(
+    const base = createCrabrunnerJobSpec(
       {
         job: { ...job, runner: { ...job.runner, model: null } },
         runnerInput: createRunnerInput(),
       },
       false,
     );
+    const specWithoutModel = { ...base, promptFile: "/tmp/prompt.md" };
 
     await client.submit(specWithoutModel);
 
     expect(manifest).not.toBeNull();
     expect(manifest!.provider).toBe("ssh");
     expect(manifest!.host).toBe("crabbox-studio1");
-    expect(manifest!.lane_worker_protocol).toBe("worker-argv.v1");
+    // A prompt_file lane is lane-worker.v1 regardless of model presence.
+    expect(manifest!.lane_worker_protocol).toBe("lane-worker.v1");
     expect(manifest!.model).toBeUndefined();
+    expect(manifest!.prompt_file).toBe("/tmp/prompt.md");
   });
 
   it("passes --no-stage and --state-root when configured", async () => {
@@ -283,18 +319,46 @@ describe("CrabrunnerCliSchedulerClient.status", () => {
     expect(calls).toBe(3);
   });
 
-  it("throws when a terminal state is never collectible", async () => {
+  it("throws when a terminal state stays not-collectible past the grace window", async () => {
+    let calls = 0;
     const client = createClient(
       staticCli({
-        status: () =>
-          cliOk(
+        status: () => {
+          calls += 1;
+          return cliOk(
             statusJson({ state: "failed", job_id: "j", collectible: false }),
-          ),
+          );
+        },
       }),
       { pollIntervalMs: 0 },
     );
 
     await expect(client.status("j")).rejects.toThrow(/terminal/i);
+    // Grace-retried up to STATUS_TERMINAL_GRACE_POLLS (3) extra polls => 4 total.
+    expect(calls).toBe(4);
+  });
+
+  it("grace-retries the terminal/collectible write race, then resolves", async () => {
+    // Daemon writes the terminal state before flipping collectible (DeepSeek P2-1).
+    let calls = 0;
+    const client = createClient(
+      staticCli({
+        status: () => {
+          calls += 1;
+          return cliOk(
+            statusJson({
+              state: "complete",
+              job_id: "j",
+              collectible: calls >= 2,
+            }),
+          );
+        },
+      }),
+      { pollIntervalMs: 0 },
+    );
+
+    await expect(client.status("j")).resolves.toBeUndefined();
+    expect(calls).toBe(2);
   });
 
   it("throws when maxPolls is exhausted without becoming collectible", async () => {
@@ -326,6 +390,51 @@ describe("CrabrunnerCliSchedulerClient.status", () => {
     });
 
     await expect(client.status("j")).rejects.toThrow();
+  });
+
+  it("aborts immediately when the signal is already aborted (no CLI call)", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    let calls = 0;
+    const client = createClient(
+      staticCli({
+        status: () => {
+          calls += 1;
+          return cliOk(
+            statusJson({ state: "running", job_id: "j", collectible: false }),
+          );
+        },
+      }),
+      { pollIntervalMs: 0 },
+    );
+
+    await expect(client.status("j", controller.signal)).rejects.toThrow(
+      /abort/i,
+    );
+    expect(calls).toBe(0);
+  });
+
+  it("stops polling when the signal aborts between polls (no 30-min orphan)", async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    const client = createClient(
+      staticCli({
+        status: () => {
+          calls += 1;
+          // Abort right after the first poll; the abortable sleep must reject.
+          controller.abort();
+          return cliOk(
+            statusJson({ state: "running", job_id: "j", collectible: false }),
+          );
+        },
+      }),
+      { pollIntervalMs: 1_000, maxPolls: 1_800 },
+    );
+
+    await expect(client.status("j", controller.signal)).rejects.toThrow(
+      /abort/i,
+    );
+    expect(calls).toBe(1);
   });
 });
 
@@ -519,6 +628,35 @@ describe("CrabrunnerCliSchedulerClient.collect", () => {
 
     const evidence = await client.collect("j");
     expect(evidence.usage?.status).toBe("unavailable");
+  });
+
+  it("aborts collect immediately when the signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    let calls = 0;
+    const client = createClient(
+      staticCli({
+        collect: () => {
+          calls += 1;
+          return cliOk(
+            collectJson({
+              state: "complete",
+              status: statusObject({
+                state: "complete",
+                job_id: "j",
+                collectible: true,
+              }),
+              archive_path: "/tmp/a.tgz",
+            }),
+          );
+        },
+      }),
+    );
+
+    await expect(client.collect("j", controller.signal)).rejects.toThrow(
+      /abort/i,
+    );
+    expect(calls).toBe(0);
   });
 
   it("throws on non-zero collect exit", async () => {
@@ -720,6 +858,30 @@ describe("CrabrunnerCliSchedulerClient.cancel", () => {
     });
   });
 
+  it("treats non-terminal 'stopping' as kill_failed, not canceled (Codex P2 / DeepSeek P2-6)", async () => {
+    const client = createClient(
+      staticCli({
+        cancel: () =>
+          cliOk(
+            statusJson({
+              state: "stopping",
+              job_id: "j",
+              collectible: false,
+              message: "still shutting down",
+            }),
+          ),
+      }),
+    );
+
+    const evidence = await client.cancel("j", cancelRequest());
+
+    expect(evidence.state).toBe("kill_failed");
+    expect(evidence.cancellation).toMatchObject({
+      killed: false,
+      failure: "cancel_incomplete",
+    });
+  });
+
   it("maps a non-stopped cancel status to kill_failed with a failure reason", async () => {
     const client = createClient(
       staticCli({
@@ -784,7 +946,10 @@ describe("CrabrunnerCliSchedulerClient end-to-end through the backend", () => {
       }),
       { pollIntervalMs: 0 },
     );
-    const backend = new CrabrunnerStageExecutionBackend({ client });
+    const backend = new CrabrunnerStageExecutionBackend({
+      client,
+      resolvePromptFile: () => "/tmp/prompt.md",
+    });
 
     const result = await backend.execute({
       job: createJob(),
@@ -798,6 +963,32 @@ describe("CrabrunnerCliSchedulerClient end-to-end through the backend", () => {
       outputTokens: 8,
       totalTokens: 20,
     });
+  });
+
+  it("fails closed through the backend when no promptFile is resolved (SYMPH-856)", async () => {
+    const recorder = createCliRecorder({
+      submit: () =>
+        cliOk(statusJson({ state: "queued", job_id: "x", collectible: false })),
+    });
+    const client = new CrabrunnerCliSchedulerClient({
+      crucibleRoot: CRUCIBLE_ROOT,
+      targetRepoRoot: TARGET_REPO_ROOT,
+      pollIntervalMs: 0,
+      cli: recorder.cli,
+    });
+    // No resolvePromptFile => spec.promptFile absent => client rejects.
+    const backend = new CrabrunnerStageExecutionBackend({ client });
+
+    const result = await backend.execute({
+      job: createJob(),
+      runnerInput: createRunnerInput(),
+    });
+
+    expect(result.result.runAttempt.status).toBe("failed");
+    expect(result.result.runAttempt.error).toContain(
+      "crabrunner_prompt_required_symph_856",
+    );
+    expect(recorder.invocations).toEqual([]);
   });
 
   it("produces a failed AgentRunResult when the lane reports a failed terminal", async () => {
@@ -833,7 +1024,10 @@ describe("CrabrunnerCliSchedulerClient end-to-end through the backend", () => {
       }),
       { pollIntervalMs: 0 },
     );
-    const backend = new CrabrunnerStageExecutionBackend({ client });
+    const backend = new CrabrunnerStageExecutionBackend({
+      client,
+      resolvePromptFile: () => "/tmp/prompt.md",
+    });
 
     const result = await backend.execute({
       job: createJob(),
@@ -984,11 +1178,19 @@ function cancelRequest(): CrabrunnerCancellationRequest {
   };
 }
 
-function createSpec(): CrabrunnerJobSpec {
-  return createCrabrunnerJobSpec(
+function createSpec(
+  overrides: { promptFile?: string | null } = {},
+): CrabrunnerJobSpec {
+  const base = createCrabrunnerJobSpec(
     { job: createJob(), runnerInput: createRunnerInput() },
     false,
   );
+  // Default to a present promptFile so submit-path tests are admitted; pass
+  // { promptFile: null } to exercise the SYMPH-856 fail-closed rejection.
+  if (overrides.promptFile === null) {
+    return base;
+  }
+  return { ...base, promptFile: overrides.promptFile ?? "/tmp/prompt.md" };
 }
 
 function createJob(): StageExecutionJobSpec {

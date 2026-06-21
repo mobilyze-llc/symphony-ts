@@ -1,5 +1,8 @@
 import type { StageExecutionBackend as StageExecutionBackendKind } from "../config/types.js";
-import type { StageExecutionBackendRunner } from "./backend.js";
+import type {
+  StageExecutionBackendInput,
+  StageExecutionBackendRunner,
+} from "./backend.js";
 import { CrabrunnerStageExecutionBackend } from "./crabrunner-backend.js";
 import {
   type CrabrunnerCli,
@@ -9,7 +12,7 @@ import {
 export interface CreateCrabrunnerStageExecutionBackendOptions {
   /** Crucible repo root. `bin/crabrunner` runs with cwd set here (MOB-193). */
   crucibleRoot: string;
-  /** Target repo to clone/operate on, passed via `--repo-root`. */
+  /** Target repo, written to manifest `workspace` (the lane operates on it). */
   targetRepoRoot: string;
   /** Crabrunner state root (defaults to `~/.crucible/crabrunner`). */
   stateRoot?: string;
@@ -19,6 +22,13 @@ export interface CreateCrabrunnerStageExecutionBackendOptions {
   provider?: string;
   /** Marks job specs as dry-run on the backend. */
   dryRun?: boolean;
+  /**
+   * Resolves the rendered stage prompt path (SYMPH-856). Default leaves it
+   * absent, so the client fails closed at submit. Dispatch supplies this.
+   */
+  resolvePromptFile?: (
+    input: StageExecutionBackendInput,
+  ) => string | null | undefined;
   now?: () => Date;
   /** Injected subprocess executor (tests only); defaults to a real execFile. */
   cli?: CrabrunnerCli;
@@ -57,6 +67,9 @@ export function createCrabrunnerStageExecutionBackend(
   return new CrabrunnerStageExecutionBackend({
     client,
     ...(options.dryRun === undefined ? {} : { dryRun: options.dryRun }),
+    ...(options.resolvePromptFile === undefined
+      ? {}
+      : { resolvePromptFile: options.resolvePromptFile }),
     ...(options.now === undefined ? {} : { now: options.now }),
   });
 }
