@@ -258,6 +258,53 @@ describe("reduceDelegatedStageAttempts", () => {
     expect(projection.degraded).toHaveLength(1);
     expect(projection.degraded[0]?.reason).toMatch(/contradictory/);
   });
+
+  it("rejects a persisted ignored_late_result status as degraded, never active", () => {
+    // ignored_late_result is reducer-synthetic; a writer must never persist it.
+    const journal: DispatcherRunJournal = [
+      rawEntry(1, {
+        runGroupId: "rg-1",
+        stageName: "implement/patch-plan",
+        stageAttempt: 0,
+        status: "ignored_late_result",
+      }),
+    ];
+    const projection = reduceDelegatedStageAttempts(journal);
+    expect(projection.active).toEqual([]);
+    expect(projection.degraded).toHaveLength(1);
+    expect(projection.degraded[0]?.reason).toMatch(/ignored_late_result/);
+  });
+
+  it("classifies a completely missing metadata schema as degraded", () => {
+    const journal: DispatcherRunJournal = [
+      {
+        sequence: 1,
+        idempotencyKey: "raw:1",
+        timestamp: "2026-06-20T05:00:00.000Z",
+        kind: DELEGATED_STAGE_ATTEMPT_JOURNAL_KIND,
+        issueId: "issue-811",
+        issueIdentifier: "SYMPH-811",
+        operation: "dispatcher",
+        stage: "implement/patch-plan",
+        attempt: 0,
+        ownerId: null,
+        lease: null,
+        summary: "no schema",
+        // metadata intentionally has no `schema` key.
+        metadata: {
+          runGroupId: "rg-1",
+          stageName: "implement/patch-plan",
+          stageAttempt: 0,
+          status: "succeeded",
+          attemptIdempotencyKey: "k-pp-0",
+        },
+      },
+    ];
+    const projection = reduceDelegatedStageAttempts(journal);
+    expect(projection.active).toEqual([]);
+    expect(projection.degraded).toHaveLength(1);
+    expect(projection.degraded[0]?.reason).toBe("unknown_schema:<missing>");
+  });
 });
 
 describe("summarizeDelegatedStageProjection", () => {

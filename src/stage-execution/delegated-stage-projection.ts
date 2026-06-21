@@ -62,6 +62,10 @@ export interface ProjectedDelegatedStageAttempt {
   /** Usage measurement — unavailable stays unavailable (never zeroed). */
   usage: StageUsageMeasurement | null;
   artifactPaths: readonly string[];
+  /**
+   * Inspection-only (the reducer keys on runGroupId/stageName/attempt, not
+   * this); null when a journal entry omits it.
+   */
   attemptIdempotencyKey: string | null;
   /** Journal sequence of the entry that produced this state. */
   sequence: number;
@@ -90,7 +94,11 @@ export interface BuildDelegatedStageAttemptEntryInput {
   runGroupId: string;
   stageName: string;
   stageAttempt: number;
-  status: DelegatedStageAttemptStatus;
+  /**
+   * The persisted status. `ignored_late_result` is reducer-synthetic and is
+   * excluded here so a writer cannot journal it (replay also rejects it).
+   */
+  status: Exclude<DelegatedStageAttemptStatus, "ignored_late_result">;
   /** The per-attempt idempotency key (e.g. the StageExecutionJobSpec key). */
   attemptIdempotencyKey: string;
   failureClass?: string | null;
@@ -224,6 +232,11 @@ function parseDelegatedAttempt(
   if (statusRaw === null) return "missing_metadata:status";
   if (!isDelegatedStageAttemptStatus(statusRaw)) {
     return `unknown_status:${statusRaw}`;
+  }
+  if (statusRaw === "ignored_late_result") {
+    // Reducer-synthetic status: writers never persist it, so a journal entry
+    // carrying it is contract drift, not an active attempt.
+    return "persisted_synthetic_status:ignored_late_result";
   }
   return {
     runGroupId,
