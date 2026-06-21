@@ -6,6 +6,7 @@ import type {
 } from "../stage-execution/backend.js";
 import type { CrabrunnerStageExecutionEvidence } from "../stage-execution/crabrunner-backend.js";
 import {
+  COUNCIL_REVIEW_MODES,
   COUNCIL_ROUTING_MODES,
   type HeadlessGateVerdict,
   type HeadlessLaneResult,
@@ -775,11 +776,14 @@ function isWellFormedReviewerLane(value: unknown): boolean {
   );
 }
 
-/** Council review loop modes the reviewer artifact routing may declare. */
-const COUNCIL_REVIEW_MODES: ReadonlySet<string> = new Set([
-  "full",
-  "convergence",
-]);
+// Both membership sets derive from the canonical const arrays in
+// headless-council-gate (SYMPH-855 council P2-3) so they can never drift from
+// the types. `mode` and `routingMode` are intentionally DIFFERENT domains:
+// `mode` is the review convergence-loop shape (full|convergence); `routingMode`
+// is lane selection (fast|standard|…).
+const COUNCIL_REVIEW_MODE_SET: ReadonlySet<string> = new Set(
+  COUNCIL_REVIEW_MODES,
+);
 const COUNCIL_ROUTING_MODE_SET: ReadonlySet<string> = new Set(
   COUNCIL_ROUTING_MODES,
 );
@@ -797,7 +801,7 @@ function isWellFormedReviewerRouting(value: unknown): boolean {
   if (
     routing === null ||
     typeof routing.mode !== "string" ||
-    !COUNCIL_REVIEW_MODES.has(routing.mode) ||
+    !COUNCIL_REVIEW_MODE_SET.has(routing.mode) ||
     typeof routing.round !== "number" ||
     !Number.isFinite(routing.round)
   ) {
@@ -832,11 +836,12 @@ function collectArtifactHashes(
     return [];
   }
   const usage = terminal.usage;
-  // TODO(SYMPH-853): the production CrabrunnerSchedulerClient will surface real
-  // per-artifact content hashes on terminal evidence; map them here so cross-
-  // host provenance carries integrity hashes alongside the artifact refs. Until
-  // that client exists, the artifact refs ARE the host-owned provenance and this
-  // stays an explicit empty — never a fabricated hash.
+  // TODO(SYMPH-862): the production review-stage dispatcher (host-owned
+  // collectArtifact reading real terminal evidence) will surface per-artifact
+  // content hashes; map them here so cross-host provenance carries integrity
+  // hashes alongside the artifact refs. Until that dispatcher exists, the
+  // artifact refs ARE the host-owned provenance and this stays an explicit
+  // empty — never a fabricated hash.
   void usage;
   return [];
 }

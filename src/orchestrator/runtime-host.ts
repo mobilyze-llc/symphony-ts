@@ -650,17 +650,28 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
   private agentRunner: AgentRunnerLike;
 
+  // The MERGED, live backend map (default current-runner + any custom entries),
+  // resolved at construction and on config reload — this is what dispatch reads.
   private stageExecutionBackends: ReadonlyMap<
     StageExecutionBackendKind,
     StageExecutionBackendRunner
   >;
 
+  // The RAW custom backends from options, retained so config reloads can re-merge
+  // them onto a fresh current-runner default. Distinct from the merged map above.
   private readonly customStageExecutionBackends: ReadonlyMap<
     StageExecutionBackendKind,
     StageExecutionBackendRunner
   > | null;
 
   private readonly reviewStageDispatcher: CrabrunnerReviewStageDispatcher | null;
+
+  /**
+   * One-shot latch so the "gate enabled but no review dispatcher wired" warning
+   * (SYMPH-855 council P2-2) is logged once per host lifetime, not on every
+   * review dispatch.
+   */
+  private reviewGateMismatchWarned = false;
 
   private readonly now: () => Date;
 
@@ -4726,6 +4737,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       crabrunnerReviewBackend !== null
         ? this.executeCrabrunnerReviewStageDispatch({
             issue,
+            attempt,
             stageName,
             signal: controller.signal,
             baseRef:
@@ -4859,14 +4871,30 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     if (this.config.reviewExecution?.crabrunnerJobGroup.enabled !== true) {
       return null;
     }
-    if (this.reviewStageDispatcher === null) {
-      return null;
-    }
     const backend = this.stageExecutionBackends.get("crabrunner");
-    if (backend === undefined || backend.backend !== "crabrunner") {
+    const hasCrabrunnerBackend =
+      backend !== undefined && backend.backend === "crabrunner";
+
+    if (this.reviewStageDispatcher === null) {
+      // SYMPH-855 council P2-2: an operator who enabled the gate AND registered
+      // the crabrunner backend but has no dispatcher wired (the production
+      // dispatcher is SYMPH-862) would otherwise SILENTLY get the legacy path.
+      // Make the inert fallback observable — once per host lifetime — so the
+      // mismatch is diagnosable instead of looking like the gate "did nothing".
+      if (hasCrabrunnerBackend && !this.reviewGateMismatchWarned) {
+        this.reviewGateMismatchWarned = true;
+        void this.logger?.warn(
+          "crabrunner_review_dispatcher_unwired",
+          "crabrunner review gate enabled but no review dispatcher wired (SYMPH-862); falling back to legacy review path",
+          { outcome: "degraded", stage: stageName },
+        );
+      }
       return null;
     }
-    return backend;
+    if (!hasCrabrunnerBackend) {
+      return null;
+    }
+    return backend ?? null;
   }
 
   /**
@@ -4883,6 +4911,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
    */
   private async executeCrabrunnerReviewStageDispatch(input: {
     issue: Issue;
+    attempt: number | null;
     stageName: string | null;
     signal: AbortSignal;
     baseRef: string;
@@ -4900,6 +4929,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       issueId: input.issue.id,
       issueIdentifier: input.issue.identifier,
       stageName: input.stageName,
+      attempt: input.attempt,
       artifactRoot: input.artifactRoot,
       baseRef: input.baseRef,
       signal: input.signal,
@@ -4909,6 +4939,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     const dispatched = await this.reviewStageDispatcher(context);
     return this.buildReviewMarkerRunResult(
       input.issue,
+      input.attempt,
       dispatched.markerMessage,
     );
   }
@@ -4921,6 +4952,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
    */
   private buildReviewMarkerRunResult(
     issue: Issue,
+    attempt: number | null,
     markerMessage: string,
   ): AgentRunResult {
     const startedAt = this.now().toISOString();
@@ -4935,7 +4967,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       runAttempt: {
         issueId: issue.id,
         issueIdentifier: issue.identifier,
-        attempt: null,
+        // SYMPH-855 council P2-1: preserve the real stage attempt so a rework
+        // re-review is journaled/correlated as its own attempt.
+        attempt,
         workspacePath: workspaceInfo.workspacePath,
         startedAt,
         status: "succeeded",

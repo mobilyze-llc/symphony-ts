@@ -6,7 +6,10 @@ import type {
   ReviewJobGroupLaneEvidence,
 } from "../../src/review/crabrunner-review-job-group.js";
 import { runCrabrunnerReviewStage } from "../../src/review/crabrunner-review-stage.js";
-import type { HeadlessCouncilGateResult } from "../../src/review/headless-council-gate.js";
+import {
+  COUNCIL_ROUTING_MODES,
+  type HeadlessCouncilGateResult,
+} from "../../src/review/headless-council-gate.js";
 import { buildReviewJournalEntries } from "../../src/review/review-journal-events.js";
 import type {
   StageExecutionBackendInput,
@@ -235,6 +238,15 @@ interface WrittenFile {
   contents: string;
 }
 
+/** Find the written review-result.json contents by path (order-independent). */
+function resultJsonOf(
+  written: readonly WrittenFile[],
+  path: string,
+): HeadlessCouncilGateResult {
+  const file = written.find((entry) => entry.path === path);
+  return JSON.parse(file?.contents ?? "{}") as HeadlessCouncilGateResult;
+}
+
 function baseInput(overrides: {
   lanes: CrabrunnerReviewLaneSpec[];
   backend: StageExecutionBackendRunner<CrabrunnerStageExecutionEvidence> & {
@@ -326,14 +338,18 @@ describe("runCrabrunnerReviewStage", () => {
       `[REVIEW_GATE_RESULT_PATH: ${stageResult.reviewResultPath}]`,
     );
     expect(stageResult.result.verdict).toBe("pass");
-    // Exactly one review-result.json is written, to the marker path.
-    expect(written).toHaveLength(1);
-    expect(written[0]?.path).toBe(stageResult.reviewResultPath);
+    // BOTH artifacts the result references are written (review-result.json AND
+    // council-report.md), matching the legacy council gate's writeResult — so
+    // artifactPaths.councilReport points at a file that actually exists.
+    expect(written).toHaveLength(2);
+    expect(written.map((entry) => entry.path).sort()).toEqual(
+      [
+        stageResult.result.artifactPaths.councilReport,
+        stageResult.reviewResultPath,
+      ].sort(),
+    );
 
-    const parsed = JSON.parse(written[0]?.contents ?? "{}") as
-      | HeadlessCouncilGateResult
-      | Record<string, unknown>;
-    const result = parsed as HeadlessCouncilGateResult;
+    const result = resultJsonOf(written, stageResult.reviewResultPath);
     // The persisted artifact satisfies the orchestrator's anti-spoof path
     // equality (resultJson === marker, artifactDir === marker parent).
     expect(result.artifactPaths.resultJson).toBe(stageResult.reviewResultPath);
@@ -382,9 +398,7 @@ describe("runCrabrunnerReviewStage", () => {
     );
 
     expect(stageResult.result.verdict).toBe("fail");
-    const result = JSON.parse(
-      written[0]?.contents ?? "{}",
-    ) as HeadlessCouncilGateResult;
+    const result = resultJsonOf(written, stageResult.reviewResultPath);
     expect(result.verdict).toBe("fail");
     // A non-pass verdict is never merge-eligible.
     expect(result.review_routing?.decorrelationBasis.mergeEligible).toBe(false);
@@ -422,9 +436,7 @@ describe("runCrabrunnerReviewStage", () => {
     );
 
     expect(stageResult.result.verdict).toBe("error");
-    const result = JSON.parse(
-      written[0]?.contents ?? "{}",
-    ) as HeadlessCouncilGateResult;
+    const result = resultJsonOf(written, stageResult.reviewResultPath);
     expect(result.verdict).toBe("error");
     expect(result.review_routing?.decorrelationBasis.mergeEligible).toBe(false);
     expect(result.degradedConditions).toContain(
@@ -442,9 +454,7 @@ describe("runCrabrunnerReviewStage", () => {
 
     expect(stageResult.result.verdict).toBe("error");
     expect(backend.submitted).toEqual([]);
-    const result = JSON.parse(
-      written[0]?.contents ?? "{}",
-    ) as HeadlessCouncilGateResult;
+    const result = resultJsonOf(written, stageResult.reviewResultPath);
     expect(result.verdict).toBe("error");
     expect(result.degradedConditions).toContain("no_reviewer_lanes");
     expect(result.review_routing?.decorrelationBasis.mergeEligible).toBe(false);
@@ -583,5 +593,85 @@ describe("runCrabrunnerReviewStage", () => {
 
     // The ONLY dispatch surface is the injected backend (one lane => one call).
     expect(backend.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("defaults routing.mode to a valid council routing mode that survives journal reduction (SYMPH-855 P2-4)", async () => {
+    const backend = fakeBackend({
+      "codex-high-lead": {
+        terminal: { state: "succeeded", artifactRefs: ["/a.json"] },
+        collectedArtifact: reviewerArtifact({
+          laneId: "codex-high-lead",
+          agent: "codex",
+          modelFamily: "codex",
+          verdict: "pass",
+        }),
+      },
+    });
+    const written: WrittenFile[] = [];
+
+    // baseInput passes no routingMode, so the mapper defaults routing.mode to
+    // "standard". Confirm "standard" is a real CouncilRoutingMode and that the
+    // resulting routing flows through buildReviewJournalEntries without throwing.
+    const stageResult = await runCrabrunnerReviewStage(
+      baseInput({
+        lanes: [
+          reviewerLane({
+            laneId: "codex-high-lead",
+            agent: "codex",
+            modelFamily: "codex",
+          }),
+        ],
+        backend,
+        written,
+      }),
+    );
+
+    expect(COUNCIL_ROUTING_MODES).toContain("standard");
+    expect(stageResult.result.review_routing?.mode).toBe("standard");
+    expect(() =>
+      buildReviewJournalEntries(stageResult.result, {
+        issueId: "issue-855",
+        issueIdentifier: "SYMPH-855",
+        stage: "review",
+        source: "pipeline",
+      }),
+    ).not.toThrow();
+  });
+
+  it("writes a council-report.md alongside review-result.json so its ref is not dangling (SYMPH-855 Track)", async () => {
+    const backend = fakeBackend({
+      "codex-high-lead": {
+        terminal: { state: "succeeded", artifactRefs: ["/a.json"] },
+        collectedArtifact: reviewerArtifact({
+          laneId: "codex-high-lead",
+          agent: "codex",
+          modelFamily: "codex",
+          verdict: "pass",
+        }),
+      },
+    });
+    const written: WrittenFile[] = [];
+
+    const stageResult = await runCrabrunnerReviewStage(
+      baseInput({
+        lanes: [
+          reviewerLane({
+            laneId: "codex-high-lead",
+            agent: "codex",
+            modelFamily: "codex",
+          }),
+        ],
+        backend,
+        written,
+      }),
+    );
+
+    const councilReportPath = stageResult.result.artifactPaths.councilReport;
+    const reportFile = written.find(
+      (entry) => entry.path === councilReportPath,
+    );
+    // The referenced council report is actually written and non-empty.
+    expect(reportFile).toBeDefined();
+    expect(reportFile?.contents.length ?? 0).toBeGreaterThan(0);
   });
 });

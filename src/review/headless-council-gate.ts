@@ -82,7 +82,15 @@ const PI_PROVENANCE_PATTERN = /(?:^|[^a-z0-9])(?:deepseek|pi)(?=$|[^a-z0-9])/;
 const execFileAsync = promisify(execFile);
 
 export type HeadlessGateVerdict = "pass" | "fail" | "error";
-export type CouncilReviewMode = "full" | "convergence";
+/**
+ * Canonical council review LOOP modes. The single runtime source of truth for
+ * `CouncilReviewMode`, distinct from `COUNCIL_ROUTING_MODES` (the lane-routing
+ * modes) — review mode is the convergence-loop shape, routing mode is lane
+ * selection. Consumers that validate `routing.mode` derive from this const so
+ * the membership cannot drift from the type (SYMPH-855 council P2-3).
+ */
+export const COUNCIL_REVIEW_MODES = ["full", "convergence"] as const;
+export type CouncilReviewMode = (typeof COUNCIL_REVIEW_MODES)[number];
 export const COUNCIL_ROUTING_MODES = [
   "fast",
   "standard",

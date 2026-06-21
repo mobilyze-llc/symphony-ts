@@ -103,6 +103,12 @@ export interface CrabrunnerReviewStageDispatchContext {
   issueId: string;
   issueIdentifier: string;
   stageName: string | null;
+  /**
+   * The stage attempt index. Threaded through so a rework (re-review) attempt is
+   * correlated/journaled as its own attempt and not collapsed into the initial
+   * one (SYMPH-855 council P2-1). null on a first dispatch with no attempt.
+   */
+  attempt: number | null;
   /** Run-group artifact root the review-result.json is written under. */
   artifactRoot: string;
   baseRef: string | null;
@@ -151,6 +157,7 @@ export async function runCrabrunnerReviewStage(
 
   const artifactDir = resolve(input.artifactDir);
   const reviewResultPath = `${artifactDir}/review-result.json`;
+  const councilReportPath = `${artifactDir}/council-report.md`;
   const completedAt = now().toISOString();
 
   const mergeEligible = jobGroup.verdict === "pass";
@@ -198,12 +205,17 @@ export async function runCrabrunnerReviewStage(
         .map((lane) => lane.structuredArtifactPath ?? null)
         .filter((path): path is string => path !== null),
       resultJson: reviewResultPath,
-      councilReport: `${artifactDir}/council-report.md`,
+      councilReport: councilReportPath,
     },
     summary: buildSummary(jobGroup),
   };
 
   await input.mkdir(artifactDir);
+  // SYMPH-855 council Track: write BOTH artifacts the result references — the
+  // legacy council gate's writeResult writes review-result.json AND
+  // council-report.md, so `artifactPaths.councilReport` must point at a file
+  // that actually exists, not a dangling reference.
+  await input.writeFile(councilReportPath, buildCouncilReport(result));
   await input.writeFile(
     reviewResultPath,
     `${JSON.stringify(result, null, 2)}\n`,
@@ -287,4 +299,26 @@ function buildSummary(jobGroup: CrabrunnerReviewJobGroupResult): string {
       ? ` (${jobGroup.degradedConditions.join(", ")})`
       : "";
   return `Crabrunner review job group ${jobGroup.verdict} over ${laneCount} reviewer lane(s)${degraded}.`;
+}
+
+/**
+ * A minimal human-readable council report written alongside review-result.json,
+ * so `artifactPaths.councilReport` references a real file (parity with the
+ * legacy council gate, which writes both). Deep per-finding rendering stays the
+ * gate's concern; this is a faithful summary of the job-group outcome.
+ */
+function buildCouncilReport(result: HeadlessCouncilGateResult): string {
+  const lines = [
+    `# Crabrunner review — ${result.issueId}`,
+    "",
+    `- Verdict: ${result.verdict}`,
+    `- Reviewed head: ${result.review_metadata.reviewed_head_sha ?? "unknown"}`,
+    `- Round: ${result.review_metadata.round}`,
+    `- Lanes: ${result.lanes.map((lane) => `${lane.laneId}:${lane.verdict}`).join(", ") || "none"}`,
+    `- Degraded conditions: ${result.degradedConditions.join(", ") || "none"}`,
+    "",
+    result.summary,
+    "",
+  ];
+  return lines.join("\n");
 }
