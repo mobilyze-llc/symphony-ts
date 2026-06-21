@@ -296,30 +296,39 @@ function verifyProducedCapsules(input: {
 
 /**
  * Resolve a declared capsule path against the run-group artifact root, confined
- * to that root. Returns null for an absolute path or any `..` traversal that
- * would escape the root, so the fail-closed "produced under the artifact root"
- * guarantee holds.
+ * to a file STRICTLY UNDER that root. Returns null for:
+ *   - an absolute path,
+ *   - an empty or "." path (which would resolve to the root directory itself),
+ *   - any `..` traversal that escapes the root,
+ *   - any path that resolves to the root itself (not a file under it),
+ * so the fail-closed "produced under the artifact root" guarantee holds and a
+ * capsule can never "produce" the artifact-root directory. (SYMPH-852 T3)
  */
 function resolveCapsulePathWithinRoot(
   artifactRoot: string,
   capsulePath: string,
 ): string | null {
-  if (isAbsolute(capsulePath)) {
+  const trimmed = capsulePath.trim();
+  if (trimmed === "" || trimmed === "." || isAbsolute(trimmed)) {
     return null;
   }
   const root = resolve(artifactRoot);
-  const resolved = resolve(root, capsulePath);
-  if (resolved !== root && !resolved.startsWith(root + sep)) {
+  const resolved = resolve(root, trimmed);
+  // Must be strictly under the root — the root itself is not a produced capsule.
+  if (!resolved.startsWith(root + sep)) {
     return null;
   }
   return resolved;
 }
 
 function readStageTotalTokens(liveSession: LiveSession): number {
-  // Prefer the per-stage rollup; fall back to the codex live total. Both are
-  // monotonically accumulated counters on the live session.
+  // Prefer the per-stage rollup; fall back to the codex live total ONLY when the
+  // rollup is genuinely absent/non-finite. A legitimate 0 (e.g. a zero-turn or
+  // synthesized sub-stage) is accepted as 0 — treating 0 as "unset" would fall
+  // back to codexTotalTokens and inflate per-sub-stage spend, falsely tripping a
+  // budget breach. (SYMPH-852 P2-1)
   const stageTotal = liveSession.totalStageTotalTokens;
-  if (Number.isFinite(stageTotal) && stageTotal > 0) {
+  if (Number.isFinite(stageTotal) && stageTotal >= 0) {
     return stageTotal;
   }
   return liveSession.codexTotalTokens;
@@ -341,6 +350,9 @@ interface JournalSubStageOutcomesInput {
 async function journalSubStageOutcomes(
   input: JournalSubStageOutcomesInput,
 ): Promise<void> {
+  // `attempt ?? 0` MUST match the job-identity stageAttempt coercion in
+  // createStageExecutionJobSpec (job-spec.ts uses `attempt ?? 0`); the delegated
+  // journal's stageAttempt has to equal the job's so the projection correlates.
   const stageAttempt = input.attempt ?? 0;
   for (const [index, outcome] of input.outcomes.entries()) {
     const job = input.subStageJobs[index];
@@ -587,6 +599,9 @@ function hardStopForStopReason(
       total + (outcome.result?.result.liveSession.turnCount ?? 0),
     0,
   );
+  // TODO(SYMPH-853): estimatedCostUsd is a deterministic-wiring placeholder (0).
+  // Real per-sub-stage cost arrives with live crabrunner wiring; until then the
+  // module is production-inert, so a fabricated cost would be misleading.
   if (decomposed.stopReason === "budget_exceeded") {
     return {
       outcome: "PAUSED-budget",

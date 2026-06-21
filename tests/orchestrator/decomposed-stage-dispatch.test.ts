@@ -583,4 +583,58 @@ describe("executeDecomposedStageDispatch", () => {
     expect(delegated).toHaveLength(2);
     expect(delegated[0]!.timestamp).not.toBe(delegated[1]!.timestamp);
   });
+
+  it("reads a legitimate zero stage-token total as 0, not the codex fallback (P2-1)", async () => {
+    // A zero-turn / synthesized sub-stage can legitimately spend 0 stage tokens
+    // while codexTotalTokens carries an unrelated nonzero value. The per-
+    // sub-stage budget check must read 0 (within the ceiling), NOT fall back to
+    // codexTotalTokens and falsely trip a budget breach.
+    const subStages = [createSubStageProfile("zero-turn", { maxTokens: 100 })];
+    const zeroStageResult: AgentRunResult = {
+      ...makeResult(createIssue(), 0),
+      liveSession: {
+        ...createEmptyLiveSession(),
+        // Stage rollup is a legitimate 0; codex live total is unrelated 500.
+        totalStageTotalTokens: 0,
+        codexTotalTokens: 500,
+        turnCount: 0,
+      },
+    };
+
+    const { result, backend } = runHarness({
+      subStages,
+      resultFor: () => zeroStageResult,
+    });
+
+    const aggregate = await result;
+    expect(backend.inputs).toHaveLength(1);
+    // 0 <= ceiling(100): the sequence completes, no budget breach.
+    expect(aggregate.hardStop ?? null).toBeNull();
+    // The aggregate reflects the stage rollup (0), not the codex fallback (500).
+    expect(aggregate.liveSession.totalStageTotalTokens).toBe(0);
+  });
+
+  it("does not count an empty or '.' produced-capsule path even when the artifact root exists (T3)", async () => {
+    const subStages = [
+      createSubStageProfile("patch-plan", { produce: ["", "."] }),
+      createSubStageProfile("first-patch", {
+        consume: [""],
+        produce: ["patch.json"],
+      }),
+    ];
+
+    const { result, backend } = runHarness({
+      subStages,
+      // The artifact root dir itself "exists" — an empty/"." produce path must
+      // still NOT count as a produced capsule (it would resolve to the root).
+      producedCapsuleFiles: new Set(["/tmp/artifacts/issue-1"]),
+      resultFor: () => makeResult(createIssue(), 100),
+    });
+
+    const aggregate = await result;
+    // patch-plan dispatched, but "" / "." are not counted, so first-patch's
+    // required capsule is missing -> sequence fails closed.
+    expect(backend.inputs).toHaveLength(1);
+    expect(aggregate.hardStop).not.toBeNull();
+  });
 });
