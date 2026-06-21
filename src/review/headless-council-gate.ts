@@ -23,6 +23,7 @@ import { classifyCouncilRiskPaths } from "../orchestrator/council-risk-predicate
 import {
   artifactSectionContent,
   artifactSectionHasContent,
+  artifactStartingVerdictToken,
   artifactStartsWithVerdict,
   normalizeArtifactStart,
   passArtifactTriageSectionIsNonBlocking,
@@ -386,6 +387,17 @@ export interface HeadlessReviewerLaneConfig {
   binary?: string;
 }
 
+export interface HeadlessReviewerLaneIdentity {
+  laneId: string;
+  agent: HeadlessReviewerAgent;
+  role: string;
+  model: string;
+  modelFamily: string;
+  reasoningEffort: string | null;
+  independentReviewer: boolean;
+  mergeAuthoritative: boolean;
+}
+
 export interface CouncilRoutingLaneSelection {
   laneId: string;
   agent: HeadlessReviewerAgent;
@@ -566,6 +578,42 @@ export interface ReviewBundleArtifact {
     evidenceDatasetPaths: string[];
     riskContractArtifactPaths: string[];
   };
+}
+
+export interface PreparedHeadlessCouncilReview {
+  context: ReviewContext;
+  artifactDir: string;
+  diffPath: string;
+  reviewBundle: ReviewBundleReference;
+  reviewerLanes: HeadlessReviewerLaneConfig[];
+  reviewRouting: CouncilReviewRouting;
+  targetedConvergence: TargetedConvergenceHypothesis | null;
+  round: number;
+  mode: CouncilReviewMode;
+}
+
+export interface PrepareHeadlessCouncilReviewDependencies {
+  runCommand?: CommandRunner;
+}
+
+export interface StructuredReviewerArtifactRecord
+  extends StructuredReviewerArtifact {
+  /** Freshness binding consumed by the crabrunner review job-group mapper. */
+  headSha: string;
+  /** Persisted structured artifact path, when synthesized from a markdown ref. */
+  structuredArtifactPath?: string;
+}
+
+export interface SynthesizeStructuredReviewerArtifactRecordInput {
+  context: ReviewContext;
+  lane: HeadlessReviewerLaneConfig;
+  artifactPath: string;
+  artifact: string;
+  structuredArtifactPath: string;
+  reviewBundle: ReviewBundleReference | null;
+  mode: CouncilReviewMode;
+  routingMode: CouncilRoutingMode | null;
+  round: number;
 }
 
 export interface CouncilReviewMetadata {
@@ -1673,6 +1721,200 @@ export function defaultReviewerLanes(
     lanes.push(kimiReviewerLane(env));
   }
   return lanes;
+}
+
+export async function prepareHeadlessCouncilReviewForDispatch(
+  input: HeadlessCouncilGateInput,
+  dependencies: PrepareHeadlessCouncilReviewDependencies = {},
+): Promise<PreparedHeadlessCouncilReview> {
+  const runCommand = dependencies.runCommand ?? execFileCommand;
+  const env = input.env ?? process.env;
+  const artifactDir = resolve(input.artifactDir);
+  const workspace = resolve(input.workspace);
+  const round = normalizeReviewRound(input.round);
+  const mode = input.mode ?? "full";
+  const explicitReviewerLanes =
+    input.reviewerLanes === undefined ? null : [...input.reviewerLanes];
+  const codexLeadEnabled = input.codexLead !== false;
+
+  if (explicitReviewerLanes?.length === 0) {
+    throw new Error("No reviewer lanes were configured.");
+  }
+  const duplicateLaneIds = findDuplicateLaneIds(explicitReviewerLanes ?? []);
+  if (duplicateLaneIds.length > 0) {
+    throw new Error(
+      `Duplicate reviewer lane IDs are not allowed: ${duplicateLaneIds.join(", ")}`,
+    );
+  }
+  const reservedLaneIds = findReservedLaneIds(explicitReviewerLanes ?? []);
+  if (reservedLaneIds.length > 0) {
+    throw new Error(
+      `Reviewer lane IDs cannot use reserved gate lane IDs: ${reservedLaneIds.join(", ")}`,
+    );
+  }
+
+  await mkdir(artifactDir, { recursive: true });
+
+  const context = await loadReviewContext(input, {
+    runCommand,
+    workspace,
+    env,
+  });
+  const diffPath = `${artifactDir}/diff.patch`;
+  await writeFile(diffPath, context.diff);
+  const targetedConvergence = await buildTargetedConvergenceHypothesis({
+    context,
+    previousReviewedHeadSha: input.previousReviewedHeadSha ?? null,
+    priorStructuredArtifacts: input.priorStructuredArtifacts ?? [],
+    runCommand,
+    workspace,
+    env,
+  });
+  const reviewRouting = buildInitialCouncilRouting({
+    input,
+    env,
+    context,
+    codexLeadEnabled,
+  });
+  const reviewerLanes =
+    explicitReviewerLanes ??
+    defaultReviewerLanes(env, {
+      codexExcavation: input.codexExcavation,
+      codexExcavationSweep:
+        input.codexExcavationSweep ?? routingCodexSweep(reviewRouting.mode),
+      codexExcavationTimeoutSeconds: input.codexExcavationTimeoutSeconds,
+      codexExcavationToolOutputTokenLimit:
+        input.codexExcavationToolOutputTokenLimit,
+      codexExcavationModelAutoCompactTokenLimit:
+        input.codexExcavationModelAutoCompactTokenLimit,
+      kimiShadow: input.kimiShadow,
+      routingMode: reviewRouting.mode,
+      acceptsNarrowerRisk: operatorAcceptedNarrowerRisk(reviewRouting),
+      requiresPiAuthorRecovery: reviewRouting.escalationPredicates.includes(
+        "same_family_required_reviewer_recovery",
+      ),
+    });
+  const routedDuplicateLaneIds = findDuplicateLaneIds(reviewerLanes);
+  if (routedDuplicateLaneIds.length > 0) {
+    throw new Error(
+      `Duplicate reviewer lane IDs are not allowed: ${routedDuplicateLaneIds.join(", ")}`,
+    );
+  }
+  const routedReservedLaneIds = findReservedLaneIds(reviewerLanes);
+  if (routedReservedLaneIds.length > 0) {
+    throw new Error(
+      `Reviewer lane IDs cannot use reserved gate lane IDs: ${routedReservedLaneIds.join(", ")}`,
+    );
+  }
+
+  const reviewBundle = await writeReviewBundle(input, context, {
+    artifactDir,
+    diffPath,
+    runCommand,
+    workspace,
+    env,
+    round,
+    mode,
+    routingMode: reviewRouting.mode,
+    targetedConvergence,
+  });
+
+  return {
+    context,
+    artifactDir,
+    diffPath,
+    reviewBundle: reviewBundle.reference,
+    reviewerLanes,
+    reviewRouting,
+    targetedConvergence,
+    round,
+    mode,
+  };
+}
+
+export function headlessReviewerLaneIdentity(
+  lane: HeadlessReviewerLaneConfig,
+): HeadlessReviewerLaneIdentity {
+  const model = reviewerLaneModel(lane);
+  return {
+    laneId: lane.laneId,
+    agent: lane.agent,
+    role: lane.role,
+    model,
+    modelFamily: modelFamilyForLane(lane.agent, model),
+    reasoningEffort: laneReasoningEffort(lane),
+    independentReviewer: independentReviewerForLane(lane),
+    mergeAuthoritative: mergeAuthoritativeForLane(lane),
+  };
+}
+
+export function buildHeadlessReviewerPrompt(input: {
+  context: ReviewContext;
+  lane: HeadlessReviewerLaneConfig;
+  reviewBundle: ReviewBundleReference;
+  targetedConvergence: TargetedConvergenceHypothesis | null;
+  priorStructuredArtifacts?: readonly StructuredReviewerArtifact[];
+  riskContractArtifactPaths?: readonly string[];
+}): string {
+  return buildReviewerPrompt(
+    input.context,
+    input.lane,
+    input.reviewBundle,
+    input.targetedConvergence,
+    input.priorStructuredArtifacts ?? [],
+    input.riskContractArtifactPaths ?? [],
+  );
+}
+
+export function finalizeHeadlessCouncilRouting(
+  routing: CouncilReviewRouting,
+  lanes: readonly HeadlessLaneResult[],
+): CouncilReviewRouting {
+  return finalizeCouncilRouting(routing, lanes);
+}
+
+export async function synthesizeStructuredReviewerArtifactRecord(
+  input: SynthesizeStructuredReviewerArtifactRecordInput,
+): Promise<StructuredReviewerArtifactRecord> {
+  if (input.context.headSha === null || input.context.headSha.trim() === "") {
+    throw new Error("review context did not resolve a head SHA");
+  }
+  const persistedArtifact = await persistContractArtifact({
+    artifactPath: input.artifactPath,
+    artifact: input.artifact,
+  });
+  if (persistedArtifact.error !== null) {
+    throw new Error(persistedArtifact.error);
+  }
+  const parsedVerdict = parseArtifactVerdict(persistedArtifact.artifact);
+  const identity = headlessReviewerLaneIdentity(input.lane);
+  const structuredArtifact = buildStructuredReviewerArtifact({
+    lane: {
+      ...identity,
+      promptPath: null,
+      cliJsonPath: null,
+      stderrPath: null,
+      reviewBundle: input.reviewBundle,
+    },
+    artifact: persistedArtifact.artifact,
+    artifactPath: input.artifactPath,
+    rawArtifactPath: persistedArtifact.rawArtifactPath,
+    parsedVerdict,
+    context: input.context,
+    mode: input.mode,
+    routingMode: input.routingMode,
+    round: input.round,
+    reviewBundle: input.reviewBundle,
+  });
+  await writeFile(
+    input.structuredArtifactPath,
+    `${JSON.stringify(structuredArtifact, null, 2)}\n`,
+  );
+  return {
+    ...structuredArtifact,
+    headSha: input.context.headSha,
+    structuredArtifactPath: input.structuredArtifactPath,
+  };
 }
 
 function opusReviewerLane(env: NodeJS.ProcessEnv): HeadlessReviewerLaneConfig {
@@ -4849,11 +5091,47 @@ function stripFindingMetadata(text: string): string {
     cursor = fields[index + 1]?.start ?? text.length;
   }
   chunks.push(text.slice(cursor));
-  return chunks
-    .join(" ")
-    .replace(/\s*(?:[|;])\s*$/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
+  return collapseFindingWhitespace(
+    stripTrailingFindingMetadataSeparator(chunks.join(" ")),
+  ).trim();
+}
+
+function stripTrailingFindingMetadataSeparator(text: string): string {
+  let end = text.length;
+  while (end > 0 && isFindingWhitespace(text.charAt(end - 1))) {
+    end -= 1;
+  }
+  if (end > 0) {
+    const trailingChar = text.charAt(end - 1);
+    if (trailingChar === "|" || trailingChar === ";") {
+      end -= 1;
+    }
+  }
+  while (end > 0 && isFindingWhitespace(text.charAt(end - 1))) {
+    end -= 1;
+  }
+  return text.slice(0, end);
+}
+
+function collapseFindingWhitespace(text: string): string {
+  let result = "";
+  let inWhitespace = false;
+  for (const char of text) {
+    if (isFindingWhitespace(char)) {
+      if (!inWhitespace) {
+        result += " ";
+      }
+      inWhitespace = true;
+      continue;
+    }
+    result += char;
+    inWhitespace = false;
+  }
+  return result;
+}
+
+function isFindingWhitespace(char: string): boolean {
+  return char.length > 0 && char.trim() === "";
 }
 
 function extractFindingMetadataField(
@@ -5348,11 +5626,9 @@ function fingerprintFinding(
 
 function parseArtifactVerdict(artifact: string): ParsedArtifactVerdict {
   const trimmedArtifact = normalizeArtifactStart(artifact);
-  const verdictMatch =
-    trimmedArtifact.match(/^## Verdict\s*\n\s*(PASS|FINDINGS|FAIL)\b/i) ??
-    trimmedArtifact.match(/^Verdict:\s*(PASS|FINDINGS|FAIL)\b/i);
+  const token = artifactStartingVerdictToken(trimmedArtifact);
 
-  if (verdictMatch === null) {
+  if (token === null) {
     return {
       verdict: "fail",
       message:
@@ -5361,7 +5637,6 @@ function parseArtifactVerdict(artifact: string): ParsedArtifactVerdict {
     };
   }
 
-  const token = verdictMatch[1]?.toUpperCase();
   if (token === "PASS") {
     if (artifactHasBlockingSections(trimmedArtifact)) {
       return {
@@ -6351,10 +6626,10 @@ function extractChangedPathsFromDiff(diff: string): string[] {
       inFileHeader = false;
     }
 
-    const diffGitMatch = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
-    if (diffGitMatch !== null) {
-      addDiffPath(paths, diffGitMatch[1]);
-      addDiffPath(paths, diffGitMatch[2]);
+    const diffGitPaths = parseUnquotedDiffGitPaths(line);
+    if (diffGitPaths !== null) {
+      addDiffPath(paths, diffGitPaths.oldPath);
+      addDiffPath(paths, diffGitPaths.newPath);
       inFileHeader = true;
       continue;
     }
@@ -6395,6 +6670,29 @@ function extractChangedPathsFromDiff(diff: string): string[] {
     }
   }
   return [...paths].sort();
+}
+
+function parseUnquotedDiffGitPaths(
+  line: string,
+): { oldPath: string; newPath: string } | null {
+  const prefix = "diff --git a/";
+  if (!line.startsWith(prefix)) {
+    return null;
+  }
+
+  const separator = " b/";
+  const separatorIndex = line.lastIndexOf(separator);
+  if (separatorIndex === -1) {
+    return null;
+  }
+
+  const oldPath = line.slice(prefix.length, separatorIndex);
+  const newPath = line.slice(separatorIndex + separator.length);
+  if (oldPath === "" || newPath === "") {
+    return null;
+  }
+
+  return { oldPath, newPath };
 }
 
 function addDiffPath(

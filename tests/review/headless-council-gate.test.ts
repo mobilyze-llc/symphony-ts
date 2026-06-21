@@ -2434,6 +2434,10 @@ describe("runHeadlessCouncilGate", () => {
         "similarity index 100%",
         "rename from rename-old.ts",
         "rename to rename-new.ts",
+        // Preserve the former greedy-regex split for ambiguous unquoted paths.
+        "diff --git a/src/foo b/bar b/src/foo b/bar",
+        "@@ -1 +1 @@",
+        "+ambiguous path",
         "diff --raw 100644 100644",
         "--- stale-header-body.ts",
         "+++ also-stale-header-body.ts",
@@ -2463,11 +2467,13 @@ describe("runHeadlessCouncilGate", () => {
     ) as { scope: { changedPaths: string[] } };
     expect(bundle.scope.changedPaths).toEqual([
       "bad\\u12",
+      "bar",
       "good.ts",
       "merged.ts",
       "path with spaces.ts",
       "rename-new.ts",
       "rename-old.ts",
+      "src/foo b/bar b/src/foo",
     ]);
   });
 

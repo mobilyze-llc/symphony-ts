@@ -48,6 +48,13 @@ const DIFF_INJECTION_TOKEN_PATTERN =
   /(DIFF_DATA|SYMPHONY_UNTRUSTED_DIFF|diff --git)/;
 const MAX_SAFE_ARTIFACT_PREAMBLE_CHARS = 3_000;
 const MAX_SAFE_ARTIFACT_PREAMBLE_LINES = 12;
+export type ArtifactVerdictToken = "PASS" | "FINDINGS" | "FAIL";
+
+const ARTIFACT_VERDICT_TOKENS: readonly ArtifactVerdictToken[] = [
+  "PASS",
+  "FINDINGS",
+  "FAIL",
+];
 
 export function sectionFindingEntries(section: string): string[] {
   const lines = section
@@ -126,7 +133,7 @@ export function artifactSectionContent(
 }
 
 export function normalizeArtifactStart(artifact: string): string {
-  const trimmedArtifact = artifact.replace(/^(?:\s|\uFEFF)+/u, "");
+  const trimmedArtifact = artifact.trimStart();
   if (artifactStartsWithVerdict(trimmedArtifact)) {
     return trimmedArtifact;
   }
@@ -141,7 +148,7 @@ export function normalizeArtifactStart(artifact: string): string {
     verdictIndex > 0 &&
     isPlainTextArtifactPreamble(trimmedArtifact.slice(0, verdictIndex))
   ) {
-    return trimmedArtifact.slice(verdictIndex).replace(/^(?:\s|\uFEFF)+/u, "");
+    return trimmedArtifact.slice(verdictIndex).trimStart();
   }
 
   return trimmedArtifact;
@@ -176,31 +183,49 @@ function stripFindingMarker(line: string): string {
 // immediately follows. Anything else before the verdict stays subject to the
 // diff-injection guard.
 function stripSingleLeadingTitleLine(artifact: string): string | null {
-  const titleMatch = artifact.match(/^#[ \t]+[^\n]*\n/);
-  if (titleMatch === null) {
+  const newlineIndex = artifact.indexOf("\n");
+  if (newlineIndex === -1) {
     return null;
   }
-  const titleLine = titleMatch[0];
+
+  const titleLine = artifact.slice(0, newlineIndex + 1);
+  const titleText = trimTrailingCarriageReturn(artifact.slice(0, newlineIndex));
+  if (
+    !titleText.startsWith("#") ||
+    !isHorizontalArtifactWhitespace(titleText.charAt(1))
+  ) {
+    return null;
+  }
+
   if (DIFF_INJECTION_TOKEN_PATTERN.test(titleLine)) {
     return null;
   }
-  return artifact.slice(titleLine.length).replace(/^(?:\s|﻿)+/u, "");
+  return artifact.slice(titleLine.length).trimStart();
 }
 
 export function artifactStartsWithVerdict(artifact: string): boolean {
-  return (
-    /^## Verdict\s*\n\s*(PASS|FINDINGS|FAIL)\b/i.test(artifact) ||
-    /^Verdict:\s*(PASS|FINDINGS|FAIL)\b/i.test(artifact)
-  );
+  return artifactStartingVerdictToken(artifact) !== null;
+}
+
+export function artifactStartingVerdictToken(
+  artifact: string,
+): ArtifactVerdictToken | null {
+  return artifactVerdictTokenAtLineStart(artifact, 0);
 }
 
 function findFirstArtifactVerdictIndex(artifact: string): number {
-  const headingIndex = artifact.search(
-    /^## Verdict\s*\n\s*(PASS|FINDINGS|FAIL)\b/im,
-  );
-  const inlineIndex = artifact.search(/^Verdict:\s*(PASS|FINDINGS|FAIL)\b/im);
-  const indexes = [headingIndex, inlineIndex].filter((index) => index >= 0);
-  return indexes.length === 0 ? -1 : Math.min(...indexes);
+  let offset = 0;
+  while (offset < artifact.length) {
+    if (artifactVerdictTokenAtLineStart(artifact, offset) !== null) {
+      return offset;
+    }
+    const nextLineIndex = artifact.indexOf("\n", offset);
+    if (nextLineIndex === -1) {
+      return -1;
+    }
+    offset = nextLineIndex + 1;
+  }
+  return -1;
 }
 
 function isPlainTextArtifactPreamble(preamble: string): boolean {
@@ -275,23 +300,17 @@ function findMarkdownHeading(
   artifact: string,
   predicate: (candidate: ArtifactHeadingMatch) => boolean,
 ): ArtifactHeadingMatch | null {
-  const headingPattern = /^(#{2,3})\s+(.+?)\s*$/gim;
-  let match = headingPattern.exec(artifact);
-  while (match !== null) {
-    const marker = match[1];
-    const rawText = match[2];
-    if (marker !== undefined && rawText !== undefined) {
-      const candidate: ArtifactHeadingMatch = {
-        startIndex: match.index,
-        endIndex: match.index + match[0].length,
-        level: marker.length === 2 ? 2 : 3,
-        normalizedText: normalizeArtifactHeadingText(rawText),
-      };
-      if (predicate(candidate)) {
-        return candidate;
-      }
+  let offset = 0;
+  while (offset <= artifact.length) {
+    const lineEnd = findArtifactLineEnd(artifact, offset);
+    const candidate = artifactMarkdownHeadingAtLine(artifact, offset, lineEnd);
+    if (candidate !== null && predicate(candidate)) {
+      return candidate;
     }
-    match = headingPattern.exec(artifact);
+    if (lineEnd >= artifact.length) {
+      break;
+    }
+    offset = lineEnd + 1;
   }
   return null;
 }
@@ -482,10 +501,191 @@ function isArtifactHeadingLabelSeparatorChar(char: string): boolean {
 }
 
 function isEmptySectionMarker(line: string): boolean {
-  const marker = line
-    .replace(/^[-*+]\s*/, "")
-    .replace(/^[_*]+/, "")
-    .replace(/[_*]+$/, "")
-    .trim();
-  return /^None(?:\s+found)?\.?$/i.test(marker);
+  const marker = trimTrailingEmphasisMarkers(
+    trimLeadingEmphasisMarkers(stripLeadingListMarker(line)),
+  ).trim();
+  return isNoneSectionMarker(marker);
+}
+
+function artifactVerdictTokenAtLineStart(
+  artifact: string,
+  offset: number,
+): ArtifactVerdictToken | null {
+  const lineEnd = findArtifactLineEnd(artifact, offset);
+  const line = trimTrailingCarriageReturn(
+    artifact.slice(offset, lineEnd),
+  ).trimEnd();
+  if (equalsIgnoreCase(line, "## Verdict")) {
+    return artifactVerdictTokenAfterHeadingLine(artifact, lineEnd);
+  }
+
+  if (!startsWithIgnoreCase(line, "Verdict:")) {
+    return null;
+  }
+
+  return parseArtifactVerdictToken(line.slice("Verdict:".length));
+}
+
+function artifactVerdictTokenAfterHeadingLine(
+  artifact: string,
+  headingLineEnd: number,
+): ArtifactVerdictToken | null {
+  let offset = headingLineEnd;
+  if (artifact.charAt(offset) === "\n") {
+    offset += 1;
+  }
+  const remainder = artifact.slice(offset).trimStart();
+  if (remainder === "") {
+    return null;
+  }
+
+  const tokenLineEnd = findArtifactLineEnd(remainder, 0);
+  return parseArtifactVerdictToken(remainder.slice(0, tokenLineEnd));
+}
+
+function parseArtifactVerdictToken(line: string): ArtifactVerdictToken | null {
+  const trimmedLine = line.trimStart();
+  for (const token of ARTIFACT_VERDICT_TOKENS) {
+    if (
+      startsWithIgnoreCase(trimmedLine, token) &&
+      isVerdictTokenBoundary(trimmedLine.charAt(token.length))
+    ) {
+      return token;
+    }
+  }
+  return null;
+}
+
+function isVerdictTokenBoundary(char: string): boolean {
+  return char === "" || !isAsciiWordChar(char);
+}
+
+function isAsciiWordChar(char: string): boolean {
+  if (char.length !== 1) {
+    return false;
+  }
+  const code = char.charCodeAt(0);
+  return (
+    (code >= 48 && code <= 57) ||
+    (code >= 65 && code <= 90) ||
+    code === 95 ||
+    (code >= 97 && code <= 122)
+  );
+}
+
+function artifactMarkdownHeadingAtLine(
+  artifact: string,
+  lineStart: number,
+  lineEnd: number,
+): ArtifactHeadingMatch | null {
+  const line = trimTrailingCarriageReturn(artifact.slice(lineStart, lineEnd));
+  const markerLength = markdownHeadingMarkerLength(line);
+  if (markerLength !== 2 && markerLength !== 3) {
+    return null;
+  }
+  if (!isArtifactWhitespace(line.charAt(markerLength))) {
+    return null;
+  }
+
+  const rawText = line.slice(markerLength + 1).trim();
+  if (rawText === "") {
+    return null;
+  }
+
+  return {
+    startIndex: lineStart,
+    endIndex: lineEnd,
+    level: markerLength === 2 ? 2 : 3,
+    normalizedText: normalizeArtifactHeadingText(rawText),
+  };
+}
+
+function markdownHeadingMarkerLength(line: string): number {
+  let markerLength = 0;
+  while (markerLength < line.length && line.charAt(markerLength) === "#") {
+    markerLength += 1;
+  }
+  return markerLength;
+}
+
+function stripLeadingListMarker(line: string): string {
+  const marker = line.charAt(0);
+  if (marker !== "-" && marker !== "*" && marker !== "+") {
+    return line;
+  }
+  return line.slice(1).trimStart();
+}
+
+function trimLeadingEmphasisMarkers(line: string): string {
+  let offset = 0;
+  while (offset < line.length) {
+    const char = line.charAt(offset);
+    if (char !== "_" && char !== "*") {
+      break;
+    }
+    offset += 1;
+  }
+  return line.slice(offset);
+}
+
+function trimTrailingEmphasisMarkers(line: string): string {
+  let end = line.length;
+  while (end > 0) {
+    const char = line.charAt(end - 1);
+    if (char !== "_" && char !== "*") {
+      break;
+    }
+    end -= 1;
+  }
+  return line.slice(0, end);
+}
+
+function isNoneSectionMarker(marker: string): boolean {
+  const normalizedMarker = collapseArtifactWhitespace(marker).toLowerCase();
+  const withoutFinalPeriod = normalizedMarker.endsWith(".")
+    ? normalizedMarker.slice(0, -1)
+    : normalizedMarker;
+  return withoutFinalPeriod === "none" || withoutFinalPeriod === "none found";
+}
+
+function collapseArtifactWhitespace(value: string): string {
+  let result = "";
+  let inWhitespace = false;
+  for (const char of value) {
+    if (isArtifactWhitespace(char)) {
+      if (!inWhitespace) {
+        result += " ";
+      }
+      inWhitespace = true;
+      continue;
+    }
+    result += char;
+    inWhitespace = false;
+  }
+  return result.trim();
+}
+
+function findArtifactLineEnd(value: string, offset: number): number {
+  const newlineIndex = value.indexOf("\n", offset);
+  return newlineIndex === -1 ? value.length : newlineIndex;
+}
+
+function trimTrailingCarriageReturn(value: string): string {
+  return value.endsWith("\r") ? value.slice(0, -1) : value;
+}
+
+function isHorizontalArtifactWhitespace(char: string): boolean {
+  return char === " " || char === "\t";
+}
+
+function isArtifactWhitespace(char: string): boolean {
+  return char.length > 0 && char.trim() === "";
+}
+
+function startsWithIgnoreCase(value: string, prefix: string): boolean {
+  return value.slice(0, prefix.length).toLowerCase() === prefix.toLowerCase();
+}
+
+function equalsIgnoreCase(left: string, right: string): boolean {
+  return left.length === right.length && startsWithIgnoreCase(left, right);
 }

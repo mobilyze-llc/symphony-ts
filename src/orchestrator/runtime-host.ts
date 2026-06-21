@@ -4696,6 +4696,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         ? this.executeCrabrunnerReviewStageDispatch({
             issue,
             attempt,
+            stage,
             stageName,
             signal: controller.signal,
             baseRef:
@@ -4870,6 +4871,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   private async executeCrabrunnerReviewStageDispatch(input: {
     issue: Issue;
     attempt: number | null;
+    stage: StageDefinition | null;
     stageName: string | null;
     signal: AbortSignal;
     baseRef: string;
@@ -4884,8 +4886,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       );
     }
     const context: CrabrunnerReviewStageDispatchContext = {
+      issue: input.issue,
       issueId: input.issue.id,
       issueIdentifier: input.issue.identifier,
+      workspaceRoot: this.config.workspace.root,
+      stage: input.stage,
       stageName: input.stageName,
       attempt: input.attempt,
       artifactRoot: input.artifactRoot,
