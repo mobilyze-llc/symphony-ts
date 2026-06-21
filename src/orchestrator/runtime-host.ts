@@ -406,6 +406,15 @@ export interface RuntimeHostOptions {
     locator: LoopTraceArtifactLocator,
     journal: LoopTraceJournal,
   ) => Promise<void>;
+  /**
+   * Coalescing window awaited once before a queued loop-trace persistence task
+   * drains its pending journal. Defaults to a single macrotask tick so that
+   * appends bursted onto the event queue merge into one write. Injectable so
+   * tests can hold the window open until a deterministic condition is met and
+   * assert the coalescing invariant against a real boundary instead of a
+   * timing-sensitive tick count.
+   */
+  awaitLoopTracePersistCoalesceWindow?: () => Promise<void>;
   readDispatcherRunJournal?: (
     workspaceRoot: string,
   ) => Promise<DispatcherRunJournal>;
@@ -691,6 +700,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     journal: LoopTraceJournal,
   ) => Promise<void>;
 
+  private readonly awaitLoopTracePersistCoalesceWindow: () => Promise<void>;
+
   private readonly readDispatcherRunJournal: (
     workspaceRoot: string,
   ) => Promise<DispatcherRunJournal>;
@@ -802,6 +813,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       options.readLoopTraceJournal ?? readLoopTraceJournal;
     this.writeLoopTraceJournal =
       options.writeLoopTraceJournal ?? writeLoopTraceJournal;
+    this.awaitLoopTracePersistCoalesceWindow =
+      options.awaitLoopTracePersistCoalesceWindow ??
+      (() => new Promise((resolve) => setTimeout(resolve, 0)));
     this.readDispatcherRunJournal =
       options.readDispatcherRunJournal ?? readDispatcherRunJournal;
     this.readManagerRunJournal =
@@ -2864,7 +2878,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     issueId: string,
   ): Promise<boolean> {
     let lastPersistSucceeded = true;
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    // Yield once before draining so appends bursted onto the event queue
+    // coalesce into a single write. The window is injectable so tests assert
+    // coalescing against a deterministic boundary rather than this tick.
+    await this.awaitLoopTracePersistCoalesceWindow();
 
     while (true) {
       const pending = this.loopTracePendingJournals.get(issueId);

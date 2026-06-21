@@ -4011,18 +4011,50 @@ describe("OrchestratorRuntimeHost", () => {
       const writeLoopTraceJournal = vi.fn(async (_locator, journal) => {
         persistedJournals.push(journal);
       });
+      // Force the worst-case interleaving the production flake (SYMPH-865) rode
+      // on: an async log sink yields a macrotask during event processing
+      // (logAgentEvent runs before the loop-trace append), which under
+      // full-suite load lets the first persist task's setTimeout(0) coalescing
+      // window fire before the second event is appended -> two writes instead
+      // of one. Without the deterministic window below, this logger alone makes
+      // the assertion fail every run.
+      const logger = new StructuredLogger([
+        {
+          async write() {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          },
+        },
+      ]);
       const config = createConfig();
       config.workspace.root = workspaceRoot;
+      const hostRef: { current: OrchestratorRuntimeHost | undefined } = {
+        current: undefined,
+      };
+      // Hold the coalescing window open until BOTH queued events have been
+      // appended to the in-memory journal, then let the single persist task
+      // drain. This pins the assertion to the real coalescing invariant (one
+      // write carrying the merged journal) against a deterministic boundary
+      // instead of a timing-sensitive macrotask tick.
+      const awaitLoopTracePersistCoalesceWindow = () =>
+        vi.waitFor(() => {
+          const journal = hostRef.current?.getState().loopTraceJournal["1"];
+          expect(journal?.length ?? 0).toBeGreaterThanOrEqual(2);
+        });
       const host = new OrchestratorRuntimeHost({
         config,
         tracker,
+        logger,
         writeLoopTraceJournal,
+        awaitLoopTracePersistCoalesceWindow,
         createAgentRunner: ({ onEvent }) => {
           fakeRunner.onEvent = onEvent;
           return fakeRunner;
         },
         now: () => new Date("2026-03-06T00:00:05.000Z"),
       });
+      // Must be set before any event is emitted: the coalescing window closure
+      // reads hostRef.current, and persistence is scheduled from event handling.
+      hostRef.current = host;
 
       await host.pollOnce();
       fakeRunner.emit("1", {
