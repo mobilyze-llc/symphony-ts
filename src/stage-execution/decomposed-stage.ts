@@ -26,18 +26,30 @@ import type {
  * stay orchestrator-owned and journal-derived (no sub-stage advances stage
  * state). The runner returns aggregate data for the caller to finalize.
  *
- * Three invariants are enforced here:
+ * Four invariants are enforced here:
  *   1. Seam insulation — every sub-stage is dispatched ONLY through a resolved
  *      `StageExecutionBackendRunner.execute`. This module never references the
  *      crabrunner scheduler client or its submit/status/collect calls, so the
  *      optional crabrunner provider (SYMPH-850) stays an internal swap.
  *   2. Capsule handoff by path — a sub-stage consumes the prior sub-stage's
- *      capsule by path (resolved from what earlier sub-stages produced), never
- *      the full prior transcript. Missing required capsules fail closed.
+ *      capsule by path, never the full prior transcript. A capsule becomes
+ *      available to later sub-stages only when the caller's
+ *      `resolveProducedCapsules` confirms the producing sub-stage actually
+ *      emitted it (config declarations alone never satisfy the handoff), so a
+ *      missing required capsule fails closed.
  *   3. Per-sub-stage budget isolation — each sub-stage carries its own ceiling;
- *      a sub-stage that exceeds its ceiling stops the sequence at the boundary
- *      and the next sub-stage is NOT dispatched, so cumulative spend is bounded
- *      by the sum of the per-sub-stage ceilings.
+ *      a sub-stage that exceeds its ceiling stops the sequence at the boundary,
+ *      the next sub-stage is NOT dispatched, and its produced capsules are
+ *      withheld, so cumulative spend is bounded by the sum of the per-sub-stage
+ *      ceilings.
+ *   4. Per-sub-stage missing-capsule policy — the handoff readiness gate uses
+ *      each sub-stage's own `dependencies.missingCapsule` policy (overridable
+ *      via `missingCapsulePolicy`). `"fail"` (the default) stops the sequence;
+ *      `"degrade"` proceeds with the sub-stage marked degraded.
+ *
+ * Capsule identity note: `capsules.consume`/`capsules.produce` entries are
+ * capsule PATHS, and this runner treats the path as the capsule identity
+ * (`id === path`) for by-path handoff.
  */
 
 export type DecomposedStageStopReason =
@@ -45,6 +57,12 @@ export type DecomposedStageStopReason =
   | "missing_required_capsule"
   | "budget_exceeded"
   | "sub_stage_failed";
+
+export type DecomposedSubStageStatus =
+  | "succeeded"
+  | "failed"
+  | "degraded"
+  | "budget_exceeded";
 
 export interface DecomposedSubStageContext {
   /** Zero-based position of this sub-stage in the ordered sequence. */
@@ -55,15 +73,16 @@ export interface DecomposedSubStageContext {
   execution: StageExecutionProfile;
   /**
    * Capsules this sub-stage consumes, resolved BY PATH from what earlier
-   * sub-stages produced. A capsule whose path is "" was not produced and fails
-   * the readiness gate. There is intentionally no prior-transcript surface here.
+   * sub-stages actually produced. A capsule whose path is "" was not produced
+   * and fails the readiness gate. There is intentionally no prior-transcript
+   * surface here.
    */
   consumeCapsules: readonly StageExecutionCapsuleRef[];
 }
 
 export interface DecomposedSubStageOutcome {
   name: string;
-  status: "succeeded" | "failed" | "degraded";
+  status: DecomposedSubStageStatus;
   spentTokens: number;
   ceilingTokens: number | null;
   consumeCapsules: readonly StageExecutionCapsuleRef[];
@@ -80,8 +99,13 @@ export interface DecomposedStageResult {
   cumulativeSpentTokens: number;
   /** Sum of the per-sub-stage token ceilings (the cumulative spend bound). */
   ceilingSumTokens: number;
-  /** Capsule paths available after the run (initial inputs + produced). */
+  /** Capsule paths available after the run (initial inputs + verified produced). */
   availableCapsulePaths: readonly string[];
+}
+
+export interface ResolveProducedCapsulesInput {
+  ctx: DecomposedSubStageContext;
+  result: StageExecutionBackendResult;
 }
 
 export interface RunDecomposedStageInput {
@@ -95,9 +119,23 @@ export interface RunDecomposedStageInput {
   buildRunnerInput: (ctx: DecomposedSubStageContext) => AgentRunInput;
   /** Tokens a completed sub-stage spent, read from its backend result. */
   spendTokensOf: (result: StageExecutionBackendResult) => number;
+  /**
+   * Capsule paths the sub-stage ACTUALLY produced, derived from the backend
+   * result (e.g. artifact evidence or a filesystem check). Only these paths
+   * become available to later sub-stages — config `capsules.produce`
+   * declarations alone never satisfy the handoff, so a declared-but-unproduced
+   * capsule fails the next sub-stage closed.
+   */
+  resolveProducedCapsules: (
+    input: ResolveProducedCapsulesInput,
+  ) => readonly string[];
   /** Capsule paths available before the first sub-stage (e.g. plan output). */
   initialCapsulePaths?: readonly string[];
-  /** Missing-required-capsule policy (default "fail" — fail closed). */
+  /**
+   * Optional override of every sub-stage's missing-capsule policy. When unset,
+   * each sub-stage's own `dependencies.missingCapsule` policy applies (default
+   * "fail").
+   */
   missingCapsulePolicy?: DelegatedStageMissingCapsulePolicy;
 }
 
@@ -110,7 +148,7 @@ export async function runDecomposedStage(
     buildJobSpec,
     buildRunnerInput,
     spendTokensOf,
-    missingCapsulePolicy = "fail",
+    resolveProducedCapsules,
   } = input;
 
   const available = new Set<string>(input.initialCapsulePaths ?? []);
@@ -137,7 +175,7 @@ export async function runDecomposedStage(
     const ceilingTokens = execution.budget.maxTokens;
 
     // Capsule handoff is BY PATH: a consumed capsule is ready only if a prior
-    // sub-stage (or the initial inputs) produced its path.
+    // sub-stage (or the initial inputs) actually produced its path.
     const consumeCapsules: StageExecutionCapsuleRef[] =
       execution.capsules.consume.map((capsulePath) => ({
         id: capsulePath,
@@ -155,24 +193,33 @@ export async function runDecomposedStage(
       consumeCapsules,
     };
 
-    // Fail closed before dispatch when a required handoff capsule is missing.
+    // Readiness uses the sub-stage's own missing-capsule policy (overridable).
+    const policy =
+      input.missingCapsulePolicy ?? execution.dependencies.missingCapsule;
     const readiness = evaluateDelegatedStageCapsuleReadiness(
       { capsules: consumeCapsules },
-      missingCapsulePolicy,
+      policy,
     );
+    let degraded = false;
     if (!readiness.ok) {
-      outcomes.push({
-        name: subStage.name,
-        status: readiness.status,
-        spentTokens: 0,
-        ceilingTokens,
-        consumeCapsules,
-        producedCapsulePaths: [],
-        missingCapsules: readiness.missingCapsules,
-        result: null,
-        error: null,
-      });
-      return finish("missing_required_capsule");
+      if (readiness.status === "failed") {
+        // Fail closed: a required handoff capsule is missing — stop the
+        // sequence before dispatch and do not run the sub-stage.
+        outcomes.push({
+          name: subStage.name,
+          status: "failed",
+          spentTokens: 0,
+          ceilingTokens,
+          consumeCapsules,
+          producedCapsulePaths: [],
+          missingCapsules: readiness.missingCapsules,
+          result: null,
+          error: null,
+        });
+        return finish("missing_required_capsule");
+      }
+      // "degrade" policy: proceed with the sub-stage but mark it degraded.
+      degraded = true;
     }
 
     const job = buildJobSpec(ctx);
@@ -195,7 +242,7 @@ export async function runDecomposedStage(
         ceilingTokens,
         consumeCapsules,
         producedCapsulePaths: [],
-        missingCapsules: [],
+        missingCapsules: readiness.ok ? [] : readiness.missingCapsules,
         result: null,
         error,
       });
@@ -205,28 +252,41 @@ export async function runDecomposedStage(
     const spentTokens = spendTokensOf(result);
     cumulativeSpentTokens += spentTokens;
 
-    const producedCapsulePaths = [...execution.capsules.produce];
+    // Per-sub-stage budget isolation: a ceiling breach stops at the boundary,
+    // the next sub-stage is NOT dispatched, and the breaching sub-stage's
+    // produced capsules are withheld from the handoff.
+    if (ceilingTokens !== null && spentTokens > ceilingTokens) {
+      outcomes.push({
+        name: subStage.name,
+        status: "budget_exceeded",
+        spentTokens,
+        ceilingTokens,
+        consumeCapsules,
+        producedCapsulePaths: [],
+        missingCapsules: readiness.ok ? [] : readiness.missingCapsules,
+        result,
+        error: null,
+      });
+      return finish("budget_exceeded");
+    }
+
+    // Only capsules the backend actually produced become available downstream.
+    const producedCapsulePaths = resolveProducedCapsules({ ctx, result });
     for (const capsulePath of producedCapsulePaths) {
       available.add(capsulePath);
     }
 
     outcomes.push({
       name: subStage.name,
-      status: "succeeded",
+      status: degraded ? "degraded" : "succeeded",
       spentTokens,
       ceilingTokens,
       consumeCapsules,
       producedCapsulePaths,
-      missingCapsules: [],
+      missingCapsules: readiness.ok ? [] : readiness.missingCapsules,
       result,
       error: null,
     });
-
-    // Per-sub-stage budget isolation: a ceiling breach stops at the boundary and
-    // the next sub-stage is NOT dispatched.
-    if (ceilingTokens !== null && spentTokens > ceilingTokens) {
-      return finish("budget_exceeded");
-    }
   }
 
   return finish("completed");

@@ -47,6 +47,7 @@ describe("runDecomposedStage", () => {
       buildJobSpec: makeJob,
       buildRunnerInput,
       spendTokensOf,
+      resolveProducedCapsules: resolveProducedFromConfig,
     });
 
     expect(calls.map((job) => job.identity.stageName)).toEqual([
@@ -86,6 +87,7 @@ describe("runDecomposedStage", () => {
         return runnerInputFor(ctx);
       },
       spendTokensOf,
+      resolveProducedCapsules: resolveProducedFromConfig,
     });
 
     expect(result.completedAll).toBe(true);
@@ -123,6 +125,7 @@ describe("runDecomposedStage", () => {
       buildJobSpec: makeJob,
       buildRunnerInput,
       spendTokensOf,
+      resolveProducedCapsules: resolveProducedFromConfig,
     });
 
     expect(result.completedAll).toBe(true);
@@ -150,6 +153,7 @@ describe("runDecomposedStage", () => {
       buildJobSpec: makeJob,
       buildRunnerInput,
       spendTokensOf,
+      resolveProducedCapsules: resolveProducedFromConfig,
     });
 
     expect(result.stopReason).toBe("missing_required_capsule");
@@ -185,6 +189,7 @@ describe("runDecomposedStage", () => {
       buildJobSpec: makeJob,
       buildRunnerInput,
       spendTokensOf,
+      resolveProducedCapsules: resolveProducedFromConfig,
     });
 
     expect(result.stopReason).toBe("budget_exceeded");
@@ -196,6 +201,13 @@ describe("runDecomposedStage", () => {
     );
     expect(patchPlan?.spentTokens).toBe(150);
     expect(patchPlan?.ceilingTokens).toBe(100);
+    // The breaching sub-stage is recorded distinctly (not "succeeded") and its
+    // produced capsules are withheld from the handoff.
+    expect(patchPlan?.status).toBe("budget_exceeded");
+    expect(patchPlan?.producedCapsulePaths).toEqual([]);
+    expect(result.availableCapsulePaths).not.toContain(
+      "capsules/patch-plan.json",
+    );
   });
 
   it("bounds cumulative spend by the sum of sub-stage ceilings and isolates each ceiling", async () => {
@@ -225,6 +237,7 @@ describe("runDecomposedStage", () => {
       buildJobSpec: makeJob,
       buildRunnerInput,
       spendTokensOf,
+      resolveProducedCapsules: resolveProducedFromConfig,
     });
 
     expect(result.completedAll).toBe(true);
@@ -238,6 +251,101 @@ describe("runDecomposedStage", () => {
     expect(calls.map((job) => job.enforcement.budget.maxTokens)).toEqual([
       100, 100, 100,
     ]);
+  });
+
+  it("fails closed when a declared capsule is not actually produced by the backend", async () => {
+    const { backend, calls } = fakeBackend({
+      "patch-plan": 10,
+      "first-patch": 20,
+    });
+
+    const result = await runDecomposedStage({
+      subStages: [
+        sub("patch-plan", {
+          maxTokens: 100,
+          produce: ["capsules/patch-plan.json"],
+        }),
+        sub("first-patch", {
+          maxTokens: 100,
+          consume: ["capsules/patch-plan.json"],
+        }),
+      ],
+      resolveBackend: () => backend,
+      buildJobSpec: makeJob,
+      buildRunnerInput,
+      spendTokensOf,
+      // patch-plan runs successfully but does NOT actually emit its declared
+      // capsule, so the declared path must not satisfy the downstream handoff.
+      resolveProducedCapsules: () => [],
+    });
+
+    expect(result.stopReason).toBe("missing_required_capsule");
+    expect(result.completedAll).toBe(false);
+    expect(calls.map((job) => job.identity.stageName)).toEqual(["patch-plan"]);
+    const firstPatch = result.outcomes.find(
+      (outcome) => outcome.name === "first-patch",
+    );
+    expect(firstPatch?.status).toBe("failed");
+  });
+
+  it("fails closed when the first sub-stage requires a capsule absent from initial inputs", async () => {
+    const { backend, calls } = fakeBackend({ "patch-plan": 10 });
+
+    const result = await runDecomposedStage({
+      subStages: [
+        sub("patch-plan", { maxTokens: 100, consume: ["capsules/plan.json"] }),
+      ],
+      // initialCapsulePaths omitted -> capsules/plan.json is unavailable.
+      resolveBackend: () => backend,
+      buildJobSpec: makeJob,
+      buildRunnerInput,
+      spendTokensOf,
+      resolveProducedCapsules: resolveProducedFromConfig,
+    });
+
+    expect(result.stopReason).toBe("missing_required_capsule");
+    expect(result.completedAll).toBe(false);
+    // The backend is never invoked when the first sub-stage's input is missing.
+    expect(calls).toHaveLength(0);
+  });
+
+  it("honors a sub-stage degrade policy: a missing capsule degrades without stopping", async () => {
+    const { backend, calls } = fakeBackend({
+      "patch-plan": 10,
+      "first-patch": 20,
+    });
+
+    const result = await runDecomposedStage({
+      subStages: [
+        sub("patch-plan", {
+          maxTokens: 100,
+          produce: ["capsules/patch-plan.json"],
+        }),
+        // Consumes a capsule nobody produced, but is configured to degrade.
+        sub("first-patch", {
+          maxTokens: 100,
+          consume: ["capsules/missing.json"],
+          missingCapsule: "degrade",
+        }),
+      ],
+      resolveBackend: () => backend,
+      buildJobSpec: makeJob,
+      buildRunnerInput,
+      spendTokensOf,
+      resolveProducedCapsules: resolveProducedFromConfig,
+    });
+
+    expect(result.stopReason).toBe("completed");
+    expect(result.completedAll).toBe(true);
+    expect(calls.map((job) => job.identity.stageName)).toEqual([
+      "patch-plan",
+      "first-patch",
+    ]);
+    const firstPatch = result.outcomes.find(
+      (outcome) => outcome.name === "first-patch",
+    );
+    expect(firstPatch?.status).toBe("degraded");
+    expect(firstPatch?.missingCapsules).toEqual(["capsules/missing.json"]);
   });
 });
 
@@ -268,6 +376,14 @@ function runnerInputFor(ctx: DecomposedSubStageContext): AgentRunInput {
 
 function buildRunnerInput(ctx: DecomposedSubStageContext): AgentRunInput {
   return runnerInputFor(ctx);
+}
+
+// Default: the sub-stage produced exactly what it declared. Tests that simulate
+// a backend NOT actually producing a declared capsule inject their own resolver.
+function resolveProducedFromConfig(input: {
+  ctx: DecomposedSubStageContext;
+}): readonly string[] {
+  return input.ctx.execution.capsules.produce;
 }
 
 function fakeBackend(spendByStage: Record<string, number>): {
