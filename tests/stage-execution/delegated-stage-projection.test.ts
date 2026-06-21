@@ -208,6 +208,56 @@ describe("reduceDelegatedStageAttempts", () => {
     expect(active?.usage?.tokens.totalTokens).toBeNull();
     expect(active?.usage?.cost.amountUsd).toBeNull();
   });
+
+  it("classifies an unknown metadata schema as degraded, never active", () => {
+    const journal: DispatcherRunJournal = [
+      rawEntry(1, {
+        schema: "symphony.delegated-stage-attempt.v2",
+        runGroupId: "rg-1",
+        stageName: "implement/patch-plan",
+        stageAttempt: 0,
+        status: "succeeded",
+      }),
+    ];
+    const projection = reduceDelegatedStageAttempts(journal);
+    expect(projection.active).toEqual([]);
+    expect(projection.degraded).toHaveLength(1);
+    expect(projection.degraded[0]?.reason).toMatch(/unknown_schema/);
+  });
+
+  it("classifies a negative stageAttempt as degraded", () => {
+    const journal: DispatcherRunJournal = [
+      rawEntry(1, {
+        runGroupId: "rg-1",
+        stageName: "implement/patch-plan",
+        stageAttempt: -1,
+        status: "succeeded",
+      }),
+    ];
+    const projection = reduceDelegatedStageAttempts(journal);
+    expect(projection.active).toEqual([]);
+    expect(projection.degraded).toHaveLength(1);
+    expect(projection.degraded[0]?.reason).toMatch(/stageAttempt/);
+  });
+
+  it("does not let an out-of-order non-terminal entry revert a terminal attempt", () => {
+    const journal = journalFrom([
+      attempt({
+        stage: "implement/patch-plan",
+        attempt: 0,
+        status: "succeeded",
+      }),
+      // A late / out-of-order running retry for the SAME attempt.
+      attempt({ stage: "implement/patch-plan", attempt: 0, status: "running" }),
+    ]);
+
+    const projection = reduceDelegatedStageAttempts(journal);
+    expect(projection.active).toHaveLength(1);
+    expect(projection.active[0]?.status).toBe("succeeded");
+    // The contradictory regression is recorded explicitly, never silently applied.
+    expect(projection.degraded).toHaveLength(1);
+    expect(projection.degraded[0]?.reason).toMatch(/contradictory/);
+  });
 });
 
 describe("summarizeDelegatedStageProjection", () => {

@@ -36,6 +36,10 @@ import type { DispatcherRunJournalEntryDraft } from "../logging/run-journal.js";
  * The projection is a pure reducer (like `reduceMergeCandidates`); it does not
  * advance stage state. Stage transitions, rework, and merge-readiness remain
  * orchestrator-owned and journal-derived.
+ *
+ * Scaling: the reducer scans the journal each call. At current journal sizes
+ * this is fine; if delegation history grows large, the `journal_checkpoint`
+ * compaction (SYMPH-293) is the shared scaling path for this projection too.
  */
 
 export const DELEGATED_STAGE_ATTEMPT_JOURNAL_KIND: DispatcherRunJournalEventKind =
@@ -48,6 +52,11 @@ export interface ProjectedDelegatedStageAttempt {
   runGroupId: string;
   stageName: string;
   stageAttempt: number;
+  /**
+   * Reconstructed status. On the `ignoredLate` path this is the synthetic
+   * `"ignored_late_result"` (a member of `DelegatedStageAttemptStatus` reserved
+   * for this projection); writers never persist that value.
+   */
   status: DelegatedStageAttemptStatus;
   failureClass: string | null;
   /** Usage measurement — unavailable stays unavailable (never zeroed). */
@@ -160,9 +169,31 @@ export function reduceDelegatedStageAttempts(
       continue;
     }
     if (parsed.stageAttempt > currentMax) {
+      // A newer attempt supersedes any prior one as the active state.
       maxAttemptByKey.set(key, parsed.stageAttempt);
+      activeByKey.set(key, parsed);
+      continue;
     }
-    // Latest state for the active attempt (idempotent: latest entry wins).
+    // Same attempt as the current active. Once an attempt has reached a terminal
+    // status, a later non-duplicate entry is contradictory (e.g. an out-of-order
+    // running retry after succeeded). Keep the terminal state and record the
+    // contradiction explicitly rather than silently reverting — the journal
+    // append alone does not guarantee monotonic within-attempt ordering.
+    const existing = activeByKey.get(key);
+    if (
+      existing !== undefined &&
+      isTerminalDelegatedStageStatus(existing.status)
+    ) {
+      if (existing.status !== parsed.status) {
+        degraded.push({
+          sequence: entry.sequence,
+          idempotencyKey: entry.idempotencyKey ?? null,
+          reason: `contradictory:terminal_${existing.status}_then_${parsed.status}`,
+        });
+      }
+      continue;
+    }
+    // Normal progression (pending -> running -> terminal): latest entry wins.
     activeByKey.set(key, parsed);
   }
 
@@ -177,6 +208,12 @@ function parseDelegatedAttempt(
   entry: DispatcherRunJournalEntry,
 ): ProjectedDelegatedStageAttempt | string {
   const m = entry.metadata;
+  // Cross-version safety: a missing or renamed schema is contract drift and is
+  // classified degraded, never accepted as a silent active row.
+  const schema = readNonBlankString(m.schema);
+  if (schema !== DELEGATED_STAGE_ATTEMPT_METADATA_SCHEMA) {
+    return `unknown_schema:${schema ?? "<missing>"}`;
+  }
   const runGroupId = readNonBlankString(m.runGroupId);
   if (runGroupId === null) return "missing_metadata:runGroupId";
   const stageName = readNonBlankString(m.stageName);
@@ -236,6 +273,15 @@ export function summarizeDelegatedStageProjection(
   };
 }
 
+const TERMINAL_DELEGATED_STAGE_STATUSES: ReadonlySet<DelegatedStageAttemptStatus> =
+  new Set(["succeeded", "failed", "degraded", "timed_out", "canceled"]);
+
+function isTerminalDelegatedStageStatus(
+  status: DelegatedStageAttemptStatus,
+): boolean {
+  return TERMINAL_DELEGATED_STAGE_STATUSES.has(status);
+}
+
 function isDelegatedStageAttemptStatus(
   value: string,
 ): value is DelegatedStageAttemptStatus {
@@ -248,8 +294,12 @@ function readNonBlankString(value: unknown): string | null {
   return typeof value === "string" && value.trim() !== "" ? value : null;
 }
 
+// Non-negative integer: the projection defends against malformed metadata, so a
+// negative attempt number is treated as missing/invalid (degraded).
 function readInteger(value: unknown): number | null {
-  return typeof value === "number" && Number.isInteger(value) ? value : null;
+  return typeof value === "number" && Number.isInteger(value) && value >= 0
+    ? value
+    : null;
 }
 
 function readStringArray(value: unknown): readonly string[] {
