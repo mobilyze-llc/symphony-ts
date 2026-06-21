@@ -4052,6 +4052,8 @@ describe("OrchestratorRuntimeHost", () => {
         },
         now: () => new Date("2026-03-06T00:00:05.000Z"),
       });
+      // Must be set before any event is emitted: the coalescing window closure
+      // reads hostRef.current, and persistence is scheduled from event handling.
       hostRef.current = host;
 
       await host.pollOnce();
