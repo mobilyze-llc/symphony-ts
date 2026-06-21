@@ -295,6 +295,11 @@ export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
   // covered-prefix state row plus a recent raw tail instead of replaying every
   // historical row on restart.
   "journal_checkpoint",
+  // Delegated (crabrunner) stage attempt projection (SYMPH-811): admission,
+  // running, terminal, degraded, and ignored-late results are journaled so
+  // delegated stage state is reconstructible by replay. Symphony stays the only
+  // writer; late/duplicate results never advance the active attempt.
+  "delegated_stage_attempt",
 ] as const;
 
 // ---------------------------------------------------------------------------

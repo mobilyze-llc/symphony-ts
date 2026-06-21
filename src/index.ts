@@ -50,5 +50,6 @@ export * from "./slack-bot/index.js";
 export * from "./stage-execution/backend.js";
 export * from "./stage-execution/crabrunner-backend.js";
 export * from "./stage-execution/decomposed-stage.js";
+export * from "./stage-execution/delegated-stage-projection.js";
 export * from "./stage-execution/job-spec.js";
 export * from "./version.js";
