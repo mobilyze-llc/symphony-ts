@@ -138,6 +138,45 @@ it("refuses install from worktree roots unless explicitly allowed", async () => 
   expect(allowed.stderr).toBe("");
 });
 
+it("refuses install from a linked git worktree whose path has no worktrees component", async () => {
+  const root = await createTempDir("symphony-ctl-linked-worktree-");
+  const primary = join(root, "primary");
+  await mkdir(primary, { recursive: true });
+  git(primary, ["init", "-b", "main"]);
+  git(primary, ["config", "user.email", "agent@example.com"]);
+  git(primary, ["config", "user.name", "Agent"]);
+  await writeFile(join(primary, "README.md"), "first\n");
+  git(primary, ["add", "README.md"]);
+  git(primary, ["commit", "-m", "first"]);
+
+  // Linked worktree at a path with NO "worktrees" component — substring
+  // detection would miss it; the git-aware check must still refuse it.
+  const linked = join(root, "linked-checkout");
+  git(primary, ["worktree", "add", linked]);
+
+  const result = await runWorktreeGuard(linked);
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain("linked git worktree root");
+});
+
+it("allows install from an ordinary checkout whose parent directory is named worktrees", async () => {
+  const root = await createTempDir("symphony-ctl-worktrees-parent-");
+  // Parent directory is literally "worktrees" but this is a primary checkout,
+  // not a linked worktree — the old substring guard false-positived here.
+  const checkout = join(root, "worktrees", "service-root");
+  await mkdir(checkout, { recursive: true });
+  git(checkout, ["init", "-b", "main"]);
+  git(checkout, ["config", "user.email", "agent@example.com"]);
+  git(checkout, ["config", "user.name", "Agent"]);
+  await writeFile(join(checkout, "README.md"), "first\n");
+  git(checkout, ["add", "README.md"]);
+  git(checkout, ["commit", "-m", "first"]);
+
+  const result = await runWorktreeGuard(checkout);
+  expect(result.status).toBe(0);
+  expect(result.stderr).toBe("");
+});
+
 it("resolves service root overrides in documented precedence order", async () => {
   const root = await createTempDir("symphony-ctl-root-precedence-");
   const home = join(root, "home");
@@ -262,6 +301,45 @@ async function createTempDir(prefix: string): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), prefix));
   tempDirs.push(path);
   return path;
+}
+
+async function runWorktreeGuard(
+  symphonyRoot: string,
+): Promise<ReturnType<typeof spawnSync>> {
+  const ctl = await readFile("ops/symphony-ctl", "utf8");
+  const guard = extractShellFunction(ctl, "check_service_root_not_worktree");
+  return spawnSync(
+    "bash",
+    [
+      "-c",
+      [
+        'die() { echo "$*" >&2; exit 1; }',
+        guard,
+        'SYMPHONY_ROOT="$1"',
+        "check_service_root_not_worktree",
+      ].join("\n"),
+      "bash",
+      symphonyRoot,
+    ],
+    {
+      encoding: "utf8",
+      env: { HOME: symphonyRoot, PATH: "/usr/bin:/bin" },
+    },
+  );
+}
+
+function git(cwd: string, args: string[]): ReturnType<typeof spawnSync> {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    env: { HOME: cwd, PATH: "/usr/bin:/bin" },
+  });
+  if (result.status !== 0) {
+    throw new Error(
+      `git ${args.join(" ")} failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+  }
+  return result;
 }
 
 async function runRootProbe(

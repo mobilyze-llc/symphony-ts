@@ -75,6 +75,49 @@ it("treats --expect as an explicit pinned deploy override", async () => {
   );
 });
 
+it("refuses to run the deploy train against the stable in-place checkout", async () => {
+  const root = await createTempDir("symphony-deploy-train-stable-root-");
+  const result = runStableRootGuard({
+    stableRoot: root,
+    runtimeCheckout: root,
+    allowStableRoot: "",
+  });
+
+  expect(result.status).toBe(97);
+  expect(result.stderr).toContain(
+    "Refusing to run the detached deploy train against the stable in-place checkout",
+  );
+});
+
+it("allows the deploy train to run against a disposable detached checkout", async () => {
+  const root = await createTempDir("symphony-deploy-train-detached-root-");
+  const stable = join(root, "stable");
+  const runtime = join(root, "runtime");
+  await mkdir(stable, { recursive: true });
+  await mkdir(runtime, { recursive: true });
+
+  const result = runStableRootGuard({
+    stableRoot: stable,
+    runtimeCheckout: runtime,
+    allowStableRoot: "",
+  });
+
+  expect(result.status).toBe(0);
+  expect(result.stderr).toBe("");
+});
+
+it("lets DEPLOY_TRAIN_ALLOW_STABLE_ROOT override the stable-root guard", async () => {
+  const root = await createTempDir("symphony-deploy-train-allow-stable-");
+  const result = runStableRootGuard({
+    stableRoot: root,
+    runtimeCheckout: root,
+    allowStableRoot: "1",
+  });
+
+  expect(result.status).toBe(0);
+  expect(result.stderr).toBe("");
+});
+
 async function createGitFixture(root: string): Promise<{
   origin: string;
   runtime: string;
@@ -150,6 +193,45 @@ function runMovingMainGuard(
       encoding: "utf8",
       env: {
         HOME: runtime,
+        PATH: "/usr/bin:/bin",
+      },
+    },
+  );
+}
+
+function runStableRootGuard(input: {
+  stableRoot: string;
+  runtimeCheckout: string;
+  allowStableRoot: string;
+}): ReturnType<typeof spawnSync> {
+  const deploy = readFileSync(resolve("ops/deploy-train.sh"), "utf8");
+  const guard = extractShellFunction(
+    deploy,
+    "check_runtime_checkout_not_stable_root",
+  );
+  expect(guard).toContain("check_runtime_checkout_not_stable_root()");
+
+  return spawnSync(
+    "bash",
+    [
+      "-c",
+      [
+        "set -euo pipefail",
+        'die() { printf "%s\\n" "$*" >&2; exit 97; }',
+        `DEPLOY_TRAIN_ALLOW_STABLE_ROOT=${bashQuote(input.allowStableRoot)}`,
+        'STABLE_ROOT="$1"',
+        'RUNTIME_CHECKOUT="$2"',
+        guard,
+        "check_runtime_checkout_not_stable_root",
+      ].join("\n"),
+      "bash",
+      input.stableRoot,
+      input.runtimeCheckout,
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        HOME: input.stableRoot,
         PATH: "/usr/bin:/bin",
       },
     },

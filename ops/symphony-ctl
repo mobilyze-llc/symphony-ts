@@ -51,11 +51,28 @@ check_workflow() {
 check_service_root_not_worktree() {
   [[ "${SYMPHONY_ALLOW_WORKTREE_ROOT:-}" == "1" ]] && return 0
 
+  # Known operator-hazard layouts: agent worktrees nested under .codex/ or
+  # .claude/. Refuse these by path even when they are not (or no longer) a valid
+  # git worktree — resolving SYMPHONY_ROOT here almost always means a transient
+  # agent checkout leaked into the service root.
   case "$SYMPHONY_ROOT" in
-    */.codex/worktrees/*|*/.claude/worktrees/*|*/worktrees/*)
+    */.codex/worktrees/*|*/.claude/worktrees/*)
       die "Refusing to install from worktree root: $SYMPHONY_ROOT. Re-run from the stable checkout or set SYMPHONY_ALLOW_WORKTREE_ROOT=1 to override."
       ;;
   esac
+
+  # Git-aware detection for every other layout: a linked worktree has a
+  # per-worktree git dir that differs from the shared common dir, while the
+  # primary checkout has them equal. This catches linked worktrees whose path
+  # has no "worktrees" component, without false-positiving on an ordinary
+  # checkout that merely lives under a directory named "worktrees".
+  local git_dir common_dir
+  if git_dir="$(git -C "$SYMPHONY_ROOT" rev-parse --absolute-git-dir 2>/dev/null)" &&
+     common_dir="$(git -C "$SYMPHONY_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"; then
+    if [[ -n "$git_dir" && -n "$common_dir" && "$git_dir" != "$common_dir" ]]; then
+      die "Refusing to install from a linked git worktree root: $SYMPHONY_ROOT. Re-run from the primary checkout or set SYMPHONY_ALLOW_WORKTREE_ROOT=1 to override."
+    fi
+  fi
 }
 
 check_not_installed() {
@@ -1205,8 +1222,9 @@ Environment:
                              SYMPHONY_RUNTIME_CHECKOUT > default
                              (checkout containing ops/symphony-ctl)
   SYMPHONY_ALLOW_WORKTREE_ROOT
-                             Allow install when the resolved service root is
-                             under a worktree path (default: refuse)
+                             Allow install when the resolved service root is a
+                             linked git worktree or a .codex/.claude worktree
+                             path (default: refuse)
   SYMPHONY_ENV_FILE          Path to .env file (default: <symphony-root>/.env)
   SYMPHONY_WORKFLOW          Path to WORKFLOW.md
                              (default: pipeline-config/workflows/WORKFLOW-\$SYMPHONY_PROJECT.md)

@@ -3,6 +3,17 @@ set -euo pipefail
 
 # deploy-train.sh — mechanized deploy train for symphony-ts (SYMPH-346)
 #
+# WHEN TO USE THIS vs symphony-deploy (SYMPH-708):
+#   - symphony-deploy is the routine, canonical deploy: it pulls + builds +
+#     restarts the stable IN-PLACE checkout that symphony-ctl serves from. Use
+#     it for normal deploys.
+#   - deploy-train.sh is the heavyweight flow for when lanes may be running and
+#     you want the strong safety gates below (drain gate + version gate). It
+#     operates on a DISPOSABLE, DETACHED runtime checkout that it resets --hard
+#     and checks out --detach — never point it at the stable in-place root (a
+#     coherence guard refuses that; override with DEPLOY_TRAIN_ALLOW_STABLE_ROOT=1).
+#   See docs/operations/03-deploy.md for the full decision and operator guidance.
+#
 # Sequence:
 #   1. fetch origin, resolve expected SHA (origin/main, or --expect)
 #      and capture the full origin/main SHA as a moving-main guard
@@ -44,6 +55,7 @@ SERVICE_LABEL="com.symphony.${SYMPHONY_PROJECT}"
 PLIST_PATH="$HOME/Library/LaunchAgents/${SERVICE_LABEL}.plist"
 RUNTIME_CHECKOUT="${SYMPHONY_RUNTIME_CHECKOUT:-$HOME/.codex/worktrees/symphony-ts-runtime-main}"
 CTL="$SCRIPT_DIR/symphony-ctl"
+STABLE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 
 DRAIN_INTERVAL_SECS="${DEPLOY_DRAIN_INTERVAL_SECS:-30}"
 DRAIN_REQUIRED_CONSECUTIVE=3
@@ -64,6 +76,23 @@ ok()    { echo -e "${GREEN}✓${NC} [$(ts)] $*"; }
 warn()  { echo -e "${YELLOW}⚠${NC} [$(ts)] $*" >&2; }
 die()   { echo -e "${RED}✗${NC} [$(ts)] $*" >&2; exit 1; }
 
+# Coherence guard (SYMPH-708): this flow resets --hard and checks out --detach
+# the runtime checkout, so its target must be a disposable detached checkout —
+# never the stable in-place root that symphony-deploy / symphony-ctl serve from.
+# Running against the stable root would discard local state and leave the live
+# checkout detached. Refuse unless explicitly overridden.
+check_runtime_checkout_not_stable_root() {
+  [[ "${DEPLOY_TRAIN_ALLOW_STABLE_ROOT:-}" == "1" ]] && return 0
+
+  local stable_real runtime_real
+  stable_real="$(cd "$STABLE_ROOT" 2>/dev/null && pwd -P)" || return 0
+  runtime_real="$(cd "$RUNTIME_CHECKOUT" 2>/dev/null && pwd -P)" || return 0
+
+  if [[ "$stable_real" == "$runtime_real" ]]; then
+    die "Refusing to run the detached deploy train against the stable in-place checkout: $runtime_real. This flow resets --hard and detaches its target; use 'symphony-deploy' for in-place stable-root deploys, point SYMPHONY_RUNTIME_CHECKOUT at a disposable detached checkout, or set DEPLOY_TRAIN_ALLOW_STABLE_ROOT=1 to override."
+  fi
+}
+
 usage() {
   cat <<EOF
 deploy-train.sh — mechanized deploy train for symphony-ts (SYMPH-346)
@@ -79,8 +108,14 @@ Flags:
 
 Environment:
   SYMPHONY_PROJECT              Project name for service label/logs (default: symphony)
-  SYMPHONY_RUNTIME_CHECKOUT     Detached runtime checkout path
+  SYMPHONY_RUNTIME_CHECKOUT     Disposable, DETACHED runtime checkout path. This
+                                flow resets --hard and checks out --detach this
+                                path, so it must NOT be the stable in-place root
+                                that symphony-deploy / symphony-ctl serve from.
                                 (default: ~/.codex/worktrees/symphony-ts-runtime-main)
+  DEPLOY_TRAIN_ALLOW_STABLE_ROOT  Set to 1 to bypass the coherence guard that
+                                refuses to run against the stable in-place root
+                                (default: refuse)
   DEPLOY_DRAIN_INTERVAL_SECS    Seconds between drain checks (default: 30)
   DEPLOY_DRAIN_TIMEOUT_SECS     Max seconds to wait for drain (default: 3600)
   DEPLOY_VERSION_GATE_TIMEOUT_SECS  Max seconds to wait for symphony_version
@@ -122,6 +157,7 @@ command -v jq   &>/dev/null || die "jq is required for the drain gate. Install w
 [[ -f "$PLIST_PATH" ]] || die "Service plist not found at $PLIST_PATH. Install with: symphony-ctl install"
 [[ -d "$RUNTIME_CHECKOUT" ]] || die "Runtime checkout not found at $RUNTIME_CHECKOUT. Set SYMPHONY_RUNTIME_CHECKOUT to override."
 git -C "$RUNTIME_CHECKOUT" rev-parse --git-dir &>/dev/null || die "Runtime checkout is not a git repo: $RUNTIME_CHECKOUT"
+check_runtime_checkout_not_stable_root
 
 # --- Resolve the serve path from the plist (do NOT assume) ---
 
