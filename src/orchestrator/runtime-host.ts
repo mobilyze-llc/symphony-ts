@@ -61,6 +61,7 @@ import type {
   ResolvedWorkflowConfig,
   StageDefinition,
   StageExecutionBackend as StageExecutionBackendKind,
+  StageExecutionSubStage,
   WorkflowHardStopsConfig,
 } from "../config/types.js";
 import { WorkflowWatcher } from "../config/workflow-watch.js";
@@ -227,6 +228,7 @@ import {
   getFailedStopSignalDeliveryAttempts,
   isStopSignalDelivery,
 } from "./core.js";
+import { executeDecomposedStageDispatch } from "./decomposed-stage-dispatch.js";
 import { projectEmergencyStopInterruptedIssue } from "./emergency-stop-projection.js";
 import { getDiff, runEnsembleGate } from "./gate-handler.js";
 import {
@@ -4670,12 +4672,35 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           effectiveHardStops.maxDollarBudgetUsd * Math.max(1, budgetMultiplier),
       }),
     };
-    const completion = stageExecutionBackend
-      .execute({
-        job: executionJob,
-        runnerInput,
-      })
-      .then(async ({ result }) => {
+    // SYMPH-852: a stage that declares execution.subStages runs its sub-stages
+    // in sequence through the StageExecutionBackend seam and folds them into ONE
+    // aggregate result; otherwise dispatch the single execution unchanged.
+    // Either branch resolves to one AgentRunResult fed into the SAME
+    // finalization below, so the orchestrator still performs exactly one stage
+    // transition (rework / merge-readiness stay journal-derived). The dispatch
+    // module returns data only — it never advances stage state.
+    const resultPromise: Promise<AgentRunResult> =
+      stage?.execution?.subStages && stage.execution.subStages.length > 0
+        ? this.executeDecomposedStageDispatch({
+            issue,
+            attempt,
+            stage,
+            stageName,
+            subStages: stage.execution.subStages,
+            effectiveHardStops,
+            signal: controller.signal,
+            baseRef:
+              executionJob.identity.baseRef ?? resolveStageExecutionBaseRef(),
+            artifactRoot: executionJob.identity.artifactRoot,
+          })
+        : stageExecutionBackend
+            .execute({
+              job: executionJob,
+              runnerInput,
+            })
+            .then(({ result }) => result);
+    const completion = resultPromise
+      .then(async (result) => {
         execution.lastResult = result;
         await this.enqueue(async () => {
           await this.finalizeWorkerExecution(execution, {
@@ -4709,6 +4734,58 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       workerHandle: execution,
       monitorHandle: completion,
     };
+  }
+
+  /**
+   * SYMPH-852 — wire the decomposed-stage dispatch module from `this` context.
+   * Returns ONE aggregate AgentRunResult (data only): the module sequences the
+   * sub-stages through the backend seam, journals each delegated attempt via the
+   * SYMPH-811 projection, and never advances stage state. Each sub-stage's job
+   * carries the SUB-STAGE execution profile but the PARENT stage name, so the
+   * run group correlates while per-sub-stage budget/capsule isolation stays
+   * data-driven.
+   */
+  private executeDecomposedStageDispatch(input: {
+    issue: Issue;
+    attempt: number | null;
+    stage: StageDefinition;
+    stageName: string | null;
+    subStages: readonly StageExecutionSubStage[];
+    effectiveHardStops: WorkflowHardStopsConfig | null;
+    signal: AbortSignal;
+    baseRef: string;
+    artifactRoot: string;
+  }): Promise<AgentRunResult> {
+    return executeDecomposedStageDispatch({
+      issue: input.issue,
+      attempt: input.attempt,
+      stageName: input.stageName,
+      subStages: input.subStages,
+      effectiveHardStops: input.effectiveHardStops,
+      baseRef: input.baseRef,
+      artifactRoot: input.artifactRoot,
+      signal: input.signal,
+      resolveBackend: this.resolveStageExecutionBackend.bind(this),
+      createStageExecutionJobSpec: ({ execution, stageName }) =>
+        this.createStageExecutionJobSpec({
+          issue: input.issue,
+          attempt: input.attempt,
+          // Carry the SUB-STAGE execution profile under the PARENT stage shell
+          // so job identity uses the parent stage name + run group.
+          stage: { ...input.stage, execution },
+          stageName,
+          effectiveHardStops: input.effectiveHardStops,
+        }),
+      // Capsule handoff replaces prior-stage context: the module builds a
+      // capsule-scoped runner input (issue/attempt/signal/stageName only). The
+      // adapter passes it through unchanged — implementationCommentDeltas /
+      // workpadContext / acceptanceCriteria / reworkCount are deliberately NOT
+      // threaded across the sub-stage boundary.
+      buildRunnerInput: (runnerInput) => runnerInput,
+      appendJournalEntry: (draft) =>
+        this.orchestrator.recordDelegatedStageAttempt(draft),
+      now: this.now,
+    });
   }
 
   private createStageExecutionJobSpec(input: {
