@@ -342,8 +342,9 @@ export function resolveWorkflowConfig(
     },
     reviewExecution: {
       crabrunnerJobGroup: {
-        // Default-closed (SYMPH-855): only an explicit boolean `true` opts a
-        // workflow into the crabrunner review job-group path.
+        // Explicit opt-in (SYMPH-855/SYMPH-812): shipped workflows set this
+        // true. Custom workflows that leave it false keep their configured
+        // runner path, but active Symphony review has no CMUX fallback.
         enabled: reviewCrabrunnerJobGroup.enabled === true,
       },
     },

@@ -36,10 +36,10 @@
         <string>your-project-slug</string>
         <key>REPO_URL</key>
         <string>https://github.com/org/repo.git</string>
-        <key>SYMPHONY_COUNCIL_REVIEW_GATE</key>
-        <string>/usr/local/bin/symphony-council-review-gate</string>
-        <key>CMUX_SPAWN_BIN</key>
-        <string>/path/to/cmux-spawn</string>
+        <key>SYMPHONY_CRABRUNNER_ROOT</key>
+        <string>/Users/youruser/projects/crucible</string>
+        <key>SYMPHONY_CRABRUNNER_TARGET_REPO</key>
+        <string>/Users/youruser/projects/product-repo</string>
     </dict>
 
     <key>StandardOutPath</key>

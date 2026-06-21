@@ -10,8 +10,11 @@ import {
   type StructuredReviewerArtifact,
   runHeadlessCouncilGate,
 } from "../review/headless-council-gate.js";
-import { isDirectRun } from "./council-review-gate.js";
+import { isDirectRun } from "./direct-run.js";
 
+// Internal replay tool only. SYMPH-812 removed headless-council-gate from the
+// package barrel because active review now runs through crabrunner-backed job
+// groups, but this diagnostic CLI still reuses the legacy artifact parser.
 interface ParsedArgs {
   sourceCouncilDir: string;
   replayArtifactDir: string;

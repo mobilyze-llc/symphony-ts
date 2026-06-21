@@ -2,6 +2,16 @@
 
 Date: 2026-06-19
 
+Status after SYMPH-812 (2026-06-21): this document records the stage-profile
+migration snapshot before the active CMUX review runtime was removed. The
+package bins for `symphony-council-review-gate` and
+`symphony-review-runtime-preflight`, the `probe:review-runtime` script, direct
+workflow/deploy calls into the local CMUX review runtime, and the
+`~/.cmux-spawn` worker sandbox grant are no longer active product-path
+requirements. Use
+[`docs/operations/03-crabrunner-review-qa.md`](operations/03-crabrunner-review-qa.md)
+for the current crabrunner review/QA runbook and holding pattern.
+
 Scope: add behavior-neutral stage execution profiles, run group identity, capsule path contracts, and delegated stage attempt records so later tickets can replace CMUX-specific review execution without preserving old abstractions by accident.
 
 Non-goals: this change does not switch any backend, does not remove CMUX, does not replatform the headless council CLI, and does not change stage workflow semantics.
@@ -45,7 +55,8 @@ Required negative checks:
 
 The captured v1 review and merge-candidate journal fixture replays green through `tests/review/review-journal-events.test.ts`.
 
-The required grep inventory remains the active CMUX surface finder:
+The required grep inventory was the active CMUX surface finder for this
+pre-removal snapshot:
 
 ```bash
 rg -n "cmux|CMUX|cmux-spawn|CMUX_SPAWN_BIN|symphony-council-review-gate|headless-council|review-runtime-preflight" . --glob '!node_modules/**' --glob '!dist/**' --glob '!coverage/**'
@@ -88,7 +99,7 @@ rg -n "cmux|CMUX|cmux-spawn|CMUX_SPAWN_BIN|symphony-council-review-gate|headless
 | `src/agent/runner.ts` `~/.cmux-spawn` sandbox grant | Active fail-closed lock support | SYMPH-810 translates the invariant to crabrunner/admission locks. |
 | CMUX operator docs and deploy tooling | Active operator support | SYMPH-812 removes from active docs after parity. |
 
-## Required Answers
+## Historical Required Answers
 
 Which review CLIs and preflight commands should disappear rather than be replatformed?
 

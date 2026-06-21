@@ -49,6 +49,10 @@ codex:
 runner:
   kind: codex
 
+review_execution:
+  crabrunner_job_group:
+    enabled: true
+
 hooks:
   after_create: |
     set -euo pipefail
@@ -406,68 +410,22 @@ When you are done:
 
 {% if stageName == "review" %}
 ## Stage: Review
-You are the review-gate operator, not the reviewer. Council is a loop over the merge candidate: every PR, including low-risk PRs, must pass the headless council gate before merge, and every material post-review change must get a convergence rerun against the new HEAD.
+You are the review-gate operator, not the reviewer. This workflow opts into the crabrunner-backed review job group with `review_execution.crabrunner_job_group.enabled: true`; the runtime must dispatch reviewer and QA lanes through the registered crabrunner stage backend and return a canonical `[REVIEW_GATE_RESULT_PATH: ...]` marker.
 
-Do NOT run `/self-moa-review`, `/codex-review`, direct `claude -p`, or any other direct Claude invocation. Claude must run through CMUX via `symphony-council-review-gate`.
+Do not run local reviewer commands or direct model-review shortcuts from this prompt. If this prompt is reached as an ordinary agent turn instead of being replaced by crabrunner review dispatch, treat that as infrastructure misconfiguration: post `## Review Infrastructure Retry` with the missing crabrunner backend or dispatcher evidence, then output `[STAGE_FAILED: infra]`.
 
-Run:
+If the investigate workpad or PR body names `risk-contract-artifact: <path>`, the runtime-owned review bundle must record that bounded artifact path under `optionalInputs.riskContractArtifactPaths`.
 
-```bash
-PR_NUMBER=$(gh pr view --json number --jq '.number')
-REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
-ARTIFACT_DIR="${TMPDIR:-/tmp}/symphony-council-{{ issue.identifier }}-$(date +%s)"
-CMUX_SPAWN_BIN="${CMUX_SPAWN_BIN:-$(command -v cmux-spawn || true)}"
-AUTHOR_FAMILY="${SYMPHONY_COUNCIL_AUTHOR_FAMILY:-codex}"
-RISK_CONTRACT_ARTIFACT_ARGS=()
-if [ -n "${RISK_CONTRACT_ARTIFACT:-}" ]; then
-  RISK_CONTRACT_ARTIFACT_ARGS=(--risk-contract-artifact "$RISK_CONTRACT_ARTIFACT")
-fi
-if [ -z "$CMUX_SPAWN_BIN" ] || [ ! -x "$CMUX_SPAWN_BIN" ]; then
-  echo "Set CMUX_SPAWN_BIN to an executable cmux-spawn path or put cmux-spawn on PATH." >&2
-  exit 1
-fi
+The runtime-owned review result must include `review_metadata.reviewed_head_sha`, `review_metadata.base_sha`, `review_metadata.round`, `review_metadata.mode`, `review_routing.decorrelationBasis.mergeEligible` (or legacy `review_metadata.decorrelation_merge_eligible`), and a clean verdict. If the crabrunner review job group reports `PASS`, the runtime emits `[REVIEW_GATE_RESULT_PATH: <artifact-dir>/review-result.json]` immediately before `[STAGE_COMPLETE]`.
 
-run_council_gate() {
-  if [ -n "${SYMPHONY_COUNCIL_REVIEW_GATE:-}" ]; then
-    "$SYMPHONY_COUNCIL_REVIEW_GATE" "$@"
-  elif command -v symphony-council-review-gate >/dev/null 2>&1; then
-    symphony-council-review-gate "$@"
-  elif [ -f dist/src/cli/council-review-gate.js ]; then
-    pnpm build
-    node dist/src/cli/council-review-gate.js "$@"
-  else
-    echo "Set SYMPHONY_COUNCIL_REVIEW_GATE to the Symphony gate executable, install symphony-council-review-gate on PATH, or run from a built symphony-ts checkout." >&2
-    return 1
-  fi
-}
-
-run_council_gate \
-  --issue-id {{ issue.identifier }} \
-  --artifact-dir "$ARTIFACT_DIR" \
-  --workspace "$PWD" \
-  --repo "$REPO" \
-  --pr "$PR_NUMBER" \
-  --cmux-spawn-bin "$CMUX_SPAWN_BIN" \
-  --author-family "$AUTHOR_FAMILY" \
-  --mode {% if reworkCount > 0 %}convergence{% else %}full{% endif %} \
-  --round {{ reworkCount | plus: 1 }} \
-  --timeout-seconds 1800 \
-  "${RISK_CONTRACT_ARTIFACT_ARGS[@]}"
-```
-
-If the investigate workpad or PR body names `risk-contract-artifact: <path>`, set `RISK_CONTRACT_ARTIFACT=<path>` before the gate so the review bundle records the bounded artifact path under `optionalInputs.riskContractArtifactPaths`.
-
-Read `$ARTIFACT_DIR/review-result.json` and `$ARTIFACT_DIR/council-report.md`. The machine result must contain `review_metadata.reviewed_head_sha`, `review_metadata.base_sha`, `review_metadata.round`, `review_metadata.mode`, and a clean verdict.
-
-If the gate reports `PASS`, output `[STAGE_COMPLETE]`.
-If the gate reports `FAIL`, is degraded, times out, or artifacts are missing/malformed: post a `## Review Findings` comment on the Linear issue with the council report path and blocking summary, then output `[STAGE_FAILED: review]`.
+If the job group reports `FAIL`, is degraded, times out, or artifacts are missing/malformed: post a `## Review Findings` comment on the Linear issue with the council report path and blocking summary, then output `[STAGE_FAILED: review]`. If the failure is substrate-only and there are no surviving P1/P2 code findings, post `## Review Infrastructure Retry` and output `[STAGE_FAILED: infra]`.
 {% endif %}
 
 {% if stageName == "merge" %}
 ## Stage: Merge
 You are in the MERGE stage. The PR has been reviewed and approved.
 - First compute PR readiness with `gh pr view --json number,state,isDraft,mergeStateStatus,mergeable,reviewDecision,statusCheckRollup` and `gh pr checks --required`. If the PR is behind base, has failing/pending required checks, lacks required review, is draft/closed, or is not mergeable, do not merge; report every blocker in `[BLOCKED_NEEDS_HUMAN_BLOCKERS: {...}]` immediately before `[BLOCKED_NEEDS_HUMAN: auto_merge]`.
-- Before merging, assert the latest clean council artifact still covers the current PR head with `symphony-council-review-gate --assert-fresh-review <path-to-latest-clean-review-result.json> --issue-id {{ issue.identifier }} --artifact-dir "$ARTIFACT_DIR" --workspace "$PWD" --repo "$REPO" --pr "$PR_NUMBER"`. If it emits `code: "stale_review"` or `rerun convergence review against HEAD.`, do not merge; return to review and run convergence against HEAD.
+- Before merging, assert the latest clean crabrunner review artifact still covers the current PR head. Read the latest successful `review-result.json`, compare `review_metadata.reviewed_head_sha` to `gh pr view --json headRefOid`, require `verdict: "pass"` and `review_routing.decorrelationBasis.mergeEligible: true` (or legacy `review_metadata.decorrelation_merge_eligible: true`), and return to review for a convergence rerun if the artifact is stale or not merge-eligible.
 - Enqueue the PR with `gh pr merge "$PR_NUMBER" --auto` only if the Mode Permission Envelope explicitly allows worker merge-queue enqueue. Treat command success as enqueue/auto-merge enablement, not merge completion: do not use `gh pr checks --watch` as completion proof; poll `gh pr view "$PR_NUMBER" --json state,mergedAt,mergeCommit` on a bounded backoff — wait 30s before the first re-check, then 60s, then 120s, capping the interval at 300s between checks, keeping the total post-enqueue wait under the merge stage turn budget and `stall_timeout_ms` — until it reports `state=MERGED` with non-null `mergedAt` and merge commit before marking Linear Done. A still-open PR after enqueue is queued/waiting unless GitHub reports an explicit rejection or failed required check; on reaching that wait bound (or if time or budget stops) before proof with no explicit rejection, park with `merge_queue_pending` rather than returning the issue to In Progress. If readiness is green but the envelope denies enqueue, do not merge; report `auto_merge_permission_denied` in `[BLOCKED_NEEDS_HUMAN_BLOCKERS: {...}]` immediately before `[BLOCKED_NEEDS_HUMAN: auto_merge]`.
 - Verify the merge succeeded on the main branch
 - Do NOT modify code in this stage

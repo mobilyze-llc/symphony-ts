@@ -185,14 +185,13 @@ export interface WorkflowSpecFidelityConfig {
 }
 
 /**
- * Crabrunner review job-group cutover gate (SYMPH-855). Default-CLOSED: when
- * `crabrunnerJobGroup.enabled` is false (the default) the live review stage runs
- * its current path byte-for-byte unchanged. When an operator opts a workflow in
- * AND a crabrunner StageExecutionBackend is registered (SYMPHONY_CRABRUNNER_ROOT
- * — SYMPH-853), the review stage dispatches its reviewer lanes (and the optional
- * browser-QA lane) through `runCrabrunnerReviewJobGroup` instead, producing the
- * same review-result.json + [REVIEW_GATE_RESULT_PATH:] marker the orchestrator
- * already validates. Doubly-inert by default so it can shadow before cutover.
+ * Crabrunner review job-group gate (SYMPH-855/SYMPH-812). Shipped Symphony
+ * workflows opt in explicitly. When enabled, a crabrunner StageExecutionBackend
+ * (SYMPHONY_CRABRUNNER_ROOT — SYMPH-853) and review dispatcher are required;
+ * missing wiring fails closed instead of falling back to the removed local
+ * review runtime. The dispatcher runs reviewer lanes (and optional browser QA)
+ * through `runCrabrunnerReviewJobGroup`, producing the same review-result.json
+ * + [REVIEW_GATE_RESULT_PATH:] marker the orchestrator already validates.
  */
 export interface WorkflowReviewExecutionConfig {
   crabrunnerJobGroup: {

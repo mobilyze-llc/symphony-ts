@@ -1,7 +1,13 @@
 # CMUX Review Substrate Deploy
 
-This is the deploy contract for the review substrate used by Symphony council
-and lightweight decorrelated review lanes. The stable operating model is:
+Historical artifact after SYMPH-812. This runbook is retained for one-release
+audit and archaeology only. It is not the live Symphony review substrate, not a
+production fallback, and not acceptable merge-authoritative review evidence.
+Use `docs/operations/03-crabrunner-review-qa.md` plus
+Codex/session-orchestrator crabbox-council during the holding pattern.
+
+This was the deploy contract for the review substrate used by Symphony council
+and lightweight decorrelated review lanes. The historical operating model was:
 
 - Pro16 is the remote-primary CMUX substrate for ordinary review lanes.
 - Pro14 is fallback or break-glass only, with an explicit recorded reason.

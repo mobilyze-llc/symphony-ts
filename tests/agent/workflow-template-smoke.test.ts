@@ -718,7 +718,7 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(output).toContain("The PR body carries exactly one live-proof");
     expect(output).toContain("punctuation variants are not evidence failures");
     expect(output).toContain(
-      "do not run the council gate on work that skipped its evidence contract",
+      "do not admit the crabrunner review job group on work that skipped its evidence contract",
     );
     // The review completion message must echo the verified disposition —
     // it is the channel the spec-fidelity judge actually reads (R3).
@@ -780,29 +780,26 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
       reworkCount: 0,
     });
     expect(output).not.toContain(DESCRIPTION_SENTINEL);
-    expect(output).toContain("every PR, including low-risk PRs");
+    expect(output).toContain("crabrunner-backed review job group");
+    expect(output).toContain("registered crabrunner stage backend");
+    expect(output).toContain("Crabrunner Review Dispatch");
+    expect(output).toContain("full mode for round 1");
     expect(output).toContain(
-      "must pass the headless council gate before merge",
+      "[REVIEW_GATE_RESULT_PATH: <artifact-dir>/review-result.json]",
     );
-    expect(output).toContain("Council is a loop over the merge candidate");
-    expect(output).toContain("material post-review change");
-    expect(output).toContain("symphony-council-review-gate");
-    expect(output).toContain("CMUX_SPAWN_BIN");
-    expect(output).toContain("SYMPHONY_COUNCIL_REVIEW_GATE");
-    expect(output).toContain("command -v cmux-spawn");
-    expect(output).toContain("command -v symphony-council-review-gate");
-    expect(output).toContain("run_council_gate");
-    expect(output).toContain("--mode full");
-    expect(output).toContain("--round 1");
-    expect(output).toContain("SYMPHONY_COUNCIL_AUTHOR_FAMILY");
-    expect(output).toContain('--author-family "$AUTHOR_FAMILY"');
-    expect(output).toContain("--timeout-seconds 1800");
     expect(output).toContain("review_metadata.reviewed_head_sha");
     expect(output).toContain("review_metadata.base_sha");
     expect(output).toContain("review_metadata.round");
     expect(output).toContain("review_metadata.mode");
-    expect(output).toContain("Claude must run through CMUX");
-    expect(output).not.toContain("Build the local CLI");
+    expect(output).toContain("review_routing.decorrelationBasis.mergeEligible");
+    expect(output).toContain("review_metadata.decorrelation_merge_eligible");
+    expect(output).not.toContain("symphony-council-review-gate");
+    expect(output).not.toContain("CMUX_SPAWN_BIN");
+    expect(output).not.toContain("SYMPHONY_COUNCIL_REVIEW_GATE");
+    expect(output).not.toContain("command -v cmux-spawn");
+    expect(output).not.toContain("command -v symphony-council-review-gate");
+    expect(output).not.toContain("run_council_gate");
+    expect(output).not.toContain("Claude must run through CMUX");
     expect(output).not.toContain(
       "/Users/ericlitman/projects/crucible/bin/cmux-spawn",
     );
@@ -820,8 +817,8 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     });
 
     expect(output).toContain("### Re-review After Rework (rework #2)");
-    expect(output).toContain("--mode convergence");
-    expect(output).toContain("--round 3");
+    expect(output).toContain("convergence mode");
+    expect(output).toContain("round 3");
   });
 
   it("merge stage does NOT contain description and HAS prohibitions", async () => {
@@ -835,9 +832,12 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(output).not.toContain(DESCRIPTION_SENTINEL);
     expect(output).toMatch(/MUST NOT/);
     expect(output).toContain("Your ONLY job is to merge the PR");
-    expect(output).toContain("--assert-fresh-review");
-    expect(output).toContain('code: "stale_review"');
-    expect(output).toContain("rerun convergence review against HEAD.");
+    expect(output).toContain("result.review_metadata?.reviewed_head_sha");
+    expect(output).toContain("decorrelationBasis?.mergeEligible");
+    expect(output).toContain("decorrelation_merge_eligible");
+    expect(output).toContain("If this check fails, do NOT merge");
+    expect(output).not.toContain("--assert-fresh-review");
+    expect(output).not.toContain("symphony-council-review-gate");
     expect(output).toContain(
       "gh pr view --json number,state,isDraft,mergeStateStatus,mergeable,reviewDecision,statusCheckRollup",
     );
@@ -854,6 +854,157 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(output).not.toContain("gh pr checks --watch --required --fail-fast");
     expect(output).toContain("[BLOCKED_NEEDS_HUMAN_BLOCKERS:");
     expect(output).toContain("auto_merge_permission_denied");
+  });
+
+  it("executes the rendered merge freshness script against real review artifacts", async () => {
+    const output = await renderPrompt({
+      workflow: { promptTemplate },
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "merge",
+      reworkCount: 0,
+    });
+    const script = extractMergeFreshnessScript(output);
+    const tempRoot = await mkdtemp(join(tmpdir(), "symphony-review-gate-"));
+
+    try {
+      const head = "abc123";
+      const reviewResultPath = join(tempRoot, "review-result.json");
+      await writeFile(
+        reviewResultPath,
+        JSON.stringify({
+          verdict: "pass",
+          review_metadata: {
+            reviewed_head_sha: head,
+          },
+          review_routing: {
+            decorrelationBasis: {
+              mergeEligible: true,
+            },
+          },
+        }),
+        "utf8",
+      );
+
+      const stdout = execFileSync(
+        process.execPath,
+        ["-e", script, reviewResultPath, head],
+        { encoding: "utf8" },
+      );
+      expect(JSON.parse(stdout)).toMatchObject({
+        ok: true,
+        code: "fresh",
+        verdict: "pass",
+        head,
+      });
+
+      await writeFile(
+        reviewResultPath,
+        JSON.stringify({
+          verdict: "pass",
+          review_metadata: {
+            reviewed_head_sha: head,
+            decorrelation_merge_eligible: true,
+          },
+        }),
+        "utf8",
+      );
+      expect(
+        JSON.parse(
+          execFileSync(
+            process.execPath,
+            ["-e", script, reviewResultPath, head],
+            {
+              encoding: "utf8",
+            },
+          ),
+        ),
+      ).toMatchObject({
+        ok: true,
+        code: "fresh",
+        verdict: "pass",
+        head,
+      });
+
+      await writeFile(
+        reviewResultPath,
+        JSON.stringify({
+          verdict: "pass",
+          review_metadata: {
+            reviewed_head_sha: head,
+            decorrelation_merge_eligible: true,
+          },
+          review_routing: {
+            decorrelationBasis: {
+              mergeEligible: false,
+            },
+          },
+        }),
+        "utf8",
+      );
+
+      expect(() =>
+        execFileSync(process.execPath, ["-e", script, reviewResultPath, head]),
+      ).toThrow();
+
+      await writeFile(
+        reviewResultPath,
+        JSON.stringify({
+          verdict: "pass",
+          review_metadata: {
+            reviewed_head_sha: head,
+          },
+        }),
+        "utf8",
+      );
+      expect(() =>
+        execFileSync(process.execPath, ["-e", script, reviewResultPath, head]),
+      ).toThrow();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the merge freshness script in sync across partial and template surfaces", async () => {
+    const primaryWorkflow = await loadWorkflowDefinition(
+      PIPELINE_WORKFLOW_PATH,
+    );
+    const primaryConfig = resolveWorkflowConfig(primaryWorkflow, {
+      LINEAR_API_KEY: "test-token",
+      LINEAR_PROJECT_SLUG: "test-project",
+    });
+    const mergePrompt = primaryConfig.stages?.stages.merge?.prompt;
+    expect(mergePrompt).not.toBeNull();
+
+    const mergeLiquid = await readFile(
+      resolve(dirname(PIPELINE_WORKFLOW_PATH), mergePrompt!),
+      "utf8",
+    );
+    const template = await readFile(WORKFLOW_TEMPLATE_PATH, "utf8");
+    const renderInput = {
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "merge",
+      reworkCount: 0,
+    } as const;
+    const mergeLiquidOutput = await renderPrompt({
+      workflow: { promptTemplate: mergeLiquid },
+      ...renderInput,
+    });
+    const templateOutput = await renderPrompt({
+      workflow: { promptTemplate: template },
+      ...renderInput,
+    });
+
+    expect(
+      normalizeMergeFreshnessScript(
+        extractMergeFreshnessScript(mergeLiquidOutput),
+      ),
+    ).toBe(
+      normalizeMergeFreshnessScript(
+        extractMergeFreshnessScript(templateOutput),
+      ),
+    );
   });
 
   it("names a bounded merge-queue polling cadence across every merge surface (SYMPH-645)", async () => {
@@ -1153,6 +1304,27 @@ function countOccurrences(output: string, needle: string): number {
     index = output.indexOf(needle, index + needle.length);
   }
   return count;
+}
+
+function extractMergeFreshnessScript(output: string): string {
+  const match = output.match(
+    /node -e '\n(?<script>[\s\S]*?)\n\s*' "\$REVIEW_RESULT_PATH" "\$HEAD_SHA"/,
+  );
+  const script = match?.groups?.script;
+  if (script === undefined) {
+    throw new Error(
+      "Expected rendered merge prompt to contain node freshness script",
+    );
+  }
+  return script;
+}
+
+function normalizeMergeFreshnessScript(script: string): string {
+  return script
+    .split("\n")
+    .map((line) => line.trimStart())
+    .join("\n")
+    .trim();
 }
 
 async function findFilesContaining(

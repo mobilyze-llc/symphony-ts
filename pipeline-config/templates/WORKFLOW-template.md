@@ -129,6 +129,10 @@ codex:
 runner:
   kind: codex
 
+review_execution:
+  crabrunner_job_group:
+    enabled: true
+
 hooks:
   after_create: |
     set -eu
@@ -733,13 +737,13 @@ policy, output `[STAGE_FAILED: infra]` with the exact denied command and error.
 
 {% if stageName == "review" %}
 ## Stage: Review
-You are the review-gate operator, not the reviewer. Council is a loop over the merge candidate: every PR, including low-risk PRs, must pass the headless council gate before merge, and every material post-review change must get a convergence rerun against the new HEAD.
+You are the review-gate operator, not the reviewer. This workflow opts into the crabrunner-backed review job group with `review_execution.crabrunner_job_group.enabled: true`; the runtime must dispatch reviewer and QA lanes through the registered crabrunner stage backend and return a canonical `[REVIEW_GATE_RESULT_PATH: ...]` marker.
 
-Do NOT run `/self-moa-review`, `/codex-review`, direct `claude -p`, or any other direct Claude invocation. Claude must run through CMUX via `symphony-council-review-gate`.
+Do not run local reviewer commands or direct model-review shortcuts from this prompt. If this prompt is reached as an ordinary agent turn instead of being replaced by crabrunner review dispatch, treat that as infrastructure misconfiguration: post `## Review Infrastructure Retry` with the missing crabrunner backend or dispatcher evidence, then output `[STAGE_FAILED: infra]`.
 
 {% if reworkCount > 0 %}
 ### Re-review After Rework (rework #{{ reworkCount }})
-This is a re-review after a rework cycle. Run the same headless council gate again and verify the previous `## Review Findings` are resolved.
+This is a re-review after a rework cycle. The crabrunner review job group must run in convergence mode and verify the previous `## Review Findings` are resolved.
 {% endif %}
 
 ### Pre-gate evidence check (SYMPH-375 / SYMPH-377)
@@ -753,74 +757,29 @@ Before running the council gate, verify the implement stage honored its evidence
    - **Full-suite criteria — CI is the authority (SYMPH-358 / SYMPH-402):** a frozen full-suite `check:` criterion (e.g. `check: pnpm test exits 0`) is SATISFIED by CI check-run success on the PR head SHA. Verify with `gh pr checks "$PR_NUMBER"` (or `gh api repos/$REPO/commits/$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)/check-runs`). When CI is green on the head SHA, do NOT fail this check over a red local full-suite log — local full-suite runs false-negative under multi-lane load. Accept `full-suite: CI green @ <head SHA>` as the criterion's evidence line.
 2. The PR body carries exactly one live-proof disposition line: `live-proof: evidence — <citation>`, `live-proof: waived — <reason>`, or `live-proof: n/a — <reason>` (the workpad artifact copy is supporting material; a missing PR-body disposition line fails this check). For mechanical matching, accept the same line with an em dash, en dash, or hyphen-minus separator after `evidence`, `waived`, or `n/a`; punctuation variants are not evidence failures. Runtime-touching diffs whose disposition is neither `evidence` nor an explicit `waived` fail this check.
 
-If a check fails, post a `## Review Findings` comment naming the missing evidence and output `[STAGE_FAILED: review]` — do not run the council gate on work that skipped its evidence contract.
+If a check fails, post a `## Review Findings` comment naming the missing evidence and output `[STAGE_FAILED: review]` — do not admit the crabrunner review job group on work that skipped its evidence contract.
 
-### Run the headless council gate
+### Crabrunner Review Dispatch
 
-1. Resolve the PR and repository:
-   ```bash
-   PR_NUMBER=$(gh pr view --json number --jq '.number')
-   REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
-   ```
-2. Run the gate through CMUX:
-   ```bash
-   ARTIFACT_DIR="${TMPDIR:-/tmp}/symphony-council-{{ issue.identifier }}-$(date +%s)"
-   CMUX_SPAWN_BIN="${CMUX_SPAWN_BIN:-$(command -v cmux-spawn || true)}"
-   AUTHOR_FAMILY="${SYMPHONY_COUNCIL_AUTHOR_FAMILY:-codex}"
-   RISK_CONTRACT_ARTIFACT_ARGS=()
-   if [ -n "${RISK_CONTRACT_ARTIFACT:-}" ]; then
-     RISK_CONTRACT_ARTIFACT_ARGS=(--risk-contract-artifact "$RISK_CONTRACT_ARTIFACT")
-   fi
-   if [ -z "$CMUX_SPAWN_BIN" ] || [ ! -x "$CMUX_SPAWN_BIN" ]; then
-     echo "Set CMUX_SPAWN_BIN to an executable cmux-spawn path or put cmux-spawn on PATH." >&2
-     exit 1
-   fi
+The runtime owns review execution. It resolves the PR, materializes the review bundle, records any `risk-contract-artifact: <path>` under `optionalInputs.riskContractArtifactPaths`, and dispatches the crabrunner review job group in {% if reworkCount > 0 %}convergence{% else %}full{% endif %} mode for round {{ reworkCount | plus: 1 }}.
 
-   run_council_gate() {
-     if [ -n "${SYMPHONY_COUNCIL_REVIEW_GATE:-}" ]; then
-       "$SYMPHONY_COUNCIL_REVIEW_GATE" "$@"
-     elif command -v symphony-council-review-gate >/dev/null 2>&1; then
-       symphony-council-review-gate "$@"
-     elif [ -f dist/src/cli/council-review-gate.js ]; then
-       pnpm build
-       node dist/src/cli/council-review-gate.js "$@"
-     else
-       echo "Set SYMPHONY_COUNCIL_REVIEW_GATE to the Symphony gate executable, install symphony-council-review-gate on PATH, or run from a built symphony-ts checkout." >&2
-       return 1
-     fi
-   }
-
-   run_council_gate \
-     --issue-id {{ issue.identifier }} \
-     --artifact-dir "$ARTIFACT_DIR" \
-     --workspace "$PWD" \
-     --repo "$REPO" \
-     --pr "$PR_NUMBER" \
-     --cmux-spawn-bin "$CMUX_SPAWN_BIN" \
-     --author-family "$AUTHOR_FAMILY" \
-     --mode {% if reworkCount > 0 %}convergence{% else %}full{% endif %} \
-     --round {{ reworkCount | plus: 1 }} \
-     --timeout-seconds 1800 \
-     "${RISK_CONTRACT_ARTIFACT_ARGS[@]}"
-   ```
-   If the investigate workpad or PR body names `risk-contract-artifact: <path>`, set `RISK_CONTRACT_ARTIFACT=<path>` before the gate so the review bundle records the bounded artifact path under `optionalInputs.riskContractArtifactPaths`.
-3. Read `$ARTIFACT_DIR/review-result.json` and `$ARTIFACT_DIR/council-report.md`. The machine result must contain `review_metadata.reviewed_head_sha`, `review_metadata.base_sha`, `review_metadata.round`, `review_metadata.mode`, and a clean verdict.
+The machine result must be written as `<artifact-dir>/review-result.json` with a sibling `council-report.md`, and must contain `review_metadata.reviewed_head_sha`, `review_metadata.base_sha`, `review_metadata.round`, `review_metadata.mode`, `review_routing.decorrelationBasis.mergeEligible` (or legacy `review_metadata.decorrelation_merge_eligible`), and a clean verdict.
 
 ### Evaluate findings
 
-If the gate reports `PASS`, post a short workpad note with the artifact directory, then output `[REVIEW_GATE_RESULT_PATH: $ARTIFACT_DIR/review-result.json]` immediately before `[STAGE_COMPLETE]` in a final message that also echoes the live-proof disposition line you verified in the pre-gate check (`live-proof: evidence|waived|n/a — …`) — the independent spec-fidelity judge reads your final message and checks for it (SYMPH-377), and the runtime host ingests the machine result before allowing merge.
-If the gate reports `FAIL` with surviving P1/P2 code findings: post a `## Review Findings` comment on the Linear issue with the council report path and blocking summary, then output `[STAGE_FAILED: review]`.
+If the job group reports `PASS`, post a short workpad note with the artifact directory, then output `[REVIEW_GATE_RESULT_PATH: <artifact-dir>/review-result.json]` immediately before `[STAGE_COMPLETE]` in a final message that also echoes the live-proof disposition line you verified in the pre-dispatch check (`live-proof: evidence|waived|n/a - ...`) — the independent spec-fidelity judge reads your final message and checks for it (SYMPH-377), and the runtime host ingests the machine result before allowing merge.
+If the job group reports `FAIL` with surviving P1/P2 code findings: post a `## Review Findings` comment on the Linear issue with the council report path and blocking summary, then output `[STAGE_FAILED: review]`.
 
-If `$ARTIFACT_DIR/review-result.json` reports `verdict: "error"` and a lane has `degradedReason: "substrate_stall"` or a `degradedConditions` entry starting with `substrate_stall:`, while no lane has `verdict: "fail"` and the council report names no surviving P1/P2 code finding, treat this as review infrastructure, not implement rework:
+If `<artifact-dir>/review-result.json` reports `verdict: "error"` and a lane has `degradedReason: "substrate_stall"` or a `degradedConditions` entry starting with `substrate_stall:`, while no lane has `verdict: "fail"` and the council report names no surviving P1/P2 code finding, treat this as review infrastructure, not implement rework:
 
 1. Post a short `## Review Infrastructure Retry` workpad/comment note naming the artifact directory, reviewed head SHA, and stalled lane(s).
 2. Output `[STAGE_FAILED: infra]` with `substrate_stall:<lane>` details. Do NOT output `[STAGE_FAILED: review]`.
 
 The orchestrator retries the review gate once for substrate-stall infrastructure. If another substrate stall follows, it parks the issue loudly as infra-blocked instead of dispatching implement rework (SYMPH-441).
 
-If `$ARTIFACT_DIR/review-result.json` reports `verdict: "error"` only because the routing/provenance guarantee is missing (`routing_author_provenance_missing`, `routing_absent_decorrelated_reviewer_artifact`, or `routing_required_lane_not_decorrelated:<lane>`), while every reviewer lane passed and the council report names no surviving P1/P2 code finding, treat this as a review procedure/provenance stop. Post `## Review Infrastructure Retry` with the artifact directory, reviewed head SHA, and routing condition(s), then output `[STAGE_FAILED: infra]`. Do NOT send the issue back to implement for product-code rework.
+If `<artifact-dir>/review-result.json` reports `verdict: "error"` only because the routing/provenance guarantee is missing (`routing_author_provenance_missing`, `routing_absent_decorrelated_reviewer_artifact`, or `routing_required_lane_not_decorrelated:<lane>`), while every reviewer lane passed and the council report names no surviving P1/P2 code finding, treat this as a review procedure/provenance stop. Post `## Review Infrastructure Retry` with the artifact directory, reviewed head SHA, and routing condition(s), then output `[STAGE_FAILED: infra]`. Do NOT send the issue back to implement for product-code rework.
 
-If `$ARTIFACT_DIR/review-result.json` is readable but reports any other `verdict: "error"` or degraded condition, fail closed as a review gate failure: post a `## Review Findings` comment naming the error/degraded condition and artifact directory, then output `[STAGE_FAILED: review]`. Do NOT output `[STAGE_COMPLETE]` for a non-PASS review-result.
+If `<artifact-dir>/review-result.json` is readable but reports any other `verdict: "error"` or degraded condition, fail closed as a review gate failure: post a `## Review Findings` comment naming the error/degraded condition and artifact directory, then output `[STAGE_FAILED: review]`. Do NOT output `[STAGE_COMPLETE]` for a non-PASS review-result.
 
 If artifacts are missing/malformed for any other reason, or the gate times out without a readable `review-result.json`: post a `## Review Findings` comment naming the missing/malformed artifact and output `[STAGE_FAILED: review]`.
 {% endif %}
@@ -871,35 +830,49 @@ If readiness is not green, do NOT merge. Report all blockers and stop:
 ```
 Adjust the JSON values to match the live PR. The blockers line must appear immediately before the terminal marker.
 
-Then assert the latest clean council artifact still covers the current PR head. Use the `review-result.json` path from the last successful review-stage workpad note:
+Then assert the latest clean crabrunner review artifact still covers the current PR head. Use the `review-result.json` path from the last successful review-stage workpad note:
 ```
-REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
-ARTIFACT_DIR="${TMPDIR:-/tmp}/symphony-council-freshness-{{ issue.identifier }}-$(date +%s)"
 REVIEW_RESULT_PATH="<path-to-latest-clean-review-result.json>"
-
-run_council_gate() {
-  if [ -n "${SYMPHONY_COUNCIL_REVIEW_GATE:-}" ]; then
-    "$SYMPHONY_COUNCIL_REVIEW_GATE" "$@"
-  elif command -v symphony-council-review-gate >/dev/null 2>&1; then
-    symphony-council-review-gate "$@"
-  elif [ -f dist/src/cli/council-review-gate.js ]; then
-    pnpm build
-    node dist/src/cli/council-review-gate.js "$@"
-  else
-    echo "Set SYMPHONY_COUNCIL_REVIEW_GATE to the Symphony gate executable, install symphony-council-review-gate on PATH, or run from a built symphony-ts checkout." >&2
-    return 1
-  fi
+HEAD_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid --jq '.headRefOid')
+node -e '
+const fs = require("node:fs");
+const reviewResult = process.argv[1];
+const head = process.argv[2];
+const guidance = "rerun convergence review against HEAD.";
+const emit = (payload) => {
+  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+};
+const fail = (code, summary, extra = {}) => {
+  emit({ ok: false, code, verdict: "error", guidance, summary, reviewResult, head, ...extra });
+  process.exit(1);
+};
+if (typeof head !== "string" || head.trim().length === 0) {
+  fail("missing_head_sha", "Current PR head SHA could not be resolved. Check gh auth, network, and PR state.");
 }
-
-run_council_gate \
-  --issue-id {{ issue.identifier }} \
-  --artifact-dir "$ARTIFACT_DIR" \
-  --workspace "$PWD" \
-  --repo "$REPO" \
-  --pr "$PR_NUMBER" \
-  --assert-fresh-review "$REVIEW_RESULT_PATH"
+let result;
+try {
+  result = JSON.parse(fs.readFileSync(reviewResult, "utf8"));
+} catch (error) {
+  fail("invalid_review_artifact", `Crabrunner review artifact could not be read or parsed: ${error instanceof Error ? error.message : String(error)}`);
+}
+if (result === null || typeof result !== "object") {
+  fail("invalid_review_artifact", "Crabrunner review artifact root is not an object.");
+}
+if (result.verdict !== "pass") {
+  fail("invalid_review_artifact", `Crabrunner review artifact verdict is ${String(result.verdict)}; expected pass.`);
+}
+const reviewedHead = result.review_metadata?.reviewed_head_sha;
+if (reviewedHead !== head) {
+  fail("stale_review", `Crabrunner review artifact is stale for the current HEAD: ${reviewedHead ?? "missing"} != ${head}.`, { reviewedHead });
+}
+const mergeEligible = result.review_routing?.decorrelationBasis?.mergeEligible ?? result.review_metadata?.decorrelation_merge_eligible;
+if (mergeEligible !== true) {
+  fail("invalid_review_artifact", "Crabrunner review artifact is not decorrelation merge eligible.");
+}
+emit({ ok: true, code: "fresh", verdict: "pass", guidance: null, summary: "Crabrunner review artifact is fresh for the current HEAD.", reviewResult, head });
+' "$REVIEW_RESULT_PATH" "$HEAD_SHA"
 ```
-If this emits `code: "stale_review"` or the guidance `rerun convergence review against HEAD.`, do NOT merge. Move the issue back to review/rework, run a convergence review against HEAD, and only return to merge after the refreshed artifact is clean.
+If this check fails, do NOT merge. Use the emitted `code` (`missing_head_sha`, `stale_review`, or `invalid_review_artifact`) to report the exact blocker, move the issue back to review/rework, run a convergence review against HEAD, and only return to merge after the refreshed artifact is clean.
 
 ### Step 1b: Merge Only If Explicitly Permitted
 If the Mode Permission Envelope explicitly allows PR merge-queue enqueue, merge:

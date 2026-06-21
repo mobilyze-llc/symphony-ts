@@ -123,35 +123,21 @@ turn sandbox policy that explicitly allows network access instead of relying on 
 If a specific external CLI still does not see the credentials it needs in your environment, provide
 that tool's credential via environment variables before launching Symphony.
 
-Product review stages that use the headless council gate also need two review-runtime executables
-available from product workspaces:
+Shipped product review stages use the crabrunner-backed review/QA job group.
+Set `SYMPHONY_CRABRUNNER_ROOT` to the Crucible checkout that owns
+`bin/crabrunner`; use `SYMPHONY_CRABRUNNER_TARGET_REPO`,
+`SYMPHONY_CRABRUNNER_HOST`, and the remote crabrunner variables when review
+lanes should run against a different checkout or host. Workflows opt in with
+`review_execution.crabrunner_job_group.enabled: true`; once enabled, missing
+crabrunner backend or dispatcher wiring fails closed instead of falling back to
+the removed local review runtime.
 
-- `SYMPHONY_COUNCIL_REVIEW_GATE` must point to an executable
-  `symphony-council-review-gate`, or `symphony-council-review-gate` must be on `PATH`.
-- `CMUX_SPAWN_BIN` must point to an executable `cmux-spawn`, or `cmux-spawn` must be on `PATH`.
-
-Smoke this from a non-Symphony product workspace after building or installing Symphony:
-
-```bash
-pnpm build
-pnpm probe:review-runtime -- --workspace /path/to/product-repo --env-file .env
-```
-
-The smoke runs `symphony-council-review-gate --help` and
-`cmux-spawn preflight --caffeinate --json`.
-
-For Mobilyze review-substrate deploys, use the repo-owned runbook and helper:
-`docs/operations/01-cmux-review-substrate-deploy.md` and
-`ops/cmux-review-substrate-deploy`. They make Pro16 the remote-primary CMUX
-substrate, write an evidence bundle, audit stale local CMUX callers, and define
-the lightweight Kimi review loop for deploy/runbook/helper changes.
-
-When a Codex-led workflow runs the council gate for implementation work, pass
-`--author-family codex` or leave the shipped
-`SYMPHONY_COUNCIL_AUTHOR_FAMILY` default as `codex`. Non-Codex-led product
-workflows must override that family before review. Missing or wrong
-author-family metadata is a review procedure/provenance stop, not a
-product-code finding.
+Use `docs/operations/03-crabrunner-review-qa.md` for review/QA smoke, parity,
+failure triage, and rollback policy. Until Symphony's crabrunner path has
+passed its gates in production, Codex/session-orchestrator remains the holding
+pattern for merge-authoritative review. The historical CMUX runbook
+`docs/operations/01-cmux-review-substrate-deploy.md` is retained only for audit
+and archaeology; it is not a live production fallback.
 
 For a complete reference covering every supported field with defaults and inline documentation, see
 [docs/WORKFLOW.template.md](docs/WORKFLOW.template.md).
