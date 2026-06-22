@@ -138,6 +138,70 @@ it("refuses install from worktree roots unless explicitly allowed", async () => 
   expect(allowed.stderr).toBe("");
 });
 
+it("refuses install from a linked git worktree whose path has no worktrees component", async () => {
+  const root = await createTempDir("symphony-ctl-linked-worktree-");
+  const primary = join(root, "primary");
+  await mkdir(primary, { recursive: true });
+  git(primary, ["init", "-b", "main"]);
+  git(primary, ["config", "user.email", "agent@example.com"]);
+  git(primary, ["config", "user.name", "Agent"]);
+  await writeFile(join(primary, "README.md"), "first\n");
+  git(primary, ["add", "README.md"]);
+  git(primary, ["commit", "-m", "first"]);
+
+  // Linked worktree at a path with NO "worktrees" component — substring
+  // detection would miss it; the git-aware check must still refuse it.
+  const linked = join(root, "linked-checkout");
+  git(primary, ["worktree", "add", linked]);
+
+  const result = await runWorktreeGuard(linked);
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain("linked git worktree root");
+});
+
+it("allows install from an ordinary checkout whose parent directory is named worktrees", async () => {
+  const root = await createTempDir("symphony-ctl-worktrees-parent-");
+  // Parent directory is literally "worktrees" but this is a primary checkout,
+  // not a linked worktree — the old substring guard false-positived here.
+  const checkout = join(root, "worktrees", "service-root");
+  await mkdir(checkout, { recursive: true });
+  git(checkout, ["init", "-b", "main"]);
+  git(checkout, ["config", "user.email", "agent@example.com"]);
+  git(checkout, ["config", "user.name", "Agent"]);
+  await writeFile(join(checkout, "README.md"), "first\n");
+  git(checkout, ["add", "README.md"]);
+  git(checkout, ["commit", "-m", "first"]);
+
+  const result = await runWorktreeGuard(checkout);
+  expect(result.status).toBe(0);
+  expect(result.stderr).toBe("");
+});
+
+it("warns instead of silently allowing when git is unavailable for the check", async () => {
+  const root = await createTempDir("symphony-ctl-git-absent-");
+  const primary = join(root, "primary");
+  await mkdir(primary, { recursive: true });
+  git(primary, ["init", "-b", "main"]);
+  git(primary, ["config", "user.email", "agent@example.com"]);
+  git(primary, ["config", "user.name", "Agent"]);
+  await writeFile(join(primary, "README.md"), "first\n");
+  git(primary, ["add", "README.md"]);
+  git(primary, ["commit", "-m", "first"]);
+  const linked = join(root, "linked-checkout");
+  git(primary, ["worktree", "add", linked]);
+
+  // Point PATH at an empty dir so `command -v git` fails on every platform
+  // (bash is invoked by absolute path, so it stays runnable). NB: a bare /bin
+  // is NOT git-free on merged-/usr Linux, where /bin -> /usr/bin. A safety guard
+  // that cannot verify must surface the degradation, not silently allow a real
+  // linked worktree through.
+  const emptyBin = join(root, "no-tools");
+  await mkdir(emptyBin, { recursive: true });
+  const result = await runWorktreeGuard(linked, emptyBin);
+  expect(result.status).toBe(0);
+  expect(result.stderr).toContain("git not found on PATH");
+});
+
 it("resolves service root overrides in documented precedence order", async () => {
   const root = await createTempDir("symphony-ctl-root-precedence-");
   const home = join(root, "home");
@@ -262,6 +326,58 @@ async function createTempDir(prefix: string): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), prefix));
   tempDirs.push(path);
   return path;
+}
+
+// Absolute bash path so callers can set PATH to a git-free dir (to exercise the
+// git-unavailable branch) without breaking bash resolution itself.
+const BASH_PATH = (() => {
+  const probe = spawnSync("bash", ["-c", "command -v bash"], {
+    encoding: "utf8",
+  });
+  return probe.status === 0 && probe.stdout.trim()
+    ? probe.stdout.trim()
+    : "/bin/bash";
+})();
+
+async function runWorktreeGuard(
+  symphonyRoot: string,
+  pathEnv = "/usr/bin:/bin",
+): Promise<ReturnType<typeof spawnSync>> {
+  const ctl = await readFile("ops/symphony-ctl", "utf8");
+  const guard = extractShellFunction(ctl, "check_service_root_not_worktree");
+  return spawnSync(
+    BASH_PATH,
+    [
+      "-c",
+      [
+        'die() { echo "$*" >&2; exit 1; }',
+        'warn() { echo "$*" >&2; }',
+        guard,
+        'SYMPHONY_ROOT="$1"',
+        "check_service_root_not_worktree",
+      ].join("\n"),
+      "bash",
+      symphonyRoot,
+    ],
+    {
+      encoding: "utf8",
+      env: { HOME: symphonyRoot, PATH: pathEnv },
+    },
+  );
+}
+
+function git(cwd: string, args: string[]): ReturnType<typeof spawnSync> {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    env: { HOME: cwd, PATH: "/usr/bin:/bin" },
+  });
+  if (result.status !== 0) {
+    throw new Error(
+      `git ${args.join(" ")} failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+  }
+  return result;
 }
 
 async function runRootProbe(

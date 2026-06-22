@@ -16,6 +16,7 @@ Shallow index of `docs/`. Loaded into every session via `@docs/README.md` in `CL
 - `docs/operations/02-symphony-manager-plan.md` [CANONICAL] — Canonical usage + deploy doc for the `symphony-manager-plan` one-shot Manager/planner CLI. Usage block auto-synced from `renderUsage()`.
 - `docs/operations/03-crabrunner-review-qa.md` [CANONICAL] — Operator runbook for crabrunner-backed Symphony review and QA gates.
 - `docs/operations/04-symphony-worktree-reaper.md` [CANONICAL] — Operator runbook for safe stable-root `.worktrees/` and `.claude/worktrees/` cleanup via `ops/symphony-ctl prune-worktrees`.
+- `docs/operations/05-deploy.md` [CANONICAL] — Canonical map of the two deploy flows (`symphony-deploy` in-place vs `deploy-train.sh` detached) + the `symphony-ctl` root model and worktree guard. Records the SYMPH-708 decision.
 - `docs/operations/_TEMPLATE.md` — The operations-doc template. Source for every numbered operations doc.
 
 ## Reference specs (`docs/`)
