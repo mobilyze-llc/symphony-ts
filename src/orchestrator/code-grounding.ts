@@ -860,8 +860,17 @@ export function extractGroundingPathHints(
     if (candidate === null || hints.length >= maxHints) {
       return;
     }
-    const { path } = candidate;
-    if (path.length > MAX_GROUNDING_PATH_HINT_LENGTH || seen.has(path)) {
+    // Strip trailing sentence punctuation a bare prose reference can capture
+    // (e.g. "…in src/foo.ts." → "src/foo.ts."): "." is a valid path char so the
+    // pattern keeps it, producing a bogus hint (council Track). The source paths
+    // are already canonical, so only terminal .,;: is removed.
+    const path = candidate.path.replace(/[.,;:]+$/, "");
+    if (
+      path === "" ||
+      !looksLikePath(path) ||
+      path.length > MAX_GROUNDING_PATH_HINT_LENGTH ||
+      seen.has(path)
+    ) {
       return;
     }
     seen.add(path);

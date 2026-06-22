@@ -1994,6 +1994,14 @@ describe("extractGroundingPathHints (SYMPH-895)", () => {
       extractGroundingPathHints(`ref \`${longPath}\` and \`src/short.ts\``),
     ).toEqual(["src/short.ts"]);
   });
+
+  it("strips trailing sentence punctuation from bare prose paths (council Track)", () => {
+    expect(
+      extractGroundingPathHints(
+        "Touches src/foo.ts. Also see src/bar.ts, done.",
+      ),
+    ).toEqual(["src/foo.ts", "src/bar.ts"]);
+  });
 });
 
 async function tempRoot(prefix: string): Promise<string> {
