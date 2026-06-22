@@ -127,6 +127,15 @@ describe("curatePlannerComments (SYMPH-896)", () => {
     expect(result.comments.map((entry) => entry.id)).toEqual(["new"]);
     expect(result.droppedForBudgetCount).toBe(1);
   });
+
+  it("classifies a null-actor comment as unknown and keeps it (council P2)", () => {
+    const result = curatePlannerComments([
+      comment({ id: "anon", body: "no author here", actor: null }),
+    ]);
+    expect(result.comments.map((entry) => entry.id)).toEqual(["anon"]);
+    expect(result.comments[0]?.authorClass).toBe("unknown");
+    expect(result.droppedNoiseCount).toBe(0);
+  });
 });
 
 describe("measurePlannerCommentEnrichment (SYMPH-896)", () => {
@@ -139,11 +148,19 @@ describe("measurePlannerCommentEnrichment (SYMPH-896)", () => {
     const measurement = measurePlannerCommentEnrichment({
       candidatesConsidered: 5,
       candidatesTruncated: 2,
+      candidatesFailed: 1,
       results: [a, b],
     });
     expect(measurement.candidatesConsidered).toBe(5);
     expect(measurement.candidatesFetched).toBe(2);
     expect(measurement.candidatesTruncated).toBe(2);
+    expect(measurement.candidatesFailed).toBe(1);
+    // honesty invariant: considered = fetched + failed + truncated.
+    expect(
+      measurement.candidatesFetched +
+        measurement.candidatesFailed +
+        measurement.candidatesTruncated,
+    ).toBe(measurement.candidatesConsidered);
     expect(measurement.totalCommentsFetched).toBe(3); // 1 + 2
     expect(measurement.totalCommentsKept).toBe(2); // a:hello, b:world!!
     expect(measurement.totalDroppedNoise).toBe(1); // bot in b

@@ -212,6 +212,33 @@ describe("buildPlannerPrompt", () => {
     expect(fenceCloseIdx).toBeGreaterThan(commentIdx);
   });
 
+  it("renders every supplied comment/path hint — no render-side cap below the upstream bound (council P2)", () => {
+    const ctx = context();
+    const first = ctx.backlog[0];
+    if (first) {
+      // Upstream (curator/extractor) is authoritative; the renderer must not
+      // silently truncate below it. Supply 8 comments + 10 path hints and expect
+      // ALL of them rendered.
+      first.comments = Array.from({ length: 8 }, (_unused, index) => ({
+        id: `c${index}`,
+        authorClass: "unknown" as const,
+        createdAt: "2026-06-20T00:00:00.000Z",
+        body: `comment-body-${index}`,
+      }));
+      first.pathHints = Array.from(
+        { length: 10 },
+        (_unused, index) => `src/mod-${index}.ts`,
+      );
+    }
+    const prompt = buildPlannerPrompt(ctx);
+    for (let index = 0; index < 8; index += 1) {
+      expect(prompt).toContain(`comment-body-${index}`);
+    }
+    for (let index = 0; index < 10; index += 1) {
+      expect(prompt).toContain(`src/mod-${index}.ts`);
+    }
+  });
+
   it("warns that candidate titles/labels/descriptions are untrusted data (SYMPH-874, council P2)", () => {
     const prompt = buildPlannerPrompt(context());
     expect(prompt.toLowerCase()).toContain("untrusted");

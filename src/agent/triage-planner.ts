@@ -174,17 +174,12 @@ function renderCandidateDescription(
 }
 
 /**
- * Per-candidate path-hint render budget in the planner prompt (SYMPH-895).
- * A defensive bound at the render seam even if an upstream extractor cap is
- * misconfigured; the extractor already caps, so this is belt-and-suspenders.
- */
-const PLANNER_CANDIDATE_PATH_HINT_LIMIT = 8;
-
-/**
  * Render a candidate's path hints as a single comma-separated line, or null when
- * there is nothing to render (absent or all-blank). Deduped, whitespace-trimmed,
- * and bounded. Returns null (never an empty/garbage line) so the caller can
- * cleanly omit the adornment — strictVariables-safe by construction.
+ * there is nothing to render (absent or all-blank). Deduped + whitespace-trimmed;
+ * the COUNT bound is the upstream extractor's (`extractGroundingPathHints`
+ * maxHints) so the operator/extractor config stays authoritative — the renderer
+ * never silently truncates below it (council P2). Returns null (never an
+ * empty/garbage line) so the caller can cleanly omit the adornment.
  */
 function renderCandidatePathHints(
   pathHints: readonly string[] | undefined,
@@ -201,25 +196,18 @@ function renderCandidatePathHints(
     }
     seen.add(normalized);
     cleaned.push(normalized);
-    if (cleaned.length >= PLANNER_CANDIDATE_PATH_HINT_LIMIT) {
-      break;
-    }
   }
   return cleaned.length === 0 ? null : cleaned.join(", ");
 }
 
 /**
- * Per-candidate curated-comment render budget (SYMPH-896): a defensive cap at
- * the render seam; the curator already bounds count + size upstream.
- */
-const PLANNER_CANDIDATE_COMMENT_LIMIT = 6;
-
-/**
  * Render a candidate's curated comments as an indented sub-block, or [] when
  * there are none. Each line is one normalized comment, prefixed with a coarse
  * author tag (operator vs human) so the Manager can weight operator intent. The
- * bodies are untrusted tracker content — the caller emits them INSIDE the
- * prompt's untrusted-data fence.
+ * COUNT/size bounds are the upstream curator's (`curatePlannerComments`) so the
+ * operator's `maxComments` config stays authoritative — the renderer never
+ * silently truncates below it (council P2). Bodies are untrusted tracker content;
+ * the caller emits them INSIDE the prompt's untrusted-data fence.
  */
 function renderCandidateComments(
   comments: readonly CuratedPlannerComment[] | undefined,
@@ -228,7 +216,7 @@ function renderCandidateComments(
     return [];
   }
   const lines: string[] = [];
-  for (const comment of comments.slice(0, PLANNER_CANDIDATE_COMMENT_LIMIT)) {
+  for (const comment of comments) {
     const body = comment.body.replace(/\s+/g, " ").trim();
     if (body === "") {
       continue;

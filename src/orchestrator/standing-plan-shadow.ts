@@ -131,6 +131,7 @@ export async function enrichPlannerContextWithComments(
 
   const results: PlannerCommentCurationResult[] = [];
   const enrichedById = new Map<string, CuratedPlannerComment[]>();
+  let candidatesFailed = 0;
   for (const candidate of toFetch) {
     let curation: PlannerCommentCurationResult | null = null;
     try {
@@ -153,7 +154,10 @@ export async function enrichPlannerContextWithComments(
       );
     } catch {
       // Best-effort per candidate: a single comment-fetch failure must not abort
-      // the whole enrichment (or the tick). Skip this candidate's comments.
+      // the whole enrichment (or the tick). Count it so the measurement reflects
+      // the N+1 cost actually paid (council Track) — a failed fetch still cost a
+      // round trip and must not make the surface look cheaper than it is.
+      candidatesFailed += 1;
       curation = null;
     }
     if (curation !== null) {
@@ -174,6 +178,7 @@ export async function enrichPlannerContextWithComments(
     measurement: measurePlannerCommentEnrichment({
       candidatesConsidered: context.backlog.length,
       candidatesTruncated,
+      candidatesFailed,
       results,
     }),
   };
@@ -391,7 +396,8 @@ export async function runStandingPlanShadowTick(
     // the tick.
     if (
       config.commentEnrichment.enabled &&
-      deps.fetchIssueComments !== undefined
+      deps.fetchIssueComments !== undefined &&
+      context.backlog.length > 0
     ) {
       const enriched = await enrichPlannerContextWithComments({
         context,

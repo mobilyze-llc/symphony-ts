@@ -170,10 +170,16 @@ export function curatePlannerComments(
 export interface PlannerCommentEnrichmentMeasurement {
   /** Backlog candidates eligible for comment enrichment this tick. */
   candidatesConsidered: number;
-  /** Candidates actually fetched (bounded by the per-tick candidate cap). */
+  /** Candidates fetched + curated successfully (bounded by the per-tick cap). */
   candidatesFetched: number;
   /** Candidates skipped because the per-tick candidate cap was reached. */
   candidatesTruncated: number;
+  /**
+   * Candidates whose comment fetch threw and was swallowed (best-effort). The
+   * N+1 cost was still paid, so this is reported separately to keep the cost
+   * surface honest: considered = fetched + failed + truncated.
+   */
+  candidatesFailed: number;
   totalCommentsFetched: number;
   totalCommentsKept: number;
   totalDroppedNoise: number;
@@ -185,6 +191,7 @@ export interface PlannerCommentEnrichmentMeasurement {
 export function measurePlannerCommentEnrichment(input: {
   candidatesConsidered: number;
   candidatesTruncated: number;
+  candidatesFailed: number;
   results: readonly PlannerCommentCurationResult[];
 }): PlannerCommentEnrichmentMeasurement {
   let totalCommentsFetched = 0;
@@ -206,6 +213,7 @@ export function measurePlannerCommentEnrichment(input: {
     candidatesConsidered: input.candidatesConsidered,
     candidatesFetched: input.results.length,
     candidatesTruncated: input.candidatesTruncated,
+    candidatesFailed: input.candidatesFailed,
     totalCommentsFetched,
     totalCommentsKept,
     totalDroppedNoise,

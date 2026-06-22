@@ -835,10 +835,13 @@ const MAX_GROUNDING_PATH_HINT_LENGTH = 160;
  * verification engine uses. Pure and deterministic — no checkout, no I/O.
  *
  * Returns de-duplicated, de-lined (line/column ranges stripped), canonical paths
- * in first-seen order, capped to `maxHints`. Both backtick-fenced spans (e.g.
+ * capped to `maxHints`. Both backtick-fenced spans (e.g.
  * `` `src/agent/triage-planner.ts:39` ``) and bare references in prose are
- * recognized. Empty when the text is absent/blank or cites no recognizable path
- * — the caller renders nothing ("absent grounding → no hint").
+ * recognized; ordering is backtick-fenced paths first (in document order), then
+ * bare references (in document order), each kept on first occurrence. Path hints
+ * are an unordered same-surface SET (overlap detection), so this grouped order is
+ * intentional, not positional. Empty when the text is absent/blank or cites no
+ * recognizable path — the caller renders nothing ("absent grounding → no hint").
  */
 export function extractGroundingPathHints(
   text: string | null | undefined,

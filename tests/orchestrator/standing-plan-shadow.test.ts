@@ -810,6 +810,8 @@ describe("enrichPlannerContextWithComments (SYMPH-896)", () => {
       "fine",
     ]);
     expect(result.measurement.candidatesFetched).toBe(1);
+    // the failed fetch still cost a round trip — counted, not silently dropped.
+    expect(result.measurement.candidatesFailed).toBe(1);
   });
 });
 
@@ -881,6 +883,43 @@ describe("runStandingPlanShadowTick comment enrichment (SYMPH-896)", () => {
       expect(measure).toBeDefined();
       expect(measure?.fields.totalCommentsKept).toBe(1);
       expect(capturedPrompt).toContain("- [human] overlaps with SYMPH-2");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not fetch or log a measurement on an empty backlog (council P2)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-"));
+    let commentFetches = 0;
+    const events: string[] = [];
+    try {
+      const result = await runStandingPlanShadowTick({
+        config: triageConfig({
+          commentEnrichment: {
+            enabled: true,
+            maxCandidates: 25,
+            maxCommentPages: 3,
+            maxComments: 6,
+            maxCommentChars: 400,
+            maxTotalChars: 1200,
+          },
+        }),
+        workspaceRoot: root,
+        fetchCandidates: async () => [],
+        getInFlight: () => [],
+        createPlannerRunner: () => okPlanner().runClaude,
+        fetchIssueComments: async () => {
+          commentFetches += 1;
+          return [];
+        },
+        log: (event) => {
+          events.push(event);
+        },
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+      });
+      expect(result.status).toBe("ok");
+      expect(commentFetches).toBe(0);
+      expect(events).not.toContain("queue_triage_comment_enrichment_measure");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
