@@ -10,6 +10,7 @@ import type { Issue } from "../../src/domain/model.js";
 import type { PlanEnvelope } from "../../src/domain/standing-plan.js";
 import {
   assembleShadowPlannerContext,
+  enrichPlannerContextWithComments,
   runShadowPlanCycle,
   runStandingPlanShadowTick,
   shouldRunShadowPlanCycle,
@@ -18,6 +19,7 @@ import {
   loadStandingPlan,
   recordPlanRevision,
 } from "../../src/orchestrator/standing-plan-store.js";
+import type { LinearIssueComment } from "../../src/tracker/linear-client.js";
 
 const ENVELOPE: PlanEnvelope = {
   version: 1,
@@ -50,6 +52,28 @@ function okPlanner(): { runClaude: () => Promise<PlannerRunResult> } {
       markdown:
         '# Plan\n```json\n{"rationale":"go","batches":[{"mode":"parallel-isolated","issueIdentifiers":["SYMPH-1"],"rationale":"first"}]}\n```\n',
     }),
+  };
+}
+
+function linearComment(
+  over: Partial<LinearIssueComment> = {},
+): LinearIssueComment {
+  return {
+    id: "lc1",
+    body: "human comment",
+    createdAt: "2026-06-20T00:00:00.000Z",
+    updatedAt: "2026-06-20T00:00:00.000Z",
+    user: {
+      kind: "user",
+      id: "u",
+      name: "Dev",
+      displayName: "Dev",
+      email: "dev@example.com",
+      botType: null,
+      botSubType: null,
+    },
+    botActor: null,
+    ...over,
   };
 }
 
@@ -95,6 +119,32 @@ describe("assembleShadowPlannerContext", () => {
       "Body mentions src/orchestrator/core.ts",
     );
     expect(context.backlog[0]?.labels).toEqual(["area:scheduling", "kind:bug"]);
+  });
+
+  it("derives code-grounding path hints from the candidate body (SYMPH-895)", () => {
+    const enriched: Issue = {
+      ...issue("u1", "SYMPH-1"),
+      description:
+        "Reworks `src/orchestrator/core.ts` and `src/agent/triage-planner.ts`.",
+    };
+    const context = assembleShadowPlannerContext({
+      candidates: [enriched],
+      inFlight: [],
+      envelope: ENVELOPE,
+    });
+    expect(context.backlog[0]?.pathHints).toEqual([
+      "src/orchestrator/core.ts",
+      "src/agent/triage-planner.ts",
+    ]);
+  });
+
+  it("yields empty path hints when the body cites no paths (SYMPH-895)", () => {
+    const context = assembleShadowPlannerContext({
+      candidates: [issue("u1", "SYMPH-1")],
+      inFlight: [],
+      envelope: ENVELOPE,
+    });
+    expect(context.backlog[0]?.pathHints).toEqual([]);
   });
 });
 
@@ -302,6 +352,14 @@ function triageConfig(
     autoReleaseFrontier: 1,
     controlDoc: { enabled: false, teamId: null },
     admissionGuardrail: { enabled: false },
+    commentEnrichment: {
+      enabled: false,
+      maxCandidates: 25,
+      maxCommentPages: 3,
+      maxComments: 6,
+      maxCommentChars: 400,
+      maxTotalChars: 1200,
+    },
     envelope: ENVELOPE,
     ...over,
   };
@@ -626,6 +684,203 @@ describe("runStandingPlanShadowTick — error rate-limiting (SYMPH-828)", () => 
       });
       expect(result).toEqual({ status: "skipped", reason: "heartbeat" });
       expect(plannerBuilt).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("enrichPlannerContextWithComments (SYMPH-896)", () => {
+  const COMMENT_CONFIG = {
+    enabled: true,
+    maxCandidates: 25,
+    maxCommentPages: 3,
+    maxComments: 6,
+    maxCommentChars: 400,
+    maxTotalChars: 1200,
+  };
+
+  it("attaches curated comments and reports a measurement", async () => {
+    const context = assembleShadowPlannerContext({
+      candidates: [issue("u1", "SYMPH-1"), issue("u2", "SYMPH-2")],
+      inFlight: [],
+      envelope: ENVELOPE,
+    });
+    const fetched: string[] = [];
+    const result = await enrichPlannerContextWithComments({
+      context,
+      config: COMMENT_CONFIG,
+      fetchIssueComments: async (issueId) => {
+        fetched.push(issueId);
+        return issueId === "u1"
+          ? [linearComment({ id: "a", body: "overlaps with SYMPH-2" })]
+          : [];
+      },
+    });
+    expect(fetched).toEqual(["u1", "u2"]);
+    expect(result.context.backlog[0]?.comments?.map((c) => c.body)).toEqual([
+      "overlaps with SYMPH-2",
+    ]);
+    expect(result.context.backlog[1]?.comments).toBeUndefined();
+    expect(result.measurement.candidatesConsidered).toBe(2);
+    expect(result.measurement.candidatesFetched).toBe(2);
+    expect(result.measurement.totalCommentsKept).toBe(1);
+    expect(result.measurement.estimatedAddedTokens).toBeGreaterThan(0);
+  });
+
+  it("bounds the fetch to maxCandidates and reports truncation", async () => {
+    const context = assembleShadowPlannerContext({
+      candidates: [
+        issue("u1", "SYMPH-1"),
+        issue("u2", "SYMPH-2"),
+        issue("u3", "SYMPH-3"),
+      ],
+      inFlight: [],
+      envelope: ENVELOPE,
+    });
+    const fetched: string[] = [];
+    const result = await enrichPlannerContextWithComments({
+      context,
+      config: { ...COMMENT_CONFIG, maxCandidates: 2 },
+      fetchIssueComments: async (issueId) => {
+        fetched.push(issueId);
+        return [];
+      },
+    });
+    expect(fetched).toEqual(["u1", "u2"]);
+    expect(result.measurement.candidatesConsidered).toBe(3);
+    expect(result.measurement.candidatesFetched).toBe(2);
+    expect(result.measurement.candidatesTruncated).toBe(1);
+  });
+
+  it("drops service-account noise via the operator config", async () => {
+    const context = assembleShadowPlannerContext({
+      candidates: [issue("u1", "SYMPH-1")],
+      inFlight: [],
+      envelope: ENVELOPE,
+    });
+    const result = await enrichPlannerContextWithComments({
+      context,
+      config: COMMENT_CONFIG,
+      operatorConfig: {
+        operatorAllowlist: [],
+        serviceAccounts: ["svc@bot.com"],
+      },
+      fetchIssueComments: async () => [
+        linearComment({
+          id: "svc",
+          body: "automated note",
+          user: {
+            kind: "user",
+            id: "s",
+            name: "svc",
+            displayName: "svc",
+            email: "svc@bot.com",
+            botType: null,
+            botSubType: null,
+          },
+        }),
+        linearComment({ id: "human", body: "real signal" }),
+      ],
+    });
+    expect(result.context.backlog[0]?.comments?.map((c) => c.body)).toEqual([
+      "real signal",
+    ]);
+    expect(result.measurement.totalDroppedNoise).toBe(1);
+  });
+
+  it("swallows a per-candidate fetch failure (best-effort)", async () => {
+    const context = assembleShadowPlannerContext({
+      candidates: [issue("u1", "SYMPH-1"), issue("u2", "SYMPH-2")],
+      inFlight: [],
+      envelope: ENVELOPE,
+    });
+    const result = await enrichPlannerContextWithComments({
+      context,
+      config: COMMENT_CONFIG,
+      fetchIssueComments: async (issueId) => {
+        if (issueId === "u1") {
+          throw new Error("boom");
+        }
+        return [linearComment({ id: "ok", body: "fine" })];
+      },
+    });
+    expect(result.context.backlog[0]?.comments).toBeUndefined();
+    expect(result.context.backlog[1]?.comments?.map((c) => c.body)).toEqual([
+      "fine",
+    ]);
+    expect(result.measurement.candidatesFetched).toBe(1);
+  });
+});
+
+describe("runStandingPlanShadowTick comment enrichment (SYMPH-896)", () => {
+  it("does not fetch comments or log a measurement when disabled (default)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-"));
+    let commentFetches = 0;
+    const events: string[] = [];
+    try {
+      const result = await runStandingPlanShadowTick({
+        config: triageConfig(), // commentEnrichment.enabled = false (default)
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        createPlannerRunner: () => okPlanner().runClaude,
+        fetchIssueComments: async () => {
+          commentFetches += 1;
+          return [];
+        },
+        log: (event) => {
+          events.push(event);
+        },
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+      });
+      expect(result.status).toBe("ok");
+      expect(commentFetches).toBe(0);
+      expect(events).not.toContain("queue_triage_comment_enrichment_measure");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fetches, injects curated comments, and logs a measurement when enabled", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-"));
+    let capturedPrompt = "";
+    const logged: Array<{ event: string; fields: Record<string, unknown> }> =
+      [];
+    try {
+      const result = await runStandingPlanShadowTick({
+        config: triageConfig({
+          commentEnrichment: {
+            enabled: true,
+            maxCandidates: 25,
+            maxCommentPages: 3,
+            maxComments: 6,
+            maxCommentChars: 400,
+            maxTotalChars: 1200,
+          },
+        }),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        createPlannerRunner: () => async (prompt: string) => {
+          capturedPrompt = prompt;
+          return okPlanner().runClaude();
+        },
+        fetchIssueComments: async () => [
+          linearComment({ id: "a", body: "overlaps with SYMPH-2" }),
+        ],
+        log: (event, _message, fields) => {
+          logged.push({ event, fields });
+        },
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+      });
+      expect(result.status).toBe("ok");
+      const measure = logged.find(
+        (entry) => entry.event === "queue_triage_comment_enrichment_measure",
+      );
+      expect(measure).toBeDefined();
+      expect(measure?.fields.totalCommentsKept).toBe(1);
+      expect(capturedPrompt).toContain("- [human] overlaps with SYMPH-2");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

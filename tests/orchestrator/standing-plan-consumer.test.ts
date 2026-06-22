@@ -409,6 +409,14 @@ describe("decidePlanDrivenDispatch (hot-path composition)", () => {
       autoReleaseFrontier: 1,
       controlDoc: { enabled: false, teamId: null },
       admissionGuardrail: { enabled: false },
+      commentEnrichment: {
+        enabled: false,
+        maxCandidates: 25,
+        maxCommentPages: 3,
+        maxComments: 6,
+        maxCommentChars: 400,
+        maxTotalChars: 1200,
+      },
       envelope: ENVELOPE,
       ...over,
     };
@@ -601,6 +609,14 @@ describe("resolvePlanDrivenDispatchForTick — single-snapshot read (SYMPH-830)"
     autoReleaseFrontier: 1,
     controlDoc: { enabled: false, teamId: null },
     admissionGuardrail: { enabled: false },
+    commentEnrichment: {
+      enabled: false,
+      maxCandidates: 25,
+      maxCommentPages: 3,
+      maxComments: 6,
+      maxCommentChars: 400,
+      maxTotalChars: 1200,
+    },
     envelope: ENVELOPE,
   };
   const freshPlan = () =>

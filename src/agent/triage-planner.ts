@@ -20,6 +20,7 @@ import {
   type PlanOptionLine,
 } from "../domain/standing-plan.js";
 import type { PlanBody } from "../orchestrator/standing-plan-supersession.js";
+import type { CuratedPlannerComment } from "./planner-comment-curation.js";
 
 // ---------------------------------------------------------------------------
 // Event-triggered planner (SYMPH-786) — the judgment layer.
@@ -57,6 +58,23 @@ export interface PlannerCandidate {
    */
   description?: string | null;
   labels?: string[];
+  /**
+   * Likely-touched repo-relative paths (SYMPH-874 Tier 2 / SYMPH-895): the
+   * STRONGEST same-surface signal — concrete file overlap — extracted
+   * deterministically from the candidate's own title + body via the
+   * code-grounding path vocabulary (`extractGroundingPathHints`), not model
+   * inference. Optional and bounded; absent/empty renders nothing ("absent
+   * grounding → no hint"). The prompt renderer treats absence as "omit".
+   */
+  pathHints?: string[];
+  /**
+   * Curated issue comments (SYMPH-874 Tier 3 / SYMPH-896): the richest
+   * same-surface signal (file/PR refs, "overlaps with X"), fetched
+   * deterministically and noise-filtered/size-capped by `curatePlannerComments`.
+   * Optional and bounded; absent/empty renders nothing. Untrusted tracker
+   * content — rendered INSIDE the prompt's untrusted-data fence.
+   */
+  comments?: CuratedPlannerComment[];
 }
 
 export interface PlannerPrInfo {
@@ -155,6 +173,72 @@ function renderCandidateDescription(
     : normalized;
 }
 
+/**
+ * Per-candidate path-hint render budget in the planner prompt (SYMPH-895).
+ * A defensive bound at the render seam even if an upstream extractor cap is
+ * misconfigured; the extractor already caps, so this is belt-and-suspenders.
+ */
+const PLANNER_CANDIDATE_PATH_HINT_LIMIT = 8;
+
+/**
+ * Render a candidate's path hints as a single comma-separated line, or null when
+ * there is nothing to render (absent or all-blank). Deduped, whitespace-trimmed,
+ * and bounded. Returns null (never an empty/garbage line) so the caller can
+ * cleanly omit the adornment — strictVariables-safe by construction.
+ */
+function renderCandidatePathHints(
+  pathHints: readonly string[] | undefined,
+): string | null {
+  if (pathHints === undefined) {
+    return null;
+  }
+  const seen = new Set<string>();
+  const cleaned: string[] = [];
+  for (const hint of pathHints) {
+    const normalized = hint.replace(/\s+/g, " ").trim();
+    if (normalized === "" || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    cleaned.push(normalized);
+    if (cleaned.length >= PLANNER_CANDIDATE_PATH_HINT_LIMIT) {
+      break;
+    }
+  }
+  return cleaned.length === 0 ? null : cleaned.join(", ");
+}
+
+/**
+ * Per-candidate curated-comment render budget (SYMPH-896): a defensive cap at
+ * the render seam; the curator already bounds count + size upstream.
+ */
+const PLANNER_CANDIDATE_COMMENT_LIMIT = 6;
+
+/**
+ * Render a candidate's curated comments as an indented sub-block, or [] when
+ * there are none. Each line is one normalized comment, prefixed with a coarse
+ * author tag (operator vs human) so the Manager can weight operator intent. The
+ * bodies are untrusted tracker content — the caller emits them INSIDE the
+ * prompt's untrusted-data fence.
+ */
+function renderCandidateComments(
+  comments: readonly CuratedPlannerComment[] | undefined,
+): string[] {
+  if (comments === undefined || comments.length === 0) {
+    return [];
+  }
+  const lines: string[] = [];
+  for (const comment of comments.slice(0, PLANNER_CANDIDATE_COMMENT_LIMIT)) {
+    const body = comment.body.replace(/\s+/g, " ").trim();
+    if (body === "") {
+      continue;
+    }
+    const tag = comment.authorClass === "operator" ? "operator" : "human";
+    lines.push(`      - [${tag}] ${body}`);
+  }
+  return lines.length === 0 ? [] : ["    comments:", ...lines];
+}
+
 export function buildPlannerPrompt(context: PlannerContext): string {
   const { envelope } = context;
   // Per-render, unforgeable boundary token (SYMPH-897): untrusted tracker fields
@@ -196,6 +280,13 @@ export function buildPlannerPrompt(context: PlannerContext): string {
       const description = renderCandidateDescription(candidate.description);
       if (description !== null) {
         lines.push(`    description: ${description}`);
+      }
+      const pathHints = renderCandidatePathHints(candidate.pathHints);
+      if (pathHints !== null) {
+        lines.push(`    likely paths: ${pathHints}`);
+      }
+      for (const commentLine of renderCandidateComments(candidate.comments)) {
+        lines.push(commentLine);
       }
     }
   }
