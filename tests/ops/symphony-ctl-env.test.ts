@@ -177,6 +177,27 @@ it("allows install from an ordinary checkout whose parent directory is named wor
   expect(result.stderr).toBe("");
 });
 
+it("warns instead of silently allowing when git is unavailable for the check", async () => {
+  const root = await createTempDir("symphony-ctl-git-absent-");
+  const primary = join(root, "primary");
+  await mkdir(primary, { recursive: true });
+  git(primary, ["init", "-b", "main"]);
+  git(primary, ["config", "user.email", "agent@example.com"]);
+  git(primary, ["config", "user.name", "Agent"]);
+  await writeFile(join(primary, "README.md"), "first\n");
+  git(primary, ["add", "README.md"]);
+  git(primary, ["commit", "-m", "first"]);
+  const linked = join(root, "linked-checkout");
+  git(primary, ["worktree", "add", linked]);
+
+  // PATH=/bin keeps bash runnable but excludes git (/usr/bin/git). A safety
+  // guard that cannot verify must surface the degradation, not silently allow
+  // a real linked worktree through.
+  const result = await runWorktreeGuard(linked, "/bin");
+  expect(result.status).toBe(0);
+  expect(result.stderr).toContain("git not found on PATH");
+});
+
 it("resolves service root overrides in documented precedence order", async () => {
   const root = await createTempDir("symphony-ctl-root-precedence-");
   const home = join(root, "home");
@@ -305,6 +326,7 @@ async function createTempDir(prefix: string): Promise<string> {
 
 async function runWorktreeGuard(
   symphonyRoot: string,
+  pathEnv = "/usr/bin:/bin",
 ): Promise<ReturnType<typeof spawnSync>> {
   const ctl = await readFile("ops/symphony-ctl", "utf8");
   const guard = extractShellFunction(ctl, "check_service_root_not_worktree");
@@ -314,6 +336,7 @@ async function runWorktreeGuard(
       "-c",
       [
         'die() { echo "$*" >&2; exit 1; }',
+        'warn() { echo "$*" >&2; }',
         guard,
         'SYMPHONY_ROOT="$1"',
         "check_service_root_not_worktree",
@@ -323,7 +346,7 @@ async function runWorktreeGuard(
     ],
     {
       encoding: "utf8",
-      env: { HOME: symphonyRoot, PATH: "/usr/bin:/bin" },
+      env: { HOME: symphonyRoot, PATH: pathEnv },
     },
   );
 }

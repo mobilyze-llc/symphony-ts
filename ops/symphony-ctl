@@ -61,11 +61,20 @@ check_service_root_not_worktree() {
       ;;
   esac
 
+  # The general check below is git-aware. If git is unavailable we cannot
+  # verify, so surface the degradation rather than silently allowing a worktree
+  # through — refusing one is this guard's whole job.
+  if ! command -v git >/dev/null 2>&1; then
+    warn "git not found on PATH — skipping the git-aware worktree check for $SYMPHONY_ROOT. Confirm this is a stable checkout, or set SYMPHONY_ALLOW_WORKTREE_ROOT=1 to silence."
+    return 0
+  fi
+
   # Git-aware detection for every other layout: a linked worktree has a
   # per-worktree git dir that differs from the shared common dir, while the
   # primary checkout has them equal. This catches linked worktrees whose path
   # has no "worktrees" component, without false-positiving on an ordinary
   # checkout that merely lives under a directory named "worktrees".
+  # (--absolute-git-dir and --path-format=absolute both require git >= 2.31.)
   local git_dir common_dir
   if git_dir="$(git -C "$SYMPHONY_ROOT" rev-parse --absolute-git-dir 2>/dev/null)" &&
      common_dir="$(git -C "$SYMPHONY_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"; then
