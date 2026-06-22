@@ -190,10 +190,14 @@ it("warns instead of silently allowing when git is unavailable for the check", a
   const linked = join(root, "linked-checkout");
   git(primary, ["worktree", "add", linked]);
 
-  // PATH=/bin keeps bash runnable but excludes git (/usr/bin/git). A safety
-  // guard that cannot verify must surface the degradation, not silently allow
-  // a real linked worktree through.
-  const result = await runWorktreeGuard(linked, "/bin");
+  // Point PATH at an empty dir so `command -v git` fails on every platform
+  // (bash is invoked by absolute path, so it stays runnable). NB: a bare /bin
+  // is NOT git-free on merged-/usr Linux, where /bin -> /usr/bin. A safety guard
+  // that cannot verify must surface the degradation, not silently allow a real
+  // linked worktree through.
+  const emptyBin = join(root, "no-tools");
+  await mkdir(emptyBin, { recursive: true });
+  const result = await runWorktreeGuard(linked, emptyBin);
   expect(result.status).toBe(0);
   expect(result.stderr).toContain("git not found on PATH");
 });
@@ -324,6 +328,17 @@ async function createTempDir(prefix: string): Promise<string> {
   return path;
 }
 
+// Absolute bash path so callers can set PATH to a git-free dir (to exercise the
+// git-unavailable branch) without breaking bash resolution itself.
+const BASH_PATH = (() => {
+  const probe = spawnSync("bash", ["-c", "command -v bash"], {
+    encoding: "utf8",
+  });
+  return probe.status === 0 && probe.stdout.trim()
+    ? probe.stdout.trim()
+    : "/bin/bash";
+})();
+
 async function runWorktreeGuard(
   symphonyRoot: string,
   pathEnv = "/usr/bin:/bin",
@@ -331,7 +346,7 @@ async function runWorktreeGuard(
   const ctl = await readFile("ops/symphony-ctl", "utf8");
   const guard = extractShellFunction(ctl, "check_service_root_not_worktree");
   return spawnSync(
-    "bash",
+    BASH_PATH,
     [
       "-c",
       [
