@@ -477,6 +477,33 @@ describe("buildPlannerPrompt", () => {
     expect(isWholeLabelPrefix).toBe(true);
   });
 
+  it("bounds the joined blocked-by set so the adornment cannot blow up (SYMPH-904)", () => {
+    const ctx = context();
+    const first = ctx.backlog[0];
+    if (first) {
+      first.blockedBy = [
+        ...Array.from({ length: 40 }, (_, i) => `SYMPH-${1000 + i}`),
+        "BLOCKERTAILMARKER",
+      ];
+    }
+    const prompt = buildPlannerPrompt(ctx);
+    expect(prompt).toContain("SYMPH-1000"); // the head of the set renders
+    expect(prompt).not.toContain("BLOCKERTAILMARKER"); // dropped by the joined cap
+  });
+
+  it("bounds an overlong in-flight stage so the prompt cannot blow up (SYMPH-904)", () => {
+    const ctx = context();
+    ctx.inFlight = [
+      {
+        issueIdentifier: "SYMPH-7",
+        stage: `STAGEHEAD ${"s".repeat(5000)} STAGETAILMARKER`,
+      },
+    ];
+    const prompt = buildPlannerPrompt(ctx);
+    expect(prompt).toContain("STAGEHEAD "); // the start of the stage renders
+    expect(prompt).not.toContain("STAGETAILMARKER"); // content past the cap is dropped
+  });
+
   it("omits a whitespace-only description (SYMPH-874, council P2)", () => {
     const ctx = context();
     const first = ctx.backlog[0];

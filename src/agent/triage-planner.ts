@@ -134,14 +134,18 @@ export type PlannerResult =
  * design's measure-first stance). These are prompt-hygiene bounds, not cost caps.
  */
 const PLANNER_CANDIDATE_DESCRIPTION_CHAR_LIMIT = 600;
+// Despite the "TITLE" name this is the general per-FIELD single-line bound, applied
+// to every short tracker field: titles, identifiers, workflow state, in-flight
+// stage, and individual blocker refs (SYMPH-904 council: one shared field bound).
 const PLANNER_CANDIDATE_TITLE_CHAR_LIMIT = 300;
 // Two-level label bound: each label is capped first (one pathological label can't
 // dominate the row), then the comma-joined set is capped (many labels can't blow up
 // the prompt). The per-label cap is deliberately well below the joined cap, so each
 // level fires on a distinct degenerate input. Real Linear labels are ~15-30 chars.
-// Keep SINGLE_LABEL_CHAR_LIMIT < LABELS_CHAR_LIMIT so at least one whole label
-// always fits under the joined cap — renderCandidateLabels' accumulate loop then
-// never reaches its hard-slice fallback (SYMPH-904 council).
+// Keep SINGLE_LABEL_CHAR_LIMIT < LABELS_CHAR_LIMIT so at least one whole label always
+// fits under the joined cap — joinBoundedParts then never reaches its hard-slice
+// fallback (SYMPH-904 council). LABELS_CHAR_LIMIT is the general JOINED-SET cap (the
+// labels set and the blocked-by set).
 const PLANNER_CANDIDATE_SINGLE_LABEL_CHAR_LIMIT = 80;
 const PLANNER_CANDIDATE_LABELS_CHAR_LIMIT = 300;
 
@@ -179,6 +183,32 @@ function renderCandidateDescription(
 }
 
 /**
+ * Join already-normalized parts with ", ", keeping WHOLE parts until the next would
+ * exceed `cap`, then appending "…". Accumulating whole parts (rather than slicing the
+ * joined string) keeps the tail a complete part even when a part itself contains ", "
+ * (SYMPH-904, council). Returns the bare join with no ellipsis when everything fits.
+ */
+function joinBoundedParts(parts: string[], cap: number): string {
+  const kept: string[] = [];
+  let length = 0;
+  for (const part of parts) {
+    const addition = kept.length === 0 ? part.length : part.length + 2; // ", "
+    if (length + addition > cap) {
+      break;
+    }
+    kept.push(part);
+    length += addition;
+  }
+  if (kept.length === 0) {
+    // The first part alone exceeds the cap (unreachable when each part is pre-capped
+    // well below `cap`); hard-slice defensively rather than emit an oversized line.
+    const [first = ""] = parts;
+    return `${first.slice(0, cap)}…`;
+  }
+  return kept.length < parts.length ? `${kept.join(", ")}…` : kept.join(", ");
+}
+
+/**
  * Render a candidate's labels as a single bounded, comma-joined string (SYMPH-904).
  * Each label is whitespace-collapsed, blank labels are dropped (so a newline or
  * empty label cannot break the candidate row), and each label is length-capped;
@@ -198,32 +228,7 @@ function renderCandidateLabels(labels: string[] | undefined): string | null {
   if (cleaned.length === 0) {
     return null;
   }
-  const joined = cleaned.join(", ");
-  if (joined.length <= PLANNER_CANDIDATE_LABELS_CHAR_LIMIT) {
-    return joined;
-  }
-  // Accumulate WHOLE labels until the next would exceed the joined cap, so the tail
-  // is never a spliced partial label — even when a label itself contains ", "
-  // (SYMPH-904, council P2; a lastIndexOf(", ") scan was unsafe for comma-bearing
-  // labels, which are free text).
-  const kept: string[] = [];
-  let length = 0;
-  for (const label of cleaned) {
-    const addition = kept.length === 0 ? label.length : label.length + 2; // ", "
-    if (length + addition > PLANNER_CANDIDATE_LABELS_CHAR_LIMIT) {
-      break;
-    }
-    kept.push(label);
-    length += addition;
-  }
-  if (kept.length === 0) {
-    // The first label alone exceeds the joined cap. The per-label cap is well below
-    // the joined cap, so this is unreachable in practice; hard-slice defensively
-    // rather than emit an oversized line.
-    const [first = ""] = cleaned;
-    return `${first.slice(0, PLANNER_CANDIDATE_LABELS_CHAR_LIMIT)}…`;
-  }
-  return `${kept.join(", ")}…`;
+  return joinBoundedParts(cleaned, PLANNER_CANDIDATE_LABELS_CHAR_LIMIT);
 }
 
 /**
@@ -304,7 +309,9 @@ export function buildPlannerPrompt(context: PlannerContext): string {
         )
         .filter((ref): ref is string => ref !== null);
       const blockedBy =
-        blockers.length > 0 ? ` (blocked by: ${blockers.join(", ")})` : "";
+        blockers.length > 0
+          ? ` (blocked by: ${joinBoundedParts(blockers, PLANNER_CANDIDATE_LABELS_CHAR_LIMIT)})`
+          : "";
       const renderedLabels = renderCandidateLabels(candidate.labels);
       const labels =
         renderedLabels !== null ? ` (labels: ${renderedLabels})` : "";
