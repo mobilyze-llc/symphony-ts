@@ -452,6 +452,31 @@ describe("buildPlannerPrompt", () => {
     expect(prompt).not.toContain("(labels:");
   });
 
+  it("never splices a label that itself contains ', ' at the joined-cap boundary (SYMPH-904)", () => {
+    const ctx = context();
+    const first = ctx.backlog[0];
+    // Each label contains a literal ", " (free-text labels can), so a naive
+    // lastIndexOf(", ") boundary search could land INSIDE a label. 5 × 74-char
+    // labels push the joined set over the 300 cap.
+    const labels = Array.from(
+      { length: 5 },
+      (_, i) => `g${i}, ${"z".repeat(70)}`,
+    );
+    if (first) {
+      first.labels = labels;
+    }
+    const prompt = buildPlannerPrompt(ctx);
+    const match = prompt.match(/\(labels: (.+?)…\)/);
+    expect(match).not.toBeNull();
+    const rendered = match?.[1] ?? "";
+    // the rendered set must be a whole-label prefix join (truncation on a boundary,
+    // never mid-label) — even though the labels themselves contain ", "
+    const isWholeLabelPrefix = labels.some(
+      (_, i) => rendered === labels.slice(0, i + 1).join(", "),
+    );
+    expect(isWholeLabelPrefix).toBe(true);
+  });
+
   it("omits a whitespace-only description (SYMPH-874, council P2)", () => {
     const ctx = context();
     const first = ctx.backlog[0];

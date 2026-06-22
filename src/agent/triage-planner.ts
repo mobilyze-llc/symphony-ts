@@ -139,9 +139,9 @@ const PLANNER_CANDIDATE_TITLE_CHAR_LIMIT = 300;
 // dominate the row), then the comma-joined set is capped (many labels can't blow up
 // the prompt). The per-label cap is deliberately well below the joined cap, so each
 // level fires on a distinct degenerate input. Real Linear labels are ~15-30 chars.
-// INVARIANT: SINGLE_LABEL_CHAR_LIMIT < LABELS_CHAR_LIMIT — renderCandidateLabels'
-// boundary truncation relies on a ", " boundary always existing below the joined
-// cap; violating this could splice a partial label at the tail (SYMPH-904 council).
+// Keep SINGLE_LABEL_CHAR_LIMIT < LABELS_CHAR_LIMIT so at least one whole label
+// always fits under the joined cap — renderCandidateLabels' accumulate loop then
+// never reaches its hard-slice fallback (SYMPH-904 council).
 const PLANNER_CANDIDATE_SINGLE_LABEL_CHAR_LIMIT = 80;
 const PLANNER_CANDIDATE_LABELS_CHAR_LIMIT = 300;
 
@@ -202,12 +202,28 @@ function renderCandidateLabels(labels: string[] | undefined): string | null {
   if (joined.length <= PLANNER_CANDIDATE_LABELS_CHAR_LIMIT) {
     return joined;
   }
-  // Truncate on a label boundary so the tail never shows a spliced partial label
-  // (SYMPH-904, council P2). A single label can't exceed the per-label cap, so a
-  // joined string over the cap always has a ", " boundary to fall back to.
-  const head = joined.slice(0, PLANNER_CANDIDATE_LABELS_CHAR_LIMIT);
-  const lastBoundary = head.lastIndexOf(", ");
-  return `${lastBoundary > 0 ? head.slice(0, lastBoundary) : head}…`;
+  // Accumulate WHOLE labels until the next would exceed the joined cap, so the tail
+  // is never a spliced partial label — even when a label itself contains ", "
+  // (SYMPH-904, council P2; a lastIndexOf(", ") scan was unsafe for comma-bearing
+  // labels, which are free text).
+  const kept: string[] = [];
+  let length = 0;
+  for (const label of cleaned) {
+    const addition = kept.length === 0 ? label.length : label.length + 2; // ", "
+    if (length + addition > PLANNER_CANDIDATE_LABELS_CHAR_LIMIT) {
+      break;
+    }
+    kept.push(label);
+    length += addition;
+  }
+  if (kept.length === 0) {
+    // The first label alone exceeds the joined cap. The per-label cap is well below
+    // the joined cap, so this is unreachable in practice; hard-slice defensively
+    // rather than emit an oversized line.
+    const [first = ""] = cleaned;
+    return `${first.slice(0, PLANNER_CANDIDATE_LABELS_CHAR_LIMIT)}…`;
+  }
+  return `${kept.join(", ")}…`;
 }
 
 /**
