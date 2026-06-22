@@ -48,6 +48,15 @@ export interface PlannerCandidate {
    * Empty when the issue has no recorded blockers.
    */
   blockedBy: string[];
+  /**
+   * Issue body and labels (SYMPH-874): enrichment signal so the Manager reasons
+   * over real ticket content — surface/area/intent — instead of one-line titles
+   * (the planner barely out-informs the deterministic comparator otherwise).
+   * Optional: absent when a context is assembled without enrichment; the prompt
+   * renderer treats absence (and empty/blank values) as "omit".
+   */
+  description?: string | null;
+  labels?: string[];
 }
 
 export interface PlannerPrInfo {
@@ -118,6 +127,34 @@ export type PlannerResult =
   // The model produced output we could not parse/validate.
   | { status: "invalid"; detail: string };
 
+/**
+ * Per-candidate description budget in the planner prompt (SYMPH-874). Bounds the
+ * enrichment signal so a few long ticket bodies cannot blow up the Opus prompt;
+ * tune from measured context size (the design's measure-first stance).
+ */
+const PLANNER_CANDIDATE_DESCRIPTION_CHAR_LIMIT = 600;
+
+/**
+ * Normalize and bound a candidate's body for the prompt. Collapses whitespace to
+ * a single line (keeps each candidate block parseable), drops blank/absent
+ * bodies, and caps length with an ellipsis. Returns null when there is nothing
+ * to render.
+ */
+function renderCandidateDescription(
+  description: string | null | undefined,
+): string | null {
+  if (description === null || description === undefined) {
+    return null;
+  }
+  const normalized = description.replace(/\s+/g, " ").trim();
+  if (normalized === "") {
+    return null;
+  }
+  return normalized.length > PLANNER_CANDIDATE_DESCRIPTION_CHAR_LIMIT
+    ? `${normalized.slice(0, PLANNER_CANDIDATE_DESCRIPTION_CHAR_LIMIT)}…`
+    : normalized;
+}
+
 export function buildPlannerPrompt(context: PlannerContext): string {
   const { envelope } = context;
   const lines: string[] = [];
@@ -141,9 +178,17 @@ export function buildPlannerPrompt(context: PlannerContext): string {
         candidate.blockedBy.length > 0
           ? ` (blocked by: ${candidate.blockedBy.join(", ")})`
           : "";
+      const labels =
+        candidate.labels && candidate.labels.length > 0
+          ? ` (labels: ${candidate.labels.join(", ")})`
+          : "";
       lines.push(
-        `- ${candidate.issueIdentifier} [${candidate.state}, priority ${candidate.priority ?? "none"}] ${candidate.title}${blockedBy}`,
+        `- ${candidate.issueIdentifier} [${candidate.state}, priority ${candidate.priority ?? "none"}] ${candidate.title}${labels}${blockedBy}`,
       );
+      const description = renderCandidateDescription(candidate.description);
+      if (description !== null) {
+        lines.push(`    ${description}`);
+      }
     }
   }
   lines.push("", "## In flight (immutable — do not re-plan these)");

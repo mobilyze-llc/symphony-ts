@@ -51,6 +51,10 @@ export function assembleShadowPlannerContext(
       blockedBy: issue.blockedBy
         .map((ref) => ref.identifier)
         .filter((identifier): identifier is string => identifier !== null),
+      // SYMPH-874: carry the body + labels so the Manager reasons over real
+      // ticket content (surface / area / intent), not just one-line titles.
+      description: issue.description,
+      labels: issue.labels,
     }));
   return {
     backlog,

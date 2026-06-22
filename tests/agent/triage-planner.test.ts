@@ -95,6 +95,39 @@ describe("buildPlannerPrompt", () => {
     expect(prompt).toContain("dependencies");
     expect(prompt).toContain("dependsOn");
   });
+
+  it("renders labels and the issue description on the candidate (SYMPH-874)", () => {
+    const ctx = context();
+    const first = ctx.backlog[0];
+    if (first) {
+      first.labels = ["area:scheduling", "kind:bug"];
+      first.description =
+        "Reworks the dispatch loop in src/orchestrator/core.ts.";
+    }
+    const prompt = buildPlannerPrompt(ctx);
+    expect(prompt).toContain("(labels: area:scheduling, kind:bug)");
+    expect(prompt).toContain(
+      "\n    Reworks the dispatch loop in src/orchestrator/core.ts.",
+    );
+  });
+
+  it("bounds an overlong description so the prompt cannot blow up (SYMPH-874)", () => {
+    const ctx = context();
+    const first = ctx.backlog[0];
+    if (first) {
+      first.description = `HEAD ${"x".repeat(5000)} TAILMARKER`;
+    }
+    const prompt = buildPlannerPrompt(ctx);
+    expect(prompt).toContain("HEAD "); // the beginning of the body is rendered
+    expect(prompt).not.toContain("TAILMARKER"); // content past the cap is dropped
+  });
+
+  it("omits the labels/description adornments when a candidate has neither (SYMPH-874)", () => {
+    // context() candidates carry neither -> single-line rendering is unchanged.
+    const prompt = buildPlannerPrompt(context());
+    expect(prompt).not.toContain("(labels:");
+    expect(prompt).toContain("] First\n- SYMPH-2");
+  });
 });
 
 describe("parsePlannerOutput", () => {

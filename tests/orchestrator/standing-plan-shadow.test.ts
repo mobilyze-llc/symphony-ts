@@ -79,6 +79,23 @@ describe("assembleShadowPlannerContext", () => {
     });
     expect(context.backlog[0]?.blockedBy).toEqual(["SYMPH-9"]);
   });
+
+  it("carries the issue description and labels onto the candidate (SYMPH-874)", () => {
+    const enriched: Issue = {
+      ...issue("u1", "SYMPH-1"),
+      description: "Body mentions src/orchestrator/core.ts",
+      labels: ["area:scheduling", "kind:bug"],
+    };
+    const context = assembleShadowPlannerContext({
+      candidates: [enriched],
+      inFlight: [],
+      envelope: ENVELOPE,
+    });
+    expect(context.backlog[0]?.description).toBe(
+      "Body mentions src/orchestrator/core.ts",
+    );
+    expect(context.backlog[0]?.labels).toEqual(["area:scheduling", "kind:bug"]);
+  });
 });
 
 describe("shouldRunShadowPlanCycle", () => {
