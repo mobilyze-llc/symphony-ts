@@ -196,9 +196,15 @@ function renderCandidateLabels(labels: string[] | undefined): string | null {
     return null;
   }
   const joined = cleaned.join(", ");
-  return joined.length > PLANNER_CANDIDATE_LABELS_CHAR_LIMIT
-    ? `${joined.slice(0, PLANNER_CANDIDATE_LABELS_CHAR_LIMIT)}…`
-    : joined;
+  if (joined.length <= PLANNER_CANDIDATE_LABELS_CHAR_LIMIT) {
+    return joined;
+  }
+  // Truncate on a label boundary so the tail never shows a spliced partial label
+  // (SYMPH-904, council P2). A single label can't exceed the per-label cap, so a
+  // joined string over the cap always has a ", " boundary to fall back to.
+  const head = joined.slice(0, PLANNER_CANDIDATE_LABELS_CHAR_LIMIT);
+  const lastBoundary = head.lastIndexOf(", ");
+  return `${lastBoundary > 0 ? head.slice(0, lastBoundary) : head}…`;
 }
 
 /**
@@ -212,6 +218,24 @@ function renderPrLine(pr: PlannerPrInfo): string {
     normalizeTrackerText(pr.title, PLANNER_CANDIDATE_TITLE_CHAR_LIMIT) ?? "";
   // trimEnd so a whitespace-only / absent title leaves no dangling space (SYMPH-904).
   return `- ${pr.issueIdentifier} #${pr.prNumber} ${title}`.trimEnd();
+}
+
+/**
+ * Render an in-flight context line. Both fields are collapsed for the same
+ * defense-in-depth reason as the rest of the fenced block: `stage` is an internal
+ * pipeline value today, but normalizing every dynamic value keeps the fence
+ * invariant uniform and future-proofs the row if a tracker-influenced field is
+ * ever added here (SYMPH-904, council).
+ */
+function renderInFlightLine(entry: PlannerInFlight): string {
+  const id =
+    normalizeTrackerText(
+      entry.issueIdentifier,
+      PLANNER_CANDIDATE_TITLE_CHAR_LIMIT,
+    ) ?? "";
+  const stage =
+    normalizeTrackerText(entry.stage, PLANNER_CANDIDATE_TITLE_CHAR_LIMIT) ?? "";
+  return `- ${id} (${stage})`;
 }
 
 export function buildPlannerPrompt(context: PlannerContext): string {
@@ -241,10 +265,11 @@ export function buildPlannerPrompt(context: PlannerContext): string {
     lines.push("- (none)");
   } else {
     for (const candidate of context.backlog) {
-      // Every field on the candidate row is collapsed: this is the eligible-backlog
-      // parse surface the model selects from, so a forged row here is the highest-
-      // impact vector (phantom-candidate injection) — blocker identifiers included
-      // (SYMPH-904, council P2).
+      // Every dynamic value on the candidate row is collapsed: this is the
+      // eligible-backlog parse surface the model selects from, so a forged row here
+      // is the highest-impact vector (phantom-candidate injection). Title, labels,
+      // blocker refs, AND the workflow state all go through normalizeTrackerText, so
+      // no field — free-text or controlled — can forge a row (SYMPH-904, council).
       const blockers = candidate.blockedBy
         .map((ref) =>
           normalizeTrackerText(ref, PLANNER_CANDIDATE_TITLE_CHAR_LIMIT),
@@ -262,10 +287,15 @@ export function buildPlannerPrompt(context: PlannerContext): string {
           candidate.title,
           PLANNER_CANDIDATE_TITLE_CHAR_LIMIT,
         ) ?? "";
+      const state =
+        normalizeTrackerText(
+          candidate.state,
+          PLANNER_CANDIDATE_TITLE_CHAR_LIMIT,
+        ) ?? "";
       // trimEnd so a whitespace-only / absent title with no adornments leaves no
       // dangling space at the end of the candidate row (SYMPH-904).
       lines.push(
-        `- ${candidate.issueIdentifier} [${candidate.state}, priority ${candidate.priority ?? "none"}] ${title}${labels}${blockedBy}`.trimEnd(),
+        `- ${candidate.issueIdentifier} [${state}, priority ${candidate.priority ?? "none"}] ${title}${labels}${blockedBy}`.trimEnd(),
       );
       const description = renderCandidateDescription(candidate.description);
       if (description !== null) {
@@ -274,15 +304,10 @@ export function buildPlannerPrompt(context: PlannerContext): string {
     }
   }
   lines.push("", "## In flight (immutable — do not re-plan these)");
-  // In-flight rows carry only a structured identifier and an internal pipeline
-  // stage enum — not free-text tracker fields — so they are not collapsed here
-  // (SYMPH-904, council Track: documented asymmetry).
   lines.push(
     context.inFlight.length === 0
       ? "- (none)"
-      : context.inFlight
-          .map((entry) => `- ${entry.issueIdentifier} (${entry.stage})`)
-          .join("\n"),
+      : context.inFlight.map(renderInFlightLine).join("\n"),
   );
   lines.push("", "## Open PRs");
   lines.push(
