@@ -12,7 +12,7 @@ set -euo pipefail
 #     operates on a DISPOSABLE, DETACHED runtime checkout that it resets --hard
 #     and checks out --detach — never point it at the stable in-place root (a
 #     coherence guard refuses that; override with DEPLOY_TRAIN_ALLOW_STABLE_ROOT=1).
-#   See docs/operations/03-deploy.md for the full decision and operator guidance.
+#   See docs/operations/05-deploy.md for the full decision and operator guidance.
 #
 # Sequence:
 #   1. fetch origin, resolve expected SHA (origin/main, or --expect)
