@@ -240,15 +240,34 @@ describe("buildPlannerPrompt", () => {
     expect(prompt).not.toContain("(labels: ,");
   });
 
-  it("bounds an overlong label set so the prompt cannot blow up (SYMPH-904)", () => {
+  it("bounds an overlong single label below the joined cap (per-label cap, SYMPH-904)", () => {
     const ctx = context();
     const first = ctx.backlog[0];
     if (first) {
-      first.labels = [`HEADLABEL${"y".repeat(5000)}`, "TAILLABELMARKER"];
+      // 122 chars: above the per-label cap but below the joined cap, so only a
+      // meaningful per-label cap (distinct from the joined cap) can drop the tail.
+      first.labels = [`AREAHEAD${"y".repeat(100)}AREATAILMARKER`];
     }
     const prompt = buildPlannerPrompt(ctx);
-    expect(prompt).toContain("HEADLABEL"); // the start of the label set renders
-    expect(prompt).not.toContain("TAILLABELMARKER"); // content past the cap is dropped
+    expect(prompt).toContain("AREAHEAD"); // the start of the label renders
+    expect(prompt).not.toContain("AREATAILMARKER"); // dropped by the per-label cap
+  });
+
+  it("bounds the joined label set when many short labels are present (joined cap, SYMPH-904)", () => {
+    const ctx = context();
+    const first = ctx.backlog[0];
+    if (first) {
+      // each label is short (under the per-label cap) but together they exceed the
+      // joined cap, so the trailing label is dropped by the joined cap.
+      first.labels = Array.from(
+        { length: 15 },
+        (_, i) => `area:label-${i}-zzzzzzzzzzzzzzzzzzzz`,
+      );
+      first.labels.push("FINALLABELMARKER");
+    }
+    const prompt = buildPlannerPrompt(ctx);
+    expect(prompt).toContain("area:label-0"); // the head of the set renders
+    expect(prompt).not.toContain("FINALLABELMARKER"); // dropped by the joined cap
   });
 
   it("collapses whitespace in a title so a newline cannot forge a second candidate row (SYMPH-904)", () => {
@@ -301,6 +320,20 @@ describe("buildPlannerPrompt", () => {
     const prompt = buildPlannerPrompt(ctx);
     expect(prompt).not.toContain("WIP\n- SYMPH-888");
     expect(prompt).toContain("WIP - SYMPH-888 [Todo, priority 1] forged");
+  });
+
+  it("bounds an overlong open-PR title (SYMPH-904)", () => {
+    const ctx = context();
+    ctx.openPrs = [
+      {
+        issueIdentifier: "SYMPH-9",
+        prNumber: 42,
+        title: `PRHEAD ${"z".repeat(5000)} PRTAILMARKER`,
+      },
+    ];
+    const prompt = buildPlannerPrompt(ctx);
+    expect(prompt).toContain("PRHEAD "); // the start of the PR title renders
+    expect(prompt).not.toContain("PRTAILMARKER"); // content past the cap is dropped
   });
 
   it("bounds recently-merged PR titles inside the fence too (SYMPH-904)", () => {

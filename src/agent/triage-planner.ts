@@ -135,6 +135,11 @@ export type PlannerResult =
  */
 const PLANNER_CANDIDATE_DESCRIPTION_CHAR_LIMIT = 600;
 const PLANNER_CANDIDATE_TITLE_CHAR_LIMIT = 300;
+// Two-level label bound: each label is capped first (one pathological label can't
+// dominate the row), then the comma-joined set is capped (many labels can't blow up
+// the prompt). The per-label cap is deliberately well below the joined cap, so each
+// level fires on a distinct degenerate input. Real Linear labels are ~15-30 chars.
+const PLANNER_CANDIDATE_SINGLE_LABEL_CHAR_LIMIT = 80;
 const PLANNER_CANDIDATE_LABELS_CHAR_LIMIT = 300;
 
 /**
@@ -172,10 +177,11 @@ function renderCandidateDescription(
 
 /**
  * Render a candidate's labels as a single bounded, comma-joined string (SYMPH-904).
- * Each label is whitespace-collapsed and blank labels are dropped (so a newline or
- * empty label cannot break the candidate row), then the joined set is length-capped
- * — mirroring the description budget so every untrusted field is bounded uniformly.
- * Returns null when nothing renders.
+ * Each label is whitespace-collapsed, blank labels are dropped (so a newline or
+ * empty label cannot break the candidate row), and each label is length-capped;
+ * the comma-joined set is then capped again (a two-level bound — one pathological
+ * label can't dominate the row, and many labels can't blow up the prompt). Mirrors
+ * the description budget so every untrusted field is bounded. Null when empty.
  */
 function renderCandidateLabels(labels: string[] | undefined): string | null {
   if (labels === undefined || labels.length === 0) {
@@ -183,7 +189,7 @@ function renderCandidateLabels(labels: string[] | undefined): string | null {
   }
   const cleaned = labels
     .map((label) =>
-      normalizeTrackerText(label, PLANNER_CANDIDATE_LABELS_CHAR_LIMIT),
+      normalizeTrackerText(label, PLANNER_CANDIDATE_SINGLE_LABEL_CHAR_LIMIT),
     )
     .filter((label): label is string => label !== null);
   if (cleaned.length === 0) {
