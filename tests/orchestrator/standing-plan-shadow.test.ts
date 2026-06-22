@@ -924,4 +924,37 @@ describe("runStandingPlanShadowTick comment enrichment (SYMPH-896)", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("logs a skip when enabled but no comment fetch is wired (council Track)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-"));
+    const events: string[] = [];
+    try {
+      const result = await runStandingPlanShadowTick({
+        config: triageConfig({
+          commentEnrichment: {
+            enabled: true,
+            maxCandidates: 25,
+            maxCommentPages: 3,
+            maxComments: 6,
+            maxCommentChars: 400,
+            maxTotalChars: 1200,
+          },
+        }),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        createPlannerRunner: () => okPlanner().runClaude,
+        // fetchIssueComments deliberately NOT wired (e.g. non-Linear tracker).
+        log: (event) => {
+          events.push(event);
+        },
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+      });
+      expect(result.status).toBe("ok");
+      expect(events).toContain("queue_triage_comment_enrichment_skipped");
+      expect(events).not.toContain("queue_triage_comment_enrichment_measure");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

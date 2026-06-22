@@ -394,25 +394,32 @@ export async function runStandingPlanShadowTick(
     // in AND a comment fetch is wired, inject curated comments into the planner
     // context and log a report-only cost measurement. Best-effort — never breaks
     // the tick.
-    if (
-      config.commentEnrichment.enabled &&
-      deps.fetchIssueComments !== undefined &&
-      context.backlog.length > 0
-    ) {
-      const enriched = await enrichPlannerContextWithComments({
-        context,
-        config: config.commentEnrichment,
-        fetchIssueComments: deps.fetchIssueComments,
-        ...(deps.operatorConfig === undefined
-          ? {}
-          : { operatorConfig: deps.operatorConfig }),
-      });
-      context = enriched.context;
-      await deps.log(
-        "queue_triage_comment_enrichment_measure",
-        "Planner comment enrichment measured (report-only; topology tuned from this).",
-        { outcome: "shadow", ...enriched.measurement },
-      );
+    if (config.commentEnrichment.enabled) {
+      if (deps.fetchIssueComments === undefined) {
+        // Enabled but no comment fetch wired (e.g. a non-Linear tracker): the
+        // feature is inert. Log it so an operator who flipped the flag is not
+        // left guessing why no measurement appears (council Track).
+        await deps.log(
+          "queue_triage_comment_enrichment_skipped",
+          "Comment enrichment is enabled but no comment fetch is wired (non-Linear tracker?); the feature is inert.",
+          { outcome: "shadow", reason: "no_comment_fetch_wired" },
+        );
+      } else if (context.backlog.length > 0) {
+        const enriched = await enrichPlannerContextWithComments({
+          context,
+          config: config.commentEnrichment,
+          fetchIssueComments: deps.fetchIssueComments,
+          ...(deps.operatorConfig === undefined
+            ? {}
+            : { operatorConfig: deps.operatorConfig }),
+        });
+        context = enriched.context;
+        await deps.log(
+          "queue_triage_comment_enrichment_measure",
+          "Planner comment enrichment measured (report-only; topology tuned from this).",
+          { outcome: "shadow", ...enriched.measurement },
+        );
+      }
     }
     const runClaude = deps.createPlannerRunner(config.plannerModel);
     const result = await runShadowPlanCycle({

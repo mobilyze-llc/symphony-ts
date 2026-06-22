@@ -123,9 +123,11 @@ export function curatePlannerComments(
       id: comment.id,
       authorClass,
       createdAt: comment.createdAt,
+      // Hard per-comment cap: the ellipsis counts toward maxCommentChars, so a
+      // truncated body is exactly maxCommentChars chars, never +1 (council Track).
       body:
         normalizedBody.length > config.maxCommentChars
-          ? `${normalizedBody.slice(0, config.maxCommentChars)}…`
+          ? `${normalizedBody.slice(0, Math.max(0, config.maxCommentChars - 1))}…`
           : normalizedBody,
     });
   }

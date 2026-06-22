@@ -105,7 +105,8 @@ describe("curatePlannerComments (SYMPH-896)", () => {
     const kept = result.comments[0];
     expect(kept?.body.startsWith("HEAD ")).toBe(true);
     expect(kept?.body.endsWith("…")).toBe(true);
-    expect(kept?.body.length).toBe(21); // 20 chars + ellipsis
+    // hard cap: ellipsis counts toward maxCommentChars (total === 20, not 21).
+    expect(kept?.body.length).toBe(20);
   });
 
   it("enforces the per-issue total-char budget by dropping the oldest kept", () => {
