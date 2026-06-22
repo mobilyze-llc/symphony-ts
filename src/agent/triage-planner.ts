@@ -135,7 +135,7 @@ export type PlannerResult =
  */
 const PLANNER_CANDIDATE_DESCRIPTION_CHAR_LIMIT = 600;
 const PLANNER_CANDIDATE_TITLE_CHAR_LIMIT = 300;
-const PLANNER_CANDIDATE_LABELS_CHAR_LIMIT = 200;
+const PLANNER_CANDIDATE_LABELS_CHAR_LIMIT = 300;
 
 /**
  * Collapse an untrusted tracker string to a single bounded line: whitespace
@@ -182,8 +182,10 @@ function renderCandidateLabels(labels: string[] | undefined): string | null {
     return null;
   }
   const cleaned = labels
-    .map((label) => label.replace(/\s+/g, " ").trim())
-    .filter((label) => label !== "");
+    .map((label) =>
+      normalizeTrackerText(label, PLANNER_CANDIDATE_LABELS_CHAR_LIMIT),
+    )
+    .filter((label): label is string => label !== null);
   if (cleaned.length === 0) {
     return null;
   }
@@ -191,6 +193,18 @@ function renderCandidateLabels(labels: string[] | undefined): string | null {
   return joined.length > PLANNER_CANDIDATE_LABELS_CHAR_LIMIT
     ? `${joined.slice(0, PLANNER_CANDIDATE_LABELS_CHAR_LIMIT)}…`
     : joined;
+}
+
+/**
+ * Render an open/merged PR context line. The PR title is mutable, attacker-
+ * influenceable free text, so collapse + bound it (a crafted title cannot forge a
+ * row inside the fence); the identifier/number are structured, not free text
+ * (SYMPH-904, council P2).
+ */
+function renderPrLine(pr: PlannerPrInfo): string {
+  const title =
+    normalizeTrackerText(pr.title, PLANNER_CANDIDATE_TITLE_CHAR_LIMIT) ?? "";
+  return `- ${pr.issueIdentifier} #${pr.prNumber} ${title}`;
 }
 
 export function buildPlannerPrompt(context: PlannerContext): string {
@@ -220,10 +234,17 @@ export function buildPlannerPrompt(context: PlannerContext): string {
     lines.push("- (none)");
   } else {
     for (const candidate of context.backlog) {
+      // Every field on the candidate row is collapsed: this is the eligible-backlog
+      // parse surface the model selects from, so a forged row here is the highest-
+      // impact vector (phantom-candidate injection) — blocker identifiers included
+      // (SYMPH-904, council P2).
+      const blockers = candidate.blockedBy
+        .map((ref) =>
+          normalizeTrackerText(ref, PLANNER_CANDIDATE_TITLE_CHAR_LIMIT),
+        )
+        .filter((ref): ref is string => ref !== null);
       const blockedBy =
-        candidate.blockedBy.length > 0
-          ? ` (blocked by: ${candidate.blockedBy.join(", ")})`
-          : "";
+        blockers.length > 0 ? ` (blocked by: ${blockers.join(", ")})` : "";
       const renderedLabels = renderCandidateLabels(candidate.labels);
       const labels =
         renderedLabels !== null ? ` (labels: ${renderedLabels})` : "";
@@ -244,6 +265,9 @@ export function buildPlannerPrompt(context: PlannerContext): string {
     }
   }
   lines.push("", "## In flight (immutable — do not re-plan these)");
+  // In-flight rows carry only a structured identifier and an internal pipeline
+  // stage enum — not free-text tracker fields — so they are not collapsed here
+  // (SYMPH-904, council Track: documented asymmetry).
   lines.push(
     context.inFlight.length === 0
       ? "- (none)"
@@ -255,17 +279,13 @@ export function buildPlannerPrompt(context: PlannerContext): string {
   lines.push(
     context.openPrs.length === 0
       ? "- (none)"
-      : context.openPrs
-          .map((pr) => `- ${pr.issueIdentifier} #${pr.prNumber} ${pr.title}`)
-          .join("\n"),
+      : context.openPrs.map((pr) => renderPrLine(pr)).join("\n"),
   );
   lines.push("", "## Recently merged (context)");
   lines.push(
     context.recentlyMerged.length === 0
       ? "- (none)"
-      : context.recentlyMerged
-          .map((pr) => `- ${pr.issueIdentifier} #${pr.prNumber} ${pr.title}`)
-          .join("\n"),
+      : context.recentlyMerged.map((pr) => renderPrLine(pr)).join("\n"),
   );
   lines.push(`</${untrustedFence}>`);
   lines.push(
