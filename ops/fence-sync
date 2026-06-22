@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# fence-sync — interim Linear-Release → dispatch-fence sync (stopgap for SYMPH-891)
+#
+# Re-derives the orchestrator dispatch fence from the OPEN issues of a Linear
+# Release and applies it via symphonyctl, so issues added to the release auto-
+# enter the fence and completed ones drop. Lets you keep Symphony gated to the
+# active release train (R1 by default) without hand-editing the fence.
+#
+# THROWAWAY: delete when SYMPH-891 (Manager train-gated dispatch) lands. The
+# admission decision — *what belongs in the release* — is NOT made here. An
+# operator (or, later, the Manager) adds issues to the Release; this only
+# MIRRORS that membership into the fence. Symphony stays dumb.
+#
+# Safety: if the release has ZERO open issues (drained) it does NOT set an empty
+# fence (that would block ALL dispatch) — it leaves the fence unchanged and
+# reports "drained" (i.e. time to run the deploy-train), then exits 0.
+#
+# Config (env, overridable; .env is sourced if present):
+#   LINEAR_API_KEY     required — Linear API token
+#   FENCE_RELEASE_ID   Linear Release UUID to mirror (default: R1 release)
+#   SYMPHONYCTL_JS     path to symphonyctl.js (default: $SYMPHONY_ROOT/dist/src/cli/symphonyctl.js)
+#   SYMPHONY_NODE      node binary (default: `which node`)
+#   FENCE_DRY_RUN      if set, print the fence set without applying
+
+SCRIPT_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
+SYMPHONY_ROOT="${SYMPHONY_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+ENV_FILE="${SYMPHONY_ENV_FILE:-$SYMPHONY_ROOT/.env}"
+
+# Load .env (for LINEAR_API_KEY etc.) if present; existing env wins is not
+# guaranteed (set -a export), but the launchd job relies on this to avoid baking
+# the secret into a plist.
+if [[ -f "$ENV_FILE" ]]; then set -a; . "$ENV_FILE"; set +a; fi
+
+FENCE_RELEASE_ID="${FENCE_RELEASE_ID:-82b930d0-ada7-4c1f-b328-56ef8cb785a8}"  # R1 · Supervised self-dev readiness
+NODE_BIN="${SYMPHONY_NODE:-$(command -v node 2>/dev/null || echo /opt/homebrew/bin/node)}"
+SYMPHONYCTL_JS="${SYMPHONYCTL_JS:-$SYMPHONY_ROOT/dist/src/cli/symphonyctl.js}"
+LINEAR_API="https://api.linear.app/graphql"
+
+die() { echo "fence-sync: $*" >&2; exit 1; }
+
+command -v curl >/dev/null 2>&1 || die "curl not found on PATH"
+command -v jq   >/dev/null 2>&1 || die "jq is required (brew install jq)"
+[[ -n "${LINEAR_API_KEY:-}" ]] || die "LINEAR_API_KEY not set (expected in env or $ENV_FILE)"
+[[ -f "$SYMPHONYCTL_JS" ]] || die "symphonyctl not built at $SYMPHONYCTL_JS (run pnpm build)"
+
+# Fetch the release's issues; we filter OPEN (not completed/canceled) below.
+QUERY='query($id:String!){ release(id:$id){ name issues(first:250){ pageInfo{ hasNextPage } nodes{ identifier state{ type } } } } }'
+BODY="$(jq -nc --arg q "$QUERY" --arg id "$FENCE_RELEASE_ID" '{query:$q,variables:{id:$id}}')"
+RESP="$(curl -s --max-time 30 -X POST "$LINEAR_API" \
+  -H "Authorization: $LINEAR_API_KEY" -H "Content-Type: application/json" \
+  -d "$BODY")" || die "Linear request failed"
+
+RELEASE_NAME="$(jq -r '.data.release.name // empty' <<<"$RESP")"
+[[ -n "$RELEASE_NAME" ]] || die "could not resolve release $FENCE_RELEASE_ID: $(jq -c '.errors // "no data"' <<<"$RESP")"
+
+# Parse the issues array EXPLICITLY (jq -e fails on a missing/null nodes path) so
+# a fetch/parse failure cannot be silently misread as a drained release — that
+# would leave the fence stale and wrongly report "time to deploy".
+NODES="$(jq -e -c '.data.release.issues.nodes' <<<"$RESP")" \
+  || die "could not parse release issues from Linear response: $(jq -c '.errors // "unexpected shape"' <<<"$RESP")"
+
+# Refuse to act on a truncated view: >250 issues would silently drop members
+# from the fence (a wrong fence). Fail loudly (stopgap: pagination unimplemented).
+if [[ "$(jq -r '.data.release.issues.pageInfo.hasNextPage' <<<"$RESP")" == "true" ]]; then
+  die "release '$RELEASE_NAME' has >250 issues — fence-sync does not paginate (stopgap); refusing to apply a partial fence"
+fi
+
+# Collect open issue identifiers from the validated array (bash 3.2: no mapfile).
+OPEN_IDS=()
+while IFS= read -r id; do
+  [[ -n "$id" ]] && OPEN_IDS+=("$id")
+done < <(jq -r '.[] | select(.state.type != "completed" and .state.type != "canceled") | .identifier' <<<"$NODES" | sort)
+
+if [[ "${#OPEN_IDS[@]}" -eq 0 ]]; then
+  echo "fence-sync: release '$RELEASE_NAME' has 0 open issues — DRAINED."
+  echo "fence-sync: leaving the dispatch fence UNCHANGED (refusing to set an empty fence that would block all dispatch). Time to run the deploy-train."
+  exit 0
+fi
+
+echo "fence-sync: release '$RELEASE_NAME' → ${#OPEN_IDS[@]} open issue(s): ${OPEN_IDS[*]}"
+
+if [[ -n "${FENCE_DRY_RUN:-}" ]]; then
+  echo "fence-sync: DRY RUN — would run: symphonyctl fence ${OPEN_IDS[*]}"
+  exit 0
+fi
+
+if ! "$NODE_BIN" "$SYMPHONYCTL_JS" fence "${OPEN_IDS[@]}" \
+    --reason "fence-sync: mirror open issues of release '$RELEASE_NAME' (SYMPH-891 stopgap)"; then
+  die "symphonyctl fence failed (orchestrator down at the control plane? it will retry next interval)"
+fi
