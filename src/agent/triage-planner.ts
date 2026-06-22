@@ -146,31 +146,146 @@ export type PlannerResult =
   | { status: "invalid"; detail: string };
 
 /**
- * Per-candidate description budget in the planner prompt (SYMPH-874). Bounds the
- * enrichment signal so a few long ticket bodies cannot blow up the Opus prompt;
- * tune from measured context size (the design's measure-first stance).
+ * Per-candidate field budgets in the planner prompt (SYMPH-874/897/904). Bound
+ * each untrusted tracker field so a few long or oddly-formatted ticket fields
+ * cannot blow up or reshape the Opus prompt; tune from measured context size (the
+ * design's measure-first stance). These are prompt-hygiene bounds, not cost caps.
  */
 const PLANNER_CANDIDATE_DESCRIPTION_CHAR_LIMIT = 600;
+// Despite the "TITLE" name this is the general per-FIELD single-line bound, applied
+// to every short tracker field: titles, identifiers, workflow state, in-flight
+// stage, and individual blocker refs (SYMPH-904 council: one shared field bound).
+const PLANNER_CANDIDATE_TITLE_CHAR_LIMIT = 300;
+// Two-level label bound: each label is capped first (one pathological label can't
+// dominate the row), then the comma-joined set is capped (many labels can't blow up
+// the prompt). The per-label cap is deliberately well below the joined cap, so each
+// level fires on a distinct degenerate input. Real Linear labels are ~15-30 chars.
+// Keep SINGLE_LABEL_CHAR_LIMIT < LABELS_CHAR_LIMIT so at least one whole label always
+// fits under the joined cap — joinBoundedParts then never reaches its hard-slice
+// fallback (SYMPH-904 council). LABELS_CHAR_LIMIT is the general JOINED-SET cap (the
+// labels set and the blocked-by set).
+const PLANNER_CANDIDATE_SINGLE_LABEL_CHAR_LIMIT = 80;
+const PLANNER_CANDIDATE_LABELS_CHAR_LIMIT = 300;
 
 /**
- * Normalize and bound a candidate's body for the prompt. Collapses whitespace to
- * a single line (keeps each candidate block parseable), drops blank/absent
- * bodies, and caps length with an ellipsis. Returns null when there is nothing
- * to render.
+ * Collapse an untrusted tracker string to a single bounded line: whitespace
+ * (including newlines) folds to single spaces so no value can forge a new
+ * candidate row, blank/absent values drop to null, and length is capped with an
+ * ellipsis. Shared by every untrusted field rendered into the fenced data block
+ * (SYMPH-904).
  */
-function renderCandidateDescription(
-  description: string | null | undefined,
+function normalizeTrackerText(
+  value: string | null | undefined,
+  charLimit: number,
 ): string | null {
-  if (description === null || description === undefined) {
+  if (value === null || value === undefined) {
     return null;
   }
-  const normalized = description.replace(/\s+/g, " ").trim();
+  const normalized = value.replace(/\s+/g, " ").trim();
   if (normalized === "") {
     return null;
   }
-  return normalized.length > PLANNER_CANDIDATE_DESCRIPTION_CHAR_LIMIT
-    ? `${normalized.slice(0, PLANNER_CANDIDATE_DESCRIPTION_CHAR_LIMIT)}…`
+  return normalized.length > charLimit
+    ? `${normalized.slice(0, charLimit)}…`
     : normalized;
+}
+
+/** Bound a candidate body for the prompt (SYMPH-874). */
+function renderCandidateDescription(
+  description: string | null | undefined,
+): string | null {
+  return normalizeTrackerText(
+    description,
+    PLANNER_CANDIDATE_DESCRIPTION_CHAR_LIMIT,
+  );
+}
+
+/**
+ * Join already-normalized parts with ", ", keeping WHOLE parts until the next would
+ * exceed `cap`, then appending "…". Accumulating whole parts (rather than slicing the
+ * joined string) keeps the tail a complete part even when a part itself contains ", "
+ * (SYMPH-904, council). Returns the bare join with no ellipsis when everything fits.
+ */
+function joinBoundedParts(parts: string[], cap: number): string {
+  const kept: string[] = [];
+  let length = 0;
+  for (const part of parts) {
+    const addition = kept.length === 0 ? part.length : part.length + 2; // ", "
+    if (length + addition > cap) {
+      break;
+    }
+    kept.push(part);
+    length += addition;
+  }
+  if (kept.length === 0) {
+    // The first part alone exceeds the cap (unreachable when each part is pre-capped
+    // well below `cap`); hard-slice defensively rather than emit an oversized line.
+    const [first = ""] = parts;
+    return `${first.slice(0, cap)}…`;
+  }
+  return kept.length < parts.length ? `${kept.join(", ")}…` : kept.join(", ");
+}
+
+/**
+ * Render a candidate's labels as a single bounded, comma-joined string (SYMPH-904).
+ * Each label is whitespace-collapsed, blank labels are dropped (so a newline or
+ * empty label cannot break the candidate row), and each label is length-capped;
+ * the comma-joined set is then capped again (a two-level bound — one pathological
+ * label can't dominate the row, and many labels can't blow up the prompt). Mirrors
+ * the description budget so every untrusted field is bounded. Null when empty.
+ */
+function renderCandidateLabels(labels: string[] | undefined): string | null {
+  if (labels === undefined || labels.length === 0) {
+    return null;
+  }
+  const cleaned = labels
+    .map((label) =>
+      normalizeTrackerText(label, PLANNER_CANDIDATE_SINGLE_LABEL_CHAR_LIMIT),
+    )
+    .filter((label): label is string => label !== null);
+  if (cleaned.length === 0) {
+    return null;
+  }
+  return joinBoundedParts(cleaned, PLANNER_CANDIDATE_LABELS_CHAR_LIMIT);
+}
+
+/**
+ * Render an open/merged PR context line. The PR title is mutable, attacker-
+ * influenceable free text; the identifier is structured, but both are collapsed for
+ * fence uniformity (every dynamic value is normalized, so none can forge a row). The
+ * number is an int (SYMPH-904, council).
+ */
+function renderPrLine(pr: PlannerPrInfo): string {
+  const id =
+    normalizeTrackerText(
+      pr.issueIdentifier,
+      PLANNER_CANDIDATE_TITLE_CHAR_LIMIT,
+    ) ?? "";
+  const title =
+    normalizeTrackerText(pr.title, PLANNER_CANDIDATE_TITLE_CHAR_LIMIT) ?? "";
+  // trimEnd so a whitespace-only / absent title leaves no dangling space (SYMPH-904).
+  return `- ${id} #${pr.prNumber} ${title}`.trimEnd();
+}
+
+/**
+ * Render an in-flight context line. Both fields are collapsed for the same
+ * defense-in-depth reason as the rest of the fenced block: `stage` is an internal
+ * pipeline value today, but normalizing every dynamic value keeps the fence
+ * invariant uniform and future-proofs the row if a tracker-influenced field is
+ * ever added here (SYMPH-904, council).
+ */
+function renderInFlightLine(entry: PlannerInFlight): string {
+  const id =
+    normalizeTrackerText(
+      entry.issueIdentifier,
+      PLANNER_CANDIDATE_TITLE_CHAR_LIMIT,
+    ) ?? "";
+  const stage = normalizeTrackerText(
+    entry.stage,
+    PLANNER_CANDIDATE_TITLE_CHAR_LIMIT,
+  );
+  // Omit the empty "()" when stage normalizes away (blank/whitespace) (SYMPH-904).
+  return stage !== null ? `- ${id} (${stage})` : `- ${id}`;
 }
 
 /**
@@ -254,16 +369,45 @@ export function buildPlannerPrompt(context: PlannerContext): string {
     lines.push("- (none)");
   } else {
     for (const candidate of context.backlog) {
+      // Every dynamic value on the candidate row is collapsed: this is the
+      // eligible-backlog parse surface the model selects from, so a forged row here
+      // is the highest-impact vector (phantom-candidate injection). Identifier,
+      // title, labels, blocker refs, AND the workflow state all go through
+      // normalizeTrackerText, so no field — free-text or structured — can forge a
+      // row (SYMPH-904, council).
+      const blockers = candidate.blockedBy
+        .map((ref) =>
+          normalizeTrackerText(ref, PLANNER_CANDIDATE_TITLE_CHAR_LIMIT),
+        )
+        .filter((ref): ref is string => ref !== null);
       const blockedBy =
-        candidate.blockedBy.length > 0
-          ? ` (blocked by: ${candidate.blockedBy.join(", ")})`
+        blockers.length > 0
+          ? ` (blocked by: ${joinBoundedParts(blockers, PLANNER_CANDIDATE_LABELS_CHAR_LIMIT)})`
           : "";
+      const renderedLabels = renderCandidateLabels(candidate.labels);
       const labels =
-        candidate.labels && candidate.labels.length > 0
-          ? ` (labels: ${candidate.labels.join(", ")})`
-          : "";
+        renderedLabels !== null ? ` (labels: ${renderedLabels})` : "";
+      // Title is untrusted tracker data too: collapse + bound it so a newline
+      // cannot forge a second candidate row inside the fenced backlog (SYMPH-904).
+      const title =
+        normalizeTrackerText(
+          candidate.title,
+          PLANNER_CANDIDATE_TITLE_CHAR_LIMIT,
+        ) ?? "";
+      const state =
+        normalizeTrackerText(
+          candidate.state,
+          PLANNER_CANDIDATE_TITLE_CHAR_LIMIT,
+        ) ?? "";
+      const identifier =
+        normalizeTrackerText(
+          candidate.issueIdentifier,
+          PLANNER_CANDIDATE_TITLE_CHAR_LIMIT,
+        ) ?? "";
+      // trimEnd so a whitespace-only / absent title with no adornments leaves no
+      // dangling space at the end of the candidate row (SYMPH-904).
       lines.push(
-        `- ${candidate.issueIdentifier} [${candidate.state}, priority ${candidate.priority ?? "none"}] ${candidate.title}${labels}${blockedBy}`,
+        `- ${identifier} [${state}, priority ${candidate.priority ?? "none"}] ${title}${labels}${blockedBy}`.trimEnd(),
       );
       const description = renderCandidateDescription(candidate.description);
       if (description !== null) {
@@ -282,25 +426,19 @@ export function buildPlannerPrompt(context: PlannerContext): string {
   lines.push(
     context.inFlight.length === 0
       ? "- (none)"
-      : context.inFlight
-          .map((entry) => `- ${entry.issueIdentifier} (${entry.stage})`)
-          .join("\n"),
+      : context.inFlight.map(renderInFlightLine).join("\n"),
   );
   lines.push("", "## Open PRs");
   lines.push(
     context.openPrs.length === 0
       ? "- (none)"
-      : context.openPrs
-          .map((pr) => `- ${pr.issueIdentifier} #${pr.prNumber} ${pr.title}`)
-          .join("\n"),
+      : context.openPrs.map((pr) => renderPrLine(pr)).join("\n"),
   );
   lines.push("", "## Recently merged (context)");
   lines.push(
     context.recentlyMerged.length === 0
       ? "- (none)"
-      : context.recentlyMerged
-          .map((pr) => `- ${pr.issueIdentifier} #${pr.prNumber} ${pr.title}`)
-          .join("\n"),
+      : context.recentlyMerged.map((pr) => renderPrLine(pr)).join("\n"),
   );
   lines.push(`</${untrustedFence}>`);
   lines.push(
