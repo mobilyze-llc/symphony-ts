@@ -139,6 +139,9 @@ const PLANNER_CANDIDATE_TITLE_CHAR_LIMIT = 300;
 // dominate the row), then the comma-joined set is capped (many labels can't blow up
 // the prompt). The per-label cap is deliberately well below the joined cap, so each
 // level fires on a distinct degenerate input. Real Linear labels are ~15-30 chars.
+// INVARIANT: SINGLE_LABEL_CHAR_LIMIT < LABELS_CHAR_LIMIT — renderCandidateLabels'
+// boundary truncation relies on a ", " boundary always existing below the joined
+// cap; violating this could splice a partial label at the tail (SYMPH-904 council).
 const PLANNER_CANDIDATE_SINGLE_LABEL_CHAR_LIMIT = 80;
 const PLANNER_CANDIDATE_LABELS_CHAR_LIMIT = 300;
 
@@ -209,15 +212,20 @@ function renderCandidateLabels(labels: string[] | undefined): string | null {
 
 /**
  * Render an open/merged PR context line. The PR title is mutable, attacker-
- * influenceable free text, so collapse + bound it (a crafted title cannot forge a
- * row inside the fence); the identifier/number are structured, not free text
- * (SYMPH-904, council P2).
+ * influenceable free text; the identifier is structured, but both are collapsed for
+ * fence uniformity (every dynamic value is normalized, so none can forge a row). The
+ * number is an int (SYMPH-904, council).
  */
 function renderPrLine(pr: PlannerPrInfo): string {
+  const id =
+    normalizeTrackerText(
+      pr.issueIdentifier,
+      PLANNER_CANDIDATE_TITLE_CHAR_LIMIT,
+    ) ?? "";
   const title =
     normalizeTrackerText(pr.title, PLANNER_CANDIDATE_TITLE_CHAR_LIMIT) ?? "";
   // trimEnd so a whitespace-only / absent title leaves no dangling space (SYMPH-904).
-  return `- ${pr.issueIdentifier} #${pr.prNumber} ${title}`.trimEnd();
+  return `- ${id} #${pr.prNumber} ${title}`.trimEnd();
 }
 
 /**
@@ -233,9 +241,12 @@ function renderInFlightLine(entry: PlannerInFlight): string {
       entry.issueIdentifier,
       PLANNER_CANDIDATE_TITLE_CHAR_LIMIT,
     ) ?? "";
-  const stage =
-    normalizeTrackerText(entry.stage, PLANNER_CANDIDATE_TITLE_CHAR_LIMIT) ?? "";
-  return `- ${id} (${stage})`;
+  const stage = normalizeTrackerText(
+    entry.stage,
+    PLANNER_CANDIDATE_TITLE_CHAR_LIMIT,
+  );
+  // Omit the empty "()" when stage normalizes away (blank/whitespace) (SYMPH-904).
+  return stage !== null ? `- ${id} (${stage})` : `- ${id}`;
 }
 
 export function buildPlannerPrompt(context: PlannerContext): string {
@@ -267,9 +278,10 @@ export function buildPlannerPrompt(context: PlannerContext): string {
     for (const candidate of context.backlog) {
       // Every dynamic value on the candidate row is collapsed: this is the
       // eligible-backlog parse surface the model selects from, so a forged row here
-      // is the highest-impact vector (phantom-candidate injection). Title, labels,
-      // blocker refs, AND the workflow state all go through normalizeTrackerText, so
-      // no field — free-text or controlled — can forge a row (SYMPH-904, council).
+      // is the highest-impact vector (phantom-candidate injection). Identifier,
+      // title, labels, blocker refs, AND the workflow state all go through
+      // normalizeTrackerText, so no field — free-text or structured — can forge a
+      // row (SYMPH-904, council).
       const blockers = candidate.blockedBy
         .map((ref) =>
           normalizeTrackerText(ref, PLANNER_CANDIDATE_TITLE_CHAR_LIMIT),
@@ -292,10 +304,15 @@ export function buildPlannerPrompt(context: PlannerContext): string {
           candidate.state,
           PLANNER_CANDIDATE_TITLE_CHAR_LIMIT,
         ) ?? "";
+      const identifier =
+        normalizeTrackerText(
+          candidate.issueIdentifier,
+          PLANNER_CANDIDATE_TITLE_CHAR_LIMIT,
+        ) ?? "";
       // trimEnd so a whitespace-only / absent title with no adornments leaves no
       // dangling space at the end of the candidate row (SYMPH-904).
       lines.push(
-        `- ${candidate.issueIdentifier} [${state}, priority ${candidate.priority ?? "none"}] ${title}${labels}${blockedBy}`.trimEnd(),
+        `- ${identifier} [${state}, priority ${candidate.priority ?? "none"}] ${title}${labels}${blockedBy}`.trimEnd(),
       );
       const description = renderCandidateDescription(candidate.description);
       if (description !== null) {
