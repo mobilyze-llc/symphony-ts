@@ -24,7 +24,7 @@ Usage: symphony-manager-plan (--team <KEY> | --project <slugId> | --initiative <
 
 Run the Queue Triage v2 backlog Manager (planner) ONE-SHOT against the scoped
 eligible backlog and print the suggested batch plan. Output-only: it spends one
-Opus pass (via cmux-spawn) unless --prompt-only, and writes NOTHING to Linear,
+Opus planner pass unless --prompt-only, and writes NOTHING to Linear,
 the live standing-plan store, or dispatch.
 
 Scope (provide at least one; additive — combine them to narrow):

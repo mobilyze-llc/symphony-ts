@@ -10,8 +10,9 @@ You are merging the PR for Linear issue {{ issue.identifier }}.
 
 ## Merge Steps
 
-1. Compute PR readiness deterministically before any merge permission boundary:
+1. Resolve the PR number, then compute PR readiness deterministically before any merge permission boundary:
    ```bash
+   PR_NUMBER=$(gh pr view --json number --jq '.number')
    gh pr view --json number,state,isDraft,mergeStateStatus,mergeable,reviewDecision,statusCheckRollup
    gh pr checks --required
    ```
@@ -29,22 +30,49 @@ You are merging the PR for Linear issue {{ issue.identifier }}.
    [BLOCKED_NEEDS_HUMAN: auto_merge]
    ```
    Adjust the JSON values to match the live PR. The blockers line must appear immediately before the terminal marker.
-3. Assert the latest clean council artifact still covers the current PR head before merging. Use the `review-result.json` path from the last successful review-stage workpad note:
+3. Assert the latest clean crabrunner review artifact still covers the current PR head before merging. Use the `review-result.json` path from the last successful review-stage workpad note:
    ```bash
-   PR_NUMBER=$(gh pr view --json number --jq '.number')
-   REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
-   ARTIFACT_DIR="${TMPDIR:-/tmp}/symphony-council-freshness-{{ issue.identifier }}-$(date +%s)"
    REVIEW_RESULT_PATH="<path-to-latest-clean-review-result.json>"
-
-   symphony-council-review-gate \
-     --issue-id {{ issue.identifier }} \
-     --artifact-dir "$ARTIFACT_DIR" \
-     --workspace "$PWD" \
-     --repo "$REPO" \
-     --pr "$PR_NUMBER" \
-     --assert-fresh-review "$REVIEW_RESULT_PATH"
+   HEAD_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid --jq '.headRefOid')
+   node -e '
+   const fs = require("node:fs");
+   const reviewResult = process.argv[1];
+   const head = process.argv[2];
+   const guidance = "rerun convergence review against HEAD.";
+   const emit = (payload) => {
+     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+   };
+   const fail = (code, summary, extra = {}) => {
+     emit({ ok: false, code, verdict: "error", guidance, summary, reviewResult, head, ...extra });
+     process.exit(1);
+   };
+   if (typeof head !== "string" || head.trim().length === 0) {
+     fail("missing_head_sha", "Current PR head SHA could not be resolved. Check gh auth, network, and PR state.");
+   }
+   let result;
+   try {
+     result = JSON.parse(fs.readFileSync(reviewResult, "utf8"));
+   } catch (error) {
+     fail("invalid_review_artifact", `Crabrunner review artifact could not be read or parsed: ${error instanceof Error ? error.message : String(error)}`);
+   }
+   if (result === null || typeof result !== "object") {
+     fail("invalid_review_artifact", "Crabrunner review artifact root is not an object.");
+   }
+   if (result.verdict !== "pass") {
+     fail("invalid_review_artifact", `Crabrunner review artifact verdict is ${String(result.verdict)}; expected pass.`);
+   }
+   const reviewedHead = result.review_metadata?.reviewed_head_sha;
+   if (reviewedHead !== head) {
+     fail("stale_review", `Crabrunner review artifact is stale for the current HEAD: ${reviewedHead ?? "missing"} != ${head}.`, { reviewedHead });
+   }
+   const mergeEligible = result.review_routing?.decorrelationBasis?.mergeEligible ?? result.review_metadata?.decorrelation_merge_eligible;
+   if (mergeEligible !== true) {
+     fail("invalid_review_artifact", "Crabrunner review artifact is not decorrelation merge eligible.");
+   }
+   emit({ ok: true, code: "fresh", verdict: "pass", guidance: null, summary: "Crabrunner review artifact is fresh for the current HEAD.", reviewResult, head });
+   ' "$REVIEW_RESULT_PATH" "$HEAD_SHA"
    ```
-   If this emits `code: "stale_review"` or the guidance `rerun convergence review against HEAD.`, do NOT merge. Return to review and run convergence against HEAD.
+   If this check fails, do NOT merge. Use the emitted `code` (`missing_head_sha`, `stale_review`, or `invalid_review_artifact`) to report the exact blocker, then return to review and run convergence against HEAD.
 4. If the Mode Permission Envelope explicitly allows PR merge-queue enqueue, enqueue the PR with the gate-enforcing merge queue command:
    ```
    gh pr merge "$PR_NUMBER" --auto

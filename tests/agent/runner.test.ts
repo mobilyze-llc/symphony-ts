@@ -7,7 +7,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -27,7 +27,6 @@ import {
   type AgentRunnerError,
   WorkspaceHookError,
   augmentWorkspaceWriteSandbox,
-  resolveCmuxSpawnStateRoot,
 } from "../../src/index.js";
 import type {
   IssueStateSnapshot,
@@ -1791,11 +1790,7 @@ describe("AgentRunner", () => {
       | { writableRoots?: string[] }
       | undefined;
     expect(policy?.writableRoots).toEqual(
-      expect.arrayContaining([
-        gitdir,
-        commonGitRoot,
-        resolveCmuxSpawnStateRoot(),
-      ]),
+      expect.arrayContaining([gitdir, commonGitRoot]),
     );
     expect(policy?.writableRoots).toContain(
       dirname(join(gitdir, "index.lock")),
@@ -3635,79 +3630,5 @@ describe("augmentWorkspaceWriteSandbox (SYMPH-353)", () => {
       augmentWorkspaceWriteSandbox({ type: "dangerFullAccess" }, ROOT),
     ).toEqual({ type: "dangerFullAccess" });
     expect(augmentWorkspaceWriteSandbox(null, ROOT)).toBeNull();
-  });
-});
-
-describe("augmentWorkspaceWriteSandbox cmux-spawn grant (SYMPH-394)", () => {
-  const ROOT = "/srv/workspaces/.bare-clones";
-  const CMUX = "/home/agent/.cmux-spawn";
-
-  it("grants the cmux-spawn root alongside the bare-clone root (string policy)", () => {
-    expect(augmentWorkspaceWriteSandbox("workspace-write", ROOT, CMUX)).toEqual(
-      {
-        type: "workspace-write",
-        writableRoots: [ROOT, CMUX],
-      },
-    );
-  });
-
-  it("grants both roots on an object policy under either key form", () => {
-    // snake_case existing roots
-    expect(
-      augmentWorkspaceWriteSandbox(
-        { type: "workspace-write", writable_roots: ["/extra"] },
-        ROOT,
-        CMUX,
-      ),
-    ).toEqual({
-      type: "workspace-write",
-      writableRoots: ["/extra", ROOT, CMUX],
-    });
-
-    // camelCase existing roots
-    expect(
-      augmentWorkspaceWriteSandbox(
-        { type: "workspace-write", writableRoots: ["/extra"] },
-        ROOT,
-        CMUX,
-      ),
-    ).toEqual({
-      type: "workspace-write",
-      writableRoots: ["/extra", ROOT, CMUX],
-    });
-  });
-
-  it("dedupes the cmux-spawn root when already present", () => {
-    // Only the cmux-spawn root is missing; the bare-clone root stays once.
-    expect(
-      augmentWorkspaceWriteSandbox(
-        { type: "workspace-write", writableRoots: [ROOT] },
-        ROOT,
-        CMUX,
-      ),
-    ).toEqual({
-      type: "workspace-write",
-      writableRoots: [ROOT, CMUX],
-    });
-
-    // Both roots already present → policy returned untouched.
-    const both = { type: "workspace-write", writableRoots: [ROOT, CMUX] };
-    expect(augmentWorkspaceWriteSandbox(both, ROOT, CMUX)).toBe(both);
-  });
-
-  it("does not duplicate roots across repeated augmentation", () => {
-    const once = augmentWorkspaceWriteSandbox("workspace-write", ROOT, CMUX);
-    const twice = augmentWorkspaceWriteSandbox(once, ROOT, CMUX);
-    const thrice = augmentWorkspaceWriteSandbox(twice, ROOT, CMUX);
-    expect(thrice).toEqual({
-      type: "workspace-write",
-      writableRoots: [ROOT, CMUX],
-    });
-  });
-});
-
-describe("resolveCmuxSpawnStateRoot (SYMPH-394)", () => {
-  it("returns the ~/.cmux-spawn state dir", () => {
-    expect(resolveCmuxSpawnStateRoot()).toBe(join(homedir(), ".cmux-spawn"));
   });
 });

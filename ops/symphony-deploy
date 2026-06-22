@@ -81,53 +81,9 @@ run_or_dry() {
   fi
 }
 
-run_review_runtime_preflight() {
-  local env_file="$1"
-  local workspace node_bin
-  node_bin="${SYMPHONY_NODE:-}"
-  if [[ -z "$node_bin" ]]; then
-    node_bin="$(command -v node 2>/dev/null || true)"
-  fi
-  if [[ -z "$node_bin" ]]; then
-    die "node not found. Install Node.js on PATH or set SYMPHONY_NODE to the Node.js executable used for review runtime preflight."
-  fi
-
-  workspace="$(mktemp -d "${TMPDIR:-/tmp}/symphony-review-runtime-preflight.XXXXXX")"
-  printf '{"name":"symphony-review-runtime-preflight-smoke","private":true}\n' > "$workspace/package.json"
-
-  if $DRY_RUN; then
-    run_or_dry env -i \
-      HOME="$HOME" \
-      PATH="$LAUNCHD_RUNTIME_PATH" \
-      "$node_bin" "$SYMPHONY_ROOT/dist/src/cli/review-runtime-preflight.js" \
-      --workspace "$workspace" \
-      --env-file "$env_file"
-    rm -rf "$workspace"
-    return
-  fi
-
-  if env -i \
-    HOME="$HOME" \
-    PATH="$LAUNCHD_RUNTIME_PATH" \
-    "$node_bin" "$SYMPHONY_ROOT/dist/src/cli/review-runtime-preflight.js" \
-    --workspace "$workspace" \
-    --env-file "$env_file"; then
-    rm -rf "$workspace"
-  else
-    local preflight_status=$?
-    rm -rf "$workspace"
-    REVIEW_RUNTIME_PREFLIGHT_FAILED=true
-    warn "Review runtime preflight failed. Configure SYMPHONY_COUNCIL_REVIEW_GATE and CMUX_SPAWN_BIN, or install symphony-council-review-gate and cmux-spawn on the launchd PATH before restarting Symphony."
-    return "$preflight_status"
-  fi
-}
-
 restart_stopped_services_after_error() {
-  if $REVIEW_RUNTIME_PREFLIGHT_FAILED; then
-    warn "Deploy failed review runtime preflight — leaving stopped services down instead of starting an unverified runtime."
-    return 0
-  fi
-
+  # Restart after ordinary pull/build/config errors. Review substrate liveness
+  # is checked at dispatch time, not deploy time.
   warn "Deploy failed — restarting services..."
   "$CTL" start 2>/dev/null || true
   "$SLACK_CTL" start 2>/dev/null || true
@@ -313,7 +269,6 @@ echo ""
 
 NEED_ENV_RESTART=false
 NEED_SERVICE_REINSTALL=false
-REVIEW_RUNTIME_PREFLIGHT_FAILED=false
 SYMPHONY_UPDATED=false
 SYMPH_PRE_SHA=""
 SYMPH_POST_SHA=""
@@ -429,20 +384,12 @@ if $DO_SYMPHONY; then
   fi
 
   if [[ -f "$local_env" ]]; then
-    info "Checking review runtime preflight..."
-    REVIEW_RUNTIME_PREFLIGHT_FAILED=false
-    if run_review_runtime_preflight "$local_env"; then
-      if ! $NO_RESTART && service_installed; then
-        NEED_SERVICE_REINSTALL=true
-      fi
-      ok "Review runtime preflight passed"
-    else
-      preflight_status=$?
-      restart_stopped_services_after_error
-      exit "$preflight_status"
+    info "Using service environment from .env; review/QA runs through crabrunner when configured."
+    if $NEED_ENV_RESTART && ! $NO_RESTART && service_installed; then
+      NEED_SERVICE_REINSTALL=true
     fi
   else
-    warn ".env not found — skipping review runtime preflight"
+    warn ".env not found — skipping service environment refresh"
   fi
 
   # Prune stale branches (squash-merged PRs leave local refs behind)
@@ -489,8 +436,7 @@ if ! $NO_RESTART && $DO_SYMPHONY; then
   if ! service_installed; then
     info "Service not installed — skipping"
   elif $NEED_ENV_RESTART || $NEED_SERVICE_REINSTALL; then
-    # Reinstall after a passing review-runtime preflight so the launchd plist
-    # is regenerated from the same .env that was just validated.
+    # Reinstall so launchd sees the same .env file deploy just refreshed.
     info "Reinstalling service (plist bakes validated env vars)..."
     run_or_dry "$CTL" uninstall
     run_or_dry "$CTL" install

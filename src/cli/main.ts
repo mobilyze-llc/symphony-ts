@@ -229,9 +229,10 @@ export async function startCliHost(
     tokenPresent: slackToken !== undefined,
   });
 
-  // Gated-canary crabrunner backend (SYMPH-853): registered only when
-  // SYMPHONY_CRABRUNNER_ROOT is set and non-empty. Absent => production is
-  // unchanged (no crabrunner backend; the host keeps only current-runner).
+  // Crabrunner backend (SYMPH-853/SYMPH-812): registered only when
+  // SYMPHONY_CRABRUNNER_ROOT is set and non-empty. Workflows that opt into
+  // review_execution.crabrunner_job_group.enabled fail closed without this env,
+  // because the CMUX review runtime has been removed from the active path.
   // The workflow config supplies the prompt-rendering inputs (SYMPH-856) so the
   // built backend renders + threads the stage prompt into each delegated lane.
   const stageExecutionBackends = buildCrabrunnerStageExecutionBackends(
@@ -267,7 +268,9 @@ export async function startCliHost(
 
 /**
  * Build the gated crabrunner stage-execution backend map from environment, or
- * return null when the canary is not enabled (the common production path).
+ * return null when the environment is not enabled. For workflows with
+ * review_execution.crabrunner_job_group.enabled, null is intentionally
+ * fail-closed: the host will not fall back to the removed CMUX review runtime.
  *
  * Enabled iff `SYMPHONY_CRABRUNNER_ROOT` is set and non-empty (the Crucible
  * repo root). `SYMPHONY_CRABRUNNER_TARGET_REPO` selects the target repo root

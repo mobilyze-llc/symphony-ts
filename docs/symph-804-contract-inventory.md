@@ -2,13 +2,24 @@
 
 Date: 2026-06-19
 
+Status after SYMPH-812 (2026-06-21): this is a pre-removal inventory, not
+current runtime guidance. The active package bins for
+`symphony-council-review-gate` and `symphony-review-runtime-preflight`, the
+`probe:review-runtime` script, direct workflow/deploy calls into the local CMUX
+review runtime, and the `~/.cmux-spawn` worker sandbox grant have been removed
+from the active product path. Use
+[`docs/operations/03-crabrunner-review-qa.md`](operations/03-crabrunner-review-qa.md)
+for the current crabrunner review/QA runbook and holding pattern. Any
+"active" classifications below describe the 2026-06-19 inventory snapshot
+unless the row names a backend-neutral contract that still survives.
+
 Scope: characterize the current review/stage contracts, mine the CMUX removal surface, and classify what the SYMPH-805 through SYMPH-812 migration should preserve, delete, collapse, extract, or defer.
 
 Non-goals: this document does not implement the crabrunner backend, does not remove CMUX, and does not preserve old review abstractions just because they exist.
 
 ## Sanity Check
 
-Run the characterization suite:
+Historical characterization suite used for this inventory:
 
 ```bash
 pnpm exec vitest run tests/cli/council-review-gate.test.ts tests/orchestrator/core.test.ts tests/review/headless-council-gate.test.ts tests/review/review-journal-events.test.ts
@@ -20,7 +31,9 @@ Run the grep inventory used for the CMUX removal matrix:
 rg -n --glob '!node_modules/**' --glob '!dist/**' --glob '!handoffs/**' "cmux|CMUX|cmux-spawn|CMUX_SPAWN_BIN|symphony-council-review-gate|headless-council|review-runtime-preflight" .
 ```
 
-Do not treat the result count as a contract. The command is the contract: it must find the CMUX and review-runtime terms above and let the next operator sort active runtime surfaces from historical references.
+Do not treat the result count as a contract. The command was the pre-removal
+inventory surface: it found CMUX and review-runtime terms and let the operator
+sort active runtime surfaces from historical references.
 
 ## Characterization Added
 
@@ -122,7 +135,7 @@ Defer only to existing Linear issues:
 - SYMPH-811 hardens state projection, usage, failure, replay, schema-version, and validator lockstep.
 - SYMPH-812 deletes CMUX surfaces after parity and updates active docs/templates.
 
-## Required Answers
+## Historical Required Answers
 
 Which review CLIs and preflight commands should disappear rather than be replatformed?
 

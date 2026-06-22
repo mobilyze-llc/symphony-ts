@@ -160,8 +160,12 @@ import {
 import type {
   CrabrunnerReviewStageDispatchContext,
   CrabrunnerReviewStageDispatcher,
+  CrabrunnerReviewStageResult,
 } from "../review/crabrunner-review-stage.js";
-import type { StructuredReviewerArtifact } from "../review/headless-council-gate.js";
+import type {
+  HeadlessCouncilGateResult,
+  StructuredReviewerArtifact,
+} from "../review/headless-council-gate.js";
 import { createRunnerFromConfig, isAiSdkRunner } from "../runners/factory.js";
 import type { RunnerKind } from "../runners/types.js";
 import { getDurableCodexSessionArtifactDirectory } from "../shared/codex-session-artifacts.js";
@@ -676,9 +680,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   private readonly reviewStageDispatcher: CrabrunnerReviewStageDispatcher | null;
 
   /**
-   * One-shot latch so the "gate enabled but no review dispatcher wired" warning
-   * (SYMPH-855 council P2-2) is logged once per host lifetime, not on every
-   * review dispatch.
+   * One-shot latch so the "gate enabled but review wiring is incomplete" warning
+   * (SYMPH-855 council P2-2 / SYMPH-812) is logged once per host lifetime, not
+   * on every review dispatch.
    */
   private reviewGateMismatchWarned = false;
 
@@ -4676,25 +4680,27 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           effectiveHardStops.maxDollarBudgetUsd * Math.max(1, budgetMultiplier),
       }),
     };
-    // SYMPH-855: a review stage runs its reviewer (+ optional browser-QA) lanes
-    // as a crabrunner job group when the per-workflow gate is on AND a crabrunner
-    // backend is registered AND a dispatcher is wired (default-closed, so the
-    // live review path is unchanged otherwise). The dispatcher produces the SAME
-    // review-result.json + [REVIEW_GATE_RESULT_PATH:] marker the legacy path
-    // emits, surfaced here as an AgentRunResult whose final message carries the
-    // marker — so the orchestrator's unchanged finalization extracts/validates
-    // it and rework/merge-readiness stay journal-derived.
+    // SYMPH-855/SYMPH-812: a review stage runs its reviewer (+ optional
+    // browser-QA) lanes as a crabrunner job group when the per-workflow gate is
+    // on. Once enabled, missing crabrunner wiring fails closed instead of
+    // silently falling back to the pre-cutover local review path. The
+    // dispatcher produces the SAME review-result.json +
+    // [REVIEW_GATE_RESULT_PATH:] marker the legacy path emitted, surfaced here
+    // as an AgentRunResult whose final message carries the marker — so the
+    // orchestrator's unchanged finalization extracts/validates it and
+    // rework/merge-readiness stay journal-derived.
     //
     // SYMPH-852: a stage that declares execution.subStages runs its sub-stages
     // in sequence through the StageExecutionBackend seam and folds them into ONE
     // aggregate result; otherwise dispatch the single execution unchanged.
     // Every branch resolves to one AgentRunResult fed into the SAME finalization
     // below, so the orchestrator still performs exactly one stage transition.
-    const crabrunnerReviewBackend =
-      this.resolveCrabrunnerReviewBackend(stageName);
-    const resultPromise: Promise<AgentRunResult> =
-      crabrunnerReviewBackend !== null
-        ? this.executeCrabrunnerReviewStageDispatch({
+    const resultPromise: Promise<AgentRunResult> = Promise.resolve().then(
+      async () => {
+        const crabrunnerReviewBackend =
+          this.resolveCrabrunnerReviewBackend(stageName);
+        if (crabrunnerReviewBackend !== null) {
+          return this.executeCrabrunnerReviewStageDispatch({
             issue,
             attempt,
             stage,
@@ -4704,26 +4710,32 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
               executionJob.identity.baseRef ?? resolveStageExecutionBaseRef(),
             artifactRoot: executionJob.identity.artifactRoot,
             backend: crabrunnerReviewBackend,
-          })
-        : stage?.execution?.subStages && stage.execution.subStages.length > 0
-          ? this.executeDecomposedStageDispatch({
-              issue,
-              attempt,
-              stage,
-              stageName,
-              subStages: stage.execution.subStages,
-              effectiveHardStops,
-              signal: controller.signal,
-              baseRef:
-                executionJob.identity.baseRef ?? resolveStageExecutionBaseRef(),
-              artifactRoot: executionJob.identity.artifactRoot,
-            })
-          : stageExecutionBackend
-              .execute({
-                job: executionJob,
-                runnerInput,
-              })
-              .then(({ result }) => result);
+          });
+        }
+        if (
+          stage?.execution?.subStages &&
+          stage.execution.subStages.length > 0
+        ) {
+          return this.executeDecomposedStageDispatch({
+            issue,
+            attempt,
+            stage,
+            stageName,
+            subStages: stage.execution.subStages,
+            effectiveHardStops,
+            signal: controller.signal,
+            baseRef:
+              executionJob.identity.baseRef ?? resolveStageExecutionBaseRef(),
+            artifactRoot: executionJob.identity.artifactRoot,
+          });
+        }
+        const { result } = await stageExecutionBackend.execute({
+          job: executionJob,
+          runnerInput,
+        });
+        return result;
+      },
+    );
     const completion = resultPromise
       .then(async (result) => {
         execution.lastResult = result;
@@ -4814,13 +4826,12 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   }
 
   /**
-   * SYMPH-855 — resolve the crabrunner backend for a review stage IFF the gate
-   * fires, else null. The gate is default-closed and DOUBLY inert: it requires
-   * (1) the per-workflow `reviewExecution.crabrunnerJobGroup` flag on,
-   * (2) the stage to be "review", (3) an injected review dispatcher, AND (4) a
-   * registered "crabrunner" StageExecutionBackend. Absent any of these, the live
-   * review path is byte-for-byte unchanged. Returning the resolved backend (not
-   * a boolean) lets the dispatch adapter route every lane through the one seam.
+   * SYMPH-855/SYMPH-812 — resolve the crabrunner backend for a review stage IFF
+   * the gate fires, else null. The gate is still explicit: it requires the
+   * per-workflow `reviewExecution.crabrunnerJobGroup` flag and stage name
+   * "review". Once enabled, the crabrunner backend and dispatcher are required
+   * and missing wiring fails closed; returning the resolved backend (not a
+   * boolean) lets the dispatch adapter route every lane through the one seam.
    */
   private resolveCrabrunnerReviewBackend(
     stageName: string | null,
@@ -4836,23 +4847,33 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       backend !== undefined && backend.backend === "crabrunner";
 
     if (this.reviewStageDispatcher === null) {
-      // SYMPH-855 council P2-2: an operator who enabled the gate AND registered
-      // the crabrunner backend but has no dispatcher wired (the production
-      // dispatcher is SYMPH-862) would otherwise SILENTLY get the legacy path.
-      // Make the inert fallback observable — once per host lifetime — so the
-      // mismatch is diagnosable instead of looking like the gate "did nothing".
+      // SYMPH-812: a workflow that opts into crabrunner review must not slide
+      // back into the removed local review runtime. Warn once for observability,
+      // then throw so worker finalization records an abnormal review attempt.
       if (hasCrabrunnerBackend && !this.reviewGateMismatchWarned) {
         this.reviewGateMismatchWarned = true;
         void this.logger?.warn(
           "crabrunner_review_dispatcher_unwired",
-          "crabrunner review gate enabled but no review dispatcher wired (SYMPH-862); falling back to legacy review path",
-          { outcome: "degraded", stage: stageName },
+          "crabrunner review gate enabled but no review dispatcher wired; failing closed",
+          { outcome: "failed", stage: stageName },
         );
       }
-      return null;
+      throw new Error(
+        "crabrunner review gate enabled but no review dispatcher is wired",
+      );
     }
     if (!hasCrabrunnerBackend) {
-      return null;
+      if (!this.reviewGateMismatchWarned) {
+        this.reviewGateMismatchWarned = true;
+        void this.logger?.warn(
+          "crabrunner_review_backend_unregistered",
+          "crabrunner review gate enabled but no crabrunner stage execution backend registered; failing closed",
+          { outcome: "failed", stage: stageName },
+        );
+      }
+      throw new Error(
+        "crabrunner review gate enabled but no crabrunner stage execution backend is registered",
+      );
     }
     return backend ?? null;
   }
@@ -4910,8 +4931,30 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     return this.buildReviewMarkerRunResult(
       input.issue,
       input.attempt,
-      dispatched.markerMessage,
+      this.messageForCrabrunnerReviewDispatch(dispatched),
     );
+  }
+
+  private messageForCrabrunnerReviewDispatch(
+    dispatched: CrabrunnerReviewStageResult,
+  ): string {
+    const result = dispatched.result;
+    if (result.verdict === "pass") {
+      return dispatched.markerMessage;
+    }
+
+    const conditions =
+      result.degradedConditions.length > 0
+        ? result.degradedConditions.join(", ")
+        : result.summary;
+    const stageSignal = isCrabrunnerReviewSubstrateOnlyFailure(result)
+      ? "[STAGE_FAILED: infra]"
+      : "[STAGE_FAILED: review]";
+    return [
+      `Crabrunner review job group ${result.verdict}: ${conditions}`,
+      `Review result path: ${dispatched.reviewResultPath}`,
+      stageSignal,
+    ].join("\n");
   }
 
   /**
@@ -6695,6 +6738,47 @@ function createGitBaseRefCandidates(input: {
 
   candidates.push("origin/main", "main", "origin/master", "master");
   return [...new Set(candidates)];
+}
+
+function isCrabrunnerReviewSubstrateOnlyFailure(
+  result: HeadlessCouncilGateResult,
+): boolean {
+  if (result.verdict !== "error") {
+    return false;
+  }
+  if (hasOpenBlockingReviewFinding(result)) {
+    return false;
+  }
+  return (
+    result.degradedConditions.some(isReviewSubstrateDegradedCondition) ||
+    result.lanes.some((lane) =>
+      lane.degradedReason === null
+        ? false
+        : isReviewSubstrateDegradedCondition(`${lane.degradedReason}:`),
+    )
+  );
+}
+
+function isReviewSubstrateDegradedCondition(condition: string): boolean {
+  return (
+    condition.startsWith("substrate_stall:") ||
+    condition.startsWith("malformed_substrate_json:") ||
+    condition === "routing_author_provenance_missing" ||
+    condition === "routing_absent_decorrelated_reviewer_artifact" ||
+    condition.startsWith("routing_required_lane_not_decorrelated:")
+  );
+}
+
+function hasOpenBlockingReviewFinding(
+  result: HeadlessCouncilGateResult,
+): boolean {
+  return result.lanes.some((lane) =>
+    lane.structuredArtifact?.findings.some(
+      (finding) =>
+        (finding.severity === "P1" || finding.severity === "P2") &&
+        finding.leadDisposition === "open",
+    ),
+  );
 }
 
 function resolveStageExecutionBaseRef(): string {

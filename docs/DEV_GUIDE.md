@@ -269,35 +269,20 @@ commands. If a specific external CLI still does not find usable credentials in y
 provide that tool's credential explicitly via an env var such as `GH_TOKEN`, `GITHUB_TOKEN`, or a
 provider-specific API key.
 
-Product review stages additionally require the headless council gate and CMUX launcher to resolve
-from product workspaces. Production hosts should choose and record one stable install mechanism:
+Product review stages use the crabrunner-backed review/QA job group. Production
+hosts must provide `SYMPHONY_CRABRUNNER_ROOT` pointing at the Crucible checkout
+that owns `bin/crabrunner`; set `SYMPHONY_CRABRUNNER_TARGET_REPO`,
+`SYMPHONY_CRABRUNNER_HOST`, and the remote crabrunner variables when lanes run
+against a different checkout or host. Shipped workflows opt in with
+`review_execution.crabrunner_job_group.enabled: true`; once enabled, missing
+backend or dispatcher wiring fails closed.
 
-- export `SYMPHONY_COUNCIL_REVIEW_GATE` to an executable gate wrapper, or install
-  `symphony-council-review-gate` on the launchd `PATH`;
-- export `CMUX_SPAWN_BIN` to an executable `cmux-spawn`, or install `cmux-spawn` on the launchd
-  `PATH`.
-
-The smoke check intentionally runs from a non-`symphony-ts` workspace and refuses a repo-local
-`dist/src/cli/council-review-gate.js` fallback:
-
-```bash
-pnpm build
-pnpm probe:review-runtime -- --workspace /path/to/product-repo --env-file .env
-```
-
-The smoke runs `symphony-council-review-gate --help` and
-`cmux-spawn preflight --caffeinate --json`.
-
-Codex-led implementation workflows must pass `--author-family codex` when they
-run the council gate. The shipped workflow templates default
-`SYMPHONY_COUNCIL_AUTHOR_FAMILY` to `codex`; non-Codex-led product workflows
-must override that family before review. If every reviewer lane passes but the
-aggregate result fails only because author-family/decorrelation metadata is
-missing or wrong, stop for review procedure/provenance repair instead of sending
-the issue back to product implementation.
-
-`ops/symphony-deploy` runs the same preflight against a temporary product-shaped workspace after
-refreshing `.env` and before restarting the service.
+Use `docs/operations/03-crabrunner-review-qa.md` for review/QA smoke, parity,
+and failure triage. Until Symphony's crabrunner path has passed its gates in
+production, Codex/session-orchestrator remains the holding pattern for
+merge-authoritative review. The historical CMUX deploy runbook remains only for
+audit and rollback archaeology; it is not a live fallback, and `ops/symphony-deploy`
+no longer probes the removed local review runtime.
 
 The exact accepted sandbox and approval values depend on the installed Codex app-server version. To
 inspect the local schema, run `codex app-server generate-json-schema --out <dir>` and inspect the
