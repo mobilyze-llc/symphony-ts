@@ -47,6 +47,45 @@ describe("config-resolver queue triage (SYMPH-784)", () => {
     expect(resolved.queueTriage?.admissionGuardrail).toEqual({
       enabled: false,
     });
+    // comment enrichment (SYMPH-896) off by default — the N+1 comment fetch is an
+    // unmeasured cost surface; an operator opts in once the measurement is trusted.
+    expect(resolved.queueTriage?.commentEnrichment).toEqual({
+      enabled: false,
+      maxCandidates: 25,
+      maxCommentPages: 3,
+      maxComments: 6,
+      maxCommentChars: 400,
+      maxTotalChars: 1200,
+    });
+  });
+
+  it("honors explicit comment_enrichment overrides (SYMPH-896)", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      config: {
+        queue_triage: {
+          enabled: true,
+          comment_enrichment: {
+            enabled: true,
+            max_candidates: 10,
+            max_comment_pages: 2,
+            max_comments: 4,
+            max_comment_chars: 200,
+            max_total_chars: 600,
+          },
+        },
+      },
+      promptTemplate: "Prompt",
+    });
+
+    expect(resolved.queueTriage?.commentEnrichment).toEqual({
+      enabled: true,
+      maxCandidates: 10,
+      maxCommentPages: 2,
+      maxComments: 4,
+      maxCommentChars: 200,
+      maxTotalChars: 600,
+    });
   });
 
   it("honors an explicit admission_guardrail.enabled override (SYMPH-794)", () => {

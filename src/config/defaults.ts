@@ -125,6 +125,18 @@ export const DEFAULT_QUEUE_TRIAGE_CONTROL_DOC_ENABLED = false;
 // admitting until an operator opts into explicit-signal-only dispatch.
 export const DEFAULT_QUEUE_TRIAGE_ADMISSION_GUARDRAIL_ENABLED = false;
 
+// Curated-comment enrichment (SYMPH-874 Tier 3 / SYMPH-896): off by default —
+// it is the only enrichment that costs an N+1 comment fetch over the backlog, so
+// an operator opts in once the report-only cost measurement is trusted. The size
+// bounds below are safety rails (the AC requires size caps), tuned from the
+// measurement rather than guessed.
+export const DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_ENABLED = false;
+export const DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_CANDIDATES = 25;
+export const DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_COMMENT_PAGES = 3;
+export const DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_COMMENTS = 6;
+export const DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_COMMENT_CHARS = 400;
+export const DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_TOTAL_CHARS = 1200;
+
 // Watchdog L2 stuck-ticket triage defaults (SYMPH-399). Disabled until the
 // operator opts a product in (calibration gate).
 export const DEFAULT_STUCK_TRIAGE_ENABLED = false;

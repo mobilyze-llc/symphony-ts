@@ -6185,6 +6185,10 @@ export async function startRuntimeService(
     // A re-plan predicate trip or an operator modify_plan intent forces a
     // re-plan now, bypassing the heartbeat cadence (SYMPH-787/789).
     const force = runtimeHost.consumeStandingPlanReplanRequest();
+    // SYMPH-896 comment enrichment needs the LinearTrackerClient comment fetch;
+    // narrow once here (the dep is inert unless commentEnrichment is enabled).
+    const linearTracker =
+      tracker instanceof LinearTrackerClient ? tracker : null;
     void runStandingPlanShadowTick({
       config: currentConfig.queueTriage,
       workspaceRoot: workspaceManager.root,
@@ -6208,6 +6212,17 @@ export async function startRuntimeService(
         void logger.info(event, message, fields);
       },
       now: () => new Date(),
+      ...(linearTracker === null
+        ? {}
+        : {
+            fetchIssueComments: (
+              issueId: string,
+              options: { maxPages?: number },
+            ) => linearTracker.fetchIssueComments(issueId, options),
+          }),
+      ...(currentConfig.operatorAnchors === undefined
+        ? {}
+        : { operatorConfig: currentConfig.operatorAnchors }),
       force,
     })
       .then((result) => {

@@ -585,6 +585,16 @@ export interface WorkflowQueueTriageConfig {
    * during a Manager outage (council R1, Pi P3).
    */
   admissionGuardrail: WorkflowQueueTriageAdmissionGuardrailConfig;
+  /**
+   * Curated-comment planner enrichment (SYMPH-874 Tier 3 / SYMPH-896).
+   * Default-DISABLED and separate from `enabled` because it is the only
+   * enrichment that costs an N+1 comment fetch over the backlog — an unmeasured
+   * recurring cost surface. When on, the shadow tick fetches + curates + injects
+   * curated comments into the planner prompt AND logs a report-only cost
+   * measurement; the topology (two-pass vs curated one-pass) is tuned from that
+   * measurement, not guessed (design SYMPH-795 §9 / measure-before-caps).
+   */
+  commentEnrichment: WorkflowQueueTriageCommentEnrichmentConfig;
 }
 
 export interface WorkflowQueueTriageControlDocConfig {
@@ -595,6 +605,25 @@ export interface WorkflowQueueTriageControlDocConfig {
 
 export interface WorkflowQueueTriageAdmissionGuardrailConfig {
   enabled: boolean;
+}
+
+export interface WorkflowQueueTriageCommentEnrichmentConfig {
+  /** Master switch for the comment fetch + curation + injection (default false). */
+  enabled: boolean;
+  /**
+   * Max backlog candidates to fetch comments for per tick — bounds the N+1
+   * fetch. Candidates beyond the cap are skipped and the truncation is logged
+   * (no silent caps).
+   */
+  maxCandidates: number;
+  /** Max comment pages fetched per issue (passed to fetchIssueComments). */
+  maxCommentPages: number;
+  /** Max curated comments kept per issue (newest-first). */
+  maxComments: number;
+  /** Max characters per curated comment body. */
+  maxCommentChars: number;
+  /** Max total curated characters per issue. */
+  maxTotalChars: number;
 }
 
 export interface ResolvedWorkflowConfig {
