@@ -73,6 +73,12 @@ import {
   DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_QUEUE_TRIAGE_ADMISSION_GUARDRAIL_ENABLED,
   DEFAULT_QUEUE_TRIAGE_AUTO_RELEASE_FRONTIER,
+  DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_ENABLED,
+  DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_CANDIDATES,
+  DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_COMMENTS,
+  DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_COMMENT_CHARS,
+  DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_COMMENT_PAGES,
+  DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_TOTAL_CHARS,
   DEFAULT_QUEUE_TRIAGE_CONTROL_DOC_ENABLED,
   DEFAULT_QUEUE_TRIAGE_ENABLED,
   DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS,
@@ -501,6 +507,7 @@ function resolveQueueTriageConfig(
   const envelope = asRecord(queueTriage.envelope);
   const allowedModes = readStringList(envelope.allowed_modes, []);
   const allowedRisk = readString(envelope.allowed_risk);
+  const commentEnrichment = asRecord(queueTriage.comment_enrichment);
   return {
     enabled: readBoolean(queueTriage.enabled) ?? DEFAULT_QUEUE_TRIAGE_ENABLED,
     shadowMode:
@@ -524,6 +531,26 @@ function resolveQueueTriageConfig(
       enabled:
         readBoolean(asRecord(queueTriage.admission_guardrail).enabled) ??
         DEFAULT_QUEUE_TRIAGE_ADMISSION_GUARDRAIL_ENABLED,
+    },
+    commentEnrichment: {
+      enabled:
+        readBoolean(commentEnrichment.enabled) ??
+        DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_ENABLED,
+      maxCandidates:
+        readPositiveInteger(commentEnrichment.max_candidates) ??
+        DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_CANDIDATES,
+      maxCommentPages:
+        readPositiveInteger(commentEnrichment.max_comment_pages) ??
+        DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_COMMENT_PAGES,
+      maxComments:
+        readPositiveInteger(commentEnrichment.max_comments) ??
+        DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_COMMENTS,
+      maxCommentChars:
+        readPositiveInteger(commentEnrichment.max_comment_chars) ??
+        DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_COMMENT_CHARS,
+      maxTotalChars:
+        readPositiveInteger(commentEnrichment.max_total_chars) ??
+        DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_TOTAL_CHARS,
     },
     envelope: resolveStandingPlanEnvelope({
       version: readPositiveInteger(envelope.version) ?? 1,

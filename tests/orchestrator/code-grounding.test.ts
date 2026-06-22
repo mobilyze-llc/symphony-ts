@@ -25,6 +25,7 @@ import {
   CODE_GROUNDING_SUPPORTED_PATH_PREFIXES,
   CODE_GROUNDING_SYMBOL_PRECISION,
   decideCodeGroundingEvidenceStatus,
+  extractGroundingPathHints,
   getCodeGroundingMutexRegistrySizesForTests,
   removeAbandonedCodeGroundingFileLock,
   resolveCodeGroundingPaths,
@@ -1945,6 +1946,63 @@ async function createSourceRepo(): Promise<string> {
   await git(repo, ["commit", "-m", "Initial"]);
   return repo;
 }
+
+describe("extractGroundingPathHints (SYMPH-895)", () => {
+  it("extracts backtick and bare repo-relative paths, de-lining and de-duping", () => {
+    const text = [
+      "Code: `src/agent/triage-planner.ts:39` (PlannerCandidate) and",
+      "`src/agent/triage-planner.ts:121` (buildPlannerPrompt).",
+      "Also touches src/orchestrator/standing-plan-shadow.ts and",
+      "tests/agent/triage-planner.test.ts in the suite.",
+    ].join("\n");
+    expect(extractGroundingPathHints(text)).toEqual([
+      "src/agent/triage-planner.ts",
+      "src/orchestrator/standing-plan-shadow.ts",
+      "tests/agent/triage-planner.test.ts",
+    ]);
+  });
+
+  it("returns [] for absent, blank, or path-free text ('absent grounding → no hint')", () => {
+    expect(extractGroundingPathHints(null)).toEqual([]);
+    expect(extractGroundingPathHints(undefined)).toEqual([]);
+    expect(extractGroundingPathHints("   ")).toEqual([]);
+    expect(
+      extractGroundingPathHints("No code references here, just prose."),
+    ).toEqual([]);
+  });
+
+  it("caps the hint list at maxHints (and 0 yields none)", () => {
+    const text = "a `src/a.ts` b `src/b.ts` c `src/c.ts` d `src/d.ts`";
+    expect(extractGroundingPathHints(text, { maxHints: 2 })).toEqual([
+      "src/a.ts",
+      "src/b.ts",
+    ]);
+    expect(extractGroundingPathHints(text, { maxHints: 0 })).toEqual([]);
+  });
+
+  it("ignores unsupported-prefix and non-canonical (path-traversal) tokens", () => {
+    expect(
+      extractGroundingPathHints(
+        "Edits `lib/foo.ts`, `/etc/passwd`, and `src/../secret.ts` but keeps `src/ok.ts`.",
+      ),
+    ).toEqual(["src/ok.ts"]);
+  });
+
+  it("drops a pathological over-long path token", () => {
+    const longPath = `src/${"x".repeat(200)}.ts`;
+    expect(
+      extractGroundingPathHints(`ref \`${longPath}\` and \`src/short.ts\``),
+    ).toEqual(["src/short.ts"]);
+  });
+
+  it("strips trailing sentence punctuation from bare prose paths (council Track)", () => {
+    expect(
+      extractGroundingPathHints(
+        "Touches src/foo.ts. Also see src/bar.ts, done.",
+      ),
+    ).toEqual(["src/foo.ts", "src/bar.ts"]);
+  });
+});
 
 async function tempRoot(prefix: string): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), prefix));

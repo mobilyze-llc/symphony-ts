@@ -818,6 +818,78 @@ function isCanonicalRepoRelativePath(path: string): boolean {
     );
 }
 
+/**
+ * Per-candidate path-hint defaults for the planner enrichment (SYMPH-895). These
+ * bound the hint list so a body that cites dozens of files cannot blow up the
+ * Opus prompt; tune from measured context size (the design's measure-first
+ * stance). The length cap drops a single pathological "path" token.
+ */
+const DEFAULT_GROUNDING_PATH_HINT_LIMIT = 8;
+const MAX_GROUNDING_PATH_HINT_LENGTH = 160;
+
+/**
+ * Resolve likely-touched repo-relative paths cited in free text (SYMPH-895),
+ * reusing the code-grounding path vocabulary (the supported prefixes +
+ * PATH_EVIDENCE_PATTERN + the canonical-path check) so the planner's
+ * "same-surface" signal is grounded in the SAME path recognition the
+ * verification engine uses. Pure and deterministic — no checkout, no I/O.
+ *
+ * Returns de-duplicated, de-lined (line/column ranges stripped), canonical paths
+ * capped to `maxHints`. Both backtick-fenced spans (e.g.
+ * `` `src/agent/triage-planner.ts:39` ``) and bare references in prose are
+ * recognized; ordering is backtick-fenced paths first (in document order), then
+ * bare references (in document order), each kept on first occurrence. Path hints
+ * are an unordered same-surface SET (overlap detection), so this grouped order is
+ * intentional, not positional. Empty when the text is absent/blank or cites no
+ * recognizable path — the caller renders nothing ("absent grounding → no hint").
+ */
+export function extractGroundingPathHints(
+  text: string | null | undefined,
+  options: { maxHints?: number } = {},
+): string[] {
+  if (text === null || text === undefined) {
+    return [];
+  }
+  const maxHints = options.maxHints ?? DEFAULT_GROUNDING_PATH_HINT_LIMIT;
+  if (maxHints <= 0) {
+    return [];
+  }
+  const hints: string[] = [];
+  const seen = new Set<string>();
+  const add = (candidate: PathEvidenceCandidate | null): void => {
+    if (candidate === null || hints.length >= maxHints) {
+      return;
+    }
+    // Strip trailing sentence punctuation a bare prose reference can capture
+    // (e.g. "…in src/foo.ts." → "src/foo.ts."): "." is a valid path char so the
+    // pattern keeps it, producing a bogus hint (council Track). The source paths
+    // are already canonical, so only terminal .,;: is removed.
+    const path = candidate.path.replace(/[.,;:]+$/, "");
+    if (
+      path === "" ||
+      !looksLikePath(path) ||
+      path.length > MAX_GROUNDING_PATH_HINT_LENGTH ||
+      seen.has(path)
+    ) {
+      return;
+    }
+    seen.add(path);
+    hints.push(path);
+  };
+  // Backtick-fenced path-like spans first (the dominant ticket-body convention).
+  for (const match of text.matchAll(/`([^`]+)`/g)) {
+    const value = match[1]?.trim();
+    if (value !== undefined && value !== "" && looksLikePath(value)) {
+      add(parsePathEvidenceCandidate(value));
+    }
+  }
+  // Bare path references anywhere in the prose.
+  for (const match of text.matchAll(PATH_EVIDENCE_PATTERN)) {
+    add(parsePathEvidenceCandidate(match[1] ?? ""));
+  }
+  return hints;
+}
+
 interface ScanCitation {
   path: string;
   startLine: number;

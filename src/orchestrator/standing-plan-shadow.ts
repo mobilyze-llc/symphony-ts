@@ -1,3 +1,11 @@
+import {
+  type CuratedPlannerComment,
+  type PlannerCommentCurationConfig,
+  type PlannerCommentCurationResult,
+  type PlannerCommentEnrichmentMeasurement,
+  curatePlannerComments,
+  measurePlannerCommentEnrichment,
+} from "../agent/planner-comment-curation.js";
 import type {
   PlannerContext,
   PlannerInFlight,
@@ -6,9 +14,15 @@ import type {
   TriagePlannerDeps,
 } from "../agent/triage-planner.js";
 import { runTriagePlanner } from "../agent/triage-planner.js";
-import type { WorkflowQueueTriageConfig } from "../config/types.js";
+import type {
+  WorkflowOperatorAnchorsConfig,
+  WorkflowQueueTriageCommentEnrichmentConfig,
+  WorkflowQueueTriageConfig,
+} from "../config/types.js";
 import type { Issue } from "../domain/model.js";
 import type { PlanEnvelope, StandingPlan } from "../domain/standing-plan.js";
+import type { LinearIssueComment } from "../tracker/linear-client.js";
+import { extractGroundingPathHints } from "./code-grounding.js";
 import { loadStandingPlan, recordPlanRevision } from "./standing-plan-store.js";
 
 // ---------------------------------------------------------------------------
@@ -55,6 +69,18 @@ export function assembleShadowPlannerContext(
       // ticket content (surface / area / intent), not just one-line titles.
       description: issue.description,
       labels: issue.labels,
+      // SYMPH-874 Tier 2 / SYMPH-895: the strongest same-surface signal —
+      // concrete file overlap. Deterministically extract the repo-relative
+      // paths the ticket itself cites (title + body) via the code-grounding
+      // path vocabulary. Absent/blank/no-path → [] → rendered as nothing.
+      pathHints: extractGroundingPathHints(
+        [issue.title, issue.description]
+          .filter(
+            (value): value is string =>
+              typeof value === "string" && value.trim() !== "",
+          )
+          .join("\n"),
+      ),
     }));
   return {
     backlog,
@@ -62,6 +88,99 @@ export function assembleShadowPlannerContext(
     openPrs: input.openPrs ?? [],
     recentlyMerged: input.recentlyMerged ?? [],
     envelope: input.envelope,
+  };
+}
+
+export interface EnrichPlannerContextWithCommentsDeps {
+  context: PlannerContext;
+  config: WorkflowQueueTriageCommentEnrichmentConfig;
+  fetchIssueComments: (
+    issueId: string,
+    options: { maxPages?: number },
+  ) => Promise<LinearIssueComment[]>;
+  operatorConfig?: Pick<
+    WorkflowOperatorAnchorsConfig,
+    "operatorAllowlist" | "serviceAccounts"
+  >;
+}
+
+export interface EnrichPlannerContextWithCommentsResult {
+  context: PlannerContext;
+  measurement: PlannerCommentEnrichmentMeasurement;
+}
+
+/**
+ * Curated-comment enrichment (SYMPH-874 Tier 3 / SYMPH-896). Fetches issue
+ * comments for the head of the backlog (bounded by `maxCandidates` — the N+1
+ * fetch is the measured cost), curates each deterministically, attaches the
+ * survivors to a NEW candidate (never mutates input), and returns the enriched
+ * context plus a report-only measurement. Per-candidate fetch failures are
+ * swallowed (best-effort): one bad fetch must never abort enrichment or the tick.
+ */
+export async function enrichPlannerContextWithComments(
+  deps: EnrichPlannerContextWithCommentsDeps,
+): Promise<EnrichPlannerContextWithCommentsResult> {
+  const { context, config } = deps;
+  const curationConfig: PlannerCommentCurationConfig = {
+    maxComments: config.maxComments,
+    maxCommentChars: config.maxCommentChars,
+    maxTotalChars: config.maxTotalChars,
+  };
+  const toFetch = context.backlog.slice(0, Math.max(0, config.maxCandidates));
+  const candidatesTruncated = context.backlog.length - toFetch.length;
+
+  const results: PlannerCommentCurationResult[] = [];
+  const enrichedById = new Map<string, CuratedPlannerComment[]>();
+  let candidatesFailed = 0;
+  for (const candidate of toFetch) {
+    let curation: PlannerCommentCurationResult | null = null;
+    try {
+      const comments = await deps.fetchIssueComments(candidate.issueId, {
+        maxPages: config.maxCommentPages,
+      });
+      curation = curatePlannerComments(
+        comments.map((comment) => ({
+          id: comment.id,
+          body: comment.body,
+          createdAt: comment.createdAt,
+          actor: comment.botActor ?? comment.user,
+        })),
+        {
+          config: curationConfig,
+          ...(deps.operatorConfig === undefined
+            ? {}
+            : { operatorConfig: deps.operatorConfig }),
+        },
+      );
+    } catch {
+      // Best-effort per candidate: a single comment-fetch failure must not abort
+      // the whole enrichment (or the tick). Count it so the measurement reflects
+      // the N+1 cost actually paid (council Track) — a failed fetch still cost a
+      // round trip and must not make the surface look cheaper than it is.
+      candidatesFailed += 1;
+      curation = null;
+    }
+    if (curation !== null) {
+      results.push(curation);
+      if (curation.comments.length > 0) {
+        enrichedById.set(candidate.issueId, curation.comments);
+      }
+    }
+  }
+
+  const enrichedBacklog = context.backlog.map((candidate) => {
+    const comments = enrichedById.get(candidate.issueId);
+    return comments === undefined ? candidate : { ...candidate, comments };
+  });
+
+  return {
+    context: { ...context, backlog: enrichedBacklog },
+    measurement: measurePlannerCommentEnrichment({
+      candidatesConsidered: context.backlog.length,
+      candidatesTruncated,
+      candidatesFailed,
+      results,
+    }),
   };
 }
 
@@ -178,6 +297,23 @@ export interface StandingPlanShadowTickDeps {
   ) => void | Promise<void>;
   now: () => Date;
   /**
+   * Inject the Linear comment fetch for curated-comment enrichment (SYMPH-896).
+   * Optional: enrichment is skipped when this is absent OR when
+   * `commentEnrichment.enabled` is false (the default).
+   */
+  fetchIssueComments?: (
+    issueId: string,
+    options: { maxPages?: number },
+  ) => Promise<LinearIssueComment[]>;
+  /**
+   * Operator/service-account sets for comment noise classification (SYMPH-896).
+   * Service-account comments (Symphony's own writes) are dropped as noise.
+   */
+  operatorConfig?: Pick<
+    WorkflowOperatorAnchorsConfig,
+    "operatorAllowlist" | "serviceAccounts"
+  >;
+  /**
    * Bypass the heartbeat cadence and re-plan now (SYMPH-787/789): a re-plan
    * trigger predicate tripped, or an operator modify_plan intent landed.
    */
@@ -249,11 +385,42 @@ export async function runStandingPlanShadowTick(
     // consumer), so there is nothing to warn about here.
 
     const candidates = await deps.fetchCandidates();
-    const context = assembleShadowPlannerContext({
+    let context = assembleShadowPlannerContext({
       candidates,
       inFlight: deps.getInFlight(),
       envelope: config.envelope,
     });
+    // Curated-comment enrichment (SYMPH-896): default-off; when an operator opts
+    // in AND a comment fetch is wired, inject curated comments into the planner
+    // context and log a report-only cost measurement. Best-effort — never breaks
+    // the tick.
+    if (config.commentEnrichment.enabled) {
+      if (deps.fetchIssueComments === undefined) {
+        // Enabled but no comment fetch wired (e.g. a non-Linear tracker): the
+        // feature is inert. Log it so an operator who flipped the flag is not
+        // left guessing why no measurement appears (council Track).
+        await deps.log(
+          "queue_triage_comment_enrichment_skipped",
+          "Comment enrichment is enabled but no comment fetch is wired (non-Linear tracker?); the feature is inert.",
+          { outcome: "shadow", reason: "no_comment_fetch_wired" },
+        );
+      } else if (context.backlog.length > 0) {
+        const enriched = await enrichPlannerContextWithComments({
+          context,
+          config: config.commentEnrichment,
+          fetchIssueComments: deps.fetchIssueComments,
+          ...(deps.operatorConfig === undefined
+            ? {}
+            : { operatorConfig: deps.operatorConfig }),
+        });
+        context = enriched.context;
+        await deps.log(
+          "queue_triage_comment_enrichment_measure",
+          "Planner comment enrichment measured (report-only; topology tuned from this).",
+          { outcome: "shadow", ...enriched.measurement },
+        );
+      }
+    }
     const runClaude = deps.createPlannerRunner(config.plannerModel);
     const result = await runShadowPlanCycle({
       workspaceRoot: deps.workspaceRoot,
