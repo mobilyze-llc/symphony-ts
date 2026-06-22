@@ -128,31 +128,69 @@ export type PlannerResult =
   | { status: "invalid"; detail: string };
 
 /**
- * Per-candidate description budget in the planner prompt (SYMPH-874). Bounds the
- * enrichment signal so a few long ticket bodies cannot blow up the Opus prompt;
- * tune from measured context size (the design's measure-first stance).
+ * Per-candidate field budgets in the planner prompt (SYMPH-874/897/904). Bound
+ * each untrusted tracker field so a few long or oddly-formatted ticket fields
+ * cannot blow up or reshape the Opus prompt; tune from measured context size (the
+ * design's measure-first stance). These are prompt-hygiene bounds, not cost caps.
  */
 const PLANNER_CANDIDATE_DESCRIPTION_CHAR_LIMIT = 600;
+const PLANNER_CANDIDATE_TITLE_CHAR_LIMIT = 300;
+const PLANNER_CANDIDATE_LABELS_CHAR_LIMIT = 200;
 
 /**
- * Normalize and bound a candidate's body for the prompt. Collapses whitespace to
- * a single line (keeps each candidate block parseable), drops blank/absent
- * bodies, and caps length with an ellipsis. Returns null when there is nothing
- * to render.
+ * Collapse an untrusted tracker string to a single bounded line: whitespace
+ * (including newlines) folds to single spaces so no value can forge a new
+ * candidate row, blank/absent values drop to null, and length is capped with an
+ * ellipsis. Shared by every untrusted field rendered into the fenced data block
+ * (SYMPH-904).
  */
-function renderCandidateDescription(
-  description: string | null | undefined,
+function normalizeTrackerText(
+  value: string | null | undefined,
+  charLimit: number,
 ): string | null {
-  if (description === null || description === undefined) {
+  if (value === null || value === undefined) {
     return null;
   }
-  const normalized = description.replace(/\s+/g, " ").trim();
+  const normalized = value.replace(/\s+/g, " ").trim();
   if (normalized === "") {
     return null;
   }
-  return normalized.length > PLANNER_CANDIDATE_DESCRIPTION_CHAR_LIMIT
-    ? `${normalized.slice(0, PLANNER_CANDIDATE_DESCRIPTION_CHAR_LIMIT)}…`
+  return normalized.length > charLimit
+    ? `${normalized.slice(0, charLimit)}…`
     : normalized;
+}
+
+/** Bound a candidate body for the prompt (SYMPH-874). */
+function renderCandidateDescription(
+  description: string | null | undefined,
+): string | null {
+  return normalizeTrackerText(
+    description,
+    PLANNER_CANDIDATE_DESCRIPTION_CHAR_LIMIT,
+  );
+}
+
+/**
+ * Render a candidate's labels as a single bounded, comma-joined string (SYMPH-904).
+ * Each label is whitespace-collapsed and blank labels are dropped (so a newline or
+ * empty label cannot break the candidate row), then the joined set is length-capped
+ * — mirroring the description budget so every untrusted field is bounded uniformly.
+ * Returns null when nothing renders.
+ */
+function renderCandidateLabels(labels: string[] | undefined): string | null {
+  if (labels === undefined || labels.length === 0) {
+    return null;
+  }
+  const cleaned = labels
+    .map((label) => label.replace(/\s+/g, " ").trim())
+    .filter((label) => label !== "");
+  if (cleaned.length === 0) {
+    return null;
+  }
+  const joined = cleaned.join(", ");
+  return joined.length > PLANNER_CANDIDATE_LABELS_CHAR_LIMIT
+    ? `${joined.slice(0, PLANNER_CANDIDATE_LABELS_CHAR_LIMIT)}…`
+    : joined;
 }
 
 export function buildPlannerPrompt(context: PlannerContext): string {
@@ -186,12 +224,18 @@ export function buildPlannerPrompt(context: PlannerContext): string {
         candidate.blockedBy.length > 0
           ? ` (blocked by: ${candidate.blockedBy.join(", ")})`
           : "";
+      const renderedLabels = renderCandidateLabels(candidate.labels);
       const labels =
-        candidate.labels && candidate.labels.length > 0
-          ? ` (labels: ${candidate.labels.join(", ")})`
-          : "";
+        renderedLabels !== null ? ` (labels: ${renderedLabels})` : "";
+      // Title is untrusted tracker data too: collapse + bound it so a newline
+      // cannot forge a second candidate row inside the fenced backlog (SYMPH-904).
+      const title =
+        normalizeTrackerText(
+          candidate.title,
+          PLANNER_CANDIDATE_TITLE_CHAR_LIMIT,
+        ) ?? "";
       lines.push(
-        `- ${candidate.issueIdentifier} [${candidate.state}, priority ${candidate.priority ?? "none"}] ${candidate.title}${labels}${blockedBy}`,
+        `- ${candidate.issueIdentifier} [${candidate.state}, priority ${candidate.priority ?? "none"}] ${title}${labels}${blockedBy}`,
       );
       const description = renderCandidateDescription(candidate.description);
       if (description !== null) {
