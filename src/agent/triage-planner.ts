@@ -210,7 +210,8 @@ function renderCandidateLabels(labels: string[] | undefined): string | null {
 function renderPrLine(pr: PlannerPrInfo): string {
   const title =
     normalizeTrackerText(pr.title, PLANNER_CANDIDATE_TITLE_CHAR_LIMIT) ?? "";
-  return `- ${pr.issueIdentifier} #${pr.prNumber} ${title}`;
+  // trimEnd so a whitespace-only / absent title leaves no dangling space (SYMPH-904).
+  return `- ${pr.issueIdentifier} #${pr.prNumber} ${title}`.trimEnd();
 }
 
 export function buildPlannerPrompt(context: PlannerContext): string {
@@ -261,8 +262,10 @@ export function buildPlannerPrompt(context: PlannerContext): string {
           candidate.title,
           PLANNER_CANDIDATE_TITLE_CHAR_LIMIT,
         ) ?? "";
+      // trimEnd so a whitespace-only / absent title with no adornments leaves no
+      // dangling space at the end of the candidate row (SYMPH-904).
       lines.push(
-        `- ${candidate.issueIdentifier} [${candidate.state}, priority ${candidate.priority ?? "none"}] ${title}${labels}${blockedBy}`,
+        `- ${candidate.issueIdentifier} [${candidate.state}, priority ${candidate.priority ?? "none"}] ${title}${labels}${blockedBy}`.trimEnd(),
       );
       const description = renderCandidateDescription(candidate.description);
       if (description !== null) {

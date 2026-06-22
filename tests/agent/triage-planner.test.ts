@@ -346,6 +346,37 @@ describe("buildPlannerPrompt", () => {
     expect(prompt).toContain("Done INJECTEDROW");
   });
 
+  it("omits the blocked-by adornment when every entry is blank/whitespace (SYMPH-904)", () => {
+    const ctx = context();
+    const first = ctx.backlog[0];
+    if (first) {
+      first.blockedBy = ["", "   "];
+    }
+    const prompt = buildPlannerPrompt(ctx);
+    // the SYMPH-1 row renders with no adornment after its title (asserting on the
+    // row, not a bare "(blocked by:" which also appears in the static instructions)
+    expect(prompt).toContain("] First\n- SYMPH-2");
+  });
+
+  it("renders a whitespace-only PR title without a dangling space (SYMPH-904)", () => {
+    const ctx = context();
+    ctx.openPrs = [{ issueIdentifier: "SYMPH-9", prNumber: 42, title: "   " }];
+    const prompt = buildPlannerPrompt(ctx);
+    expect(prompt).toContain("- SYMPH-9 #42\n");
+    expect(prompt).not.toContain("- SYMPH-9 #42 \n");
+  });
+
+  it("renders a whitespace-only candidate title without a dangling space (SYMPH-904)", () => {
+    const ctx = context();
+    const first = ctx.backlog[0];
+    if (first) {
+      first.title = "   ";
+    }
+    const prompt = buildPlannerPrompt(ctx);
+    expect(prompt).toContain("- SYMPH-1 [Todo, priority 1]\n");
+    expect(prompt).not.toContain("priority 1] \n");
+  });
+
   it("omits a whitespace-only description (SYMPH-874, council P2)", () => {
     const ctx = context();
     const first = ctx.backlog[0];
