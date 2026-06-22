@@ -3254,11 +3254,13 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     const localPause = this.getPipelineLocalPauseStatus();
 
     if (!(this.tracker instanceof LinearTrackerClient)) {
+      const degraded = this.getPipelineLocalPauseDegradation(localPause);
       return {
         paused: localPause !== null,
         issues: [],
         halt_view: { status: "unsupported" },
         local_pause: localPause,
+        ...(degraded === undefined ? {} : { degraded }),
         restart_safety: restartSafety,
         emergency_stop: emergencyStop,
       };
@@ -3266,11 +3268,13 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
     const tracker = this.tracker as LinearTrackerClient;
     if (tracker.fetchOpenIssuesByLabels === undefined) {
+      const degraded = this.getPipelineLocalPauseDegradation(localPause);
       return {
         paused: localPause !== null,
         issues: [],
         halt_view: { status: "unsupported" },
         local_pause: localPause,
+        ...(degraded === undefined ? {} : { degraded }),
         restart_safety: restartSafety,
         emergency_stop: emergencyStop,
       };
@@ -3300,6 +3304,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       };
     }
 
+    const degraded = this.getPipelineLocalPauseDegradation(localPause);
     return {
       paused: haltIssues.length > 0 || localPause !== null,
       issues: haltIssues.map((issue) => ({
@@ -3308,9 +3313,25 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       })),
       halt_view: { status: "known" },
       local_pause: localPause,
+      ...(degraded === undefined ? {} : { degraded }),
       restart_safety: restartSafety,
       emergency_stop: emergencyStop,
     };
+  }
+
+  private getPipelineLocalPauseDegradation(
+    localPause: Exclude<PipelineStatusResponse["local_pause"], undefined>,
+  ): PipelineStatusResponse["degraded"] | undefined {
+    if (localPause?.halt_view.status !== "uncertain") {
+      return undefined;
+    }
+    return [
+      {
+        code: "pipeline_pause_applied_halt_view_uncertain",
+        message:
+          "Runtime-local pipeline pause is active, but the Linear halt view is uncertain.",
+      },
+    ];
   }
 
   private getPipelineLocalPauseStatus(): Exclude<
@@ -4144,13 +4165,15 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
    * 1. Feasibility is determined BEFORE any mutation: an already-satisfied
    *    request or a tracker that cannot apply the view journals a `no_op`
    *    naming why, and the view is never touched.
-   * 2. The Linear view mutation runs next. If it throws, NOTHING is
-   *    journaled as `applied` — the error propagates to the caller and the
-   *    journal never claims an outcome that did not happen.
-   * 3. `applied` is journaled only AFTER the mutation succeeded. A failed
-   *    journal write at that point is warn-only degraded mode (the view is
-   *    already mutated; a lost audit entry is the documented degradation,
-   *    see journalPipelineIntentDegradedOk).
+   * 2. Pause applies a runtime-local gate and best-effort creates a Linear
+   *    halt issue. A failed halt issue write degrades the halt view, but does
+   *    not defeat the local gate.
+   * 3. Resume remains Linear-view dependent when halt issues may exist: a
+   *    failed halt issue read/write propagates and clears no local gate.
+   * 4. `applied` is journaled only AFTER the chosen control effect succeeded.
+   *    A failed journal write at that point is warn-only degraded mode (the
+   *    control effect stands, audit entry lost; see
+   *    journalPipelineIntentDegradedOk).
    */
   async requestPipelinePause(
     context?: PipelineControlContext,
@@ -4220,12 +4243,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         labelIds: [haltLabelId],
       });
     } catch (error) {
-      if (!haltViewWasUnknown) {
-        throw error;
-      }
       haltIssueCreateError = toErrorMessage(error);
     }
 
+    const haltViewUncertain =
+      haltViewWasUnknown || haltIssueCreateError !== null;
     const haltViewError = [
       status.halt_view?.error_message,
       haltIssueCreateError === null
@@ -4235,7 +4257,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       .filter((part): part is string => part !== null && part !== undefined)
       .join("; ");
     const haltViewMetadata = {
-      status: haltViewWasUnknown ? "uncertain" : "created",
+      status: haltViewUncertain ? "uncertain" : "created",
       issue_identifier: created?.identifier ?? null,
       issue_title: created?.title ?? null,
       error_message: haltViewError === "" ? null : haltViewError,
@@ -4249,7 +4271,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       detail:
         created === null
           ? "pipeline pause applied via runtime-local gate; halt issue view uncertain"
-          : haltViewWasUnknown
+          : haltViewUncertain
             ? `pipeline pause applied via runtime-local gate; halt issue ${created.identifier} created but prior halt view is uncertain`
             : `pipeline pause applied; halt issue ${created.identifier} created`,
       metadata: {
@@ -4264,14 +4286,14 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         created === null
           ? []
           : [{ identifier: created.identifier, title: created.title }],
-      halt_view: haltViewWasUnknown
+      halt_view: haltViewUncertain
         ? {
             status: "unknown",
             ...(haltViewError === "" ? {} : { error_message: haltViewError }),
           }
         : { status: "known" },
       local_pause: this.getPipelineLocalPauseStatus(),
-      ...(haltViewWasUnknown
+      ...(haltViewUncertain
         ? {
             degraded: [
               {

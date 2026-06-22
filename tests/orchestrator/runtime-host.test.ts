@@ -2718,6 +2718,107 @@ describe("OrchestratorRuntimeHost", () => {
     });
   });
 
+  it("applies a runtime-local pause when halt issue creation fails after a known halt view", async () => {
+    const tracker = createLinearTrackerForPipelineStatus();
+    vi.spyOn(tracker, "fetchOpenIssuesByLabels").mockResolvedValue([]);
+    vi.spyOn(tracker, "fetchIssuesByStates").mockResolvedValue([]);
+    const createIssue = vi
+      .spyOn(tracker, "createIssue")
+      .mockRejectedValue(
+        new Error("Linear GraphQL returned top-level errors."),
+      );
+
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      agentRunner: new FakeAgentRunner(),
+      now: () => new Date("2026-06-22T02:26:00.000Z"),
+    });
+
+    const status = await host.requestPipelinePause({
+      actor: { kind: "operator", host: "pro14", session: "vitest" },
+      reason: "R1 bring-up verify SYMPH-620 pause",
+    });
+
+    expect(createIssue).toHaveBeenCalledTimes(1);
+    expect(status).toMatchObject({
+      paused: true,
+      issues: [],
+      halt_view: {
+        status: "unknown",
+        error_message: expect.stringContaining(
+          "halt issue creation failed: Linear GraphQL returned top-level errors.",
+        ),
+      },
+      local_pause: {
+        active: true,
+        reason: "R1 bring-up verify SYMPH-620 pause",
+        actor: { kind: "operator", host: "pro14", session: "vitest" },
+        halt_view: {
+          status: "uncertain",
+          issue_identifier: null,
+          issue_title: null,
+          error_message: expect.stringContaining(
+            "Linear GraphQL returned top-level errors.",
+          ),
+        },
+      },
+      degraded: [
+        {
+          code: "pipeline_pause_applied_halt_view_uncertain",
+          message:
+            "Runtime-local pipeline pause is active, but the Linear halt view is uncertain.",
+        },
+      ],
+    });
+    expect(host.getState().pipelinePause).toMatchObject({
+      reason: "R1 bring-up verify SYMPH-620 pause",
+      haltView: {
+        status: "uncertain",
+        errorMessage: expect.stringContaining(
+          "Linear GraphQL returned top-level errors.",
+        ),
+      },
+    });
+
+    const degradedStatus = await host.getPipelineStatus();
+    expect(degradedStatus.paused).toBe(true);
+    expect(degradedStatus.local_pause?.active).toBe(true);
+    expect(degradedStatus.degraded).toEqual([
+      {
+        code: "pipeline_pause_applied_halt_view_uncertain",
+        message:
+          "Runtime-local pipeline pause is active, but the Linear halt view is uncertain.",
+      },
+    ]);
+
+    const idempotent = await host.requestPipelinePause({
+      actor: { kind: "operator", host: "pro14", session: "vitest" },
+      reason: "repeat pause",
+    });
+
+    expect(createIssue).toHaveBeenCalledTimes(1);
+    expect(idempotent.paused).toBe(true);
+    expect(idempotent.local_pause?.active).toBe(true);
+    expect(idempotent.degraded).toEqual([
+      {
+        code: "pipeline_pause_applied_halt_view_uncertain",
+        message:
+          "Runtime-local pipeline pause is active, but the Linear halt view is uncertain.",
+      },
+    ]);
+
+    const resumed = await host.requestPipelineResume({
+      actor: { kind: "operator", host: "pro14", session: "vitest" },
+      reason: "clear degraded pause",
+    });
+
+    expect(resumed.paused).toBe(false);
+    expect(resumed.local_pause).toBeNull();
+    expect(resumed.degraded).toBeUndefined();
+    expect(host.getState().pipelinePause).toBeNull();
+  });
+
   it("resolves running workspace details from issue id after identifier changes", async () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();
