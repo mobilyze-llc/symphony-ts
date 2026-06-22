@@ -856,6 +856,337 @@ cmd_prune_branches() {
   fi
 }
 
+# --- Prune Worktrees ---
+
+_realpath_dir() {
+  (cd "$1" 2>/dev/null && pwd -P)
+}
+
+_worktree_scope_label() {
+  local path="$1"
+  local root root_real
+  for root in "$SYMPHONY_ROOT/.worktrees" "$SYMPHONY_ROOT/.claude/worktrees"; do
+    [[ -d "$root" ]] || continue
+    root_real="$(_realpath_dir "$root")"
+    [[ -n "$root_real" ]] || continue
+    case "$path" in
+      "$root_real"/*)
+        if [[ "$root" == "$SYMPHONY_ROOT/.worktrees" ]]; then
+          echo ".worktrees"
+        else
+          echo ".claude/worktrees"
+        fi
+        return 0
+        ;;
+    esac
+  done
+  echo "out-of-scope"
+}
+
+_worktree_age_days() {
+  local path="$1"
+  local now mtime
+  now="$(date +%s)"
+  if [[ "$(uname)" == "Darwin" ]]; then
+    mtime="$(stat -f %m "$path" 2>/dev/null || echo "$now")"
+  else
+    mtime="$(stat -c %Y "$path" 2>/dev/null || echo "$now")"
+  fi
+  echo $(( (now - mtime) / 86400 ))
+}
+
+_worktree_size_kb() {
+  du -sk "$1" 2>/dev/null | awk '{print $1}'
+}
+
+_worktree_size_label() {
+  local kb="$1"
+  if [[ -z "$kb" || "$kb" == "0" ]]; then
+    echo "0K"
+  elif [[ "$kb" -ge 1048576 ]]; then
+    awk -v kb="$kb" 'BEGIN { printf "%.1fG", kb / 1048576 }'
+  elif [[ "$kb" -ge 1024 ]]; then
+    awk -v kb="$kb" 'BEGIN { printf "%.1fM", kb / 1024 }'
+  else
+    echo "${kb}K"
+  fi
+}
+
+_worktree_dependency_label() {
+  local path="$1"
+  if [[ -d "$path/node_modules" ]]; then
+    local kb
+    kb="$(_worktree_size_kb "$path/node_modules")"
+    echo "node_modules=$(_worktree_size_label "$kb")"
+  else
+    echo "node_modules=none"
+  fi
+}
+
+_worktree_branch_upstream_status() {
+  local branch="$1"
+  local upstream track
+  IFS='|' read -r upstream track < <(
+    git -C "$SYMPHONY_ROOT" for-each-ref \
+      --format='%(upstream:short)|%(upstream:track)' \
+      "refs/heads/$branch" 2>/dev/null
+  )
+
+  if [[ "$track" == "[gone]" ]]; then
+    echo "gone"
+  elif [[ -n "$upstream" ]]; then
+    echo "present:$upstream"
+  else
+    echo "none"
+  fi
+}
+
+_worktree_context_label() {
+  local path="$1"
+  local branch="$2"
+  local key="" leaf=""
+
+  leaf="$(basename "$path")"
+  key="$(printf '%s\n%s\n' "$branch" "$leaf" | grep -Eio '(SYMPH|MOB)-[0-9]+' | head -1 | tr '[:lower:]' '[:upper:]' || true)"
+  if [[ -n "$key" ]]; then
+    echo "linear:$key"
+    return 0
+  fi
+
+  if [[ -d "$SYMPHONY_ROOT/handoffs" ]]; then
+    local branch_slug handoff
+    branch_slug="$(basename "$branch" | tr -cs '[:alnum:]' '-' | sed 's/^-*//; s/-*$//' | tr '[:upper:]' '[:lower:]')"
+    [[ -n "$branch_slug" ]] || {
+      echo "none"
+      return 0
+    }
+    handoff="$(find "$SYMPHONY_ROOT/handoffs" -maxdepth 1 -type f -name "*.md" -print 2>/dev/null | sort | grep -Ei "(^|[^[:alnum:]])${branch_slug}([^[:alnum:]]|$)" | head -1 || true)"
+    if [[ -n "$handoff" ]]; then
+      echo "handoff:$(basename "$handoff")"
+      return 0
+    fi
+  fi
+
+  echo "none"
+}
+
+_worktree_status_label() {
+  local path="$1"
+  local status
+  status="$(git -C "$path" status --porcelain --untracked-files=all 2>/dev/null || true)"
+  if [[ -z "$status" ]]; then
+    echo "clean"
+  else
+    echo "dirty"
+  fi
+}
+
+_worktree_is_protected_path() {
+  local path_real="$1"
+  local candidate candidate_real
+  for candidate in "$PWD" "$SYMPHONY_ROOT" "${SYMPHONY_RUNTIME_CHECKOUT:-}" "${SYMPHONY_SERVICE_ROOT:-}"; do
+    [[ -n "$candidate" && -d "$candidate" ]] || continue
+    candidate_real="$(_realpath_dir "$candidate")"
+    [[ -n "$candidate_real" ]] || continue
+    if [[ "$path_real" == "$candidate_real" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+_worktree_skip() {
+  local path="$1"
+  local reason="$2"
+  local detail="$3"
+  warn "  $path — SKIPPED ($reason: $detail)"
+  _PRUNE_WORKTREES_SKIPPED=$((_PRUNE_WORKTREES_SKIPPED + 1))
+  case "$reason" in
+    protected)    _PRUNE_WORKTREES_SKIP_PROTECTED=$((_PRUNE_WORKTREES_SKIP_PROTECTED + 1)) ;;
+    detached)     _PRUNE_WORKTREES_SKIP_DETACHED=$((_PRUNE_WORKTREES_SKIP_DETACHED + 1)) ;;
+    dirty)        _PRUNE_WORKTREES_SKIP_DIRTY=$((_PRUNE_WORKTREES_SKIP_DIRTY + 1)) ;;
+    recent)       _PRUNE_WORKTREES_SKIP_RECENT=$((_PRUNE_WORKTREES_SKIP_RECENT + 1)) ;;
+    upstream)     _PRUNE_WORKTREES_SKIP_UPSTREAM=$((_PRUNE_WORKTREES_SKIP_UPSTREAM + 1)) ;;
+    context)      _PRUNE_WORKTREES_SKIP_CONTEXT=$((_PRUNE_WORKTREES_SKIP_CONTEXT + 1)) ;;
+    remove-failed) _PRUNE_WORKTREES_SKIP_REMOVE=$((_PRUNE_WORKTREES_SKIP_REMOVE + 1)) ;;
+  esac
+}
+
+_evaluate_worktree_for_prune() {
+  local path="$1"
+  local branch="$2"
+  local detached="$3"
+  local execute="$4"
+  local older_than_days="$5"
+
+  [[ -n "$path" ]] || return 0
+  [[ -d "$path" ]] || return 0
+
+  local path_real
+  path_real="$(_realpath_dir "$path")"
+  [[ -n "$path_real" ]] || return 0
+
+  local scope
+  scope="$(_worktree_scope_label "$path_real")"
+  if [[ "$scope" == "out-of-scope" ]]; then
+    return 0
+  fi
+
+  if _worktree_is_protected_path "$path_real"; then
+    _worktree_skip "$path" "protected" "current or runtime checkout"
+    return 0
+  fi
+
+  if [[ "$detached" == "true" || -z "$branch" ]]; then
+    _worktree_skip "$path" "detached" "not branch-backed"
+    return 0
+  fi
+
+  local dirty
+  dirty="$(_worktree_status_label "$path")"
+  if [[ "$dirty" != "clean" ]]; then
+    _worktree_skip "$path" "dirty" "tracked or untracked changes"
+    return 0
+  fi
+
+  local upstream_status
+  upstream_status="$(_worktree_branch_upstream_status "$branch")"
+  if [[ "$upstream_status" != "gone" ]]; then
+    _worktree_skip "$path" "upstream" "$upstream_status"
+    return 0
+  fi
+
+  local age_days
+  age_days="$(_worktree_age_days "$path")"
+  if [[ "$age_days" -lt "$older_than_days" ]]; then
+    _worktree_skip "$path" "recent" "${age_days}d old, threshold ${older_than_days}d"
+    return 0
+  fi
+
+  local context
+  context="$(_worktree_context_label "$path" "$branch")"
+  if [[ "$context" == "none" ]]; then
+    _worktree_skip "$path" "context" "no issue key or stable-root handoff evidence"
+    return 0
+  fi
+
+  local dep_label size_kb size_label
+  dep_label="$(_worktree_dependency_label "$path")"
+  size_kb="$(_worktree_size_kb "$path")"
+  size_kb="${size_kb:-0}"
+  size_label="$(_worktree_size_label "$size_kb")"
+
+  if $execute; then
+    if git -C "$SYMPHONY_ROOT" worktree remove --force "$path"; then
+      _PRUNE_WORKTREES_RECLAIM_KB=$((_PRUNE_WORKTREES_RECLAIM_KB + size_kb))
+      _PRUNE_WORKTREES_CANDIDATES=$((_PRUNE_WORKTREES_CANDIDATES + 1))
+      ok "  $path — removed branch=$branch upstream=$upstream_status dirty=$dirty age=${age_days}d size=$size_label $dep_label context=$context"
+      _PRUNE_WORKTREES_REMOVED=$((_PRUNE_WORKTREES_REMOVED + 1))
+    else
+      _worktree_skip "$path" "remove-failed" "git worktree remove failed"
+    fi
+  else
+    _PRUNE_WORKTREES_RECLAIM_KB=$((_PRUNE_WORKTREES_RECLAIM_KB + size_kb))
+    _PRUNE_WORKTREES_CANDIDATES=$((_PRUNE_WORKTREES_CANDIDATES + 1))
+    info "  $path — would remove branch=$branch upstream=$upstream_status dirty=$dirty age=${age_days}d size=$size_label $dep_label context=$context"
+  fi
+}
+
+cmd_prune_worktrees() {
+  local execute=false
+  local older_than_days=7
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --execute) execute=true ;;
+      --dry-run) execute=false ;;
+      --older-than)
+        shift
+        [[ $# -gt 0 && "$1" =~ ^[0-9]+$ ]] || die "--older-than requires a day count"
+        older_than_days="$1"
+        ;;
+      *) die "Unknown flag: $1" ;;
+    esac
+    shift
+  done
+
+  if $execute; then
+    info "symphony-ctl prune-worktrees [EXECUTING]"
+  else
+    info "symphony-ctl prune-worktrees [DRY RUN]"
+  fi
+  info "Scope: $SYMPHONY_ROOT/.worktrees and $SYMPHONY_ROOT/.claude/worktrees"
+  info "Threshold: ${older_than_days}d old, clean, branch-backed, upstream gone, durable context present"
+  echo ""
+
+  if ! git -C "$SYMPHONY_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    die "SYMPHONY_ROOT is not a git checkout: $SYMPHONY_ROOT"
+  fi
+
+  if ! git -C "$SYMPHONY_ROOT" fetch --prune 2>/dev/null; then
+    warn "git fetch --prune failed — proceeding with stale tracking data"
+  fi
+
+  _PRUNE_WORKTREES_REMOVED=0
+  _PRUNE_WORKTREES_CANDIDATES=0
+  _PRUNE_WORKTREES_SKIPPED=0
+  _PRUNE_WORKTREES_SKIP_PROTECTED=0
+  _PRUNE_WORKTREES_SKIP_DETACHED=0
+  _PRUNE_WORKTREES_SKIP_DIRTY=0
+  _PRUNE_WORKTREES_SKIP_RECENT=0
+  _PRUNE_WORKTREES_SKIP_UPSTREAM=0
+  _PRUNE_WORKTREES_SKIP_CONTEXT=0
+  _PRUNE_WORKTREES_SKIP_REMOVE=0
+  _PRUNE_WORKTREES_RECLAIM_KB=0
+
+  if $execute; then
+    if ! git -C "$SYMPHONY_ROOT" worktree prune 2>/dev/null; then
+      warn "git worktree prune failed — proceeding with registered worktree evaluation"
+    fi
+  else
+    local stale_registrations
+    stale_registrations="$(git -C "$SYMPHONY_ROOT" worktree prune --dry-run 2>&1 || true)"
+    if [[ -n "$stale_registrations" ]]; then
+      warn "Stale git worktree registrations detected; run with --execute to prune them:"
+      printf '%s\n' "$stale_registrations" >&2
+    fi
+  fi
+
+  local path="" branch="" detached=false
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == worktree\ * ]]; then
+      _evaluate_worktree_for_prune "$path" "$branch" "$detached" "$execute" "$older_than_days"
+      path="${line#worktree }"
+      branch=""
+      detached=false
+    elif [[ "$line" == branch\ * ]]; then
+      branch="${line#branch }"
+      branch="${branch#refs/heads/}"
+    elif [[ "$line" == detached ]]; then
+      detached=true
+    elif [[ -z "$line" ]]; then
+      _evaluate_worktree_for_prune "$path" "$branch" "$detached" "$execute" "$older_than_days"
+      path=""
+      branch=""
+      detached=false
+    fi
+  done < <(git -C "$SYMPHONY_ROOT" worktree list --porcelain 2>/dev/null)
+  _evaluate_worktree_for_prune "$path" "$branch" "$detached" "$execute" "$older_than_days"
+
+  echo ""
+  info "Skipped: $_PRUNE_WORKTREES_SKIPPED total (protected=$_PRUNE_WORKTREES_SKIP_PROTECTED, detached=$_PRUNE_WORKTREES_SKIP_DETACHED, dirty=$_PRUNE_WORKTREES_SKIP_DIRTY, recent=$_PRUNE_WORKTREES_SKIP_RECENT, upstream=$_PRUNE_WORKTREES_SKIP_UPSTREAM, context=$_PRUNE_WORKTREES_SKIP_CONTEXT, remove-failed=$_PRUNE_WORKTREES_SKIP_REMOVE)"
+  info "Summary: $_PRUNE_WORKTREES_REMOVED removed, $_PRUNE_WORKTREES_CANDIDATES candidate(s), estimated reclaimable=$(_worktree_size_label "$_PRUNE_WORKTREES_RECLAIM_KB")"
+
+  if $execute && [[ "$_PRUNE_WORKTREES_REMOVED" -gt 0 ]]; then
+    echo ""
+    info "Running branch pruning after worktree removal..."
+    _do_prune_branches true
+    info "Branch cleanup removed $_PRUNE_BRANCHES_COUNT branch(es)"
+  elif ! $execute; then
+    info "Run with --execute to remove candidates and then prune unpinned branches."
+  fi
+}
+
 # --- Analyze ---
 
 # Format milliseconds into a human-readable duration string.
@@ -1214,6 +1545,11 @@ Commands:
   prune-branches     Prune merged local branches (dry-run by default)
                        --execute       Delete merged branches (git branch -d)
                        --dry-run       Print what would be deleted (default)
+  prune-worktrees    Prune safe project-local worktrees (dry-run by default)
+                       --execute       Remove safe candidates and prune branches
+                       --dry-run       Print what would be removed (default)
+                       --older-than N  Only remove worktrees at least N days old
+                                      (default: 7)
   analyze            Analyze a JSONL run log and print a report
                        [path]          Path to symphony.jsonl
                                        (default: \$LOG_DIR/symphony.jsonl)
@@ -1254,6 +1590,7 @@ case "${1:-}" in
   install-logrotate)  cmd_install_logrotate ;;
   cleanup)            shift; cmd_cleanup "$@" ;;
   prune-branches)     shift; cmd_prune_branches "$@" ;;
+  prune-worktrees)    shift; cmd_prune_worktrees "$@" ;;
   analyze)            shift; cmd_analyze "$@" ;;
   -h|--help)          usage ;;
   --version|-V)       "$NODE_BIN" "$CLI_JS" --version ;;

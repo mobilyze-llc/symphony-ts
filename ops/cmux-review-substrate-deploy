@@ -20,7 +20,7 @@ FAILURE_COUNT=0
 
 usage() {
   cat <<EOF
-cmux-review-substrate-deploy — inspect/prove the Pro16 CMUX review substrate
+cmux-review-substrate-deploy — historical CMUX substrate evidence helper
 
 Usage: ops/cmux-review-substrate-deploy [flags]
 
@@ -32,7 +32,8 @@ Flags:
   --allow-drift         Write evidence but exit 0 even when gates fail
   -h, --help            Show this help
 
-This helper implements ${RUNBOOK}. It is intentionally conservative: it writes
+This helper implements ${RUNBOOK}. After SYMPH-812 it is audit/archaeology only,
+not a live Symphony review fallback. It is intentionally conservative: it writes
 an evidence bundle, audits raw local cmux-spawn callers, probes Pro16 when not
 disabled, and does not mutate local or remote checkouts.
 

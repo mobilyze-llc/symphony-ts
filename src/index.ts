@@ -34,7 +34,6 @@ export * from "./portfolio/classifier.js";
 export * from "./portfolio/eligibility.js";
 export * from "./portfolio/linear-webhook-reconciler.js";
 export * from "./portfolio/taxonomy.js";
-export * from "./review/headless-council-gate.js";
 export * from "./workspace/hooks.js";
 export * from "./tracker/errors.js";
 export * from "./tracker/linear-client.js";
@@ -45,6 +44,9 @@ export * from "./tracker/tracker.js";
 export * from "./runners/index.js";
 export * from "./claude-runner/cmux-claude-runner.js";
 export * from "./spec-review/spec-review.js";
+// SYMPH-812 removes the active local review runtime from the package barrel,
+// but keeps review artifact types available for external parsers.
+export type * from "./review/headless-council-gate.js";
 export * from "./workspace/path-safety.js";
 export * from "./workspace/workspace-manager.js";
 export * from "./slack-bot/index.js";

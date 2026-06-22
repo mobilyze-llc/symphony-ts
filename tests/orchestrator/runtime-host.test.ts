@@ -2718,6 +2718,107 @@ describe("OrchestratorRuntimeHost", () => {
     });
   });
 
+  it("applies a runtime-local pause when halt issue creation fails after a known halt view", async () => {
+    const tracker = createLinearTrackerForPipelineStatus();
+    vi.spyOn(tracker, "fetchOpenIssuesByLabels").mockResolvedValue([]);
+    vi.spyOn(tracker, "fetchIssuesByStates").mockResolvedValue([]);
+    const createIssue = vi
+      .spyOn(tracker, "createIssue")
+      .mockRejectedValue(
+        new Error("Linear GraphQL returned top-level errors."),
+      );
+
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      agentRunner: new FakeAgentRunner(),
+      now: () => new Date("2026-06-22T02:26:00.000Z"),
+    });
+
+    const status = await host.requestPipelinePause({
+      actor: { kind: "operator", host: "pro14", session: "vitest" },
+      reason: "R1 bring-up verify SYMPH-620 pause",
+    });
+
+    expect(createIssue).toHaveBeenCalledTimes(1);
+    expect(status).toMatchObject({
+      paused: true,
+      issues: [],
+      halt_view: {
+        status: "unknown",
+        error_message: expect.stringContaining(
+          "halt issue creation failed: Linear GraphQL returned top-level errors.",
+        ),
+      },
+      local_pause: {
+        active: true,
+        reason: "R1 bring-up verify SYMPH-620 pause",
+        actor: { kind: "operator", host: "pro14", session: "vitest" },
+        halt_view: {
+          status: "uncertain",
+          issue_identifier: null,
+          issue_title: null,
+          error_message: expect.stringContaining(
+            "Linear GraphQL returned top-level errors.",
+          ),
+        },
+      },
+      degraded: [
+        {
+          code: "pipeline_pause_applied_halt_view_uncertain",
+          message:
+            "Runtime-local pipeline pause is active, but the Linear halt view is uncertain.",
+        },
+      ],
+    });
+    expect(host.getState().pipelinePause).toMatchObject({
+      reason: "R1 bring-up verify SYMPH-620 pause",
+      haltView: {
+        status: "uncertain",
+        errorMessage: expect.stringContaining(
+          "Linear GraphQL returned top-level errors.",
+        ),
+      },
+    });
+
+    const degradedStatus = await host.getPipelineStatus();
+    expect(degradedStatus.paused).toBe(true);
+    expect(degradedStatus.local_pause?.active).toBe(true);
+    expect(degradedStatus.degraded).toEqual([
+      {
+        code: "pipeline_pause_applied_halt_view_uncertain",
+        message:
+          "Runtime-local pipeline pause is active, but the Linear halt view is uncertain.",
+      },
+    ]);
+
+    const idempotent = await host.requestPipelinePause({
+      actor: { kind: "operator", host: "pro14", session: "vitest" },
+      reason: "repeat pause",
+    });
+
+    expect(createIssue).toHaveBeenCalledTimes(1);
+    expect(idempotent.paused).toBe(true);
+    expect(idempotent.local_pause?.active).toBe(true);
+    expect(idempotent.degraded).toEqual([
+      {
+        code: "pipeline_pause_applied_halt_view_uncertain",
+        message:
+          "Runtime-local pipeline pause is active, but the Linear halt view is uncertain.",
+      },
+    ]);
+
+    const resumed = await host.requestPipelineResume({
+      actor: { kind: "operator", host: "pro14", session: "vitest" },
+      reason: "clear degraded pause",
+    });
+
+    expect(resumed.paused).toBe(false);
+    expect(resumed.local_pause).toBeNull();
+    expect(resumed.degraded).toBeUndefined();
+    expect(host.getState().pipelinePause).toBeNull();
+  });
+
   it("resolves running workspace details from issue id after identifier changes", async () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();
@@ -6691,7 +6792,7 @@ describe("pipeline notifications", () => {
     );
   });
 
-  it("does not emit issue_failed for an intentional manual stop", async () => {
+  it("emits issue_paused instead of issue_failed for an intentional manual stop", async () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();
     const notifier = createMockNotifier();
@@ -6707,6 +6808,8 @@ describe("pipeline notifications", () => {
     });
 
     await host.pollOnce();
+    // biome-ignore lint/suspicious/noExplicitAny: accessing private field for duplicate-finalization regression setup
+    const worker = (host as any).workers.get("1");
     const stopResponse = await host.requestIssueStop("ISSUE-1");
     await host.waitForIdle();
 
@@ -6716,13 +6819,42 @@ describe("pipeline notifications", () => {
     });
     expect(notifier.events).toEqual([
       expect.objectContaining({ type: "issue_dispatched" }),
+      expect.objectContaining({
+        type: "issue_paused",
+        issueIdentifier: "ISSUE-1",
+        issueTitle: "Issue 1",
+        issueUrl: null,
+        stageName: null,
+        reason: "stopped after manual_stop",
+        operatorAction: "Move the issue to Resume after review.",
+      }),
     ]);
+    expect(notifier.events).not.toContainEqual(
+      expect.objectContaining({ type: "issue_failed" }),
+    );
+    expect(notifier.events).not.toContainEqual(
+      expect.objectContaining({ type: "infra_error" }),
+    );
 
     const snapshot = await host.getRuntimeSnapshot();
     expect(snapshot.counts.failed).toBe(0);
 
     const stillActive = await host.pollOnce();
     expect(stillActive.dispatchedIssueIds).toEqual([]);
+    expect(
+      notifier.events.filter((event) => event.type === "issue_paused"),
+    ).toHaveLength(1);
+    // A duplicate finalization must not double-ping operators for an already
+    // parked issue.
+    // biome-ignore lint/suspicious/noExplicitAny: exercising private finalizer guard directly
+    await (host as any).finalizeWorkerExecution(worker, {
+      outcome: "abnormal",
+      reason: "stopped after manual_stop",
+      endedAt: new Date("2026-03-06T00:00:06.000Z"),
+    });
+    expect(
+      notifier.events.filter((event) => event.type === "issue_paused"),
+    ).toHaveLength(1);
   });
 
   it("aborts workers before awaiting stop-request telemetry logging", async () => {
@@ -6861,10 +6993,22 @@ describe("pipeline notifications", () => {
     );
     expect(notifier.events).toEqual([
       expect.objectContaining({ type: "issue_dispatched" }),
+      expect.objectContaining({
+        type: "issue_paused",
+        issueIdentifier: "ISSUE-1",
+        issueTitle: "Issue 1",
+        issueUrl: null,
+        stageName: null,
+        reason: "stopped after manual_stop",
+        operatorAction: "Move the issue to Resume after review.",
+      }),
     ]);
 
     const stillActive = await host.pollOnce();
     expect(stillActive.dispatchedIssueIds).toEqual([]);
+    expect(
+      notifier.events.filter((event) => event.type === "issue_paused"),
+    ).toHaveLength(1);
   });
 
   it("targets the tracked app-server pid for stop signal delivery", async () => {
@@ -7121,6 +7265,15 @@ describe("pipeline notifications", () => {
     );
     expect(notifier.events).toEqual([
       expect.objectContaining({ type: "issue_dispatched" }),
+      expect.objectContaining({
+        type: "issue_paused",
+        issueIdentifier: "ISSUE-1",
+        issueTitle: "Issue 1",
+        issueUrl: null,
+        stageName: null,
+        reason: "stopped after manual_stop",
+        operatorAction: "Move the issue to Resume after review.",
+      }),
     ]);
   });
 
@@ -7764,7 +7917,7 @@ describe("pipeline notifications", () => {
     ]);
   });
 
-  it("does not emit issue_failed for a budget hard stop pause", async () => {
+  it("emits issue_paused without issue_failed for a budget hard stop pause", async () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();
     const notifier = createMockNotifier();
@@ -7802,14 +7955,29 @@ describe("pipeline notifications", () => {
     });
     await host.waitForIdle();
 
-    // Events: dispatched + hard_stop_budget (SYMPH-397)
+    // Events: dispatched + hard_stop_budget (SYMPH-397) + explicit pause notification.
     expect(notifier.events).toEqual([
       expect.objectContaining({ type: "issue_dispatched" }),
       expect.objectContaining({
         type: "hard_stop_budget",
         issueIdentifier: "ISSUE-1",
       }),
+      expect.objectContaining({
+        type: "issue_paused",
+        issueIdentifier: "ISSUE-1",
+        issueTitle: "Issue 1",
+        issueUrl: null,
+        stageName: null,
+        reason: "token budget - Token budget exceeded.",
+        operatorAction: "Move the issue to Resume after review.",
+      }),
     ]);
+    expect(notifier.events).not.toContainEqual(
+      expect.objectContaining({ type: "issue_failed" }),
+    );
+    expect(notifier.events).not.toContainEqual(
+      expect.objectContaining({ type: "infra_error" }),
+    );
 
     const snapshot = await host.getRuntimeSnapshot();
     expect(snapshot.counts.failed).toBe(0);
@@ -7836,6 +8004,9 @@ describe("pipeline notifications", () => {
 
     const stillActive = await host.pollOnce();
     expect(stillActive.dispatchedIssueIds).toEqual([]);
+    expect(
+      notifier.events.filter((event) => event.type === "issue_paused"),
+    ).toHaveLength(1);
   });
 
   it("logs Codex input-required exits as paused and avoids retry burn", async () => {
@@ -7872,6 +8043,16 @@ describe("pipeline notifications", () => {
 
     expect(notifier.events).toEqual([
       expect.objectContaining({ type: "issue_dispatched" }),
+      expect.objectContaining({
+        type: "issue_paused",
+        issueIdentifier: "ISSUE-1",
+        issueTitle: "Issue 1",
+        issueUrl: null,
+        stageName: null,
+        reason:
+          "codex_user_input_required: Codex requested operator input during a turn.",
+        operatorAction: "Move the issue to Resume after review.",
+      }),
     ]);
     const snapshot = await host.getRuntimeSnapshot();
     expect(snapshot.counts.failed).toBe(0);
@@ -7894,6 +8075,9 @@ describe("pipeline notifications", () => {
 
     const stillActive = await host.pollOnce();
     expect(stillActive.dispatchedIssueIds).toEqual([]);
+    expect(
+      notifier.events.filter((event) => event.type === "issue_paused"),
+    ).toHaveLength(1);
   });
 
   it("fires stall_killed when a stall timeout aborts a worker", async () => {
@@ -8922,7 +9106,15 @@ describe("stage execution backend boundary", () => {
     await host.waitForIdle();
   });
 
-  it("leaves the review path unchanged when no crabrunner backend is registered (SYMPH-855)", async () => {
+  it("fails closed when the review gate is enabled without a crabrunner backend (SYMPH-812)", async () => {
+    const logEntries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          logEntries.push(entry);
+        },
+      },
+    ]);
     let dispatcherCalled = false;
     const fakeRunner = new FakeAgentRunner();
     const host = new OrchestratorRuntimeHost({
@@ -8940,8 +9132,9 @@ describe("stage execution backend boundary", () => {
         ],
       }),
       agentRunner: fakeRunner,
+      logger,
       // Gate ON + dispatcher present, but NO crabrunner backend registered =>
-      // doubly-inert: the branch must not fire (it has no backend to route to).
+      // fail closed before the dispatcher can route a review job group.
       reviewStageDispatcher: async (context) => {
         dispatcherCalled = true;
         return fakeReviewStageResult(context);
@@ -8950,12 +9143,38 @@ describe("stage execution backend boundary", () => {
     });
 
     await host.pollOnce();
+    await host.waitForIdle();
 
     expect(dispatcherCalled).toBe(false);
-    expect(fakeRunner.runInputs).toHaveLength(1);
-
-    fakeRunner.resolve("review-issue", createNormalResult());
-    await host.waitForIdle();
+    expect(fakeRunner.runInputs).toHaveLength(0);
+    expect(host.getState().retryAttempts["review-issue"]?.error).toContain(
+      "no crabrunner stage execution backend is registered",
+    );
+    const traceEntries = host.getState().loopTraceJournal["review-issue"] ?? [];
+    expect(traceEntries).toContainEqual(
+      expect.objectContaining({
+        kind: "stage_transition",
+        stageTransition: expect.objectContaining({
+          status: "retry_queued",
+        }),
+      }),
+    );
+    expect(traceEntries).toContainEqual(
+      expect.objectContaining({
+        kind: "worker_exit",
+        workerExit: expect.objectContaining({
+          outcome: "abnormal",
+          reason: expect.stringContaining(
+            "no crabrunner stage execution backend is registered",
+          ),
+        }),
+      }),
+    );
+    const warnings = logEntries.filter(
+      (entry) => entry.event === "crabrunner_review_backend_unregistered",
+    );
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.level).toBe("warn");
   });
 
   it("preserves the stage attempt through the crabrunner review dispatch (SYMPH-855 P2-1)", async () => {
@@ -9219,7 +9438,7 @@ describe("stage execution backend boundary", () => {
     }
   });
 
-  it("warns once when the review gate is enabled but no dispatcher is wired (SYMPH-855 P2-2)", async () => {
+  it("warns once and fails closed when the review gate is enabled but no dispatcher is wired (SYMPH-812, SYMPH-855 P2-2)", async () => {
     const logEntries: StructuredLogEntry[] = [];
     const logger = new StructuredLogger([
       {
@@ -9246,10 +9465,14 @@ describe("stage execution backend boundary", () => {
       }
     ).resolveCrabrunnerReviewBackend.bind(host);
 
-    // First review resolution => inert fallback + a single warning.
-    expect(resolve("review")).toBeNull();
+    // First review resolution => fail closed + a single warning.
+    expect(() => resolve("review")).toThrow(
+      "crabrunner review gate enabled but no review dispatcher is wired",
+    );
     // Second resolution must NOT re-warn (one-shot latch).
-    expect(resolve("review")).toBeNull();
+    expect(() => resolve("review")).toThrow(
+      "crabrunner review gate enabled but no review dispatcher is wired",
+    );
 
     const warnings = logEntries.filter(
       (entry) => entry.event === "crabrunner_review_dispatcher_unwired",
@@ -9364,6 +9587,171 @@ describe("stage execution backend boundary", () => {
     } finally {
       rmSync(workspaceRoot, { recursive: true, force: true });
     }
+  });
+
+  it("routes substrate-only crabrunner review dispatch errors as infra retry (SYMPH-812)", async () => {
+    const crabrunnerBackend = new ImmediateStageExecutionBackend("crabrunner");
+    const host = new OrchestratorRuntimeHost({
+      config: createReviewGatedConfig({ gateEnabled: true }),
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "review-issue",
+            identifier: "SYMPH-812",
+            branchName: "claude/SYMPH-812-review",
+          }),
+        ],
+        stateSnapshots: [
+          { id: "review-issue", identifier: "SYMPH-812", state: "In Review" },
+        ],
+      }),
+      agentRunner: new FakeAgentRunner(),
+      stageExecutionBackends: new Map([["crabrunner", crabrunnerBackend]]),
+      reviewStageDispatcher: async (context) =>
+        fakeSubstrateStallReviewStageResult(context),
+      now: () => new Date("2026-06-21T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    await host.waitForIdle();
+
+    expect(host.getState().issueStages["review-issue"]).toBe("review");
+    expect(host.getState().retryAttempts["review-issue"]?.error).toBe(
+      "agent reported failure: infra",
+    );
+    expect(host.getState().failed.has("review-issue")).toBe(false);
+  });
+
+  it("routes malformed crabrunner review substrate JSON as infra retry (SYMPH-812)", async () => {
+    const crabrunnerBackend = new ImmediateStageExecutionBackend("crabrunner");
+    const host = new OrchestratorRuntimeHost({
+      config: createReviewGatedConfig({ gateEnabled: true }),
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "review-issue",
+            identifier: "SYMPH-812",
+            branchName: "claude/SYMPH-812-review",
+          }),
+        ],
+        stateSnapshots: [
+          { id: "review-issue", identifier: "SYMPH-812", state: "In Review" },
+        ],
+      }),
+      agentRunner: new FakeAgentRunner(),
+      stageExecutionBackends: new Map([["crabrunner", crabrunnerBackend]]),
+      reviewStageDispatcher: async (context) =>
+        fakeMalformedSubstrateJsonReviewStageResult(context),
+      now: () => new Date("2026-06-21T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    await host.waitForIdle();
+
+    expect(host.getState().issueStages["review-issue"]).toBe("review");
+    expect(host.getState().retryAttempts["review-issue"]?.error).toBe(
+      "agent reported failure: infra",
+    );
+    expect(host.getState().failed.has("review-issue")).toBe(false);
+  });
+
+  it("routes routing-provenance crabrunner review dispatch errors as infra retry (SYMPH-812)", async () => {
+    const crabrunnerBackend = new ImmediateStageExecutionBackend("crabrunner");
+    const host = new OrchestratorRuntimeHost({
+      config: createReviewGatedConfig({ gateEnabled: true }),
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "review-issue",
+            identifier: "SYMPH-812",
+            branchName: "claude/SYMPH-812-review",
+          }),
+        ],
+        stateSnapshots: [
+          { id: "review-issue", identifier: "SYMPH-812", state: "In Review" },
+        ],
+      }),
+      agentRunner: new FakeAgentRunner(),
+      stageExecutionBackends: new Map([["crabrunner", crabrunnerBackend]]),
+      reviewStageDispatcher: async (context) =>
+        fakeRoutingProvenanceReviewStageResult(context),
+      now: () => new Date("2026-06-21T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    await host.waitForIdle();
+
+    expect(host.getState().issueStages["review-issue"]).toBe("review");
+    expect(host.getState().retryAttempts["review-issue"]?.error).toBe(
+      "agent reported failure: infra",
+    );
+    expect(host.getState().failed.has("review-issue")).toBe(false);
+  });
+
+  it("keeps crabrunner review dispatch errors with open findings on the review rework path (SYMPH-812)", async () => {
+    const crabrunnerBackend = new ImmediateStageExecutionBackend("crabrunner");
+    const host = new OrchestratorRuntimeHost({
+      config: createReviewGatedConfig({ gateEnabled: true }),
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "review-issue",
+            identifier: "SYMPH-812",
+            branchName: "claude/SYMPH-812-review",
+          }),
+        ],
+        stateSnapshots: [
+          { id: "review-issue", identifier: "SYMPH-812", state: "In Review" },
+        ],
+      }),
+      agentRunner: new FakeAgentRunner(),
+      stageExecutionBackends: new Map([["crabrunner", crabrunnerBackend]]),
+      reviewStageDispatcher: async (context) =>
+        fakeSubstrateStallWithBlockingFindingReviewStageResult(context),
+      now: () => new Date("2026-06-21T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    await host.waitForIdle();
+
+    expect(host.getState().issueStages["review-issue"]).toBe("implement");
+    expect(host.getState().retryAttempts["review-issue"]?.error).toBe(
+      "agent review failure: rework to implement",
+    );
+    expect(host.getState().failed.has("review-issue")).toBe(false);
+  });
+
+  it("routes plain crabrunner review fail verdicts to review rework (SYMPH-812)", async () => {
+    const crabrunnerBackend = new ImmediateStageExecutionBackend("crabrunner");
+    const host = new OrchestratorRuntimeHost({
+      config: createReviewGatedConfig({ gateEnabled: true }),
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "review-issue",
+            identifier: "SYMPH-812",
+            branchName: "claude/SYMPH-812-review",
+          }),
+        ],
+        stateSnapshots: [
+          { id: "review-issue", identifier: "SYMPH-812", state: "In Review" },
+        ],
+      }),
+      agentRunner: new FakeAgentRunner(),
+      stageExecutionBackends: new Map([["crabrunner", crabrunnerBackend]]),
+      reviewStageDispatcher: async (context) =>
+        fakeFailVerdictReviewStageResult(context),
+      now: () => new Date("2026-06-21T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    await host.waitForIdle();
+
+    expect(host.getState().issueStages["review-issue"]).toBe("implement");
+    expect(host.getState().retryAttempts["review-issue"]?.error).toBe(
+      "agent review failure: rework to implement",
+    );
+    expect(host.getState().failed.has("review-issue")).toBe(false);
   });
 });
 
@@ -9543,6 +9931,109 @@ function fakeReviewStageResult(
       qa: null,
     },
   };
+}
+
+function fakeSubstrateStallReviewStageResult(
+  context: CrabrunnerReviewStageDispatchContext,
+): CrabrunnerReviewStageResult {
+  const result = fakeReviewStageResult(context);
+  result.result.verdict = "error";
+  result.result.review_metadata.verdict = "error";
+  result.result.degradedConditions = ["substrate_stall:codex-high-lead"];
+  result.result.summary =
+    "Crabrunner review job group error over 1 reviewer lane (substrate_stall:codex-high-lead).";
+  result.result.lanes = [
+    {
+      laneId: "codex-high-lead",
+      agent: "codex",
+      role: "reviewer",
+      model: "codex-model",
+      state: "failed",
+      verdict: "error",
+      artifactPath: null,
+      promptPath: null,
+      stderrPath: null,
+      cliJsonPath: null,
+      reasoningEffort: null,
+      independentReviewer: true,
+      mergeAuthoritative: true,
+      message: "substrate stall",
+      degradedReason: "substrate_stall",
+      reviewBundle: null,
+      wallTimeMs: null,
+      tokenUsage: null,
+      structuredArtifactPath: null,
+      structuredArtifact: null,
+    },
+  ];
+  return result;
+}
+
+function fakeMalformedSubstrateJsonReviewStageResult(
+  context: CrabrunnerReviewStageDispatchContext,
+): CrabrunnerReviewStageResult {
+  const result = fakeSubstrateStallReviewStageResult(context);
+  result.result.degradedConditions = [
+    "malformed_substrate_json:codex-high-lead",
+  ];
+  result.result.summary =
+    "Crabrunner review job group error over 1 reviewer lane (malformed_substrate_json:codex-high-lead).";
+  result.result.lanes[0]!.message = "malformed substrate json";
+  result.result.lanes[0]!.degradedReason = "malformed_substrate_json";
+  return result;
+}
+
+function fakeRoutingProvenanceReviewStageResult(
+  context: CrabrunnerReviewStageDispatchContext,
+): CrabrunnerReviewStageResult {
+  const result = fakeSubstrateStallReviewStageResult(context);
+  result.result.degradedConditions = ["routing_author_provenance_missing"];
+  result.result.summary =
+    "Crabrunner review job group error over routing provenance.";
+  result.result.lanes[0]!.message = "routing provenance missing";
+  result.result.lanes[0]!.degradedReason = null;
+  return result;
+}
+
+function fakeFailVerdictReviewStageResult(
+  context: CrabrunnerReviewStageDispatchContext,
+): CrabrunnerReviewStageResult {
+  const result = fakeReviewStageResult(context);
+  result.result.verdict = "fail";
+  result.result.review_metadata.verdict = "fail";
+  result.result.summary =
+    "Crabrunner review job group failed with reviewer findings.";
+  return result;
+}
+
+function fakeSubstrateStallWithBlockingFindingReviewStageResult(
+  context: CrabrunnerReviewStageDispatchContext,
+): CrabrunnerReviewStageResult {
+  const result = fakeSubstrateStallReviewStageResult(context);
+  result.result.lanes[0]!.structuredArtifact = {
+    ...runtimePriorStructuredArtifact(),
+    verdict: "fail",
+    findings: [
+      {
+        fingerprint: "blocking-review-finding",
+        severity: "P1",
+        emittedSeverity: "P1",
+        title: "Blocking review finding",
+        titleStem: "blocking review finding",
+        category: "correctness",
+        confidence: 0.9,
+        evidence: [],
+        relatedPaths: [],
+        rationale: "A real open P1/P2 finding must remain a review failure.",
+        leadDisposition: "open",
+        repeatOf: null,
+        introducedIn: "original_diff",
+        dismissalReason: null,
+        family: null,
+      },
+    ],
+  };
+  return result;
 }
 
 function runtimePriorReviewResult(input: {

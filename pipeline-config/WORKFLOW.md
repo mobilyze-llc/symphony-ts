@@ -51,6 +51,10 @@ codex:
 runner:
   kind: codex
 
+review_execution:
+  crabrunner_job_group:
+    enabled: true
+
 hooks:
   after_create: ./hooks/after-create.sh
   before_run: ./hooks/before-run.sh
@@ -116,52 +120,13 @@ Labels: {{ issue.labels | join: ", " }}
 
 {% if stageName == "review" %}
 ## Stage: Review
-You are the review-gate operator, not the reviewer. Council is a loop over the merge candidate: every PR, including low-risk PRs, must pass the headless council gate before merge, and every material post-review change must get a convergence rerun against the new HEAD.
+You are the review-gate operator, not the reviewer. This workflow opts into the crabrunner-backed review job group with `review_execution.crabrunner_job_group.enabled: true`; the runtime must dispatch reviewer and QA lanes through the registered crabrunner stage backend and return a canonical `[REVIEW_GATE_RESULT_PATH: ...]` marker.
 
-Do NOT run `/self-moa-review`, `/codex-review`, direct `claude -p`, or any other direct Claude invocation. Claude must run through CMUX via `symphony-council-review-gate`.
+Do not run local reviewer commands or direct model-review shortcuts from this prompt. If this prompt is reached as an ordinary agent turn instead of being replaced by crabrunner review dispatch, treat that as infrastructure misconfiguration: post `## Review Infrastructure Retry` with the missing crabrunner backend or dispatcher evidence, then output `[STAGE_FAILED: infra]`.
 
-Run:
+If the investigate workpad or PR body names `risk-contract-artifact: <path>`, the runtime-owned review bundle must record that bounded artifact path under `optionalInputs.riskContractArtifactPaths`.
 
-```bash
-PR_NUMBER=$(gh pr view --json number --jq '.number')
-REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
-ARTIFACT_DIR="${TMPDIR:-/tmp}/symphony-council-{{ issue.identifier }}-$(date +%s)"
-CMUX_SPAWN_BIN="${CMUX_SPAWN_BIN:-$(command -v cmux-spawn || true)}"
-AUTHOR_FAMILY="${SYMPHONY_COUNCIL_AUTHOR_FAMILY:-codex}"
-if [ -z "$CMUX_SPAWN_BIN" ] || [ ! -x "$CMUX_SPAWN_BIN" ]; then
-  echo "Set CMUX_SPAWN_BIN to an executable cmux-spawn path or put cmux-spawn on PATH." >&2
-  exit 1
-fi
+The runtime-owned review result must include `review_metadata.reviewed_head_sha`, `review_metadata.base_sha`, `review_metadata.round`, `review_metadata.mode`, `review_routing.decorrelationBasis.mergeEligible` (or legacy `review_metadata.decorrelation_merge_eligible`), and a clean verdict. If the crabrunner review job group reports `PASS`, the runtime emits `[REVIEW_GATE_RESULT_PATH: <artifact-dir>/review-result.json]` immediately before `[STAGE_COMPLETE]`.
 
-run_council_gate() {
-  if [ -n "${SYMPHONY_COUNCIL_REVIEW_GATE:-}" ]; then
-    "$SYMPHONY_COUNCIL_REVIEW_GATE" "$@"
-  elif command -v symphony-council-review-gate >/dev/null 2>&1; then
-    symphony-council-review-gate "$@"
-  elif [ -f dist/src/cli/council-review-gate.js ]; then
-    pnpm build
-    node dist/src/cli/council-review-gate.js "$@"
-  else
-    echo "Set SYMPHONY_COUNCIL_REVIEW_GATE to the Symphony gate executable, install symphony-council-review-gate on PATH, or run from a built symphony-ts checkout." >&2
-    return 1
-  fi
-}
-
-run_council_gate \
-  --issue-id {{ issue.identifier }} \
-  --artifact-dir "$ARTIFACT_DIR" \
-  --workspace "$PWD" \
-  --repo "$REPO" \
-  --pr "$PR_NUMBER" \
-  --cmux-spawn-bin "$CMUX_SPAWN_BIN" \
-  --author-family "$AUTHOR_FAMILY" \
-  --mode {% if reworkCount > 0 %}convergence{% else %}full{% endif %} \
-  --round {{ reworkCount | plus: 1 }} \
-  --timeout-seconds 1800
-```
-
-Read `$ARTIFACT_DIR/review-result.json` and `$ARTIFACT_DIR/council-report.md`. The machine result must contain `review_metadata.reviewed_head_sha`, `review_metadata.base_sha`, `review_metadata.round`, `review_metadata.mode`, and a clean verdict.
-
-If the gate reports `PASS`, output `[REVIEW_GATE_RESULT_PATH: $ARTIFACT_DIR/review-result.json]` immediately before `[STAGE_COMPLETE]`.
-If the gate reports `FAIL`, is degraded, times out, or artifacts are missing/malformed: post a `## Review Findings` comment on the Linear issue with the council report path and blocking summary, then output `[STAGE_FAILED: review]`.
+If the job group reports `FAIL`, is degraded, times out, or artifacts are missing/malformed: post a `## Review Findings` comment on the Linear issue with the council report path and blocking summary, then output `[STAGE_FAILED: review]`. If the failure is substrate-only and there are no surviving P1/P2 code findings, post `## Review Infrastructure Retry` and output `[STAGE_FAILED: infra]`.
 {% endif %}

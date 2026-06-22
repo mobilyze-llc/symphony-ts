@@ -1,6 +1,5 @@
 import { execFile } from "node:child_process";
 import { readFile, rm } from "node:fs/promises";
-import { homedir } from "node:os";
 import { dirname, isAbsolute, join, normalize, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
@@ -455,14 +454,12 @@ export class AgentRunner {
           // turn-level concept — and turns are where git executes.
           threadSandbox:
             input.modePolicy?.threadSandbox ?? this.config.codex.threadSandbox,
-          // The bare-clone root keeps git commits working (SYMPH-353); the
-          // cmux-spawn state dir keeps in-pipeline council lanes from EPERMing
-          // on their concurrency lock and failing the gate closed (SYMPH-394).
+          // The bare-clone root keeps git commits working (SYMPH-353). Review
+          // lanes now run through crabrunner admission outside this sandbox.
           turnSandboxPolicy: augmentWorkspaceWriteSandbox(
             input.modePolicy?.turnSandboxPolicy ??
               this.config.codex.turnSandboxPolicy,
             ...gitMetadataRoots,
-            resolveCmuxSpawnStateRoot(),
           ),
           readTimeoutMs: this.config.codex.readTimeoutMs,
           turnTimeoutMs: this.config.codex.turnTimeoutMs,
@@ -1643,25 +1640,11 @@ async function resolveGitMetadataWritableRoots(
 }
 
 /**
- * Resolve cmux-spawn's cross-process state directory (SYMPH-394). cmux-spawn
- * (crucible/scripts/cmux_spawn.py) takes a per-agent flock under
- * `~/.cmux-spawn/locks/` to enforce its concurrency cap; the sandbox must be
- * allowed to write the whole `~/.cmux-spawn` dir (locks today, future state
- * files tomorrow) or every in-pipeline council lane EPERMs on the lock and the
- * gate fails closed. The Python side hardcodes `Path.home() / ".cmux-spawn"`
- * with no env override, so we mirror that default here.
- */
-export function resolveCmuxSpawnStateRoot(): string {
-  return join(homedir(), ".cmux-spawn");
-}
-
-/**
- * Append shared writable roots (the git-metadata bare clone, SYMPH-353; the
- * cmux-spawn state dir, SYMPH-394) to a workspace-write sandbox policy. String
- * policies are expanded to object form; object policies keep their other
- * fields (the client reads camelCase before snake_case). Each extra root is
- * deduped against roots already present. Non-workspace-write policies pass
- * through untouched.
+ * Append shared writable roots (currently the git-metadata bare clone,
+ * SYMPH-353) to a workspace-write sandbox policy. String policies are expanded
+ * to object form; object policies keep their other fields (the client reads
+ * camelCase before snake_case). Each extra root is deduped against roots
+ * already present. Non-workspace-write policies pass through untouched.
  */
 export function augmentWorkspaceWriteSandbox(
   value: unknown,

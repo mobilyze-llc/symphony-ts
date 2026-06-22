@@ -29,8 +29,8 @@ it("renders export-style dotenv keys as launchd environment keys", async () => {
     envFile,
     [
       "# review runtime env",
-      'export CMUX_SPAWN_BIN="/opt/cmux-spawn"',
-      "SYMPHONY_COUNCIL_REVIEW_GATE='/opt/symphony-council-review-gate'",
+      'export SYMPHONY_CRABRUNNER_ROOT="/opt/crucible"',
+      "SYMPHONY_CRABRUNNER_TARGET_REPO='/opt/product-repo'",
       "PATH=/opt/homebrew/bin:/usr/bin\t# launchd path",
       "not a dotenv assignment",
       "",
@@ -54,18 +54,18 @@ it("renders export-style dotenv keys as launchd environment keys", async () => {
 
   expect(result.status).toBe(0);
   expect(result.stderr).toBe("");
-  expect(result.stdout).toContain("<key>CMUX_SPAWN_BIN</key>");
-  expect(result.stdout).toContain("<string>/opt/cmux-spawn</string>");
-  expect(result.stdout).toContain("<key>SYMPHONY_COUNCIL_REVIEW_GATE</key>");
-  expect(result.stdout).toContain(
-    "<string>/opt/symphony-council-review-gate</string>",
-  );
+  expect(result.stdout).toContain("<key>SYMPHONY_CRABRUNNER_ROOT</key>");
+  expect(result.stdout).toContain("<string>/opt/crucible</string>");
+  expect(result.stdout).toContain("<key>SYMPHONY_CRABRUNNER_TARGET_REPO</key>");
+  expect(result.stdout).toContain("<string>/opt/product-repo</string>");
   expect(result.stdout).toContain("<key>PATH</key>");
   expect(result.stdout).toContain(
     "<string>/opt/homebrew/bin:/usr/bin</string>",
   );
-  expect(result.stdout).not.toContain("<key>export CMUX_SPAWN_BIN</key>");
-  expect(result.stdout).not.toContain("'/opt/symphony-council-review-gate'");
+  expect(result.stdout).not.toContain(
+    "<key>export SYMPHONY_CRABRUNNER_ROOT</key>",
+  );
+  expect(result.stdout).not.toContain("'/opt/product-repo'");
   expect(result.stdout).not.toContain("launchd path");
   expect(result.stdout).not.toContain("not a dotenv assignment");
 });

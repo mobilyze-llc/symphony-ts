@@ -383,21 +383,56 @@ describe("pipeline pause/resume journal-first intent (SYMPH-408b)", () => {
     );
   });
 
-  it("pause journals nothing claiming applied when the halt-issue creation throws", async () => {
+  it("pause journals an applied degraded runtime-local gate when halt-issue creation throws", async () => {
     const host = createHost({
       tracker: createLinearTracker({
         createIssueError: new Error("linear is down"),
       }),
     });
 
-    await expect(
-      host.requestPipelinePause({
-        actor: { kind: "operator", host: "pro14" },
-        reason: "halting for deploy",
-      }),
-    ).rejects.toThrow("linear is down");
+    const status = await host.requestPipelinePause({
+      actor: { kind: "operator", host: "pro14" },
+      reason: "halting for deploy",
+    });
 
-    expect(pipelineEntries(host, "pipeline_pause")).toHaveLength(0);
+    expect(status).toMatchObject({
+      paused: true,
+      halt_view: {
+        status: "unknown",
+        error_message: expect.stringContaining(
+          "halt issue creation failed: linear is down",
+        ),
+      },
+      local_pause: {
+        active: true,
+        reason: "halting for deploy",
+        halt_view: {
+          status: "uncertain",
+          issue_identifier: null,
+          issue_title: null,
+          error_message: expect.stringContaining(
+            "halt issue creation failed: linear is down",
+          ),
+        },
+      },
+      degraded: [
+        {
+          code: "pipeline_pause_applied_halt_view_uncertain",
+          message:
+            "Runtime-local pipeline pause is active, but the Linear halt view is uncertain.",
+        },
+      ],
+    });
+
+    const entries = pipelineEntries(host, "pipeline_pause");
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.metadata.status).toBe("applied");
+    expect(entries[0]?.metadata.halt_view).toMatchObject({
+      status: "uncertain",
+      error_message: expect.stringContaining(
+        "halt issue creation failed: linear is down",
+      ),
+    });
   });
 
   it("resume fails closed when the halt view is unreadable and no local pause is active", async () => {
