@@ -46,7 +46,7 @@ command -v jq   >/dev/null 2>&1 || die "jq is required (brew install jq)"
 [[ -f "$SYMPHONYCTL_JS" ]] || die "symphonyctl not built at $SYMPHONYCTL_JS (run pnpm build)"
 
 # Fetch the release's issues; we filter OPEN (not completed/canceled) below.
-QUERY='query($id:String!){ release(id:$id){ name issues(first:250){ nodes{ identifier state{ type } } } } }'
+QUERY='query($id:String!){ release(id:$id){ name issues(first:250){ pageInfo{ hasNextPage } nodes{ identifier state{ type } } } } }'
 BODY="$(jq -nc --arg q "$QUERY" --arg id "$FENCE_RELEASE_ID" '{query:$q,variables:{id:$id}}')"
 RESP="$(curl -s --max-time 30 -X POST "$LINEAR_API" \
   -H "Authorization: $LINEAR_API_KEY" -H "Content-Type: application/json" \
@@ -55,11 +55,23 @@ RESP="$(curl -s --max-time 30 -X POST "$LINEAR_API" \
 RELEASE_NAME="$(jq -r '.data.release.name // empty' <<<"$RESP")"
 [[ -n "$RELEASE_NAME" ]] || die "could not resolve release $FENCE_RELEASE_ID: $(jq -c '.errors // "no data"' <<<"$RESP")"
 
-# Collect open issue identifiers (bash 3.2: no mapfile).
+# Parse the issues array EXPLICITLY (jq -e fails on a missing/null nodes path) so
+# a fetch/parse failure cannot be silently misread as a drained release — that
+# would leave the fence stale and wrongly report "time to deploy".
+NODES="$(jq -e -c '.data.release.issues.nodes' <<<"$RESP")" \
+  || die "could not parse release issues from Linear response: $(jq -c '.errors // "unexpected shape"' <<<"$RESP")"
+
+# Refuse to act on a truncated view: >250 issues would silently drop members
+# from the fence (a wrong fence). Fail loudly (stopgap: pagination unimplemented).
+if [[ "$(jq -r '.data.release.issues.pageInfo.hasNextPage' <<<"$RESP")" == "true" ]]; then
+  die "release '$RELEASE_NAME' has >250 issues — fence-sync does not paginate (stopgap); refusing to apply a partial fence"
+fi
+
+# Collect open issue identifiers from the validated array (bash 3.2: no mapfile).
 OPEN_IDS=()
 while IFS= read -r id; do
   [[ -n "$id" ]] && OPEN_IDS+=("$id")
-done < <(jq -r '.data.release.issues.nodes[] | select(.state.type != "completed" and .state.type != "canceled") | .identifier' <<<"$RESP" | sort)
+done < <(jq -r '.[] | select(.state.type != "completed" and .state.type != "canceled") | .identifier' <<<"$NODES" | sort)
 
 if [[ "${#OPEN_IDS[@]}" -eq 0 ]]; then
   echo "fence-sync: release '$RELEASE_NAME' has 0 open issues — DRAINED."

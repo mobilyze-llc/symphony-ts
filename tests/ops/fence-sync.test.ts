@@ -34,6 +34,16 @@ it("refuses to set an empty fence when the release is drained (would block all d
   expect(fenceIdx).toBeGreaterThan(drainedIdx);
 });
 
+it("dies on a fetch/parse failure instead of misreporting a drained release", () => {
+  expect(SCRIPT).toContain("jq -e -c '.data.release.issues.nodes'");
+  expect(SCRIPT).toContain("could not parse release issues");
+});
+
+it("refuses to apply a partial fence when the release exceeds one page (>250)", () => {
+  expect(SCRIPT).toContain("hasNextPage");
+  expect(SCRIPT).toContain("does not paginate");
+});
+
 it("applies the fence via symphonyctl (not a new dispatch-control surface)", () => {
   expect(SCRIPT).toContain('"$SYMPHONYCTL_JS" fence');
   expect(SCRIPT).toContain("symphonyctl.js");
