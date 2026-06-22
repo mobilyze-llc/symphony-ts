@@ -14,6 +14,8 @@ Shallow index of `docs/`. Loaded into every session via `@docs/README.md` in `CL
 - `docs/operations/00-*` [RESERVED] — Symphony overview / top-level operator runbook. Not yet written.
 - `docs/operations/01-cmux-review-substrate-deploy.md` — Deploy runbook for the (deprecating) CMUX review substrate. Pairs with `ops/cmux-review-substrate-deploy`.
 - `docs/operations/02-symphony-manager-plan.md` [CANONICAL] — Canonical usage + deploy doc for the `symphony-manager-plan` one-shot Manager/planner CLI. Usage block auto-synced from `renderUsage()`.
+- `docs/operations/03-crabrunner-review-qa.md` [CANONICAL] — Operator runbook for crabrunner-backed Symphony review and QA gates.
+- `docs/operations/04-symphony-worktree-reaper.md` [CANONICAL] — Operator runbook for safe stable-root `.worktrees/` and `.claude/worktrees/` cleanup via `ops/symphony-ctl prune-worktrees`.
 - `docs/operations/_TEMPLATE.md` — The operations-doc template. Source for every numbered operations doc.
 
 ## Reference specs (`docs/`)
