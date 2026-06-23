@@ -666,7 +666,7 @@ function resolvePlanDependencyEdges(
     ) {
       return; // self-edge, or an endpoint outside the planned set
     }
-    const key = `${issueIdentifier} ${dependsOn}`;
+    const key = JSON.stringify([issueIdentifier, dependsOn]);
     if (seen.has(key)) {
       return;
     }
