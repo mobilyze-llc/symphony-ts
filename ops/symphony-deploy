@@ -124,7 +124,8 @@ dist_is_stale() {
   if ! command -v find >/dev/null 2>&1; then
     return 0
   fi
-  if [[ -n "$(find "$root/src" -newer "$dist_entry" -type f 2>/dev/null)" ]]; then
+  # `command find` bypasses any shadowing shell function/alias named find.
+  if [[ -n "$(command find "$root/src" -newer "$dist_entry" -type f 2>/dev/null)" ]]; then
     return 0
   fi
   return 1

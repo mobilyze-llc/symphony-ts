@@ -225,6 +225,14 @@ describe("symphony-deploy build_decision gate (SYMPH-921)", () => {
       srcNewerThanDist: false,
     });
     expect(runBuildDecision(fresh, "true")).toBe("code-changed");
+
+    // A SHA move short-circuits before dist_is_stale, so a stale dist still
+    // decides "code-changed" — exercise that path too, not just the fresh one.
+    const stale = await makeCheckout({
+      distEntry: true,
+      srcNewerThanDist: true,
+    });
+    expect(runBuildDecision(stale, "true")).toBe("code-changed");
   });
 
   it("decides stale-dist when the SHA is unchanged but dist is stale", async () => {
