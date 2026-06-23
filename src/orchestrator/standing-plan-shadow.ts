@@ -228,7 +228,11 @@ export async function runShadowPlanCycle(
     await deps.log(
       "queue_triage_planner_unavailable",
       "Standing-plan planner unavailable; pipeline keeps using the deterministic comparator.",
-      { outcome: "degraded", detail: planned.detail },
+      {
+        outcome: "degraded",
+        detail: planned.detail,
+        attempts: planned.attempts,
+      },
     );
     return { status: "unavailable", detail: planned.detail };
   }
@@ -236,7 +240,11 @@ export async function runShadowPlanCycle(
     await deps.log(
       "queue_triage_planner_invalid",
       "Standing-plan planner produced unparseable output; no revision recorded.",
-      { outcome: "degraded", detail: planned.detail },
+      {
+        outcome: "degraded",
+        detail: planned.detail,
+        attempts: planned.attempts,
+      },
     );
     return { status: "invalid", detail: planned.detail };
   }
@@ -251,6 +259,7 @@ export async function runShadowPlanCycle(
     "Standing-plan shadow cycle computed a plan (shadow mode — dispatch unchanged).",
     {
       outcome: "shadow",
+      attempts: planned.attempts,
       recorded: record.recorded,
       revision: record.plan.revision,
       plan_id: record.plan.planId,

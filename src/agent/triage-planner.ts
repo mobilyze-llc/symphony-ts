@@ -139,11 +139,14 @@ export interface TriagePlannerDeps {
 }
 
 export type PlannerResult =
-  | { status: "ok"; body: PlanBody }
+  // `attempts` is the number of model invocations this cycle made (0 when the
+  // backlog was empty and no model was called, 1 normally, 2 when a bounded
+  // retry was needed — SYMPH-918). Surfaced so the retry rate stays observable.
+  | { status: "ok"; body: PlanBody; attempts: number }
   // The model/cmux is down → caller degrades gracefully to the comparator.
-  | { status: "unavailable"; detail: string }
+  | { status: "unavailable"; detail: string; attempts: number }
   // The model produced output we could not parse/validate.
-  | { status: "invalid"; detail: string };
+  | { status: "invalid"; detail: string; attempts: number };
 
 /**
  * Per-candidate field budgets in the planner prompt (SYMPH-874/897/904). Bound
@@ -735,6 +738,7 @@ export async function runTriagePlanner(
   if (context.backlog.length === 0) {
     return {
       status: "ok",
+      attempts: 0,
       body: {
         batches: [],
         options: [],
@@ -748,15 +752,35 @@ export async function runTriagePlanner(
   }
 
   const prompt = buildPlannerPrompt(context);
-  const run = await deps.runClaude(prompt);
-  if (run.status === "unavailable") {
-    return { status: "unavailable", detail: run.detail };
+  // SYMPH-918: bounded single retry on UNPARSEABLE output only. The planner
+  // model occasionally returns prose with no JSON plan object (~1.7% of cycles —
+  // transient output variance, not a systematic failure); re-asking the same
+  // prompt once usually recovers it. We do NOT retry `unavailable` (the
+  // runner/cmux is down — a different failure that degrades to the comparator
+  // and is retried on the next heartbeat). `attempts` is returned so the retry
+  // rate is observable (no silent caps); tune the ceiling from that data.
+  const MAX_PLANNER_ATTEMPTS = 2;
+  let lastInvalidReason = "no JSON plan object found";
+  for (let attempts = 1; attempts <= MAX_PLANNER_ATTEMPTS; attempts += 1) {
+    const run = await deps.runClaude(prompt);
+    if (run.status === "unavailable") {
+      return { status: "unavailable", detail: run.detail, attempts };
+    }
+    const parsed = parsePlannerOutput(run.markdown);
+    if (parsed.ok) {
+      return {
+        status: "ok",
+        attempts,
+        body: buildPlanBody(parsed.value, context),
+      };
+    }
+    lastInvalidReason = parsed.reason;
   }
-  const parsed = parsePlannerOutput(run.markdown);
-  if (!parsed.ok) {
-    return { status: "invalid", detail: parsed.reason };
-  }
-  return { status: "ok", body: buildPlanBody(parsed.value, context) };
+  return {
+    status: "invalid",
+    detail: lastInvalidReason,
+    attempts: MAX_PLANNER_ATTEMPTS,
+  };
 }
 
 function extractPlannerJson(markdown: string): string | null {
