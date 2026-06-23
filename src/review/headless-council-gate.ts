@@ -298,6 +298,7 @@ export interface StructuredReviewerArtifact {
   rawArtifactPath: string | null;
   malformedReason: string | null;
   sections: {
+    findings: string;
     p1: string;
     p2: string;
     track: string;
@@ -4809,6 +4810,7 @@ function buildStructuredReviewerArtifact(input: {
 }): StructuredReviewerArtifact {
   const normalizedArtifact = normalizeArtifactStart(input.artifact);
   const sections = {
+    findings: artifactSectionContent(normalizedArtifact, "Findings"),
     p1: artifactSectionContent(normalizedArtifact, "P1 Must Fix"),
     p2: artifactSectionContent(normalizedArtifact, "P2 Should Fix"),
     track: artifactSectionContent(normalizedArtifact, "Track"),
@@ -4829,6 +4831,11 @@ function buildStructuredReviewerArtifact(input: {
     round: input.round,
   });
   const findings = [
+    ...parseCrucibleContractFindings({
+      content: sections.findings,
+      changedPaths,
+      round: input.round,
+    }),
     ...parseSectionFindings({
       severity: "P1",
       content: sections.p1,
@@ -4960,6 +4967,47 @@ function parseSectionFindings(input: {
       category: input.category,
     }),
   );
+}
+
+function parseCrucibleContractFindings(input: {
+  content: string;
+  changedPaths: ReadonlySet<string>;
+  round: number;
+}): StructuredReviewFinding[] {
+  return sectionFindingEntries(
+    stripCrucibleFindingSubFieldLines(input.content),
+  ).map((entry) => {
+    const severity = extractCrucibleFindingSeverity(entry);
+    const category =
+      severity === "Track"
+        ? "track"
+        : severity === "Dismissed"
+          ? "dismissed_or_theoretical"
+          : "findings";
+    return normalizeStructuredFinding({
+      rawText: stripCrucibleFindingSeverity(entry),
+      severity,
+      changedPaths: input.changedPaths,
+      round: input.round,
+      category,
+    });
+  });
+}
+
+// The crucible reviewer contract carries optional indented `evidence:`/`failure:`/
+// `test:` sub-fields under each finding bullet. Those are explanatory metadata, not
+// additional evidence locations — the authoritative location is the bullet's
+// `file:line`. `sectionFindingEntries` trims and space-joins continuation lines into
+// a single entry, so the sub-fields must be removed from the section content *before*
+// that collapse — otherwise a path-like token inside a `test:` command or `failure:`
+// prose is mis-attributed as finding evidence (which would also corrupt the
+// deterministic fingerprint). Sub-fields are indented per the contract. Preserving
+// their content into the structured finding is tracked separately (SYMPH-910).
+function stripCrucibleFindingSubFieldLines(content: string): string {
+  return content
+    .split(/\r?\n/)
+    .filter((line) => !/^\s+(?:evidence|failure|test)\s*:/i.test(line))
+    .join("\n");
 }
 
 function parseTriageSectionFindings(input: {
@@ -5588,6 +5636,22 @@ function extractTriageFindingSeverity(
   return normalizeFindingSeverity(severityToken);
 }
 
+function extractCrucibleFindingSeverity(
+  text: string,
+): StructuredReviewFindingSeverity {
+  const severityToken =
+    /^\s*\[(P1|P2|P3|Track|Dismissed)\]/i.exec(text)?.[1] ??
+    extractTriageFindingSeverity(text);
+  if (severityToken === null) {
+    return "P2";
+  }
+  return normalizeFindingSeverity(severityToken);
+}
+
+function stripCrucibleFindingSeverity(text: string): string {
+  return text.replace(/^\s*\[(?:P1|P2|P3|Track|Dismissed)\]\s*/i, "").trim();
+}
+
 function normalizeFindingSeverity(
   value: string,
 ): StructuredReviewFindingSeverity {
@@ -5596,6 +5660,9 @@ function normalizeFindingSeverity(
     return "P1";
   }
   if (normalized === "track") {
+    return "Track";
+  }
+  if (normalized === "p3") {
     return "Track";
   }
   if (normalized === "dismissed") {
@@ -5642,7 +5709,7 @@ function parseArtifactVerdict(artifact: string): ParsedArtifactVerdict {
       return {
         verdict: "fail",
         message:
-          "Artifact verdict was PASS but P1/P2 findings sections were not empty.",
+          "Artifact verdict was PASS but blocking findings sections were not empty.",
         degradedReason: null,
       };
     }
@@ -5671,6 +5738,18 @@ function parseArtifactVerdict(artifact: string): ParsedArtifactVerdict {
       degradedReason: null,
     };
   }
+  if (
+    token === "CHANGES_REQUESTED" &&
+    !artifactHasBlockingSections(trimmedArtifact) &&
+    artifactHasNonBlockingFindings(trimmedArtifact)
+  ) {
+    return {
+      verdict: "pass",
+      message:
+        "Reviewer verdict was CHANGES_REQUESTED but only Track/Dismissed content was present.",
+      degradedReason: null,
+    };
+  }
   return {
     verdict: "fail",
     message: `Reviewer verdict was ${token}.`,
@@ -5680,6 +5759,7 @@ function parseArtifactVerdict(artifact: string): ParsedArtifactVerdict {
 
 function artifactHasBlockingSections(artifact: string): boolean {
   return (
+    artifactCrucibleFindingsHaveBlockingContent(artifact) ||
     artifactSectionHasContent(artifact, "P1 Must Fix") ||
     artifactSectionHasContent(artifact, "P2 Should Fix")
   );
@@ -5687,8 +5767,35 @@ function artifactHasBlockingSections(artifact: string): boolean {
 
 function artifactHasNonBlockingFindings(artifact: string): boolean {
   return (
+    artifactCrucibleFindingsHaveOnlyNonBlockingContent(artifact) ||
     artifactSectionHasContent(artifact, "Track") ||
     artifactSectionHasContent(artifact, "Dismissed Or Theoretical")
+  );
+}
+
+function artifactCrucibleFindingsHaveBlockingContent(
+  artifact: string,
+): boolean {
+  return sectionFindingEntries(
+    artifactSectionContent(artifact, "Findings"),
+  ).some((entry) => {
+    const severity = extractCrucibleFindingSeverity(entry);
+    return severity === "P1" || severity === "P2";
+  });
+}
+
+function artifactCrucibleFindingsHaveOnlyNonBlockingContent(
+  artifact: string,
+): boolean {
+  const entries = sectionFindingEntries(
+    artifactSectionContent(artifact, "Findings"),
+  );
+  return (
+    entries.length > 0 &&
+    entries.every((entry) => {
+      const severity = extractCrucibleFindingSeverity(entry);
+      return severity === "Track" || severity === "Dismissed";
+    })
   );
 }
 
@@ -6387,40 +6494,32 @@ function buildReviewerPrompt(
     "Severity:",
     "- P1: must fix before merge.",
     "- P2: should fix before merge.",
-    "- Track: durable follow-up not introduced by this diff.",
-    "Use FINDINGS only when P1 or P2 contains blocking content. Use PASS when only Track contains content.",
+    "- P3/Track: durable follow-up not introduced by this diff, non-blocking.",
+    "Defect classes: correctness, safety, security, data integrity, contract/API, and operator-risk regressions.",
+    "Use CHANGES_REQUESTED only when P1 or P2 contains blocking content. Use PASS when there are no findings or only Track content. Use BLOCKED only when the review cannot be completed because required evidence is unavailable.",
     "Put findings outside the changed lines in Track unless the diff directly introduces or exposes the issue. Do not silently drop out-of-diff findings.",
     "For each finding, include a concise title, file:line evidence when available, confidence, and whether it repeats a prior fingerprint.",
+    "Use parseable bullets: `- [P1|P2|P3|Track] file:line - summary` with optional indented `evidence:`, `failure:`, and `test:` sub-fields.",
     "When multiple findings share a cross-file invariant, append lead-assertable metadata fields to each related finding as an explicit trailer: `| family: <name>; safety_claim: <claim>; next_round_question: <question>; fixed_symptoms: <comma-or-semicolon list>; remaining_symptoms: <comma-or-semicolon list>`. Family labels augment fingerprints and repeatOf; they do not replace per-finding evidence.",
     "",
     "Prior adjudicated findings by fingerprint:",
     priorFindings,
     "",
-    "Your artifact MUST start with `## Verdict` as the first non-whitespace line.",
-    "Do not write a title (for example `# Council Review ...`), preamble, or any other text before `## Verdict`; the gate parser rejects artifacts that do not lead with the verdict.",
+    "Your artifact should start with `## Verdict`. A short plain-language preamble is tolerated but discouraged.",
     "",
     "Output exactly:",
     "",
     "## Verdict",
-    "PASS or FINDINGS",
+    "PASS or CHANGES_REQUESTED or BLOCKED",
     "",
-    "## P1 Must Fix",
-    "Use `None` when empty.",
-    "",
-    "## P2 Should Fix",
-    "Use `None` when empty.",
-    "",
-    "## Track",
-    "Use `None` when empty.",
-    "",
-    "## Dismissed Or Theoretical",
-    "Use `None` when empty.",
+    "## Findings",
+    "Use `None` when empty. Otherwise use one parseable bullet per finding.",
     "",
     `BEGIN_${diffBoundary}`,
     diffData,
     `END_${diffBoundary}`,
     "",
-    "Final artifact reminder: the artifact content must start with `## Verdict` as its first non-whitespace line. Do not summarize the review session.",
+    "Final artifact reminder: do not summarize the review session outside the artifact contract.",
   ].join("\n");
 }
 

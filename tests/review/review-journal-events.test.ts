@@ -1181,6 +1181,7 @@ function structuredArtifact(input: {
     rawArtifactPath: "/tmp/raw.md",
     malformedReason: null,
     sections: {
+      findings: "",
       p1: "SECRET raw section",
       p2: "",
       track: "",

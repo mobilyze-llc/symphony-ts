@@ -82,6 +82,7 @@ function laneWithFindings(
       rawArtifactPath: null,
       malformedReason: null,
       sections: {
+        findings: "",
         p1: "",
         p2: "",
         track: "",

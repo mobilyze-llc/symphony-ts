@@ -52,6 +52,7 @@
     "pretest": "pnpm run validate:skill-installs",
     "test": "node scripts/test.mjs",
     "test:watch": "vitest",
+    "smoke:review": "vitest run tests/review/crucible-contract-smoke.test.ts",
     "validate:skill-installs": "node scripts/validate-skill-installs.mjs",
     "probe:codex-skills": "node scripts/probe-codex-skills.mjs",
     "smoke:codex-headless": "node scripts/probe-codex-skills.mjs --ci-smoke",
