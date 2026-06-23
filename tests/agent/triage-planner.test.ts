@@ -1078,6 +1078,7 @@ describe("runTriagePlanner", () => {
 
     expect(invoked).toBe(false);
     expect(result.status).toBe("ok");
+    expect(result.attempts).toBe(0); // no model call on an empty backlog (SYMPH-918)
     if (result.status === "ok") {
       expect(result.body.batches).toEqual([]);
       expect(result.body.options).toEqual([]);
@@ -1162,6 +1163,82 @@ describe("runTriagePlanner", () => {
       expect(downgraded?.mode).toBe("parallel-isolated");
       expect(downgraded?.canary).toBeNull();
     }
+  });
+
+  it("retries once and recovers when the first model output is unparseable (SYMPH-918)", async () => {
+    let calls = 0;
+    const deps = {
+      runClaude: async (): Promise<PlannerRunResult> => {
+        calls += 1;
+        return calls === 1
+          ? { status: "ok", markdown: "# Plan\n\nNo JSON this time.\n" }
+          : {
+              status: "ok",
+              markdown: artifact({
+                rationale: "recovered on retry",
+                batches: [
+                  {
+                    mode: "parallel-isolated",
+                    issueIdentifiers: ["SYMPH-1"],
+                    rationale: "first",
+                  },
+                ],
+              }),
+            };
+      },
+    };
+    const result = await runTriagePlanner(context(), deps);
+    expect(calls).toBe(2);
+    expect(result.status).toBe("ok");
+    expect(result.attempts).toBe(2);
+    if (result.status === "ok") {
+      expect(result.body.batches).toHaveLength(1);
+    }
+  });
+
+  it("stops after exactly one bounded retry when output stays unparseable (SYMPH-918)", async () => {
+    let calls = 0;
+    const deps = {
+      runClaude: async (): Promise<PlannerRunResult> => {
+        calls += 1;
+        return { status: "ok", markdown: "# Plan\n\nStill no JSON.\n" };
+      },
+    };
+    const result = await runTriagePlanner(context(), deps);
+    expect(calls).toBe(2); // one retry, not unbounded
+    expect(result.status).toBe("invalid");
+    expect(result.attempts).toBe(2);
+  });
+
+  it("does not retry when the runner is unavailable (SYMPH-918)", async () => {
+    let calls = 0;
+    const deps = {
+      runClaude: async (): Promise<PlannerRunResult> => {
+        calls += 1;
+        return { status: "unavailable", detail: "cmux down" };
+      },
+    };
+    const result = await runTriagePlanner(context(), deps);
+    expect(calls).toBe(1); // unavailable is an infra failure, not retried
+    expect(result.status).toBe("unavailable");
+    expect(result.attempts).toBe(1);
+  });
+
+  it("makes a single model call and reports attempts=1 on first-try success (SYMPH-918)", async () => {
+    let calls = 0;
+    const deps = {
+      runClaude: async (): Promise<PlannerRunResult> => {
+        calls += 1;
+        return {
+          status: "ok",
+          markdown: artifact({ rationale: "ok", batches: [] }),
+        };
+      },
+    };
+    const result = await runTriagePlanner(context(), deps);
+    expect(calls).toBe(1);
+    expect(result.status).toBe("ok");
+    expect(result.attempts).toBe(1);
   });
 });
 

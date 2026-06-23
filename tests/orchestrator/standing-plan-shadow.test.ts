@@ -242,6 +242,11 @@ describe("runShadowPlanCycle", () => {
         expect(result.batchCount).toBe(1);
       }
       expect(logs.map((l) => l.event)).toContain("queue_triage_shadow_plan");
+      // Retry rate is observable: the shadow-plan log carries attempts (SYMPH-918).
+      const shadowLog = logs.find(
+        (l) => l.event === "queue_triage_shadow_plan",
+      );
+      expect(shadowLog?.fields).toMatchObject({ attempts: 1 });
       // Persisted + queryable after the cycle.
       const plan = await loadStandingPlan(root);
       expect(plan?.revision).toBe(1);
