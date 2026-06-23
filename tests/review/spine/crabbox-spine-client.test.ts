@@ -1,0 +1,214 @@
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+import { describe, expect, it } from "vitest";
+
+import {
+  CrabboxSpineClient,
+  type SpineCommandResult,
+  type SpineCommandRunner,
+  SpineUnavailableError,
+} from "../../../src/review/spine/crabbox-spine-client.js";
+
+const TRIAGE_PASS = {
+  schema: "crucible.session-orchestrator.council-triage.v1",
+  lanes: [
+    {
+      reviewer: "opus",
+      file: "a.md",
+      verdict: "PASS",
+      parse_quality: "clean",
+      finding_count: 0,
+      none: true,
+      fail_open: false,
+    },
+  ],
+  summary: {
+    lanes: 1,
+    track: 0,
+    escalate: 0,
+    unparseable_lanes: 0,
+    blocked_lanes: 0,
+    partial_lanes: 0,
+  },
+  track: [],
+  escalate: [],
+  next_action: "no_blocking_findings_this_round",
+};
+
+const CROSS_EXAM_NOT_REQUIRED = {
+  schema: "crucible.session-orchestrator.cross-exam-select.v1",
+  cross_exam_required: false,
+  reason: "frozen diff, nothing escalated",
+  fix_diff_changed: false,
+  fix_size_lines: null,
+  fix_trivial: null,
+  parseable_lanes: 1,
+  target_count: 0,
+  targets: [],
+};
+
+const CONVERGED = {
+  schema: "crucible.session-orchestrator.convergence-decision.v1",
+  input_rounds: 2,
+  state: "converged",
+  reason: "2 clean rounds over a frozen diff",
+  rounds: 2,
+};
+
+function capturingRunner(
+  result: SpineCommandResult | (() => SpineCommandResult),
+): {
+  runner: SpineCommandRunner;
+  calls: string[][];
+} {
+  const calls: string[][] = [];
+  const runner: SpineCommandRunner = async (argv) => {
+    calls.push([...argv]);
+    return typeof result === "function" ? result() : result;
+  };
+  return { runner, calls };
+}
+
+function ok(json: unknown): SpineCommandResult {
+  return { stdout: JSON.stringify(json), stderr: "", exitCode: 0 };
+}
+
+describe("CrabboxSpineClient", () => {
+  it("parses a council-triage result and pairs review-file/reviewer argv in order", async () => {
+    const { runner, calls } = capturingRunner(ok(TRIAGE_PASS));
+    const client = new CrabboxSpineClient({ runCommand: runner });
+    const result = await client.councilTriage({
+      reviews: [
+        { file: "a.md", reviewer: "opus" },
+        { file: "b.md", reviewer: "deepseek" },
+      ],
+    });
+    expect(result.summary.escalate).toBe(0);
+    expect(result.next_action).toBe("no_blocking_findings_this_round");
+    const argv = calls[0]!;
+    expect(argv).toContain("council-triage");
+    expect(argv.join(" ")).toContain(
+      "--review-file a.md --reviewer opus --review-file b.md --reviewer deepseek",
+    );
+  });
+
+  it("omits unknown optional flags from cross-exam-select argv (no literal null)", async () => {
+    const { runner, calls } = capturingRunner(ok(CROSS_EXAM_NOT_REQUIRED));
+    const client = new CrabboxSpineClient({ runCommand: runner });
+    const result = await client.crossExamSelect({
+      triageFile: "t.json",
+      currentDiffHash: "abc123",
+    });
+    expect(result.cross_exam_required).toBe(false);
+    const argv = calls[0]!.join(" ");
+    expect(argv).toContain("--current-diff-hash abc123");
+    expect(argv).not.toContain("--fix-size-lines");
+    expect(argv).not.toContain("--prior-diff-hash");
+    expect(argv).not.toContain("null");
+  });
+
+  it("includes optional cross-exam flags when provided", async () => {
+    const { runner, calls } = capturingRunner(ok(CROSS_EXAM_NOT_REQUIRED));
+    const client = new CrabboxSpineClient({ runCommand: runner });
+    await client.crossExamSelect({
+      triageFile: "t.json",
+      currentDiffHash: "head",
+      priorDiffHash: "prior",
+      fixSizeLines: 12,
+    });
+    const argv = calls[0]!.join(" ");
+    expect(argv).toContain("--prior-diff-hash prior");
+    expect(argv).toContain("--fix-size-lines 12");
+  });
+
+  it("parses a convergence-decision result", async () => {
+    const { runner } = capturingRunner(ok(CONVERGED));
+    const client = new CrabboxSpineClient({ runCommand: runner });
+    const result = await client.convergenceDecision({ roundsFile: "r.json" });
+    expect(result.state).toBe("converged");
+  });
+
+  it("throws SpineUnavailableError on a non-zero exit", async () => {
+    const { runner } = capturingRunner({
+      stdout: "",
+      stderr: "boom",
+      exitCode: 2,
+    });
+    const client = new CrabboxSpineClient({ runCommand: runner });
+    await expect(
+      client.councilTriage({ reviews: [{ file: "a.md", reviewer: "opus" }] }),
+    ).rejects.toBeInstanceOf(SpineUnavailableError);
+  });
+
+  it("throws SpineUnavailableError on malformed JSON", async () => {
+    const { runner } = capturingRunner({
+      stdout: "not json",
+      stderr: "",
+      exitCode: 0,
+    });
+    const client = new CrabboxSpineClient({ runCommand: runner });
+    await expect(
+      client.councilTriage({ reviews: [{ file: "a.md", reviewer: "opus" }] }),
+    ).rejects.toThrow(/valid JSON/);
+  });
+
+  it("throws SpineUnavailableError on a drifted schema id (contract drift)", async () => {
+    const drifted = {
+      ...TRIAGE_PASS,
+      schema: "crucible.session-orchestrator.council-triage.v2",
+    };
+    const { runner } = capturingRunner(ok(drifted));
+    const client = new CrabboxSpineClient({ runCommand: runner });
+    await expect(
+      client.councilTriage({ reviews: [{ file: "a.md", reviewer: "opus" }] }),
+    ).rejects.toThrow(/contract drift/);
+  });
+
+  it("rejects an empty reviewer set", async () => {
+    const { runner } = capturingRunner(ok(TRIAGE_PASS));
+    const client = new CrabboxSpineClient({ runCommand: runner });
+    await expect(client.councilTriage({ reviews: [] })).rejects.toBeInstanceOf(
+      SpineUnavailableError,
+    );
+  });
+
+  it("preflight resolves when the spine returns a single triaged lane", async () => {
+    const { runner } = capturingRunner(ok(TRIAGE_PASS));
+    const client = new CrabboxSpineClient({ runCommand: runner });
+    await expect(client.preflight()).resolves.toBeUndefined();
+  });
+
+  it("preflight fails closed when the spine returns no lanes", async () => {
+    const empty = {
+      ...TRIAGE_PASS,
+      lanes: [],
+      summary: { ...TRIAGE_PASS.summary, lanes: 0 },
+    };
+    const { runner } = capturingRunner(ok(empty));
+    const client = new CrabboxSpineClient({ runCommand: runner });
+    await expect(client.preflight()).rejects.toBeInstanceOf(
+      SpineUnavailableError,
+    );
+  });
+});
+
+// Live conformance: run the real crucible spine when it is present (controller /
+// local dev). Skipped in CI where the crucible checkout is absent.
+const LIVE_SPINE_PATH =
+  process.env.SYMPHONY_REVIEW_SPINE_PATH ??
+  join(
+    homedir(),
+    "projects/crucible/skills/session-orchestrator/scripts/production-rollout.mjs",
+  );
+
+describe.skipIf(!existsSync(LIVE_SPINE_PATH))(
+  "CrabboxSpineClient (live spine)",
+  () => {
+    it("preflights against the real crucible spine", async () => {
+      const client = new CrabboxSpineClient({ spinePath: LIVE_SPINE_PATH });
+      await expect(client.preflight()).resolves.toBeUndefined();
+    });
+  },
+);
