@@ -23,6 +23,14 @@ tracker:
 queue_triage:
   enabled: true
   shadow_mode: true
+  # SYMPH-916: flip the SYMPH-896 curated-comment planner enrichment ON to start
+  # the measurement window for the SYMPH-905 topology decision (two-pass vs
+  # curated one-pass). Report-only: shadow_mode stays true, so this only enlarges
+  # the planner context + emits queue_triage_comment_enrichment_measure events —
+  # dispatch is unaffected. Caps stay at shipped defaults (measure-before-caps);
+  # re-tuning the caps and the topology decision are SYMPH-905, not here.
+  comment_enrichment:
+    enabled: true
 agent:
   max_concurrent_agents: 5
 server:
