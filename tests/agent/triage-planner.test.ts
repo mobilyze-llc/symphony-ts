@@ -1055,6 +1055,55 @@ describe("buildPlanBody", () => {
       dependsOn: "SYMPH-1",
     });
   });
+
+  it("dedupes a dependency edge declared by both recorded blockedBy and a soft dep (SYMPH-920)", () => {
+    const ctx: PlannerContext = {
+      ...context(),
+      backlog: [
+        {
+          issueId: "u-1",
+          issueIdentifier: "SYMPH-1",
+          title: "A",
+          priority: 1,
+          state: "Todo",
+          blockedBy: [],
+        },
+        {
+          issueId: "u-2",
+          issueIdentifier: "SYMPH-2",
+          title: "B",
+          priority: 2,
+          state: "Todo",
+          blockedBy: ["SYMPH-1"],
+        },
+      ],
+    };
+    const body = buildPlanBody(
+      {
+        rationale: "plan",
+        batches: [
+          {
+            mode: "parallel-isolated",
+            issueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+            rationale: "r",
+          },
+        ],
+        // The same edge SYMPH-2 -> SYMPH-1 arrives from recorded blockedBy AND
+        // the model's soft dependency. The dedup Set key (SYMPH-920: now a
+        // JSON.stringify pair, formerly a NUL-delimited literal) must collapse
+        // them to a single edge.
+        dependencies: [{ issueIdentifier: "SYMPH-2", dependsOn: ["SYMPH-1"] }],
+      },
+      ctx,
+    );
+    const matches = body.dependencyEdges.filter(
+      (edge) =>
+        edge.issueIdentifier === "SYMPH-2" && edge.dependsOn === "SYMPH-1",
+    );
+    expect(matches).toEqual([
+      { issueIdentifier: "SYMPH-2", dependsOn: "SYMPH-1" },
+    ]);
+  });
 });
 
 describe("runTriagePlanner", () => {
