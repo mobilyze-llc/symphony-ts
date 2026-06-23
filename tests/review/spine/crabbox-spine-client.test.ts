@@ -192,6 +192,28 @@ describe("CrabboxSpineClient", () => {
       SpineUnavailableError,
     );
   });
+
+  it("fails closed via the real runner when the spine path is missing", async () => {
+    // No injected runner: a non-existent spine path makes node exit non-zero, which
+    // must surface end-to-end as a fail-closed SpineUnavailableError (never a pass).
+    const client = new CrabboxSpineClient({
+      spinePath: "/nonexistent/symphony-spine-does-not-exist.mjs",
+      timeoutMs: 10_000,
+    });
+    await expect(
+      client.councilTriage({ reviews: [{ file: "a.md", reviewer: "opus" }] }),
+    ).rejects.toBeInstanceOf(SpineUnavailableError);
+  });
+
+  it("wraps a runner spawn rejection as a 'spawn failed' SpineUnavailableError", async () => {
+    const runner: SpineCommandRunner = async () => {
+      throw new Error("ETIMEDOUT");
+    };
+    const client = new CrabboxSpineClient({ runCommand: runner });
+    await expect(
+      client.councilTriage({ reviews: [{ file: "a.md", reviewer: "opus" }] }),
+    ).rejects.toThrow(/spawn failed/);
+  });
 });
 
 // Live conformance: run the real crucible spine when it is present (controller /

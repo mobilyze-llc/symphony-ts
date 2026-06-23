@@ -31,18 +31,17 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 
 export class SpineUnavailableError extends Error {
   readonly subcommand: string;
-  override readonly cause?: unknown;
   constructor(
     subcommand: string,
     message: string,
     options?: { cause?: unknown },
   ) {
-    super(`crabbox review spine [${subcommand}]: ${message}`);
+    super(
+      `crabbox review spine [${subcommand}]: ${message}`,
+      options?.cause !== undefined ? { cause: options.cause } : undefined,
+    );
     this.name = "SpineUnavailableError";
     this.subcommand = subcommand;
-    if (options?.cause !== undefined) {
-      this.cause = options.cause;
-    }
   }
 }
 
@@ -234,31 +233,31 @@ function defaultSpineCommandRunner(
   argv: readonly string[],
   options: { timeoutMs: number; env: NodeJS.ProcessEnv },
 ): Promise<SpineCommandResult> {
-  const [first, ...rest] = argv;
-  if (first === undefined) {
-    return Promise.reject(new Error("empty spine argv"));
-  }
   return new Promise((resolve, reject) => {
     execFile(
       process.execPath,
-      [first, ...rest],
+      [...argv],
       {
         timeout: options.timeoutMs,
         env: options.env,
         maxBuffer: 64 * 1024 * 1024,
       },
       (error, stdout, stderr) => {
-        if (error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+        if (error) {
+          // execFile sets a numeric `code` only on a genuine non-zero process
+          // exit. Spawn failures (ENOENT/EACCES/… → errno string code) and
+          // timeout/signal kills (code null) reject so the client surfaces
+          // "spawn failed: <message>" with the original error preserved as
+          // `cause`, rather than a diagnostic-less "exited null".
+          const code = (error as NodeJS.ErrnoException).code;
+          if (typeof code === "number") {
+            resolve({ stdout, stderr, exitCode: code });
+            return;
+          }
           reject(error);
           return;
         }
-        const exitCode =
-          error && typeof (error as { code?: unknown }).code === "number"
-            ? ((error as { code: number }).code ?? null)
-            : error
-              ? null
-              : 0;
-        resolve({ stdout, stderr, exitCode });
+        resolve({ stdout, stderr, exitCode: 0 });
       },
     );
   });
