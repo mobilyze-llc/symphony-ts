@@ -617,6 +617,7 @@ function structuredReviewerArtifact(
     rawArtifactPath: null,
     malformedReason: null,
     sections: {
+      findings: "",
       p1: "None",
       p2: "None",
       track: "None",

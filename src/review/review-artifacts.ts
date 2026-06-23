@@ -1,5 +1,6 @@
 const ARTIFACT_SECTION_HEADINGS = [
   "Verdict",
+  "Findings",
   "P1 Must Fix",
   "P2 Should Fix",
   "Track",
@@ -48,11 +49,18 @@ const DIFF_INJECTION_TOKEN_PATTERN =
   /(DIFF_DATA|SYMPHONY_UNTRUSTED_DIFF|diff --git)/;
 const MAX_SAFE_ARTIFACT_PREAMBLE_CHARS = 3_000;
 const MAX_SAFE_ARTIFACT_PREAMBLE_LINES = 12;
-export type ArtifactVerdictToken = "PASS" | "FINDINGS" | "FAIL";
+export type ArtifactVerdictToken =
+  | "PASS"
+  | "FINDINGS"
+  | "FAIL"
+  | "CHANGES_REQUESTED"
+  | "BLOCKED";
 
 const ARTIFACT_VERDICT_TOKENS: readonly ArtifactVerdictToken[] = [
+  "CHANGES_REQUESTED",
   "PASS",
   "FINDINGS",
+  "BLOCKED",
   "FAIL",
 ];
 

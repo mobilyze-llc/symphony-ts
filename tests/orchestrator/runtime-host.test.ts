@@ -10123,6 +10123,7 @@ function runtimePriorStructuredArtifact(): StructuredReviewerArtifact {
     rawArtifactPath: "/tmp/prior.md",
     malformedReason: null,
     sections: {
+      findings: "",
       p1: "",
       p2: "prior finding",
       track: "",

@@ -3124,6 +3124,104 @@ describe("runHeadlessCouncilGate", () => {
     });
   });
 
+  it("maps crucible CHANGES_REQUESTED findings without malformed degradation or finding drop", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact: [
+            "## Verdict",
+            "CHANGES_REQUESTED",
+            "",
+            "## Findings",
+            "- [P1] file.ts:1 - valid crucible finding survives synthesis.",
+            "  failure: valid foreign artifacts must not become substrate degradation.",
+            "  test: pnpm exec vitest run tests/review/headless-council-gate.test.ts",
+          ].join("\n"),
+        },
+      },
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("fail");
+    const lane = result.lanes[0]!;
+    expect(lane).toMatchObject({
+      verdict: "fail",
+      degradedReason: null,
+      message: "Reviewer verdict was CHANGES_REQUESTED.",
+    });
+    expect(lane.structuredArtifact).toMatchObject({
+      parseStatus: "synthesized_from_markdown",
+      malformedReason: null,
+      sections: {
+        findings: expect.stringContaining("[P1] file.ts:1"),
+      },
+    });
+    expect(lane.structuredArtifact?.findings).toHaveLength(1);
+    expect(lane.structuredArtifact?.findings[0]).toMatchObject({
+      severity: "P1",
+      leadDisposition: "open",
+      category: "findings",
+      evidence: [
+        {
+          path: "file.ts",
+          lineStart: 1,
+          lineEnd: 1,
+          changedPath: true,
+        },
+      ],
+    });
+  });
+
+  it("keeps crucible track-only findings non-blocking", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact: [
+            "## Verdict",
+            "PASS",
+            "",
+            "## Findings",
+            "- [Track] docs/operators.md:9 - pre-existing rollout note.",
+            "  failure: non-blocking; outside the changed diff.",
+            "  test: no merge-blocking test required.",
+          ].join("\n"),
+        },
+      },
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    expect(result.lanes[0]?.structuredArtifact?.findings).toEqual([
+      expect.objectContaining({
+        severity: "Track",
+        leadDisposition: "track",
+        category: "track",
+      }),
+    ]);
+  });
+
   it("rejects stale remote lane mirrors that predate lane launch", async () => {
     const harness = await createHarness({
       laneBehavior: {
@@ -6158,7 +6256,7 @@ describe("runHeadlessCouncilGate", () => {
     ).toMatchObject({
       verdict: "fail",
       message:
-        "Artifact verdict was PASS but P1/P2 findings sections were not empty.",
+        "Artifact verdict was PASS but blocking findings sections were not empty.",
     });
   });
 
@@ -6189,7 +6287,7 @@ describe("runHeadlessCouncilGate", () => {
     ).toMatchObject({
       verdict: "fail",
       message:
-        "Artifact verdict was PASS but P1/P2 findings sections were not empty.",
+        "Artifact verdict was PASS but blocking findings sections were not empty.",
     });
   });
 
@@ -6275,7 +6373,7 @@ describe("runHeadlessCouncilGate", () => {
     ).toMatchObject({
       verdict: "fail",
       message:
-        "Artifact verdict was PASS but P1/P2 findings sections were not empty.",
+        "Artifact verdict was PASS but blocking findings sections were not empty.",
     });
   });
 

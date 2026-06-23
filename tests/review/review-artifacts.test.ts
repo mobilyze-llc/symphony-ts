@@ -65,6 +65,10 @@ describe("review artifact contracts", () => {
   it("accepts normalized verdict heading variants", () => {
     expect(artifactStartingVerdictToken("## Verdict:\nFAIL")).toBe("FAIL");
     expect(artifactStartingVerdictToken("### Verdict\nPASS")).toBe("PASS");
+    expect(artifactStartingVerdictToken("## Verdict\nCHANGES_REQUESTED")).toBe(
+      "CHANGES_REQUESTED",
+    );
+    expect(artifactStartingVerdictToken("## Verdict\nBLOCKED")).toBe("BLOCKED");
   });
 
   it("requires verdict token word boundaries", () => {
@@ -72,6 +76,9 @@ describe("review artifact contracts", () => {
     expect(artifactStartingVerdictToken("Verdict: PASS.")).toBe("PASS");
     expect(artifactStartingVerdictToken("Verdict: PASSED")).toBeNull();
     expect(artifactStartingVerdictToken("Verdict: FAILING")).toBeNull();
+    expect(
+      artifactStartingVerdictToken("Verdict: CHANGES_REQUESTED_BY_TEST"),
+    ).toBeNull();
   });
 
   it("ignores emphasized empty-section markers", () => {
