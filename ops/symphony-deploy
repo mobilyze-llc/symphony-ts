@@ -81,23 +81,72 @@ run_or_dry() {
   fi
 }
 
-# dist_is_stale ROOT — exit 0 (stale) when the compiled dist/ is missing or
-# older than src/, so a rebuild is required even when the git SHA did not move
-# (SYMPH-919). The build is otherwise gated on a SHA delta, so an anomalous
-# same-SHA checkout whose dist/ is out of sync with HEAD (an external git
-# advance, a partial/failed build, or a manually-deleted dist/) would restart
-# the service on stale compiled code. Mirrors the src->dist staleness guard in
-# run-pipeline.sh.
+# write_build_stamp ROOT — record the git SHA the dist was just built from in
+# dist/.build-sha, so a later same-SHA deploy can tell whether dist/ is current
+# for HEAD independent of file mtimes (SYMPH-921). Best-effort: a no-op outside a
+# git checkout. Call it after every successful build.
+write_build_stamp() {
+  local root="$1" sha
+  sha="$(git -C "$root" rev-parse HEAD 2>/dev/null || true)"
+  if [[ -n "$sha" ]]; then
+    printf '%s\n' "$sha" > "$root/dist/.build-sha"
+  fi
+}
+
+# dist_is_stale ROOT — exit 0 (stale) when dist/ must be rebuilt even though the
+# git SHA did not move; exit 1 (fresh) otherwise. Checks, in order:
+#   1. compiled entrypoint missing                  -> stale
+#   2. build-stamp missing or != HEAD (SYMPH-921)   -> stale: dist/ was not built
+#      from the current checkout (external git advance, partial/failed build)
+#   3. `find` unavailable (SYMPH-921)               -> stale: cannot prove
+#      freshness, so fail safe toward a rebuild rather than skip on uncertainty
+#   4. any src file newer than the entrypoint       -> stale: uncommitted edits
+#   else                                            -> fresh
+# Known limitation (SYMPH-921): arbitrary corruption of a NON-entry dist/ file at
+# a matching SHA with older mtimes is not detected; full integrity would need a
+# file manifest. The build-stamp + entrypoint + mtime checks cover the observed
+# failure modes (external SHA advance, partial/failed build, deleted dist/).
+# Extends the src->dist staleness guard in run-pipeline.sh (SYMPH-919).
 dist_is_stale() {
   local root="$1"
   local dist_entry="$root/dist/src/cli/main.js"
+  local stamp="$root/dist/.build-sha"
   if [[ ! -f "$dist_entry" ]]; then
     return 0
   fi
-  if [[ -n "$(find "$root/src" -newer "$dist_entry" -type f 2>/dev/null)" ]]; then
+  local head_sha=""
+  head_sha="$(git -C "$root" rev-parse HEAD 2>/dev/null || true)"
+  if [[ -n "$head_sha" ]]; then
+    if [[ ! -f "$stamp" || "$(cat "$stamp" 2>/dev/null)" != "$head_sha" ]]; then
+      return 0
+    fi
+  fi
+  if ! command -v find >/dev/null 2>&1; then
+    return 0
+  fi
+  # `command find` bypasses any shadowing shell function/alias named find.
+  if [[ -n "$(command find "$root/src" -newer "$dist_entry" -type f 2>/dev/null)" ]]; then
     return 0
   fi
   return 1
+}
+
+# build_decision ROOT SHA_CHANGED — echo the symphony build-gate decision so the
+# gate is behaviorally testable (SYMPH-921), separate from its side effects:
+#   "code-changed"  the git SHA moved -> build (+ install if the lockfile changed)
+#   "stale-dist"    SHA unchanged but dist/ is out of sync with HEAD -> rebuild
+#                   (SYMPH-919)
+#   "current"       dist/ is current -> skip
+# Pure: no build, no install, no logs, no side effects. SHA_CHANGED is "true"/"false".
+build_decision() {
+  local root="$1" sha_changed="$2"
+  if [[ "$sha_changed" == "true" ]]; then
+    echo "code-changed"
+  elif dist_is_stale "$root"; then
+    echo "stale-dist"
+  else
+    echo "current"
+  fi
 }
 
 restart_stopped_services_after_error() {
@@ -348,34 +397,43 @@ if $DO_SYMPHONY; then
   SYMPH_PRE_SHA="$_PRE_SHA"
   SYMPH_POST_SHA="$_POST_SHA"
 
-  if [[ "$SYMPH_PRE_SHA" != "$SYMPH_POST_SHA" ]]; then
-    SYMPHONY_UPDATED=true
+  SYMPH_SHA_CHANGED=false
+  [[ "$SYMPH_PRE_SHA" != "$SYMPH_POST_SHA" ]] && SYMPH_SHA_CHANGED=true
 
-    # pnpm install if lockfile changed
-    if $_LOCKFILE_CHANGED; then
-      info "pnpm-lock.yaml changed — installing dependencies..."
-      run_or_dry pnpm install --frozen-lockfile --dir "$SYMPHONY_ROOT"
-      ok "Dependencies installed"
-    else
-      ok "pnpm-lock.yaml unchanged — skipping install"
-    fi
+  case "$(build_decision "$SYMPHONY_ROOT" "$SYMPH_SHA_CHANGED")" in
+    code-changed)
+      SYMPHONY_UPDATED=true
 
-    # Always rebuild if code changed
-    info "Building..."
-    run_or_dry pnpm run --dir "$SYMPHONY_ROOT" build
-    ok "Build complete"
-  elif dist_is_stale "$SYMPHONY_ROOT"; then
-    # SYMPH-919: the SHA did not move but dist/ is out of sync with HEAD. The
-    # pipeline runs from compiled dist/, so restarting now would run stale code.
-    # Rebuild instead of silently skipping. No install — the lockfile cannot
-    # have changed without a SHA move.
-    SYMPHONY_UPDATED=true
-    warn "dist/ stale at unchanged SHA ${SYMPH_POST_SHA:0:8} — rebuilding..."
-    run_or_dry pnpm run --dir "$SYMPHONY_ROOT" build
-    ok "Build complete (refreshed stale dist/)"
-  else
-    ok "dist/ current at ${SYMPH_POST_SHA:0:8} — skipping rebuild"
-  fi
+      # pnpm install if lockfile changed
+      if $_LOCKFILE_CHANGED; then
+        info "pnpm-lock.yaml changed — installing dependencies..."
+        run_or_dry pnpm install --frozen-lockfile --dir "$SYMPHONY_ROOT"
+        ok "Dependencies installed"
+      else
+        ok "pnpm-lock.yaml unchanged — skipping install"
+      fi
+
+      # Always rebuild if code changed
+      info "Building..."
+      run_or_dry pnpm run --dir "$SYMPHONY_ROOT" build
+      run_or_dry write_build_stamp "$SYMPHONY_ROOT"
+      ok "Build complete"
+      ;;
+    stale-dist)
+      # SYMPH-919: the SHA did not move but dist/ is out of sync with HEAD. The
+      # pipeline runs from compiled dist/, so restarting now would run stale
+      # code. Rebuild instead of silently skipping. No install — the lockfile
+      # cannot have changed without a SHA move.
+      SYMPHONY_UPDATED=true
+      warn "dist/ stale at unchanged SHA ${SYMPH_POST_SHA:0:8} — rebuilding..."
+      run_or_dry pnpm run --dir "$SYMPHONY_ROOT" build
+      run_or_dry write_build_stamp "$SYMPHONY_ROOT"
+      ok "Build complete (refreshed stale dist/)"
+      ;;
+    current)
+      ok "dist/ current at ${SYMPH_POST_SHA:0:8} — skipping rebuild"
+      ;;
+  esac
 
   # Sync mobile dashboard to report server directory
   dashboard_src="$SYMPHONY_ROOT/.symphony/reports/mobile-dashboard.html"
