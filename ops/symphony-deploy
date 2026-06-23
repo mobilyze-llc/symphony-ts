@@ -81,6 +81,25 @@ run_or_dry() {
   fi
 }
 
+# dist_is_stale ROOT — exit 0 (stale) when the compiled dist/ is missing or
+# older than src/, so a rebuild is required even when the git SHA did not move
+# (SYMPH-919). The build is otherwise gated on a SHA delta, so an anomalous
+# same-SHA checkout whose dist/ is out of sync with HEAD (an external git
+# advance, a partial/failed build, or a manually-deleted dist/) would restart
+# the service on stale compiled code. Mirrors the src->dist staleness guard in
+# run-pipeline.sh.
+dist_is_stale() {
+  local root="$1"
+  local dist_entry="$root/dist/src/cli/main.js"
+  if [[ ! -f "$dist_entry" ]]; then
+    return 0
+  fi
+  if [[ -n "$(find "$root/src" -newer "$dist_entry" -type f 2>/dev/null)" ]]; then
+    return 0
+  fi
+  return 1
+}
+
 restart_stopped_services_after_error() {
   # Restart after ordinary pull/build/config errors. Review substrate liveness
   # is checked at dispatch time, not deploy time.
@@ -345,6 +364,17 @@ if $DO_SYMPHONY; then
     info "Building..."
     run_or_dry pnpm run --dir "$SYMPHONY_ROOT" build
     ok "Build complete"
+  elif dist_is_stale "$SYMPHONY_ROOT"; then
+    # SYMPH-919: the SHA did not move but dist/ is out of sync with HEAD. The
+    # pipeline runs from compiled dist/, so restarting now would run stale code.
+    # Rebuild instead of silently skipping. No install — the lockfile cannot
+    # have changed without a SHA move.
+    SYMPHONY_UPDATED=true
+    warn "dist/ stale at unchanged SHA ${SYMPH_POST_SHA:0:8} — rebuilding..."
+    run_or_dry pnpm run --dir "$SYMPHONY_ROOT" build
+    ok "Build complete (refreshed stale dist/)"
+  else
+    ok "dist/ current at ${SYMPH_POST_SHA:0:8} — skipping rebuild"
   fi
 
   # Sync mobile dashboard to report server directory
