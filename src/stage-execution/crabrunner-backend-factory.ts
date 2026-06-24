@@ -28,12 +28,12 @@ import {
  * The minimal slice of {@link ResolvedWorkflowConfig} the default prompt
  * resolver needs to render a stage prompt at dispatch time (SYMPH-856).
  *
- * `AgentRunInput` carries the per-dispatch `stage` (whose `prompt` overrides the
- * workflow default) but NOT the workflow config — the global `promptTemplate`
- * and `workflowPath` live on the runtime host / config, so they are injected
- * here. This mirrors `AgentRunner.run()`, which selects
- * `stage?.prompt ?? this.config.promptTemplate` and resolves partials from
- * `this.config.workflowPath`.
+ * `AgentRunInput` carries the per-dispatch prompt override and optional `stage`
+ * (whose `prompt` overrides the workflow default) but NOT the workflow config —
+ * the global `promptTemplate` and `workflowPath` live on the runtime host /
+ * config, so they are injected here. This mirrors `AgentRunner.run()`, which
+ * selects `promptTemplate ?? stage?.prompt ?? this.config.promptTemplate` and
+ * resolves partials from `this.config.workflowPath`.
  */
 export interface CrabrunnerPromptRenderingConfig {
   /** Workflow-global prompt template (fallback when a stage has no prompt). */
@@ -246,7 +246,8 @@ async function defaultWritePromptFile(
  * Default SYMPH-856 resolver: render the stage prompt and write it to a temp
  * file, returning the absolute path. Mirrors a turn-1 `AgentRunner.run()`:
  *
- *   - Template source: `runnerInput.stage?.prompt ?? promptRendering.promptTemplate`.
+ *   - Template source:
+ *     `runnerInput.promptTemplate ?? runnerInput.stage?.prompt ?? promptRendering.promptTemplate`.
  *   - The source is resolved through {@link resolveDispatchPromptTemplate} so a
  *     bare prompt-file path (e.g. `./prompts/implement.liquid`) is read from
  *     disk exactly as the runner does on turn 1.
@@ -282,9 +283,12 @@ async function renderStagePromptToFile(args: {
   const { input, promptRendering, render, writePromptFile, ownedDirs } = args;
   const runnerInput = input.runnerInput;
 
-  // stage?.prompt ?? config.promptTemplate — identical to AgentRunner.run().
+  // promptTemplate ?? stage?.prompt ?? config.promptTemplate — identical to
+  // AgentRunner.run().
   const templateSource =
-    runnerInput.stage?.prompt ?? promptRendering.promptTemplate;
+    runnerInput.promptTemplate ??
+    runnerInput.stage?.prompt ??
+    promptRendering.promptTemplate;
   if (templateSource === null || templateSource.trim().length === 0) {
     // Genuinely ABSENT source: fail closed at submit (required), not a render
     // failure. (A present-but-empty template, by contrast, throws below.)

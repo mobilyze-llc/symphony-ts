@@ -148,6 +148,12 @@ export interface AgentRunInput {
   signal?: AbortSignal;
   stage?: StageDefinition | null;
   stageName?: string | null;
+  /**
+   * Direct prompt source for delegated lane dispatches that do not correspond
+   * to a workflow StageDefinition. When absent, the runner uses stage.prompt and
+   * then the workflow prompt template as before.
+   */
+  promptTemplate?: string | null;
   reworkCount?: number;
   /**
    * Frozen gate-passed AC snapshot (SYMPH-374), rendered into the prompt
@@ -327,7 +333,7 @@ export class AgentRunner {
       hardStops.maxIterations,
     );
     const effectivePromptTemplateSource =
-      stage?.prompt ?? this.config.promptTemplate;
+      input.promptTemplate ?? stage?.prompt ?? this.config.promptTemplate;
     let hardStop: HardStopDecision | null = null;
     let pendingLiveBudgetGraceStop: HardStopDecision | null = null;
     let previousProgressSignature: string | null = null;

@@ -6,6 +6,11 @@ import type {
 } from "../stage-execution/backend.js";
 import type { CrabrunnerStageExecutionEvidence } from "../stage-execution/crabrunner-backend.js";
 import {
+  type StageExecutionLaneDispatch,
+  type StageExecutionLaneResult,
+  runStageExecutionLanes,
+} from "../stage-execution/multi-lane.js";
+import {
   COUNCIL_REVIEW_MODES,
   COUNCIL_ROUTING_MODES,
   type HeadlessGateVerdict,
@@ -166,6 +171,13 @@ interface ReviewerLaneMapping {
   conditions: string[];
 }
 
+interface ReviewLaneCollection {
+  reviewerMapping: ReviewerLaneMapping | null;
+  qaResult: ReviewJobGroupQaResult | null;
+  provenance: ReviewJobGroupLaneProvenance | null;
+  degradedConditions: readonly string[];
+}
+
 export async function runCrabrunnerReviewJobGroup(
   input: RunCrabrunnerReviewJobGroupInput,
 ): Promise<CrabrunnerReviewJobGroupResult> {
@@ -223,109 +235,173 @@ export async function runCrabrunnerReviewJobGroup(
     };
   }
 
-  const reviewerMappings: ReviewerLaneMapping[] = [];
-  const provenanceLanes: ReviewJobGroupLaneProvenance[] = [];
-  const degradedConditions: string[] = [];
-  let qaResult: ReviewJobGroupQaResult | null = null;
-
-  for (const lane of input.lanes) {
-    const job = input.buildJobSpec(lane);
-
-    // Group integrity: a lane's job spec MUST belong to this run group. A
-    // mismatched runGroupId would dispatch the lane outside the intended group
-    // while provenance claims membership — fail closed BEFORE dispatch (no
-    // submit), recording the condition per lane kind.
-    if (job.identity.runGroupId !== input.runGroupId) {
-      const condition = `run_group_mismatch:${lane.laneId}`;
-      if (lane.kind === "browser-qa") {
-        const assessment = assessBrowserQaEvidence(null, {
-          policy: input.qaMissingPolicy ?? "block",
-        });
-        qaResult = {
-          laneId: lane.laneId,
-          evidence: null,
-          assessment: {
-            ...assessment,
-            reasons: [...assessment.reasons, condition],
-          },
-        };
-        degradedConditions.push(...qaResult.assessment.reasons);
-        continue;
-      }
-      const mapping = errorReviewerMapping({
-        lane,
-        condition,
-        degradedReason: "malformed_artifact",
-        message: `lane job spec runGroupId ${job.identity.runGroupId} does not match group ${input.runGroupId}`,
-      });
-      reviewerMappings.push(mapping);
-      degradedConditions.push(...mapping.conditions);
-      continue;
-    }
-
-    const backendResult = await input.backend.execute({
-      job,
-      runnerInput: input.buildRunnerInput(lane),
-    });
-    const evidence = backendResult.evidence;
-    const jobId = evidence?.admission.jobId ?? null;
-    const artifactRefs = evidence?.artifactRefs ?? [];
-
-    provenanceLanes.push({
-      laneId: lane.laneId,
+  const laneRun = await runStageExecutionLanes<
+    CrabrunnerReviewLaneSpec,
+    ReviewLaneCollection,
+    CrabrunnerReviewJobGroupResult,
+    CrabrunnerStageExecutionEvidence
+  >({
+    lanes: input.lanes,
+    dispatchMode: "parallel",
+    buildJobSpec: (lane) => input.buildJobSpec(lane),
+    buildRunnerInput: (lane) => input.buildRunnerInput(lane),
+    resolveBackend: () => input.backend,
+    expectedIdentity: {
+      issueId: input.issueId,
       runGroupId: input.runGroupId,
-      jobId,
-      artifactRefs,
-      artifactHashes: collectArtifactHashes(evidence),
-      backendResult,
-    });
-
-    const laneEvidence: ReviewJobGroupLaneEvidence = {
-      laneId: lane.laneId,
-      kind: lane.kind,
-      spec: lane,
-      jobId,
-      artifactRefs,
-      backendResult,
-    };
-
-    // Substrate-level fail-closed checks shared by all lane kinds.
-    const substrateCondition = classifyLaneSubstrate({
-      lane,
-      evidence,
-      jobId,
-      artifactRefs,
-      runStatus: backendResult.result.runAttempt.status,
-    });
-
-    if (lane.kind === "browser-qa") {
-      qaResult = await assessQaLane({
-        lane,
-        laneEvidence,
-        substrateCondition,
+    },
+    collectArtifact: (laneDispatch) =>
+      collectReviewLane({
+        laneDispatch,
+        runGroupId: input.runGroupId,
         currentHeadSha: input.currentHeadSha,
         collectArtifact: input.collectArtifact,
         qaMissingPolicy: input.qaMissingPolicy ?? "block",
-      });
-      degradedConditions.push(...qaResult.assessment.reasons);
-      continue;
-    }
+      }),
+    aggregate: (lanes) =>
+      aggregateReviewLanes({
+        lanes,
+        runGroupId: input.runGroupId,
+        currentHeadSha: input.currentHeadSha,
+        routingGuaranteeConditions: input.routingGuaranteeConditions ?? [],
+        qaMissingPolicy: input.qaMissingPolicy ?? "block",
+      }),
+  });
 
-    const mapping = await mapReviewerLane({
+  return laneRun.aggregate;
+}
+
+async function collectReviewLane(input: {
+  laneDispatch: StageExecutionLaneDispatch<
+    CrabrunnerReviewLaneSpec,
+    CrabrunnerStageExecutionEvidence
+  >;
+  runGroupId: string;
+  currentHeadSha: string;
+  collectArtifact: RunCrabrunnerReviewJobGroupInput["collectArtifact"];
+  qaMissingPolicy: "block" | "degrade";
+}): Promise<ReviewLaneCollection> {
+  const lane = input.laneDispatch.lane;
+  const validationCondition = reviewValidationCondition(input.laneDispatch);
+  if (validationCondition !== null) {
+    return validationFailureCollection({
+      lane,
+      condition: validationCondition.condition,
+      message: validationCondition.message,
+      qaMissingPolicy: input.qaMissingPolicy,
+    });
+  }
+
+  if (
+    input.laneDispatch.dispatchStatus !== "completed" ||
+    input.laneDispatch.backendResult === null
+  ) {
+    return unavailableLaneCollection({
+      lane,
+      qaMissingPolicy: input.qaMissingPolicy,
+    });
+  }
+
+  const backendResult = input.laneDispatch.backendResult;
+  const evidence = backendResult.evidence;
+  const jobId = evidence?.admission.jobId ?? null;
+  const artifactRefs = evidence?.artifactRefs ?? [];
+  const provenance: ReviewJobGroupLaneProvenance = {
+    laneId: lane.laneId,
+    runGroupId: input.runGroupId,
+    jobId,
+    artifactRefs,
+    artifactHashes: collectArtifactHashes(evidence),
+    backendResult,
+  };
+  const laneEvidence: ReviewJobGroupLaneEvidence = {
+    laneId: lane.laneId,
+    kind: lane.kind,
+    spec: lane,
+    jobId,
+    artifactRefs,
+    backendResult,
+  };
+
+  // Substrate-level fail-closed checks shared by all lane kinds.
+  const substrateCondition = classifyLaneSubstrate({
+    lane,
+    evidence,
+    jobId,
+    artifactRefs,
+    runStatus: backendResult.result.runAttempt.status,
+  });
+
+  if (lane.kind === "browser-qa") {
+    const qaResult = await assessQaLane({
       lane,
       laneEvidence,
       substrateCondition,
       currentHeadSha: input.currentHeadSha,
       collectArtifact: input.collectArtifact,
+      qaMissingPolicy: input.qaMissingPolicy,
     });
-    reviewerMappings.push(mapping);
-    degradedConditions.push(...mapping.conditions);
+    return {
+      reviewerMapping: null,
+      qaResult,
+      provenance,
+      degradedConditions: qaResult.assessment.reasons,
+    };
   }
 
-  const routingGuaranteeConditions = input.routingGuaranteeConditions ?? [];
+  const reviewerMapping = await mapReviewerLane({
+    lane,
+    laneEvidence,
+    substrateCondition,
+    currentHeadSha: input.currentHeadSha,
+    collectArtifact: input.collectArtifact,
+  });
+  return {
+    reviewerMapping,
+    qaResult: null,
+    provenance,
+    degradedConditions: reviewerMapping.conditions,
+  };
+}
+
+function aggregateReviewLanes(input: {
+  lanes: readonly StageExecutionLaneResult<
+    CrabrunnerReviewLaneSpec,
+    ReviewLaneCollection,
+    CrabrunnerStageExecutionEvidence
+  >[];
+  runGroupId: string;
+  currentHeadSha: string;
+  routingGuaranteeConditions: readonly string[];
+  qaMissingPolicy: "block" | "degrade";
+}): CrabrunnerReviewJobGroupResult {
+  const reviewerMappings: ReviewerLaneMapping[] = [];
+  const provenanceLanes: ReviewJobGroupLaneProvenance[] = [];
+  const degradedConditions: string[] = [];
+  let qaResult: ReviewJobGroupQaResult | null = null;
+
+  for (const laneResult of input.lanes) {
+    const collected =
+      laneResult.artifact ??
+      unavailableLaneCollection({
+        lane: laneResult.lane,
+        qaMissingPolicy: input.qaMissingPolicy,
+      });
+    if (collected.reviewerMapping !== null) {
+      reviewerMappings.push(collected.reviewerMapping);
+    }
+    if (collected.qaResult !== null) {
+      qaResult = collected.qaResult;
+    }
+    if (collected.provenance !== null) {
+      provenanceLanes.push(collected.provenance);
+    }
+    degradedConditions.push(...collected.degradedConditions);
+  }
+
   const verdict = resolveGroupVerdict({
     reviewerMappings,
-    routingGuaranteeConditions,
+    routingGuaranteeConditions: input.routingGuaranteeConditions,
     qaResult,
   });
 
@@ -333,7 +409,7 @@ export async function runCrabrunnerReviewJobGroup(
   // verdict; surface them in degradedConditions (they feed the verdict but were
   // otherwise invisible there). Appended after lane/QA conditions to preserve
   // ordering, deduped against anything already recorded.
-  for (const condition of routingGuaranteeConditions) {
+  for (const condition of input.routingGuaranteeConditions) {
     if (!degradedConditions.includes(condition)) {
       degradedConditions.push(condition);
     }
@@ -350,6 +426,113 @@ export async function runCrabrunnerReviewJobGroup(
       lanes: provenanceLanes,
     },
     qa: qaResult,
+  };
+}
+
+function validationFailureCollection(input: {
+  lane: CrabrunnerReviewLaneSpec;
+  condition: string;
+  message: string;
+  qaMissingPolicy: "block" | "degrade";
+}): ReviewLaneCollection {
+  if (input.lane.kind === "browser-qa") {
+    const assessment = assessBrowserQaEvidence(null, {
+      policy: input.qaMissingPolicy,
+    });
+    const qaResult: ReviewJobGroupQaResult = {
+      laneId: input.lane.laneId,
+      evidence: null,
+      assessment: {
+        ...assessment,
+        reasons: [...assessment.reasons, input.condition],
+      },
+    };
+    return {
+      reviewerMapping: null,
+      qaResult,
+      provenance: null,
+      degradedConditions: qaResult.assessment.reasons,
+    };
+  }
+
+  const reviewerMapping = errorReviewerMapping({
+    lane: input.lane,
+    condition: input.condition,
+    degradedReason: "malformed_artifact",
+    message: input.message,
+  });
+  return {
+    reviewerMapping,
+    qaResult: null,
+    provenance: null,
+    degradedConditions: reviewerMapping.conditions,
+  };
+}
+
+function unavailableLaneCollection(input: {
+  lane: CrabrunnerReviewLaneSpec;
+  qaMissingPolicy: "block" | "degrade";
+}): ReviewLaneCollection {
+  const condition = `lane_unavailable:${input.lane.laneId}`;
+  if (input.lane.kind === "browser-qa") {
+    const assessment = assessBrowserQaEvidence(null, {
+      policy: input.qaMissingPolicy,
+    });
+    const qaResult: ReviewJobGroupQaResult = {
+      laneId: input.lane.laneId,
+      evidence: null,
+      assessment: {
+        ...assessment,
+        reasons: [...assessment.reasons, condition],
+      },
+    };
+    return {
+      reviewerMapping: null,
+      qaResult,
+      provenance: null,
+      degradedConditions: qaResult.assessment.reasons,
+    };
+  }
+
+  const reviewerMapping = errorReviewerMapping({
+    lane: input.lane,
+    condition,
+    degradedReason: null,
+    message: condition,
+  });
+  return {
+    reviewerMapping,
+    qaResult: null,
+    provenance: null,
+    degradedConditions: reviewerMapping.conditions,
+  };
+}
+
+function reviewValidationCondition(
+  laneDispatch: StageExecutionLaneDispatch<
+    CrabrunnerReviewLaneSpec,
+    CrabrunnerStageExecutionEvidence
+  >,
+): { condition: string; message: string } | null {
+  const runGroupMismatch = laneDispatch.validationErrors.find(
+    (error) => error.field === "runGroupId",
+  );
+  if (runGroupMismatch !== undefined) {
+    return {
+      condition: `run_group_mismatch:${laneDispatch.lane.laneId}`,
+      message: [
+        `lane job spec runGroupId ${runGroupMismatch.actual}`,
+        `does not match group ${runGroupMismatch.expected}`,
+      ].join(" "),
+    };
+  }
+  const firstMismatch = laneDispatch.validationErrors[0];
+  if (firstMismatch === undefined) {
+    return null;
+  }
+  return {
+    condition: `identity_mismatch:${laneDispatch.lane.laneId}`,
+    message: firstMismatch.message,
   };
 }
 
