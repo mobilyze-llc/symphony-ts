@@ -14,9 +14,14 @@ describe("decomposed-stage seam insulation", () => {
     "../../src/stage-execution/decomposed-stage.ts",
     import.meta.url,
   );
+  const multiLaneUrl = new URL(
+    "../../src/stage-execution/multi-lane.ts",
+    import.meta.url,
+  );
 
   it("dispatches only through the StageExecutionBackend seam", async () => {
     const source = await readFile(runnerUrl, "utf8");
+    const multiLaneSource = await readFile(multiLaneUrl, "utf8");
 
     // Must NOT reach the scheduler client or its submit/status/collect calls.
     expect(source).not.toMatch(/CrabrunnerSchedulerClient/);
@@ -25,9 +30,22 @@ describe("decomposed-stage seam insulation", () => {
     expect(source).not.toMatch(/\.status\s*\(/);
     expect(source).not.toMatch(/\.collect\s*\(/);
 
-    // Must dispatch through the resolved backend's execute (the seam).
+    // Must delegate dispatch to the shared multi-lane primitive, with backend
+    // resolution passed through as the seam.
     expect(source).toMatch(/resolveBackend\(/);
-    expect(source).toMatch(/\.execute\(/);
+    expect(source).toMatch(/runStageExecutionLanes/);
+    expect(source).toMatch(/["']\.\/multi-lane\.js["']/);
+
+    // The shared multi-lane primitive now owns the backend seam, still without
+    // coupling to the crabrunner scheduler client or its submit/status/collect
+    // calls directly.
+    expect(multiLaneSource).toMatch(/resolveBackend\(/);
+    expect(multiLaneSource).toMatch(/\.execute\s*\(/);
+    expect(multiLaneSource).not.toMatch(/CrabrunnerSchedulerClient/);
+    expect(multiLaneSource).not.toMatch(/crabrunner-backend/);
+    expect(multiLaneSource).not.toMatch(/\.submit\s*\(/);
+    expect(multiLaneSource).not.toMatch(/\.status\s*\(/);
+    expect(multiLaneSource).not.toMatch(/\.collect\s*\(/);
   });
 
   it("does not advance stage state or mutate the rework counter", async () => {
