@@ -101,6 +101,20 @@ export class CrabboxSpineClient {
     this.runCommand = config.runCommand ?? defaultSpineCommandRunner;
   }
 
+  /**
+   * SYMPH-908 — crucible's MOB-348 reviewer-artifact contract is the SINGLE binding
+   * source, and this `council-triage` subcommand is the parser of record. The
+   * reviewer markdown each `--review-file` points at MUST conform to MOB-348:
+   * `## Verdict` ∈ {PASS, CHANGES_REQUESTED, BLOCKED} and `## Findings` bullets
+   * `- [P1|P2|P3|Track] <file:line> — <summary>` with optional indented
+   * `evidence:`/`failure:`/`test:`. Crucible's `parseReviewerVerdict` recognizes ONLY
+   * those three tokens; an unrecognized token (e.g. the retired Symphony-only
+   * `FINDINGS`) yields verdict=null → `parse_quality: "partial"` → `fail_open: true`,
+   * which silently misleads the operator. Symphony therefore normalizes any inbound
+   * legacy `FINDINGS` artifact to `CHANGES_REQUESTED` BEFORE writing the file passed
+   * here (see `persistContractArtifact` / `normalizeLegacyFindingsVerdict` in
+   * headless-council-gate.ts). Symphony conforms to this contract; it does not fork it.
+   */
   async councilTriage(input: CouncilTriageInput): Promise<CouncilTriageResult> {
     if (input.reviews.length === 0) {
       throw new SpineUnavailableError(
