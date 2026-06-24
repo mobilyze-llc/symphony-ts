@@ -4,6 +4,10 @@ import { join } from "node:path";
 
 import type { CrabboxSpineClient } from "./crabbox-spine-client.js";
 import type {
+  ReviewQualityLedgerClient,
+  RqlCrossExamVerdict,
+} from "./review-quality-ledger-client.js";
+import type {
   ConvergenceDecisionResult,
   CouncilTriageResult,
   CrossExamSelectResult,
@@ -72,6 +76,38 @@ export interface AggregatedReview {
   /** Escalated findings the judge refuted (kept for audit, non-blocking). */
   refutedFindings: TriageFinding[];
   judgedTargetCount: number;
+  /**
+   * SYMPH-924 — fps the judge EXPLICITLY confirmed real (`real === true`). A strict
+   * subset of `blockingFindings`: it excludes fail-closed default-blocks (findings
+   * the judge was silent on, which still block but were never affirmatively
+   * confirmed). Empty when no judge ran. Additive/observability only — never read by
+   * the verdict; the ledger uses it to record CONFIRM vs `none` honestly.
+   */
+  judgeConfirmedFps: string[];
+}
+
+/**
+ * SYMPH-924 — review-quality ledger capture configuration. When supplied, the
+ * aggregator records one durable per-finding row per round (raised_by → disposition
+ * → cross-exam verdict) as a PURE SIDE-EFFECT after the verdict is already decided.
+ * The ledger is DATA CAPTURE ONLY: nothing here is ever read by the convergence /
+ * merge decision, and a capture failure is swallowed (never thrown into the
+ * decision path). Omit to disable capture entirely.
+ */
+export interface ReviewLedgerCapture {
+  client: ReviewQualityLedgerClient;
+  runId?: string;
+  /** PR identifier for the ledger row, e.g. "owner/repo#123". */
+  pr?: string;
+  headSha?: string;
+  /** Review round number (1-based) — part of the row identity for round survival. */
+  round?: number;
+  reviewTier?: string;
+  /**
+   * Optional sink invoked with a swallowed capture error, for structured logging.
+   * The error is NEVER rethrown; this hook is observability only.
+   */
+  onError?: (error: unknown) => void;
 }
 
 export interface AggregateReviewInput {
@@ -86,6 +122,11 @@ export interface AggregateReviewInput {
    * treated as blocking — fail-closed, never a silent pass.
    */
   judge?: EscalateJudge;
+  /**
+   * Optional review-quality ledger capture (SYMPH-924). A pure, fail-closed
+   * side-effect: it cannot change the returned `AggregatedReview` or the verdict.
+   */
+  ledger?: ReviewLedgerCapture;
 }
 
 export class ReviewAggregator {
@@ -109,8 +150,12 @@ export class ReviewAggregator {
           : { fixSizeLines: input.fixSizeLines }),
       });
 
-      const { blockingFindings, refutedFindings, judgedTargetCount } =
-        await this.adjudicate(triage, crossExam, input.judge);
+      const {
+        blockingFindings,
+        refutedFindings,
+        judgedTargetCount,
+        confirmedFps,
+      } = await this.adjudicate(triage, crossExam, input.judge);
 
       const convergence =
         input.rounds === undefined
@@ -129,7 +174,7 @@ export class ReviewAggregator {
               ),
             });
 
-      return {
+      const review: AggregatedReview = {
         verdict: blockingFindings.length > 0 ? "fail" : "pass",
         triage,
         crossExam,
@@ -138,10 +183,85 @@ export class ReviewAggregator {
         trackFindings: [...triage.track],
         refutedFindings,
         judgedTargetCount,
+        judgeConfirmedFps: confirmedFps,
       };
+
+      // SYMPH-924: pure, fail-closed side-effect — capture the review-quality
+      // ledger row(s) AFTER `review` is fully decided, using it as INPUT only.
+      // It is never read back into the verdict; capture failures are swallowed so
+      // a missing/broken ledger can never block or alter a merge decision.
+      await this.captureLedger(input, review);
+
+      return review;
     } finally {
       if (dir !== null) {
         await rm(dir, { recursive: true, force: true }).catch(() => {});
+      }
+    }
+  }
+
+  /**
+   * SYMPH-924 — capture one durable ledger row per finding for this round. Pure
+   * side-effect: takes the already-decided `review` as input, records via the
+   * crucible RQL seam, and SWALLOWS every failure (the ledger must never block or
+   * alter a merge decision). Returns nothing the decision path consumes.
+   *
+   * raised_by is recovered PRE-DEDUP inside the ledger itself: it re-reads the
+   * per-lane `laneArtifacts` (the same artifacts `council-triage` consumed before
+   * its dedup) so a co-raised finding's full raiser set is restored, even though the
+   * triage output collapsed it to a single `reviewer` tag.
+   */
+  private async captureLedger(
+    input: AggregateReviewInput,
+    review: AggregatedReview,
+  ): Promise<void> {
+    const capture = input.ledger;
+    if (capture === undefined) {
+      return;
+    }
+    try {
+      const blockingFps = review.blockingFindings.map((f) => f.fp);
+      // Cross-exam verdicts captured for audit: ONLY fps the judge EXPLICITLY
+      // confirmed (`judgeConfirmedFps`) → CONFIRM; judge-refuted findings → REFUTE. A
+      // fail-closed default-block (blocking but never affirmatively confirmed —
+      // judge-silent, or no judge ran) is OMITTED here, so the ledger records it as
+      // "none" rather than a fabricated CONFIRM. This keeps per-lane precision
+      // (confirmed/raised) honest — the exact ground truth the ledger exists to
+      // measure. The merge decision is unaffected: a default-block still blocks via
+      // `blockingFps`; only its recorded cross_exam_verdict changes.
+      const confirmedFpSet = new Set(review.judgeConfirmedFps);
+      const crossExamVerdicts: RqlCrossExamVerdict[] = [
+        ...review.blockingFindings
+          .filter((f) => confirmedFpSet.has(f.fp))
+          .map((f): RqlCrossExamVerdict => ({ fp: f.fp, verdict: "CONFIRM" })),
+        ...review.refutedFindings.map(
+          (f): RqlCrossExamVerdict => ({ fp: f.fp, verdict: "REFUTE" }),
+        ),
+      ];
+      await capture.client.record({
+        triage: review.triage,
+        laneArtifacts: input.laneArtifacts.map((lane) => ({
+          reviewer: lane.reviewer,
+          markdown: lane.markdown,
+        })),
+        blockingFps,
+        ...(crossExamVerdicts.length > 0 ? { crossExamVerdicts } : {}),
+        ...(capture.runId === undefined ? {} : { runId: capture.runId }),
+        ...(capture.pr === undefined ? {} : { pr: capture.pr }),
+        ...(capture.headSha === undefined ? {} : { headSha: capture.headSha }),
+        ...(capture.round === undefined ? {} : { round: capture.round }),
+        ...(capture.reviewTier === undefined
+          ? {}
+          : { reviewTier: capture.reviewTier }),
+      });
+    } catch (error) {
+      // Fail-closed: capture must NEVER propagate into the review decision.
+      // SYMPH-924: onError is observability-only — a throwing onError must not
+      // re-enter and abort the review decision, so swallow anything it throws.
+      try {
+        capture.onError?.(error);
+      } catch {
+        // intentionally ignored — the observability hook cannot alter the verdict.
       }
     }
   }
@@ -154,6 +274,12 @@ export class ReviewAggregator {
     blockingFindings: TriageFinding[];
     refutedFindings: TriageFinding[];
     judgedTargetCount: number;
+    /**
+     * SYMPH-924 — fps the judge EXPLICITLY confirmed (`real === true`). Empty when
+     * no judge ran (no explicit confirmation exists, so default-blocks must NOT be
+     * recorded as judge-confirmed).
+     */
+    confirmedFps: string[];
   }> {
     const escalate = triage.escalate;
     if (escalate.length === 0) {
@@ -161,6 +287,7 @@ export class ReviewAggregator {
         blockingFindings: [],
         refutedFindings: [],
         judgedTargetCount: 0,
+        confirmedFps: [],
       };
     }
     // Fail-closed: escalated findings block unless a judge is supplied AND
@@ -170,6 +297,9 @@ export class ReviewAggregator {
         blockingFindings: [...escalate],
         refutedFindings: [],
         judgedTargetCount: 0,
+        // No judge ran → nothing was explicitly confirmed. These block fail-closed
+        // but must be recorded as cross_exam_verdict "none", not CONFIRM.
+        confirmedFps: [],
       };
     }
     const verdicts = await judge(
@@ -184,6 +314,12 @@ export class ReviewAggregator {
     const refutedFps = new Set(
       verdicts.filter((v) => v.real === false).map((v) => v.fp),
     );
+    // Only fps the judge AFFIRMATIVELY confirmed real. A judge-silent fp is NOT
+    // here — it default-blocks (below) but was never confirmed, so the ledger records
+    // it as "none", never a fabricated CONFIRM.
+    const confirmedFps = verdicts
+      .filter((v) => v.real === true)
+      .map((v) => v.fp);
     const blockingFindings: TriageFinding[] = [];
     const refutedFindings: TriageFinding[] = [];
     for (const finding of escalate) {
@@ -198,6 +334,7 @@ export class ReviewAggregator {
       blockingFindings,
       refutedFindings,
       judgedTargetCount: crossExam.targets.length,
+      confirmedFps,
     };
   }
 
