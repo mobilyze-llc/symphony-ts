@@ -97,11 +97,44 @@ export interface JudgeDecorrelationDecision {
  * `openai:codex`): the author family entering this seam is Symphony's
  * provenance family, so both sides must normalize to Symphony's vocabulary.
  *
- * FAIL CLOSED: returns `null` for an empty spec OR any spec that does not map to
- * one of the four RECOGNIZED families above. An unrecognized string is never
- * trusted as a distinct identity — `null` makes `decideJudgeDecorrelation` fail
- * closed rather than risk reading two same-provider specs as different families.
+ * FAIL CLOSED on BOTH unrecognized AND ambiguous specs (SYMPH-925, council P2):
+ * - UNRECOGNIZED — a spec matching ZERO recognized families is `null`. An
+ *   unrecognized string is never trusted as a distinct identity (else two
+ *   same-provider specs like `mistral-large` / `mistral/small` would read as
+ *   different families and let an undecorrelated judge run).
+ * - AMBIGUOUS — a spec matching tokens from MORE THAN ONE recognized family
+ *   (e.g. `moonshot-codex` matches both `codex`→openai and `moonshot`→moonshot)
+ *   is `null`, NOT the first matcher to fire. Order-dependent first-match would
+ *   let a substring hijack the family (`moonshot-codex`→`openai-codex`) and
+ *   again mis-read same-provider specs as different. If we cannot prove a SINGLE
+ *   family, we cannot prove decorrelation → fail closed.
+ *
+ * Both make `decideJudgeDecorrelation` fail closed. A new model family must be
+ * added to `FAMILY_MATCHERS` EXPLICITLY to stay provable.
  */
+
+/**
+ * The recognized model-family matchers, evaluated as an UNORDERED set (not a
+ * first-match cascade) so a multi-family spec is detected as ambiguous rather
+ * than silently keyed by whichever pattern happens to be listed first.
+ */
+const FAMILY_MATCHERS: ReadonlyArray<{ family: string; pattern: RegExp }> = [
+  {
+    family: "openai-codex",
+    pattern: /(?:^|[^a-z0-9])(?:codex|openai|gpt)(?=$|[^a-z0-9])/,
+  },
+  {
+    family: "anthropic",
+    pattern:
+      /(?:^|[^a-z0-9])(?:anthropic|claude|opus|sonnet|haiku|fable)(?=$|[^a-z0-9])/,
+  },
+  {
+    family: "moonshot-kimi",
+    pattern: /(?:^|[^a-z0-9])(?:moonshot|kimi)(?=$|[^a-z0-9])/,
+  },
+  { family: "pi", pattern: /(?:^|[^a-z0-9])(?:deepseek|pi)(?=$|[^a-z0-9])/ },
+];
+
 export function normalizeJudgeFamily(
   spec: string | null | undefined,
 ): string | null {
@@ -112,7 +145,9 @@ export function normalizeJudgeFamily(
   if (raw === "") {
     return null;
   }
-  // Already-normalized Symphony families pass through unchanged.
+  // Already-normalized canonical families pass through unchanged. (These are the
+  // exact `FAMILY_MATCHERS` family ids; e.g. canonical "pi" must not be read as
+  // ambiguous just because some other token also matches.)
   if (
     raw === "openai-codex" ||
     raw === "anthropic" ||
@@ -121,42 +156,29 @@ export function normalizeJudgeFamily(
   ) {
     return raw;
   }
-  if (/(?:^|[^a-z0-9])(?:codex|openai|gpt)(?=$|[^a-z0-9])/.test(raw)) {
-    return "openai-codex";
+  // Evaluate ALL matchers and collect the DISTINCT families matched. Return the
+  // family iff EXACTLY ONE matched: zero → unrecognized → null; two-or-more →
+  // ambiguous → null. Both fail closed in `decideJudgeDecorrelation`.
+  const matched = new Set<string>();
+  for (const matcher of FAMILY_MATCHERS) {
+    if (matcher.pattern.test(raw)) {
+      matched.add(matcher.family);
+    }
   }
-  if (
-    /(?:^|[^a-z0-9])(?:anthropic|claude|opus|sonnet|haiku|fable)(?=$|[^a-z0-9])/.test(
-      raw,
-    )
-  ) {
-    return "anthropic";
+  if (matched.size !== 1) {
+    return null;
   }
-  if (/(?:^|[^a-z0-9])(?:moonshot|kimi)(?=$|[^a-z0-9])/.test(raw)) {
-    return "moonshot-kimi";
-  }
-  if (/(?:^|[^a-z0-9])(?:deepseek|pi)(?=$|[^a-z0-9])/.test(raw)) {
-    return "pi";
-  }
-  // FAIL CLOSED (SYMPH-925, council P2): a spec we cannot map to a RECOGNIZED
-  // Symphony family is `null`, never a trusted distinct identity. The earlier
-  // fail-open fallback (key on the provider segment / raw token) silently read
-  // same-provider specs as different families — e.g. author `mistral-large` →
-  // `mistral-large` vs judge `mistral/small` → `mistral` differ → `satisfied:true`
-  // → the same-provider judge RUNS, even though decorrelation was NOT proven.
-  // "Unrecognized" must mean "I cannot prove this family", which fails closed in
-  // `decideJudgeDecorrelation` (`judge_author_family_missing` /
-  // `judge_family_missing`). A new model family must be added to the recognized
-  // set ABOVE explicitly to keep decorrelation provable — that is the conservative
-  // trade: an unmapped family blocks the judge rather than gambling on a string.
-  return null;
+  // Exactly one family matched.
+  return [...matched][0] ?? null;
 }
 
 /**
  * Decide whether the escalate-bucket judge is provably decorrelated from the
  * author/executor family. FAIL-CLOSED: returns `satisfied: false` (with a
- * reason) whenever the author family is unkeyable, the judge family is
- * unkeyable, or they are the same family. Only an explicitly-keyed,
- * different-family judge is `satisfied: true`.
+ * reason) whenever the author family is unkeyable (unrecognized OR ambiguous),
+ * the judge family is unkeyable (unrecognized OR ambiguous), or the two are the
+ * same family. Only an explicitly-keyed, single-family, different-family judge is
+ * `satisfied: true`.
  */
 export function decideJudgeDecorrelation(
   input: JudgeDecorrelationInput,

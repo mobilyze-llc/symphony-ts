@@ -91,13 +91,21 @@ export interface AggregatedReview {
   judgeConfirmedFps: string[];
   /**
    * SYMPH-925 — the deterministic judge-family decorrelation decision for THIS
-   * round. Present only when a judge would have adjudicated the escalate bucket
-   * (a judge was supplied AND cross-exam was required); `null` otherwise (no
-   * adjudication happened, so there is no judge to decorrelate). When present and
-   * `satisfied === false`, the judge was REFUSED — every escalated finding
-   * default-blocks fail-closed and the supplied judge never ran. Additive: the
-   * verdict already reflects the fail-closed blocking; this field reports WHY for
-   * operators and the ledger.
+   * round.
+   *
+   * NON-NULL whenever the adjudication PATH was entered — i.e. a judge was
+   * supplied AND cross-exam was required AND the escalate bucket was non-empty —
+   * REGARDLESS of whether the judge then ran (`satisfied: true`) or was REFUSED
+   * (`satisfied: false`). A refused judge is reported, not erased: a `satisfied:
+   * false` decision means every escalated finding default-blocks fail-closed and
+   * the supplied judge never ran (the reason says why).
+   *
+   * `null` ONLY when the adjudication path was NOT entered: no judge supplied, OR
+   * cross-exam not required, OR no escalations. So a caller MUST NOT read
+   * `judgeDecorrelation === null` as "the judge passed" — `null` means "no judge
+   * adjudicated this round", while a refused judge is a NON-NULL `satisfied:
+   * false`. Additive: the verdict already reflects the fail-closed blocking; this
+   * field reports WHY for operators and the ledger.
    */
   judgeDecorrelation: JudgeDecorrelationDecision | null;
   /**
@@ -339,10 +347,13 @@ export class ReviewAggregator {
      */
     confirmedFps: string[];
     /**
-     * SYMPH-925 — the family-decorrelation decision, present ONLY when a judge would
-     * have adjudicated (judge supplied AND cross-exam required AND escalations
-     * exist); `null` otherwise. A `satisfied:false` decision means the judge was
-     * REFUSED and the escalations default-blocked fail-closed.
+     * SYMPH-925 — the family-decorrelation decision. NON-NULL whenever the
+     * adjudication path was entered (judge supplied AND cross-exam required AND
+     * escalations exist), REGARDLESS of whether the judge then ran
+     * (`satisfied:true`) or was REFUSED (`satisfied:false`). `null` ONLY when that
+     * path was not entered (no judge / no cross-exam / no escalations). A
+     * `satisfied:false` decision means the judge was REFUSED and the escalations
+     * default-blocked fail-closed.
      */
     judgeDecorrelation: JudgeDecorrelationDecision | null;
   }> {

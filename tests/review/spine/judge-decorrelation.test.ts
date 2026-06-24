@@ -9,12 +9,16 @@ describe("normalizeJudgeFamily (SYMPH-925)", () => {
   it("keys raw model/agent specs to Symphony's finder-layer family vocabulary", () => {
     expect(normalizeJudgeFamily("codex")).toBe("openai-codex");
     expect(normalizeJudgeFamily("openai/gpt-5-codex")).toBe("openai-codex");
+    expect(normalizeJudgeFamily("gpt-4")).toBe("openai-codex");
     expect(normalizeJudgeFamily("anthropic/opus")).toBe("anthropic");
     expect(normalizeJudgeFamily("claude-opus-4-8")).toBe("anthropic");
+    expect(normalizeJudgeFamily("claude-opus-4")).toBe("anthropic");
     expect(normalizeJudgeFamily("opus")).toBe("anthropic");
     expect(normalizeJudgeFamily("deepseek/deepseek-v4-pro")).toBe("pi");
+    expect(normalizeJudgeFamily("deepseek-v4-pro")).toBe("pi");
     expect(normalizeJudgeFamily("pi")).toBe("pi");
     expect(normalizeJudgeFamily("kimi-k27")).toBe("moonshot-kimi");
+    expect(normalizeJudgeFamily("kimi-k2")).toBe("moonshot-kimi");
   });
 
   it("passes already-normalized Symphony families through unchanged", () => {
@@ -24,11 +28,37 @@ describe("normalizeJudgeFamily (SYMPH-925)", () => {
     expect(normalizeJudgeFamily("moonshot-kimi")).toBe("moonshot-kimi");
   });
 
-  it("returns null only for empty/blank specs (fail-closed signal)", () => {
+  it("is robust to surrounding whitespace and case", () => {
+    expect(normalizeJudgeFamily(" Openai-Codex ")).toBe("openai-codex");
+    expect(normalizeJudgeFamily("  CLAUDE-OPUS-4  ")).toBe("anthropic");
+  });
+
+  it("returns null for empty/blank specs (fail-closed signal)", () => {
     expect(normalizeJudgeFamily(null)).toBeNull();
     expect(normalizeJudgeFamily(undefined)).toBeNull();
     expect(normalizeJudgeFamily("")).toBeNull();
     expect(normalizeJudgeFamily("   ")).toBeNull();
+  });
+
+  it("returns null for AMBIGUOUS multi-family specs (fail-closed on ambiguity)", () => {
+    // SYMPH-925 council P2: a spec matching tokens from MORE THAN ONE recognized
+    // family cannot prove a single family → null, NOT the first matcher to fire.
+    // Order-dependent first-match would let a substring hijack the family
+    // (e.g. "moonshot-codex" → "openai-codex") and mis-read same-provider specs.
+    expect(normalizeJudgeFamily("moonshot-codex")).toBeNull();
+    expect(normalizeJudgeFamily("deepseek-openai")).toBeNull();
+    expect(normalizeJudgeFamily("claude-codex")).toBeNull();
+    expect(normalizeJudgeFamily("gpt-kimi")).toBeNull();
+  });
+
+  it("returns null for any spec it cannot map to a RECOGNIZED Symphony family (fail-closed)", () => {
+    // SYMPH-925 council P2: an unrecognized spec is NOT trusted as a distinct
+    // identity. It must be null so decideJudgeDecorrelation fails closed, never
+    // read same-provider specs (mistral/large vs mistral/small) as different.
+    expect(normalizeJudgeFamily("mistral/large")).toBeNull();
+    expect(normalizeJudgeFamily("mistral-large")).toBeNull();
+    expect(normalizeJudgeFamily("mistral/small")).toBeNull();
+    expect(normalizeJudgeFamily("qwen3")).toBeNull();
   });
 
   it("returns null for any spec it cannot map to a RECOGNIZED Symphony family (fail-closed)", () => {
@@ -133,5 +163,27 @@ describe("decideJudgeDecorrelation (SYMPH-925)", () => {
     expect(decision.satisfied).toBe(false);
     // Author is resolved first, so the unkeyable author short-circuits the reason.
     expect(decision.reason).toBe("judge_author_family_missing");
+  });
+
+  it("fails closed when the author spec is AMBIGUOUS (matches >1 recognized family)", () => {
+    const decision = decideJudgeDecorrelation({
+      // Matches both codex→openai and moonshot→moonshot-kimi → ambiguous → null.
+      authorFamily: "moonshot-codex",
+      judgeFamily: "anthropic",
+    });
+    expect(decision.satisfied).toBe(false);
+    expect(decision.reason).toBe("judge_author_family_missing");
+    expect(decision.authorFamily).toBeNull();
+  });
+
+  it("fails closed when the judge spec is AMBIGUOUS (matches >1 recognized family)", () => {
+    const decision = decideJudgeDecorrelation({
+      authorFamily: "anthropic",
+      // Matches both claude→anthropic and codex→openai → ambiguous → null.
+      judgeFamily: "claude-codex",
+    });
+    expect(decision.satisfied).toBe(false);
+    expect(decision.reason).toBe("judge_family_missing");
+    expect(decision.judgeFamily).toBeNull();
   });
 });

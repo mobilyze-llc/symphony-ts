@@ -679,6 +679,35 @@ describe("ReviewAggregator judge-family decorrelation (SYMPH-925)", () => {
     expect(result.judgeConfirmedFps).toEqual([]);
   });
 
+  it("a REFUSED judge yields a NON-NULL satisfied:false decision (null-vs-non-null contract)", async () => {
+    // SYMPH-925 council P2 (doc contract): a refused judge is REPORTED, not erased.
+    // `judgeDecorrelation` is NON-NULL because the adjudication path was entered
+    // (judge supplied + cross-exam required + escalations); a caller branching on
+    // `=== null` to mean "no adjudication" must NOT misread a refused judge.
+    const result = await aggregatorWith({
+      triage: escalatedTriage,
+      crossExam: escalatedCrossExam,
+    }).aggregate({
+      laneArtifacts: lanes,
+      currentDiffHash: "head",
+      judge: refutingJudge,
+      judgeDecorrelation: {
+        authorFamily: "openai-codex",
+        judgeFamily: "codex",
+      },
+    });
+    // NON-NULL (not undefined, not null) even though the judge was refused.
+    expect(result.judgeDecorrelation).not.toBeNull();
+    expect(result.judgeDecorrelation?.satisfied).toBe(false);
+    expect(result.judgeDecorrelation?.reason).toBe(
+      "judge_same_family_as_author",
+    );
+    // The degraded-reason mirror carries the same reason.
+    expect(result.judgeDecorrelationDegradedReason).toBe(
+      "judge_same_family_as_author",
+    );
+  });
+
   it("fails closed when the author/executor family is unkeyable", async () => {
     const result = await aggregatorWith({
       triage: escalatedTriage,
