@@ -9,15 +9,13 @@ import type {
   WorkflowPreReviewVerifyConfig,
 } from "../config/types.js";
 import type { Issue } from "../domain/model.js";
-import type {
-  StageExecutionBackendRunner,
-} from "../stage-execution/backend.js";
+import type { StageExecutionBackendRunner } from "../stage-execution/backend.js";
 import type { CrabrunnerStageExecutionEvidence } from "../stage-execution/crabrunner-backend.js";
 import {
   type CreateStageExecutionJobSpecInput,
   createStageExecutionJobSpec,
 } from "../stage-execution/job-spec.js";
-import type { CommandRunner, CommandResult } from "./headless-council-gate.js";
+import type { CommandResult, CommandRunner } from "./headless-council-gate.js";
 
 const execFileAsync = promisify(execFile);
 const VERIFY_COMMAND_TIMEOUT_MS = 600_000;
@@ -224,7 +222,7 @@ async function dispatchRepairLane(
     defaultRunnerKind: input.defaultRunnerKind,
     defaultRunnerModel: input.defaultRunnerModel,
     defaultRunnerProvider: input.defaultRunnerProvider ?? null,
-    effectiveHardStops: input.hardStops,
+    effectiveHardStops: input.hardStops ?? null,
     defaultTurnTimeoutMs: input.defaultTurnTimeoutMs,
     defaultStallTimeoutMs: input.defaultStallTimeoutMs,
     baseRef: input.baseRef,
@@ -363,7 +361,9 @@ function formatFailingCategories(
 }
 
 function truncate(value: string): string {
-  return value.length <= 12_000 ? value : `${value.slice(0, 12_000)}\n[truncated]`;
+  return value.length <= 12_000
+    ? value
+    : `${value.slice(0, 12_000)}\n[truncated]`;
 }
 
 async function execFileCommand(

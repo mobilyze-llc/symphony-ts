@@ -5,8 +5,8 @@ import type { AgentRunInput } from "../agent/runner.js";
 import { SPEC_DEFAULTS } from "../config/defaults.js";
 import type {
   StageDefinition,
-  WorkflowPreReviewVerifyConfig,
   WorkflowHardStopsConfig,
+  WorkflowPreReviewVerifyConfig,
 } from "../config/types.js";
 import type { Issue, ReasoningEffort } from "../domain/model.js";
 import type { StageExecutionJobSpec } from "../stage-execution/backend.js";

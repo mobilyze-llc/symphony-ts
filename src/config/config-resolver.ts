@@ -509,8 +509,7 @@ function resolvePreReviewVerifyConfig(
 ): WorkflowPreReviewVerifyConfig {
   const commands = asRecord(config.commands);
   return {
-    enabled:
-      readBoolean(config.enabled) ?? DEFAULT_PRE_REVIEW_VERIFY_ENABLED,
+    enabled: readBoolean(config.enabled) ?? DEFAULT_PRE_REVIEW_VERIFY_ENABLED,
     maxFixAttempts:
       readNonNegativeInteger(config.max_fix_attempts) ??
       DEFAULT_PRE_REVIEW_VERIFY_MAX_FIX_ATTEMPTS,

@@ -348,9 +348,7 @@ describe("createCrabrunnerReviewStageDispatcher", () => {
 
       expect(backend.inputs).toHaveLength(2);
       const repair = backend.inputs[0]!;
-      expect(repair.job.identity.stageName).toBe(
-        "review/pre-review-repair-1",
-      );
+      expect(repair.job.identity.stageName).toBe("review/pre-review-repair-1");
       expect(repair.job.role).toBe("implementer");
       expect(repair.job.phase).toBe("verify");
       expect(repair.job.runner.reasoningEffort).toBe("low");
