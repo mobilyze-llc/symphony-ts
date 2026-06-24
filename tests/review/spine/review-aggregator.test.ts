@@ -473,4 +473,97 @@ describe("ReviewAggregator review-quality ledger capture (SYMPH-924)", () => {
     ]);
     expect(captured?.blockingFps).toEqual(["src/a.ts::real"]);
   });
+
+  it("records CONFIRM only for explicitly judge-confirmed fps; a judge-silent default-block gets none (not CONFIRM) yet still blocks", async () => {
+    // A: explicitly confirmed (real:true). B: explicitly refuted (real:false).
+    // C: judge is SILENT (returns no verdict) → default-blocks fail-closed but was
+    // NEVER affirmatively confirmed, so it must record cross_exam_verdict "none".
+    const judge: EscalateJudge = async (targets) =>
+      targets
+        .filter((t) => t.fp !== "src/c.ts::silent")
+        .map((t) => ({ fp: t.fp, real: t.fp === "src/a.ts::real" }));
+    const escalateThree = triage({
+      escalate: [
+        finding({ fp: "src/a.ts::real" }),
+        finding({ fp: "src/b.ts::fake" }),
+        finding({ fp: "src/c.ts::silent" }),
+      ],
+      summary: { ...triage().summary, escalate: 3 },
+    });
+    const target = (fp: string, location: string) => ({
+      fp,
+      severity: "P1",
+      location,
+      summary: "boom",
+      reviewers: ["opus"],
+      lane_count: 1,
+      agreement: "single_lane",
+    });
+    const crossExamThree = crossExam({
+      cross_exam_required: true,
+      target_count: 3,
+      targets: [
+        target("src/a.ts::real", "src/a.ts:1"),
+        target("src/b.ts::fake", "src/b.ts:1"),
+        target("src/c.ts::silent", "src/c.ts:1"),
+      ],
+    });
+
+    let captured: RqlRecordInput | undefined;
+    const client = new ReviewQualityLedgerClient({
+      ledgerScriptPath: "/fake/rql.mjs",
+      runCommand: async () => ({
+        stdout: JSON.stringify({
+          schema: "crucible.review-quality-ledger.record-result.v1",
+          ledger_file: "/tmp/ledger.jsonl",
+          ledger_source: "explicit",
+          dry_run: false,
+          finding_count: 3,
+          appended: 3,
+          deduped: 0,
+          classification_counts: { P1: 2, Dismissed: 1 },
+        }),
+        stderr: "",
+        exitCode: 0,
+      }),
+    });
+    const originalRecord = client.record.bind(client);
+    client.record = (input: RqlRecordInput) => {
+      captured = input;
+      return originalRecord(input);
+    };
+
+    const result = await aggregatorWith({
+      triage: escalateThree,
+      crossExam: crossExamThree,
+    }).aggregate({
+      laneArtifacts: lanes,
+      currentDiffHash: "head",
+      judge,
+      ledger: { client },
+    });
+
+    // The merge decision is unchanged: A and the judge-silent C both block.
+    expect(result.verdict).toBe("fail");
+    expect(result.blockingFindings.map((f) => f.fp)).toEqual([
+      "src/a.ts::real",
+      "src/c.ts::silent",
+    ]);
+    expect(result.refutedFindings.map((f) => f.fp)).toEqual(["src/b.ts::fake"]);
+    // Only the explicitly-confirmed fp is recorded CONFIRM; the silent default-block
+    // (C) is OMITTED → the ledger records it as "none", never a fabricated CONFIRM.
+    expect(result.judgeConfirmedFps).toEqual(["src/a.ts::real"]);
+    expect(captured?.crossExamVerdicts).toEqual([
+      { fp: "src/a.ts::real", verdict: "CONFIRM" },
+      { fp: "src/b.ts::fake", verdict: "REFUTE" },
+    ]);
+    // C blocks (fail-closed) but carries no fabricated CONFIRM verdict.
+    expect(captured?.blockingFps).toEqual([
+      "src/a.ts::real",
+      "src/c.ts::silent",
+    ]);
+    expect(
+      captured?.crossExamVerdicts?.some((v) => v.fp === "src/c.ts::silent"),
+    ).toBe(false);
+  });
 });
