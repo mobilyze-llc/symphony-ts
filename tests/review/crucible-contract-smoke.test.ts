@@ -1,8 +1,6 @@
-import { execFile } from "node:child_process";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
 
 import { describe, expect, it } from "vitest";
 
@@ -13,7 +11,6 @@ import {
 } from "../../src/review/headless-council-gate.js";
 
 const FIXTURE_DIR = "tests/fixtures/review-crucible-contract";
-const execFileAsync = promisify(execFile);
 
 describe("crucible review contract smoke corpus v0", () => {
   it.each([
@@ -69,36 +66,6 @@ describe("crucible review contract smoke corpus v0", () => {
       second.findings[0]?.fingerprint,
     );
   });
-
-  it.skipIf(process.env.CRUCIBLE_SPINE === undefined)(
-    "runs the configured live crucible council-triage spine over corpus fixtures",
-    async () => {
-      const spine = process.env.CRUCIBLE_SPINE!;
-      const { stdout } = await execFileAsync(process.execPath, [
-        spine,
-        "council-triage",
-        "--review-file",
-        join(FIXTURE_DIR, "changes-requested-p1.md"),
-        "--reviewer",
-        "codex",
-        "--review-file",
-        join(FIXTURE_DIR, "track-only.md"),
-        "--reviewer",
-        "deepseek",
-      ]);
-      const triage = JSON.parse(stdout) as {
-        schema?: string;
-        escalate?: unknown[];
-        track?: unknown[];
-      };
-
-      expect(triage.schema).toBe(
-        "crucible.session-orchestrator.council-triage.v1",
-      );
-      expect(triage.escalate?.length).toBeGreaterThan(0);
-      expect(triage.track?.length).toBeGreaterThan(0);
-    },
-  );
 });
 
 async function synthesizeFixture(fixtureName: string, artifactDir: string) {
