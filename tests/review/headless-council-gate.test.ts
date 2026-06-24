@@ -3415,7 +3415,7 @@ describe("runHeadlessCouncilGate", () => {
       laneBehavior: {
         "claude-opus": {
           artifact:
-            "# Council Review of PR #288 (SYMPH-287)\n\n## Verdict\nFINDINGS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\n- Bug\n\n## Track\nNone",
+            "# Council Review of PR #288 (SYMPH-287)\n\n## Verdict\nCHANGES_REQUESTED\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\n- Bug\n\n## Track\nNone",
         },
       },
     });
@@ -3436,7 +3436,7 @@ describe("runHeadlessCouncilGate", () => {
       result.lanes.find((lane) => lane.laneId === "claude-opus"),
     ).toMatchObject({
       verdict: "fail",
-      message: "Reviewer verdict was FINDINGS.",
+      message: "Reviewer verdict was CHANGES_REQUESTED.",
       degradedReason: null,
     });
     const lane = result.lanes.find((lane) => lane.laneId === "claude-opus")!;
@@ -5047,7 +5047,7 @@ describe("runHeadlessCouncilGate", () => {
     );
   });
 
-  it("keeps Track-only FINDINGS as pass while preserving the Track finding", async () => {
+  it("normalizes a Track-only legacy FINDINGS verdict to CHANGES_REQUESTED and keeps it pass while preserving the Track finding (SYMPH-908 deprecation window)", async () => {
     const harness = await createHarness({
       laneBehavior: {
         "codex-high-lead": {
@@ -5075,8 +5075,13 @@ describe("runHeadlessCouncilGate", () => {
     expect(leadLane).toMatchObject({
       verdict: "pass",
       message:
-        "Reviewer verdict was FINDINGS but only Track/Dismissed content was present.",
+        "Reviewer verdict was CHANGES_REQUESTED but only Track/Dismissed content was present.",
     });
+    // SYMPH-908: the legacy `FINDINGS` token is normalized to `CHANGES_REQUESTED` on
+    // disk before council-triage; the persisted artifact must carry the contract token.
+    const persisted = await readFile(leadLane.artifactPath!, "utf-8");
+    expect(persisted).toContain("## Verdict\nCHANGES_REQUESTED");
+    expect(persisted).not.toContain("FINDINGS");
     expect(leadLane.structuredArtifact!.findings[0]).toMatchObject({
       severity: "Track",
       repeatOf: "71c6507aa5c92114",
@@ -5573,7 +5578,7 @@ describe("runHeadlessCouncilGate", () => {
       "utf-8",
     );
     expect(prompt).toContain(
-      "Do not convert degraded reviewer infrastructure into blocking code FINDINGS",
+      "Do not convert degraded reviewer infrastructure into blocking code findings",
     );
     expect(prompt).toContain("degradedReason: substrate_stall");
     expect(prompt).toContain(
@@ -5771,7 +5776,7 @@ describe("runHeadlessCouncilGate", () => {
     expect(rawArtifact).toContain("Now, completing the analysis");
   });
 
-  it("parses a findings verdict after a short plain-text preamble", async () => {
+  it("normalizes a legacy FINDINGS verdict to CHANGES_REQUESTED after a short plain-text preamble (SYMPH-908 deprecation window)", async () => {
     const harness = await createHarness({
       laneBehavior: {
         "claude-opus": {
@@ -5793,12 +5798,17 @@ describe("runHeadlessCouncilGate", () => {
     );
 
     expect(result.verdict).toBe("fail");
-    expect(
-      result.lanes.find((lane) => lane.laneId === "claude-opus"),
-    ).toMatchObject({
+    const lane = result.lanes.find((lane) => lane.laneId === "claude-opus")!;
+    expect(lane).toMatchObject({
       verdict: "fail",
-      message: "Reviewer verdict was FINDINGS.",
+      message: "Reviewer verdict was CHANGES_REQUESTED.",
     });
+    // SYMPH-908: the preamble is stripped and the legacy `FINDINGS` token is
+    // rewritten to crucible's `CHANGES_REQUESTED` on disk before council-triage.
+    const persisted = await readFile(lane.artifactPath!, "utf-8");
+    expect(persisted.replace(/^(?:\s|﻿)+/u, "")).toMatch(/^## Verdict/);
+    expect(persisted).toContain("## Verdict\nCHANGES_REQUESTED");
+    expect(persisted).not.toContain("FINDINGS");
   });
 
   it("does not skip a list item that smuggles an artifact section heading", async () => {

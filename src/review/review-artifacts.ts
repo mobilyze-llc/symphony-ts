@@ -49,20 +49,28 @@ const DIFF_INJECTION_TOKEN_PATTERN =
   /(DIFF_DATA|SYMPHONY_UNTRUSTED_DIFF|diff --git)/;
 const MAX_SAFE_ARTIFACT_PREAMBLE_CHARS = 3_000;
 const MAX_SAFE_ARTIFACT_PREAMBLE_LINES = 12;
-export type ArtifactVerdictToken =
-  | "PASS"
-  | "FINDINGS"
-  | "FAIL"
-  | "CHANGES_REQUESTED"
-  | "BLOCKED";
+// SYMPH-908: crucible's MOB-348 reviewer-artifact contract is the single binding
+// source. The recognized verdict vocabulary is EXACTLY crucible's set
+// {PASS, CHANGES_REQUESTED, BLOCKED} — the same tokens crucible's council-triage
+// (`production-rollout.mjs council-triage` → `parseReviewerVerdict`) recognizes.
+// Symphony conforms to this contract; it does not fork it. The Symphony-only
+// legacy tokens `FINDINGS` and `FAIL` were retired here: a verdict token outside
+// this set is a `malformed_artifact`. Inbound legacy `FINDINGS` is normalized to
+// `CHANGES_REQUESTED` during the deprecation window (see
+// `normalizeLegacyFindingsVerdict` in headless-council-gate.ts) BEFORE the artifact
+// reaches council-triage, so the spine never downgrades it to partial/fail_open.
+export type ArtifactVerdictToken = "PASS" | "CHANGES_REQUESTED" | "BLOCKED";
 
 const ARTIFACT_VERDICT_TOKENS: readonly ArtifactVerdictToken[] = [
   "CHANGES_REQUESTED",
   "PASS",
-  "FINDINGS",
   "BLOCKED",
-  "FAIL",
 ];
+
+// SYMPH-908: the single retired legacy token kept solely so the deprecation-window
+// normalizer can recognize and rewrite it. It is NOT a member of
+// `ArtifactVerdictToken` and never parses as a valid verdict.
+export const LEGACY_FINDINGS_VERDICT_TOKEN = "FINDINGS";
 
 export function sectionFindingEntries(section: string): string[] {
   const lines = section
@@ -142,12 +150,16 @@ export function artifactSectionContent(
 
 export function normalizeArtifactStart(artifact: string): string {
   const trimmedArtifact = artifact.trimStart();
-  if (artifactStartsWithVerdict(trimmedArtifact)) {
+  // SYMPH-908: surface the verdict line for both the contract tokens and the
+  // retired legacy `FINDINGS` token, so a preamble-prefixed legacy artifact is
+  // normalized to lead with `## Verdict` and the deprecation-window rewrite
+  // (`normalizeLegacyFindingsVerdict`) can then run on it.
+  if (artifactStartsWithVerdictOrLegacy(trimmedArtifact)) {
     return trimmedArtifact;
   }
 
   const afterTitle = stripSingleLeadingTitleLine(trimmedArtifact);
-  if (afterTitle !== null && artifactStartsWithVerdict(afterTitle)) {
+  if (afterTitle !== null && artifactStartsWithVerdictOrLegacy(afterTitle)) {
     return afterTitle;
   }
 
@@ -221,10 +233,40 @@ export function artifactStartingVerdictToken(
   return artifactVerdictTokenAtLineStart(artifact, 0);
 }
 
+/**
+ * SYMPH-908 deprecation window: detect a leading legacy `FINDINGS` verdict token.
+ *
+ * `FINDINGS` was retired from `ArtifactVerdictToken`; crucible's council-triage
+ * recognizes only {PASS, CHANGES_REQUESTED, BLOCKED} and downgrades an unrecognized
+ * `FINDINGS` token to `parse_quality: partial` → `fail_open: true` (the operator-
+ * misleading defect). During the window we recognize the legacy token solely so the
+ * consumer can normalize it to `CHANGES_REQUESTED` BEFORE the artifact reaches the
+ * spine. Returns the span of the verdict TOKEN (not the heading) so callers can
+ * rewrite exactly that token, never an incidental occurrence of the word elsewhere.
+ */
+export function legacyFindingsVerdictTokenSpan(
+  artifact: string,
+): { start: number; end: number } | null {
+  const span = artifactVerdictTokenSpanAtLineStart(artifact, 0);
+  if (span === null) {
+    return null;
+  }
+  const token = artifact.slice(span.start, span.end);
+  return equalsIgnoreCase(token, LEGACY_FINDINGS_VERDICT_TOKEN) ? span : null;
+}
+
+// SYMPH-908: a leading verdict line carrying a recognized contract token OR the
+// retired legacy `FINDINGS` token. Used only by `normalizeArtifactStart` so legacy
+// artifacts get their preamble stripped during the deprecation window; the exported
+// `artifactStartsWithVerdict` stays recognized-token-only for contract validation.
+function artifactStartsWithVerdictOrLegacy(artifact: string): boolean {
+  return artifactVerdictTokenSpanAtLineStart(artifact, 0) !== null;
+}
+
 function findFirstArtifactVerdictIndex(artifact: string): number {
   let offset = 0;
   while (offset < artifact.length) {
-    if (artifactVerdictTokenAtLineStart(artifact, offset) !== null) {
+    if (artifactVerdictTokenSpanAtLineStart(artifact, offset) !== null) {
       return offset;
     }
     const nextLineIndex = artifact.indexOf("\n", offset);
@@ -519,6 +561,22 @@ function artifactVerdictTokenAtLineStart(
   artifact: string,
   offset: number,
 ): ArtifactVerdictToken | null {
+  const span = artifactVerdictTokenSpanAtLineStart(artifact, offset);
+  if (span === null) {
+    return null;
+  }
+  return recognizedVerdictToken(artifact.slice(span.start, span.end));
+}
+
+// SYMPH-908: locate the verdict-token span at the start of a verdict line,
+// recognizing both the current contract tokens and the retired legacy `FINDINGS`
+// token (so the deprecation-window normalizer can rewrite it). Returns the token's
+// absolute [start, end) offsets in `artifact`, or null when the line at `offset` is
+// not a verdict line carrying a known/legacy token.
+function artifactVerdictTokenSpanAtLineStart(
+  artifact: string,
+  offset: number,
+): { start: number; end: number } | null {
   const lineEnd = findArtifactLineEnd(artifact, offset);
   const line = trimTrailingCarriageReturn(
     artifact.slice(offset, lineEnd),
@@ -528,41 +586,84 @@ function artifactVerdictTokenAtLineStart(
     heading !== null &&
     heading.normalizedText === normalizeArtifactHeadingText("Verdict")
   ) {
-    return artifactVerdictTokenAfterHeadingLine(artifact, lineEnd);
+    return artifactVerdictTokenSpanAfterHeadingLine(artifact, lineEnd);
   }
 
   if (!startsWithIgnoreCase(line, "Verdict:")) {
     return null;
   }
 
-  return parseArtifactVerdictToken(line.slice("Verdict:".length));
+  const labelOffset = offset + "Verdict:".length;
+  return artifactVerdictTokenSpanInLine(artifact, labelOffset, lineEnd);
 }
 
-function artifactVerdictTokenAfterHeadingLine(
+function artifactVerdictTokenSpanAfterHeadingLine(
   artifact: string,
   headingLineEnd: number,
-): ArtifactVerdictToken | null {
+): { start: number; end: number } | null {
   let offset = headingLineEnd;
   if (artifact.charAt(offset) === "\n") {
     offset += 1;
   }
-  const remainder = artifact.slice(offset).trimStart();
-  if (remainder === "") {
+  while (
+    offset < artifact.length &&
+    isArtifactWhitespace(artifact.charAt(offset))
+  ) {
+    offset += 1;
+  }
+  if (offset >= artifact.length) {
     return null;
   }
-
-  const tokenLineEnd = findArtifactLineEnd(remainder, 0);
-  return parseArtifactVerdictToken(remainder.slice(0, tokenLineEnd));
+  const tokenLineEnd = findArtifactLineEnd(artifact, offset);
+  return artifactVerdictTokenSpanInLine(artifact, offset, tokenLineEnd);
 }
 
-function parseArtifactVerdictToken(line: string): ArtifactVerdictToken | null {
+function artifactVerdictTokenSpanInLine(
+  artifact: string,
+  lineStart: number,
+  lineEnd: number,
+): { start: number; end: number } | null {
+  let tokenStart = lineStart;
+  while (
+    tokenStart < lineEnd &&
+    isHorizontalArtifactWhitespace(artifact.charAt(tokenStart))
+  ) {
+    tokenStart += 1;
+  }
+  const lineText = trimTrailingCarriageReturn(
+    artifact.slice(tokenStart, lineEnd),
+  );
+  const token = matchLeadingVerdictTokenText(lineText);
+  if (token === null) {
+    return null;
+  }
+  return { start: tokenStart, end: tokenStart + token.length };
+}
+
+function recognizedVerdictToken(token: string): ArtifactVerdictToken | null {
+  for (const candidate of ARTIFACT_VERDICT_TOKENS) {
+    if (equalsIgnoreCase(token, candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+// Returns the literal leading token text (preserving the matched token's canonical
+// length) when `line` starts with a recognized contract token OR the retired legacy
+// `FINDINGS` token at a word boundary; null otherwise.
+function matchLeadingVerdictTokenText(line: string): string | null {
   const trimmedLine = line.trimStart();
-  for (const token of ARTIFACT_VERDICT_TOKENS) {
+  const candidates: readonly string[] = [
+    ...ARTIFACT_VERDICT_TOKENS,
+    LEGACY_FINDINGS_VERDICT_TOKEN,
+  ];
+  for (const token of candidates) {
     if (
       startsWithIgnoreCase(trimmedLine, token) &&
       isVerdictTokenBoundary(trimmedLine.charAt(token.length))
     ) {
-      return token;
+      return trimmedLine.slice(0, token.length);
     }
   }
   return null;

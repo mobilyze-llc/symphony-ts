@@ -21,9 +21,15 @@ calls**.
 | `track-only.md` | PASS | an explicitly non-blocking finding buckets to track, not escalate |
 | `preamble-prefixed.md` | CHANGES_REQUESTED | a short preamble before `## Verdict` (the DeepSeek tendency) must still parse |
 | `wording-sensitive-a.md` / `-b.md` | CHANGES_REQUESTED | same `file:line`, different summary → distinct `fp` |
+| `legacy-findings.md` | FINDINGS (retired) | SYMPH-908: the retired Symphony-only `FINDINGS` token. Symphony normalizes it to `CHANGES_REQUESTED` before council-triage; fed raw to the spine it degrades to `parse_quality: partial` / `fail_open`. The cutover gate proves normalization prevents that. |
 
 ## Runners (single command: `pnpm smoke:review`)
 
+- `tests/review/crucible-verdict-contract-cutover.test.ts` — **SYMPH-908 cutover
+  gate.** Proves a Symphony-prompted artifact parses `clean` (not `partial`) through
+  crucible's council-triage, and a legacy `FINDINGS` artifact is normalized to
+  `CHANGES_REQUESTED` before the spine — never silently degraded. Live-spine portion
+  auto-skips when the crucible checkout is absent.
 - `tests/review/crucible-contract-smoke.test.ts` — Symphony's own parser
   (`synthesizeStructuredReviewerArtifactRecord`) consumes each fixture without
   degrading to `malformed_artifact`.

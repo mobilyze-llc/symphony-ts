@@ -207,7 +207,17 @@ function isReviewSubstrateDegradedCondition(condition: string): boolean {
   ) {
     return false;
   }
-  if (/^[^:]+:complete:Reviewer verdict was FINDINGS\./.test(condition)) {
+  // SYMPH-908: a completed reviewer lane that returned a blocking code-review
+  // verdict is a legitimate review outcome, not review-substrate degradation. The
+  // Symphony-only `FINDINGS` token was retired in favor of crucible's MOB-348
+  // {PASS, CHANGES_REQUESTED, BLOCKED} vocabulary, so this exemption now matches the
+  // crucible verdict messages (inbound legacy `FINDINGS` is normalized to
+  // `CHANGES_REQUESTED` before it reaches the consumer).
+  if (
+    /^[^:]+:complete:Reviewer verdict was (CHANGES_REQUESTED|BLOCKED)\./.test(
+      condition,
+    )
+  ) {
     return false;
   }
   return (

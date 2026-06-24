@@ -125,4 +125,28 @@ describe("review verdict contracts", () => {
       }),
     ).toBe(true);
   });
+
+  it("treats a completed reviewer CHANGES_REQUESTED/BLOCKED verdict as a review outcome, not substrate degradation (SYMPH-908)", () => {
+    // The Symphony-only `FINDINGS` token was retired for crucible's MOB-348
+    // {PASS, CHANGES_REQUESTED, BLOCKED} vocabulary. A completed lane returning a
+    // blocking code-review verdict is a legitimate review outcome the gate handles
+    // via finding aggregation — it must NOT classify the lane as degraded substrate.
+    for (const verdict of ["CHANGES_REQUESTED", "BLOCKED"]) {
+      expect(
+        hasReviewSubstrateDegradation({
+          lanes: [],
+          degradedConditions: [
+            `pi-deepseek:complete:Reviewer verdict was ${verdict}.`,
+          ],
+        }),
+      ).toBe(false);
+    }
+    // A genuinely degraded lane condition still classifies as substrate degradation.
+    expect(
+      hasReviewSubstrateDegradation({
+        lanes: [],
+        degradedConditions: ["malformed_artifact:pi-deepseek:/tmp/a.md"],
+      }),
+    ).toBe(true);
+  });
 });

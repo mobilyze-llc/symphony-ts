@@ -5,6 +5,7 @@ import {
   artifactSectionHasContent,
   artifactStartingVerdictToken,
   buildArtifactSectionHeadingKeys,
+  legacyFindingsVerdictTokenSpan,
   normalizeArtifactStart,
   sectionFindingEntries,
 } from "../../src/review/review-artifacts.js";
@@ -57,18 +58,54 @@ describe("review artifact contracts", () => {
     );
     expect(
       normalizeArtifactStart(
-        ["\uFEFFBrief preamble.", "", "## Verdict", "FINDINGS"].join("\n"),
+        ["\uFEFFBrief preamble.", "", "## Verdict", "CHANGES_REQUESTED"].join(
+          "\n",
+        ),
       ),
-    ).toBe("## Verdict\nFINDINGS");
+    ).toBe("## Verdict\nCHANGES_REQUESTED");
   });
 
   it("accepts normalized verdict heading variants", () => {
-    expect(artifactStartingVerdictToken("## Verdict:\nFAIL")).toBe("FAIL");
+    // SYMPH-908: recognized tokens are exactly crucible's MOB-348 set.
+    expect(artifactStartingVerdictToken("## Verdict:\nBLOCKED")).toBe(
+      "BLOCKED",
+    );
     expect(artifactStartingVerdictToken("### Verdict\nPASS")).toBe("PASS");
     expect(artifactStartingVerdictToken("## Verdict\nCHANGES_REQUESTED")).toBe(
       "CHANGES_REQUESTED",
     );
     expect(artifactStartingVerdictToken("## Verdict\nBLOCKED")).toBe("BLOCKED");
+  });
+
+  it("retires the Symphony-only FINDINGS and FAIL verdict tokens (SYMPH-908)", () => {
+    // Only crucible's MOB-348 set {PASS, CHANGES_REQUESTED, BLOCKED} is recognized as
+    // a parseable verdict; the retired tokens yield null (a malformed_artifact
+    // downstream) rather than parsing as a valid verdict.
+    expect(artifactStartingVerdictToken("## Verdict\nFINDINGS")).toBeNull();
+    expect(artifactStartingVerdictToken("## Verdict\nFAIL")).toBeNull();
+    expect(artifactStartingVerdictToken("Verdict: FINDINGS")).toBeNull();
+  });
+
+  it("locates a leading legacy FINDINGS verdict token span for deprecation-window normalization (SYMPH-908)", () => {
+    const heading = "## Verdict\nFINDINGS\n\n## Findings\nNone";
+    const headingSpan = legacyFindingsVerdictTokenSpan(heading);
+    expect(headingSpan).not.toBeNull();
+    expect(heading.slice(headingSpan!.start, headingSpan!.end)).toBe(
+      "FINDINGS",
+    );
+
+    const inline = "Verdict: FINDINGS";
+    const inlineSpan = legacyFindingsVerdictTokenSpan(inline);
+    expect(inlineSpan).not.toBeNull();
+    expect(inline.slice(inlineSpan!.start, inlineSpan!.end)).toBe("FINDINGS");
+
+    // Non-legacy and non-verdict leads do not match.
+    expect(
+      legacyFindingsVerdictTokenSpan("## Verdict\nCHANGES_REQUESTED"),
+    ).toBeNull();
+    expect(
+      legacyFindingsVerdictTokenSpan("## Findings\n- FINDINGS"),
+    ).toBeNull();
   });
 
   it("requires verdict token word boundaries", () => {
