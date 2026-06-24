@@ -336,6 +336,40 @@ describe("ReviewAggregator review-quality ledger capture (SYMPH-924)", () => {
     expect(errors[0]).toBeInstanceOf(RqlUnavailableError);
   });
 
+  it("does not propagate a THROWING onError into the review decision", async () => {
+    const baseline = await aggregatorWith({
+      triage: escalatedTriage,
+      crossExam: escalatedCrossExam,
+    }).aggregate({ laneArtifacts: lanes, currentDiffHash: "head" });
+
+    // A failing capture fires onError; this onError records then THROWS. The throw
+    // must be swallowed so it can never re-enter and abort aggregate().
+    let onErrorCalled = false;
+    const { client } = recordingLedger({ fail: true });
+    const result = await aggregatorWith({
+      triage: escalatedTriage,
+      crossExam: escalatedCrossExam,
+    }).aggregate({
+      laneArtifacts: lanes,
+      currentDiffHash: "head",
+      ledger: {
+        client,
+        pr: "owner/repo#1",
+        onError: () => {
+          onErrorCalled = true;
+          throw new Error("observability hook blew up");
+        },
+      },
+    });
+
+    // The throwing onError WAS invoked, yet aggregate() returned normally with the
+    // verdict / blocking findings unchanged from the no-ledger baseline.
+    expect(onErrorCalled).toBe(true);
+    expect(result.verdict).toBe(baseline.verdict);
+    expect(result.verdict).toBe("fail");
+    expect(result.blockingFindings).toEqual(baseline.blockingFindings);
+  });
+
   it("records the round with the triage, blocking fps, and PRE-dedup lane artifacts", async () => {
     const { client, calls } = recordingLedger();
     await aggregatorWith({

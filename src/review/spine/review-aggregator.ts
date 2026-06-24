@@ -247,7 +247,13 @@ export class ReviewAggregator {
       });
     } catch (error) {
       // Fail-closed: capture must NEVER propagate into the review decision.
-      capture.onError?.(error);
+      // SYMPH-924: onError is observability-only — a throwing onError must not
+      // re-enter and abort the review decision, so swallow anything it throws.
+      try {
+        capture.onError?.(error);
+      } catch {
+        // intentionally ignored — the observability hook cannot alter the verdict.
+      }
     }
   }
 
