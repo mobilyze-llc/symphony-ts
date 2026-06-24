@@ -263,8 +263,7 @@ export async function runCrabrunnerReviewJobGroup(
         lanes,
         runGroupId: input.runGroupId,
         currentHeadSha: input.currentHeadSha,
-        routingGuaranteeConditions:
-          input.routingGuaranteeConditions ?? [],
+        routingGuaranteeConditions: input.routingGuaranteeConditions ?? [],
         qaMissingPolicy: input.qaMissingPolicy ?? "block",
       }),
   });

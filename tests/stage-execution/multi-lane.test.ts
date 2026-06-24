@@ -17,7 +17,7 @@ interface Lane {
 
 describe("runStageExecutionLanes", () => {
   it("dispatches lanes through backend.execute and preserves ordered provenance", async () => {
-    let releaseSlow: (() => void) | null = null;
+    const releaseSlow: { current: (() => void) | null } = { current: null };
     const started: string[] = [];
     const completed: string[] = [];
     const backend = fakeBackend(async (input) => {
@@ -25,7 +25,7 @@ describe("runStageExecutionLanes", () => {
       started.push(laneId);
       if (laneId === "slow") {
         await new Promise<void>((resolve) => {
-          releaseSlow = resolve;
+          releaseSlow.current = resolve;
         });
       }
       completed.push(laneId);
@@ -55,7 +55,7 @@ describe("runStageExecutionLanes", () => {
     expect(started).toEqual(["slow", "fast"]);
     await Promise.resolve();
     expect(completed).toEqual(["fast"]);
-    releaseSlow?.();
+    releaseSlow.current?.();
 
     const result = await pending;
 
@@ -193,8 +193,9 @@ describe("runStageExecutionLanes", () => {
 function fakeBackend(
   execute: (
     input: StageExecutionBackendInput,
-  ) => Promise<StageExecutionBackendResult<{ artifactRefs: readonly string[] }>> =
-    (input) => Promise.resolve(backendResult(input)),
+  ) => Promise<
+    StageExecutionBackendResult<{ artifactRefs: readonly string[] }>
+  > = (input) => Promise.resolve(backendResult(input)),
 ): StageExecutionBackendRunner<{ artifactRefs: readonly string[] }> & {
   submitted: StageExecutionJobSpec[];
 } {

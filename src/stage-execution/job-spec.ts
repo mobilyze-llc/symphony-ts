@@ -86,8 +86,7 @@ export function createStageExecutionJobSpec(
     runnerKind,
     model: runnerModel,
     provider: runnerProvider,
-    reasoningEffort:
-      execution?.reasoningEffort ?? stageReasoningEffort,
+    reasoningEffort: execution?.reasoningEffort ?? stageReasoningEffort,
   };
 
   return {

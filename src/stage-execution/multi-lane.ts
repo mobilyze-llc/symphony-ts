@@ -27,10 +27,7 @@ export interface StageExecutionLaneValidationError {
   message: string;
 }
 
-export interface StageExecutionLaneDispatch<
-  TLane,
-  TEvidence = unknown,
-> {
+export interface StageExecutionLaneDispatch<TLane, TEvidence = unknown> {
   lane: TLane;
   index: number;
   job: StageExecutionJobSpec;
@@ -41,11 +38,8 @@ export interface StageExecutionLaneDispatch<
   error: unknown;
 }
 
-export interface StageExecutionLaneResult<
-  TLane,
-  TArtifact,
-  TEvidence = unknown,
-> extends StageExecutionLaneDispatch<TLane, TEvidence> {
+export interface StageExecutionLaneResult<TLane, TArtifact, TEvidence = unknown>
+  extends StageExecutionLaneDispatch<TLane, TEvidence> {
   artifact: TArtifact | null;
   collectError: unknown;
 }
@@ -294,7 +288,11 @@ function validateExpectedIdentity(
       job.identity.issueIdentifier,
       expected.issueIdentifier,
     ),
-    compareIdentityField("stageName", job.identity.stageName, expected.stageName),
+    compareIdentityField(
+      "stageName",
+      job.identity.stageName,
+      expected.stageName,
+    ),
     compareIdentityField(
       "stageAttempt",
       job.identity.stageAttempt,
@@ -355,5 +353,16 @@ function normalizeValidationErrors(
   if (value === null || value === undefined) {
     return [];
   }
-  return Array.isArray(value) ? [...value] : [value];
+  if (isValidationErrorArray(value)) {
+    return [...value];
+  }
+  return [value];
+}
+
+function isValidationErrorArray(
+  value:
+    | StageExecutionLaneValidationError
+    | readonly StageExecutionLaneValidationError[],
+): value is readonly StageExecutionLaneValidationError[] {
+  return Array.isArray(value);
 }
