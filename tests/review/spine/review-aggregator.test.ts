@@ -830,15 +830,19 @@ describe("ReviewAggregator judge-family decorrelation (SYMPH-925)", () => {
       },
     });
 
-    // FINDER signal-first: the codex (author-family) finder participated and its
-    // co-raised finding is in the triage lanes (not excluded for being same-family).
-    expect(
-      triageWithCodexFinder.lanes.some((lane) => lane.reviewer === "codex"),
-    ).toBe(true);
-    // JUDGE decorrelated: anthropic ≠ codex author family → adjudication allowed.
+    // FINDER signal-first — assert AGGREGATOR BEHAVIOR, not just the input fixture:
+    // the codex (author-family) finder's finding FLOWS THROUGH the aggregator into
+    // `blockingFindings` carrying its `reviewer: "codex"` raiser, and it drives the
+    // verdict. The aggregator did NOT drop the author-family finder's signal.
+    expect(result.blockingFindings.map((f) => f.fp)).toEqual([finding().fp]);
+    expect(result.blockingFindings.map((f) => f.reviewer)).toEqual(["codex"]);
+    expect(result.refutedFindings).toHaveLength(0);
+    // JUDGE excluded the author family AND actually adjudicated: anthropic ≠ codex
+    // author family → satisfied, and the judge ran over the escalate target(s).
     expect(result.judgeDecorrelation?.satisfied).toBe(true);
     expect(result.judgeDecorrelation?.judgeFamily).toBe("anthropic");
     expect(result.judgeDecorrelation?.authorFamily).toBe("openai-codex");
+    expect(result.judgedTargetCount).toBeGreaterThan(0);
     // The decorrelated judge confirmed the author-finder's finding → it blocks.
     expect(result.verdict).toBe("fail");
     expect(result.judgeConfirmedFps).toEqual([finding().fp]);

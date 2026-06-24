@@ -97,7 +97,10 @@ export interface JudgeDecorrelationDecision {
  * `openai:codex`): the author family entering this seam is Symphony's
  * provenance family, so both sides must normalize to Symphony's vocabulary.
  *
- * Returns `null` for an empty/unrecognized spec → the caller fails closed.
+ * FAIL CLOSED: returns `null` for an empty spec OR any spec that does not map to
+ * one of the four RECOGNIZED families above. An unrecognized string is never
+ * trusted as a distinct identity — `null` makes `decideJudgeDecorrelation` fail
+ * closed rather than risk reading two same-provider specs as different families.
  */
 export function normalizeJudgeFamily(
   spec: string | null | undefined,
@@ -134,14 +137,18 @@ export function normalizeJudgeFamily(
   if (/(?:^|[^a-z0-9])(?:deepseek|pi)(?=$|[^a-z0-9])/.test(raw)) {
     return "pi";
   }
-  // A bare provider/family token Symphony does not recognize is still a usable
-  // identity for equality (e.g. a future "kimi-k3"): a "<provider>/<model>" spec
-  // keys on its provider segment; an opaque single token keys on itself. This
-  // mirrors crucible's `${provider}:${model}` terminal — it is NEVER null-here,
-  // because an unrecognized-but-present family can still be compared for
-  // same-vs-different, and only a truly empty spec fails closed above.
-  const slash = raw.indexOf("/");
-  return slash > 0 ? raw.slice(0, slash) : raw;
+  // FAIL CLOSED (SYMPH-925, council P2): a spec we cannot map to a RECOGNIZED
+  // Symphony family is `null`, never a trusted distinct identity. The earlier
+  // fail-open fallback (key on the provider segment / raw token) silently read
+  // same-provider specs as different families — e.g. author `mistral-large` →
+  // `mistral-large` vs judge `mistral/small` → `mistral` differ → `satisfied:true`
+  // → the same-provider judge RUNS, even though decorrelation was NOT proven.
+  // "Unrecognized" must mean "I cannot prove this family", which fails closed in
+  // `decideJudgeDecorrelation` (`judge_author_family_missing` /
+  // `judge_family_missing`). A new model family must be added to the recognized
+  // set ABOVE explicitly to keep decorrelation provable — that is the conservative
+  // trade: an unmapped family blocks the judge rather than gambling on a string.
+  return null;
 }
 
 /**

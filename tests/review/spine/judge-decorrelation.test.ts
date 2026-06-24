@@ -31,11 +31,14 @@ describe("normalizeJudgeFamily (SYMPH-925)", () => {
     expect(normalizeJudgeFamily("   ")).toBeNull();
   });
 
-  it("keeps an unrecognized-but-present family comparable (provider segment / token)", () => {
-    // Not null — an opaque family is still a usable identity for same-vs-different
-    // (mirrors crucible's `${provider}:${model}` terminal), so it can be excluded.
-    expect(normalizeJudgeFamily("mistral/large")).toBe("mistral");
-    expect(normalizeJudgeFamily("qwen3")).toBe("qwen3");
+  it("returns null for any spec it cannot map to a RECOGNIZED Symphony family (fail-closed)", () => {
+    // SYMPH-925 council P2: an unrecognized spec is NOT trusted as a distinct
+    // identity. It must be null so decideJudgeDecorrelation fails closed, never
+    // read same-provider specs (mistral/large vs mistral/small) as different.
+    expect(normalizeJudgeFamily("mistral/large")).toBeNull();
+    expect(normalizeJudgeFamily("mistral-large")).toBeNull();
+    expect(normalizeJudgeFamily("mistral/small")).toBeNull();
+    expect(normalizeJudgeFamily("qwen3")).toBeNull();
   });
 });
 
@@ -97,5 +100,38 @@ describe("decideJudgeDecorrelation (SYMPH-925)", () => {
         judgeFamily: "claude-opus-4-8",
       }).reason,
     ).toBe("judge_same_family_as_author");
+  });
+
+  it("fails closed when the author family is UNRECOGNIZED (not a recognized Symphony family)", () => {
+    const decision = decideJudgeDecorrelation({
+      authorFamily: "mistral-large",
+      judgeFamily: "anthropic",
+    });
+    expect(decision.satisfied).toBe(false);
+    expect(decision.reason).toBe("judge_author_family_missing");
+    expect(decision.authorFamily).toBeNull();
+  });
+
+  it("fails closed when the judge family is UNRECOGNIZED (not a recognized Symphony family)", () => {
+    const decision = decideJudgeDecorrelation({
+      authorFamily: "anthropic",
+      judgeFamily: "mistral/small",
+    });
+    expect(decision.satisfied).toBe(false);
+    expect(decision.reason).toBe("judge_family_missing");
+    expect(decision.judgeFamily).toBeNull();
+  });
+
+  it("fails closed on the council's same-provider fail-open case (mistral-large vs mistral/small)", () => {
+    // The exact P2 the reviewer flagged: under the old fail-open fallback these
+    // keyed to "mistral-large" vs "mistral", differed, and the same-provider judge
+    // RAN. Now both are unrecognized → null → fail closed, never satisfied:true.
+    const decision = decideJudgeDecorrelation({
+      authorFamily: "mistral-large",
+      judgeFamily: "mistral/small",
+    });
+    expect(decision.satisfied).toBe(false);
+    // Author is resolved first, so the unkeyable author short-circuits the reason.
+    expect(decision.reason).toBe("judge_author_family_missing");
   });
 });
