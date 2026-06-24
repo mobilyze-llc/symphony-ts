@@ -4,11 +4,11 @@ import { join } from "node:path";
 import type { AgentRunInput } from "../agent/runner.js";
 import { SPEC_DEFAULTS } from "../config/defaults.js";
 import type {
-  StageDefinition,
+  StageExecutionProfile,
   WorkflowHardStopsConfig,
   WorkflowPreReviewVerifyConfig,
 } from "../config/types.js";
-import type { Issue, ReasoningEffort } from "../domain/model.js";
+import type { ReasoningEffort } from "../domain/model.js";
 import type { StageExecutionJobSpec } from "../stage-execution/backend.js";
 import {
   type CreateStageExecutionJobSpecInput,
@@ -38,10 +38,6 @@ import {
 } from "./pre-review-verify-gate.js";
 
 const REVIEW_STAGE_NAME = "review";
-const REVIEW_LANE_HEARTBEAT_INTERVAL_MS = 30_000;
-const REVIEW_LANE_PROGRESS_INTERVAL_MS = 30_000;
-const REVIEW_LANE_USAGE_INTERVAL_MS = 30_000;
-const REVIEW_LANE_KILL_GRACE_MS = 5_000;
 
 export interface CreateCrabrunnerReviewStageDispatcherOptions {
   env?: NodeJS.ProcessEnv;
@@ -151,15 +147,12 @@ export function createCrabrunnerReviewStageDispatcher(
           lane,
           laneConfig: requireLaneConfig(laneConfigs, lane.laneId),
           runGroupId,
-          prompt: promptFor(lane.laneId),
           options,
         }),
       buildRunnerInput: (lane) =>
         buildReviewLaneRunnerInput({
           context,
           lane,
-          laneConfig: requireLaneConfig(laneConfigs, lane.laneId),
-          runGroupId,
           prompt: promptFor(lane.laneId),
         }),
       collectArtifact: (laneEvidence) =>
@@ -226,15 +219,26 @@ function buildReviewLaneJobSpec(input: {
   lane: CrabrunnerReviewLaneSpec;
   laneConfig: HeadlessReviewerLaneConfig;
   runGroupId: string;
-  prompt: string;
   options: CreateCrabrunnerReviewStageDispatcherOptions;
 }): StageExecutionJobSpec {
-  const stage = reviewLaneStage(input);
+  const timeoutMs = reviewLaneTimeoutMs(input);
+  const reasoningEffort = reviewLaneReasoningEffort(input.lane);
   return createStageExecutionJobSpec({
     issue: input.context.issue,
     attempt: input.context.attempt,
-    stage,
+    stage: input.context.stage,
     stageName: input.lane.laneId,
+    execution: reviewLaneExecutionProfile({
+      lane: input.lane,
+      runGroupId: input.runGroupId,
+      timeoutMs,
+      reasoningEffort,
+      laneConfig: input.laneConfig,
+    }),
+    runnerKind: runnerKindForLane(input.laneConfig),
+    runnerModel: input.lane.model,
+    runnerReasoningEffort: reasoningEffort,
+    stageTimeoutMs: timeoutMs,
     defaultRunnerKind: input.options.defaultRunnerKind,
     defaultRunnerModel: input.options.defaultRunnerModel,
     defaultRunnerProvider: input.options.defaultRunnerProvider ?? null,
@@ -249,8 +253,6 @@ function buildReviewLaneJobSpec(input: {
 function buildReviewLaneRunnerInput(input: {
   context: CrabrunnerReviewStageDispatchContext;
   lane: CrabrunnerReviewLaneSpec;
-  laneConfig: HeadlessReviewerLaneConfig;
-  runGroupId: string;
   prompt: string;
 }): AgentRunInput {
   const reasoningEffort = reviewLaneReasoningEffort(input.lane);
@@ -258,92 +260,61 @@ function buildReviewLaneRunnerInput(input: {
     issue: input.context.issue,
     attempt: input.context.attempt,
     signal: input.context.signal,
-    stage: reviewLaneStage(input),
     stageName: input.lane.laneId,
+    promptTemplate: input.prompt,
     reasoningEffort,
   };
 }
 
-function reviewLaneStage(input: {
+function reviewLaneTimeoutMs(input: {
   context: CrabrunnerReviewStageDispatchContext;
+  laneConfig: HeadlessReviewerLaneConfig;
+}): number | null {
+  return input.laneConfig.timeoutSeconds === undefined
+    ? (input.context.stage?.timeoutMs ?? null)
+    : input.laneConfig.timeoutSeconds * 1000;
+}
+
+function reviewLaneExecutionProfile(input: {
   lane: CrabrunnerReviewLaneSpec;
   laneConfig: HeadlessReviewerLaneConfig;
   runGroupId: string;
-  prompt: string;
-}): StageDefinition {
-  const timeoutMs =
-    input.laneConfig.timeoutSeconds === undefined
-      ? (input.context.stage?.timeoutMs ?? null)
-      : input.laneConfig.timeoutSeconds * 1000;
-  const reasoningEffort = reviewLaneReasoningEffort(input.lane);
+  timeoutMs: number | null;
+  reasoningEffort: ReasoningEffort | null;
+}): StageExecutionProfile {
   return {
-    ...baseReviewStage(input.context.issue, input.context.stage),
-    runner: runnerKindForLane(input.laneConfig),
+    role: "reviewer",
+    phase: "review",
+    backend: "crabrunner",
+    controlNeeding: false,
+    provider: providerForLane(input.laneConfig),
     model: input.lane.model,
-    reasoningEffort,
-    prompt: input.prompt,
-    timeoutMs,
-    execution: {
-      role: "reviewer",
-      phase: "review",
-      backend: "crabrunner",
-      controlNeeding: false,
-      provider: providerForLane(input.laneConfig),
-      model: input.lane.model,
-      reasoningEffort,
-      profile: `crabrunner-review.${input.lane.laneId}`,
-      artifacts: {
-        requires: [],
-        produces: [`${input.lane.laneId}.structured.json`],
-      },
-      timeoutMs,
-      budget: {
-        maxTokens: null,
-        maxUsd: null,
-      },
-      dependencies: {
-        stages: [],
-        capsules: [],
-        missingCapsule: "fail",
-      },
-      runGroup: {
-        id: input.runGroupId,
-        key: null,
-      },
-      capsules: {
-        consume: [],
-        produce: [],
-      },
-      subStages: [],
+    reasoningEffort: input.reasoningEffort,
+    profile: `crabrunner-review.${input.lane.laneId}`,
+    artifacts: {
+      requires: [],
+      produces: [`${input.lane.laneId}.structured.json`],
     },
+    timeoutMs: input.timeoutMs,
+    budget: {
+      maxTokens: null,
+      maxUsd: null,
+    },
+    dependencies: {
+      stages: [],
+      capsules: [],
+      missingCapsule: "fail",
+    },
+    runGroup: {
+      id: input.runGroupId,
+      key: null,
+    },
+    capsules: {
+      consume: [],
+      produce: [],
+    },
+    subStages: [],
   };
-}
-
-function baseReviewStage(
-  issue: Issue,
-  stage: StageDefinition | null,
-): StageDefinition {
-  return (
-    stage ?? {
-      type: "agent",
-      runner: "codex",
-      model: null,
-      prompt: null,
-      maxTurns: null,
-      timeoutMs: null,
-      concurrency: null,
-      gateType: null,
-      maxRework: null,
-      reviewers: [],
-      transitions: {
-        onComplete: null,
-        onApprove: null,
-        onRework: null,
-      },
-      linearState: issue.state,
-      execution: null,
-    }
-  );
 }
 
 async function collectReviewerArtifact(input: {

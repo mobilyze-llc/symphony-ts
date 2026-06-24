@@ -5,7 +5,7 @@ import type {
   StageExecutionProfile,
   WorkflowHardStopsConfig,
 } from "../config/types.js";
-import type { Issue } from "../domain/model.js";
+import type { Issue, ReasoningEffort } from "../domain/model.js";
 import { resolveStageRunnerProviderSelector } from "../runners/provider-selection.js";
 import type {
   StageExecutionEnforcementContract,
@@ -22,6 +22,11 @@ export interface CreateStageExecutionJobSpecInput {
   attempt: number | null;
   stage: StageDefinition | null;
   stageName: string | null;
+  execution?: StageExecutionProfile | null;
+  runnerKind?: string | null;
+  runnerModel?: string | null;
+  runnerReasoningEffort?: ReasoningEffort | null;
+  stageTimeoutMs?: number | null;
   defaultRunnerKind: string;
   defaultRunnerModel: string | null;
   defaultRunnerProvider?: string | null;
@@ -35,14 +40,25 @@ export interface CreateStageExecutionJobSpecInput {
 export function createStageExecutionJobSpec(
   input: CreateStageExecutionJobSpecInput,
 ): StageExecutionJobSpec {
-  const execution = input.stage?.execution ?? null;
+  const execution =
+    input.execution === undefined
+      ? (input.stage?.execution ?? null)
+      : input.execution;
   const backend = execution?.backend ?? "current-runner";
-  const runnerKind = input.stage?.runner ?? input.defaultRunnerKind;
-  const runnerModel = input.stage?.model ?? input.defaultRunnerModel;
+  const stageRunner = input.runnerKind ?? input.stage?.runner ?? null;
+  const runnerKind = stageRunner ?? input.defaultRunnerKind;
+  const runnerModel =
+    input.runnerModel === undefined
+      ? (input.stage?.model ?? input.defaultRunnerModel)
+      : input.runnerModel;
+  const stageReasoningEffort =
+    input.runnerReasoningEffort === undefined
+      ? (input.stage?.reasoningEffort ?? null)
+      : input.runnerReasoningEffort;
   const runnerProvider = resolveStageRunnerProviderSelector({
     runnerKind,
     defaultRunnerKind: input.defaultRunnerKind,
-    stageRunner: input.stage?.runner ?? null,
+    stageRunner,
     executionProvider: execution?.provider ?? null,
     defaultRunnerProvider: input.defaultRunnerProvider ?? null,
   });
@@ -61,13 +77,17 @@ export function createStageExecutionJobSpec(
     effectiveHardStops: input.effectiveHardStops ?? null,
     defaultTurnTimeoutMs: input.defaultTurnTimeoutMs ?? null,
     defaultStallTimeoutMs: input.defaultStallTimeoutMs ?? null,
+    stageTimeoutMs:
+      input.stageTimeoutMs === undefined
+        ? (input.stage?.timeoutMs ?? null)
+        : input.stageTimeoutMs,
   });
   const runner = {
     runnerKind,
     model: runnerModel,
     provider: runnerProvider,
     reasoningEffort:
-      execution?.reasoningEffort ?? input.stage?.reasoningEffort ?? null,
+      execution?.reasoningEffort ?? stageReasoningEffort,
   };
 
   return {
@@ -110,6 +130,7 @@ function createStageExecutionEnforcementContract(input: {
   effectiveHardStops: WorkflowHardStopsConfig | null;
   defaultTurnTimeoutMs: number | null;
   defaultStallTimeoutMs: number | null;
+  stageTimeoutMs: number | null;
 }): StageExecutionEnforcementContract {
   const required = input.backend === "crabrunner";
   const hardStops = input.effectiveHardStops;
@@ -130,7 +151,7 @@ function createStageExecutionEnforcementContract(input: {
     timing: {
       timeoutMs:
         input.execution?.timeoutMs ??
-        input.stage?.timeoutMs ??
+        input.stageTimeoutMs ??
         input.defaultTurnTimeoutMs,
       stallTimeoutMs: input.defaultStallTimeoutMs,
       noProgressTurns: hardStops?.noProgressTurns ?? null,

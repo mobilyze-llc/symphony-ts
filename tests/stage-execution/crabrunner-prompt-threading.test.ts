@@ -85,6 +85,37 @@ describe("crabrunner default prompt resolver (SYMPH-856)", () => {
     expect(contents).not.toContain("GLOBAL fallback");
   });
 
+  it("renders runnerInput.promptTemplate before stage or workflow prompts", async () => {
+    const capture = createManifestCaptureCli();
+    const backend = createCrabrunnerStageExecutionBackend({
+      crucibleRoot: "/tmp/crucible",
+      targetRepoRoot: "/tmp/repo",
+      pollIntervalMs: 0,
+      cli: capture.cli,
+      promptRendering: {
+        promptTemplate: "GLOBAL fallback for {{ issue.identifier }}",
+        workflowPath: "/tmp/workflow/WORKFLOW.md",
+      },
+    });
+
+    const runnerInput: AgentRunInput = {
+      ...createRunnerInput(),
+      stage: createStage("STAGE prompt loses for {{ issue.identifier }}"),
+      promptTemplate: "LANE prompt wins for {{ issue.identifier }}",
+    };
+
+    const result = await backend.execute({
+      job: createJob(),
+      runnerInput,
+    });
+
+    expect(result.result.runAttempt.status).toBe("succeeded");
+    const contents = capture.promptContents() ?? "";
+    expect(contents).toContain("LANE prompt wins for SYMPH-1");
+    expect(contents).not.toContain("STAGE prompt loses");
+    expect(contents).not.toContain("GLOBAL fallback");
+  });
+
   it("fails closed when the template references an undefined variable (strictVariables) — no prompt_file written, job not succeeded", async () => {
     const capture = createManifestCaptureCli();
     const backend = createCrabrunnerStageExecutionBackend({

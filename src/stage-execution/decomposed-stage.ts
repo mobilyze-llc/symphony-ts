@@ -13,6 +13,8 @@ import type {
   StageExecutionBackendRunner,
   StageExecutionJobSpec,
 } from "./backend.js";
+import { runStageExecutionLanes } from "./multi-lane.js";
+import type { StageExecutionLaneResult } from "./multi-lane.js";
 
 /**
  * SYMPH-835 — run a stage that has been decomposed into bounded, capsule-scoped
@@ -233,16 +235,31 @@ export async function runDecomposedStage(
       degraded = true;
     }
 
-    const job = buildJobSpec(ctx);
-    const backend = resolveBackend(job);
-
-    let result: StageExecutionBackendResult;
-    try {
-      result = await backend.execute({
-        job,
-        runnerInput: buildRunnerInput(ctx),
-      });
-    } catch (error) {
+    const dispatched = await runStageExecutionLanes<
+      DecomposedSubStageContext,
+      StageExecutionBackendResult | null,
+      StageExecutionLaneResult<
+        DecomposedSubStageContext,
+        StageExecutionBackendResult | null
+      >
+    >({
+      lanes: [ctx],
+      dispatchMode: "sequential",
+      buildJobSpec,
+      buildRunnerInput,
+      resolveBackend: (job) => resolveBackend(job),
+      collectArtifact: (laneDispatch) => laneDispatch.backendResult,
+      aggregate: (lanes) => {
+        const lane = lanes[0];
+        if (lane === undefined) {
+          throw new Error(`No dispatch result for sub-stage "${ctx.name}".`);
+        }
+        return lane;
+      },
+    });
+    const dispatchedLane = dispatched.aggregate;
+    const result = dispatchedLane.backendResult;
+    if (result === null) {
       // Between-sub-stage control: a failed sub-stage stops the sequence. The
       // orchestrator — not this runner — owns failure classification, rework,
       // and stage transitions, so the error is preserved for it.
@@ -255,7 +272,11 @@ export async function runDecomposedStage(
         producedCapsulePaths: [],
         missingCapsules: readiness.ok ? [] : readiness.missingCapsules,
         result: null,
-        error,
+        error:
+          dispatchedLane.error ??
+          dispatchedLane.collectError ??
+          dispatchedLane.validationErrors[0] ??
+          null,
       });
       return finish("sub_stage_failed");
     }

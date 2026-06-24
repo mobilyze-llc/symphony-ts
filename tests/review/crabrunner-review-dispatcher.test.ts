@@ -72,7 +72,8 @@ describe("createCrabrunnerReviewStageDispatcher", () => {
       expect(backend.inputs[0]?.job.backend).toBe("crabrunner");
       expect(backend.inputs[0]?.job.runner.runnerKind).toBe("pi");
       expect(backend.inputs[0]?.job.runner.provider).toBe("deepseek");
-      expect(backend.inputs[0]?.runnerInput.stage?.prompt).toContain(
+      expect(backend.inputs[0]?.runnerInput.stage).toBeUndefined();
+      expect(backend.inputs[0]?.runnerInput.promptTemplate).toContain(
         "You are a decorrelated reviewer in a headless Symphony council gate.",
       );
 
@@ -163,10 +164,10 @@ describe("createCrabrunnerReviewStageDispatcher", () => {
       expect(result.result.review_metadata.previous_reviewed_head_sha).toBe(
         PRIOR_HEAD_SHA,
       );
-      expect(backend.inputs[0]?.runnerInput.stage?.prompt).toContain(
+      expect(backend.inputs[0]?.runnerInput.promptTemplate).toContain(
         "Prior adjudicated findings by fingerprint:",
       );
-      expect(backend.inputs[0]?.runnerInput.stage?.prompt).toContain(
+      expect(backend.inputs[0]?.runnerInput.promptTemplate).toContain(
         "prior-fingerprint",
       );
     } finally {

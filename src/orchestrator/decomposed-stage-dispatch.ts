@@ -265,15 +265,16 @@ function buildCapsuleScopedRunnerInput(input: {
   // reworkCount — the sub-stage consumes its inputs by capsule path.
   //
   // NOTE(SYMPH-856 / SYMPH-857): `stage` is also intentionally absent here. The
-  // crabrunner backend's default prompt resolver renders
-  // `runnerInput.stage?.prompt ?? config.promptTemplate`; with no `stage`, a
-  // decomposed sub-stage lane renders the WORKFLOW-GLOBAL promptTemplate. That
-  // is the only prompt the config model exposes today — a sub-stage
-  // (`StageExecutionSubStage`) carries a `StageExecutionProfile` with NO prompt
-  // field. Per-sub-stage prompts (so investigate/plan/implement get phase-
-  // specific prompts) are a config-schema change tracked in SYMPH-857; they are
-  // required before a *decomposed* canary but do not block the single-transition
-  // canary (SYMPH-852/808), which carries the full StageDefinition prompt.
+  // crabrunner backend's default prompt resolver renders `promptTemplate ??
+  // runnerInput.stage?.prompt ?? config.promptTemplate`; with no promptTemplate
+  // or `stage`, a decomposed sub-stage lane renders the WORKFLOW-GLOBAL
+  // promptTemplate. That is the only prompt the config model exposes today — a
+  // sub-stage (`StageExecutionSubStage`) carries a `StageExecutionProfile` with
+  // NO prompt field. Per-sub-stage prompts (so investigate/plan/implement get
+  // phase-specific prompts) are a config-schema change tracked in SYMPH-857;
+  // they are required before a *decomposed* canary but do not block the
+  // single-transition canary (SYMPH-852/808), which carries the full
+  // StageDefinition prompt.
   return {
     issue: input.issue,
     attempt: input.attempt,
