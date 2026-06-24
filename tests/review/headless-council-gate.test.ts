@@ -5449,58 +5449,18 @@ describe("runHeadlessCouncilGate", () => {
     ).toBe(true);
   });
 
-  it("emits partial artifacts when the overall deadline elapses before the Codex lead starts", async () => {
-    const progress: string[] = [];
-    const harness = await createHarness({
-      laneBehavior: {
-        "claude-opus": { delayMs: 35 },
-      },
-    });
-    const result = await runHeadlessCouncilGate(
-      {
-        issueId: "MOB-88",
-        workspace: harness.workspace,
-        artifactDir: harness.artifactDir,
-        diffPath: harness.diffPath,
-        reviewerLanes: [opusLane()],
-        timeoutSeconds: 60,
-      },
-      {
-        runCommand: harness.runCommand,
-        laneStallDeadlineMs: 1_000,
-        overallLaneDeadlineMs: 10,
-        progress: (message) => progress.push(message),
-      },
-    );
-
-    const codexLeadLane = result.lanes.find(
-      (lane) => lane.laneId === "codex-high-lead",
-    );
-    expect(codexLeadLane).toMatchObject({
-      state: "timed_out",
-      verdict: "error",
-      degradedReason: "substrate_stall",
-    });
-    const sawBeforeStartDeadline = progress.some((line) =>
-      line.includes(
-        "lane_deadline_elapsed_before_start laneId=codex-high-lead",
-      ),
-    );
-    const sawLaneStall = progress.some((line) =>
-      line.includes("lane_stalled laneId=codex-high-lead"),
-    );
-    if (sawBeforeStartDeadline) {
-      expect(codexLeadLane?.message).toContain(
-        "overall lane deadline elapsed before the Codex lead could start",
-      );
-    } else {
-      expect(sawLaneStall).toBe(true);
-      expect(codexLeadLane?.message).toContain(
-        "Lane never reached a terminal state",
-      );
-    }
-  });
-
+  // SYMPH-559: the prior "emits partial artifacts when the overall deadline
+  // elapses before the Codex lead starts" case relied on a 1ms-scale
+  // `overallLaneDeadlineMs: 10` wall-clock race and branched on whichever path
+  // it happened to hit, so it flaked under coverage-mode CI (the race slipped
+  // into the lane-stall branch instead of the intended deadline-before-start
+  // branch). Both of its branches are now covered deterministically:
+  //   - deadline-before-start branch: this `deterministically covers the Codex
+  //     lead deadline-before-start branch` case (injected `sequencedClock`).
+  //   - lane-stall (SYMPH-441 substrate-stall) branch: the `derives Codex lead
+  //     stall budget from remaining overall gate time` case above.
+  // The flaky race-based case was removed rather than rewritten to avoid a
+  // duplicate of the deterministic coverage below.
   it("deterministically covers the Codex lead deadline-before-start branch", async () => {
     const progress: string[] = [];
     const harness = await createHarness();

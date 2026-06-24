@@ -6366,9 +6366,19 @@ function formatTerminationStopRule(
     }
     return "stop for review-gate error repair; do not continue pipeline";
   }
-  if (substrateOrProvenanceDegraded && termination.blockingFindingCount === 0) {
-    return "stop for review-substrate/provenance repair; do not launch another product-code review round";
-  }
+  // SYMPH-601: a post-degraded substrate/provenance branch here is unreachable.
+  // `substrateOrProvenanceDegraded` (hasReviewSubstrateDegradation ||
+  // isRoutingOnlyProcedureStop) being true always forces
+  // `termination.status === "degraded"` in assessCouncilTermination, which is
+  // fed the same lanes/degradedConditions/verdict that build this `result`:
+  //   - hasReviewSubstrateDegradation runs on the identical merge-authoritative
+  //     lanes + degradedConditions, so it agrees at both call sites; and
+  //   - isRoutingOnlyProcedureStop requires `verdict === "error"`, which is the
+  //     primary `status === "degraded"` trigger.
+  // So once the `status === "degraded"` block above has returned,
+  // `substrateOrProvenanceDegraded` is necessarily false and a guard for it
+  // here can never fire. (The degraded block already emits the identical
+  // substrate/provenance repair string for the reachable case.)
   if (termination.reason === "round_cap_hit") {
     return "operator decision required before any additional review round";
   }
