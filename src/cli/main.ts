@@ -252,6 +252,13 @@ export async function startCliHost(
           defaultRunnerProvider: input.runtime.config.runner.provider ?? null,
           defaultTurnTimeoutMs: input.runtime.config.codex.turnTimeoutMs,
           defaultStallTimeoutMs: input.runtime.config.codex.stallTimeoutMs,
+          ...(input.runtime.config.reviewExecution?.preReviewVerify ===
+          undefined
+            ? {}
+            : {
+                preReviewVerify:
+                  input.runtime.config.reviewExecution.preReviewVerify,
+              }),
           ...(input.runtime.config.hardStops === undefined
             ? {}
             : { hardStops: input.runtime.config.hardStops }),

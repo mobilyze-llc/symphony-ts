@@ -173,6 +173,12 @@ export const DEFAULT_MERGE_ACTUATOR_MAX_DRAFT_WAIT_OBSERVATIONS = 20;
 // mergeability computation, which normally resolves within seconds.
 export const DEFAULT_MERGE_ACTUATOR_MAX_PENDING_CHECKS_WAIT_OBSERVATIONS = 30;
 export const DEFAULT_MERGE_ACTUATOR_MAX_UNKNOWN_MERGEABILITY_WAIT_OBSERVATIONS = 20;
+export const DEFAULT_PRE_REVIEW_VERIFY_ENABLED = true;
+export const DEFAULT_PRE_REVIEW_VERIFY_MAX_FIX_ATTEMPTS = 1;
+export const DEFAULT_PRE_REVIEW_VERIFY_TYPECHECK_COMMAND = "pnpm typecheck";
+export const DEFAULT_PRE_REVIEW_VERIFY_LINT_COMMAND = "pnpm lint";
+export const DEFAULT_PRE_REVIEW_VERIFY_BUILD_COMMAND = "pnpm build";
+export const DEFAULT_PRE_REVIEW_VERIFY_UNIT_COMMAND = "pnpm test";
 
 export const SPEC_DEFAULTS = Object.freeze({
   tracker: {
@@ -247,6 +253,17 @@ export const SPEC_DEFAULTS = Object.freeze({
   reviewExecution: {
     crabrunnerJobGroup: {
       enabled: false,
+    },
+    preReviewVerify: {
+      enabled: DEFAULT_PRE_REVIEW_VERIFY_ENABLED,
+      maxFixAttempts: DEFAULT_PRE_REVIEW_VERIFY_MAX_FIX_ATTEMPTS,
+      commands: {
+        typecheck: DEFAULT_PRE_REVIEW_VERIFY_TYPECHECK_COMMAND,
+        lint: DEFAULT_PRE_REVIEW_VERIFY_LINT_COMMAND,
+        build: DEFAULT_PRE_REVIEW_VERIFY_BUILD_COMMAND,
+        unit: DEFAULT_PRE_REVIEW_VERIFY_UNIT_COMMAND,
+        smoke: null,
+      },
     },
   },
   admissionCard: {

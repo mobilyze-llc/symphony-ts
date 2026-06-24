@@ -71,6 +71,12 @@ import {
   DEFAULT_OBSERVABILITY_RENDER_INTERVAL_MS,
   DEFAULT_PAUSE_TRIAGE_MAX_RESUMES,
   DEFAULT_POLL_INTERVAL_MS,
+  DEFAULT_PRE_REVIEW_VERIFY_BUILD_COMMAND,
+  DEFAULT_PRE_REVIEW_VERIFY_ENABLED,
+  DEFAULT_PRE_REVIEW_VERIFY_LINT_COMMAND,
+  DEFAULT_PRE_REVIEW_VERIFY_MAX_FIX_ATTEMPTS,
+  DEFAULT_PRE_REVIEW_VERIFY_TYPECHECK_COMMAND,
+  DEFAULT_PRE_REVIEW_VERIFY_UNIT_COMMAND,
   DEFAULT_QUEUE_TRIAGE_ADMISSION_GUARDRAIL_ENABLED,
   DEFAULT_QUEUE_TRIAGE_AUTO_RELEASE_FRONTIER,
   DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_ENABLED,
@@ -118,6 +124,7 @@ import type {
   StagesConfig,
   WorkflowContinuousFeedbackEvent,
   WorkflowHardStopsConfigOverride,
+  WorkflowPreReviewVerifyConfig,
   WorkflowQueueTriageConfig,
   WorkflowStuckTriageConfig,
 } from "./types.js";
@@ -154,6 +161,7 @@ export function resolveWorkflowConfig(
   const reviewCrabrunnerJobGroup = asRecord(
     reviewExecution.crabrunner_job_group,
   );
+  const preReviewVerify = asRecord(reviewExecution.pre_review_verify);
   const admissionCard = asRecord(config.admission_card);
   const codeGrounding = asRecord(config.code_grounding);
   const operatorAnchors = asRecord(config.operator_anchors);
@@ -353,6 +361,7 @@ export function resolveWorkflowConfig(
         // runner path, but active Symphony review has no CMUX fallback.
         enabled: reviewCrabrunnerJobGroup.enabled === true,
       },
+      preReviewVerify: resolvePreReviewVerifyConfig(preReviewVerify),
     },
     admissionCard: {
       enabled: admissionCard.enabled === true,
@@ -492,6 +501,33 @@ export function resolveWorkflowConfig(
       override: readBoolean(contracts.override) ?? false,
     },
     queueTriage: resolveQueueTriageConfig(queueTriage, maxConcurrentAgents),
+  };
+}
+
+function resolvePreReviewVerifyConfig(
+  config: Record<string, unknown>,
+): WorkflowPreReviewVerifyConfig {
+  const commands = asRecord(config.commands);
+  return {
+    enabled: readBoolean(config.enabled) ?? DEFAULT_PRE_REVIEW_VERIFY_ENABLED,
+    maxFixAttempts:
+      readNonNegativeInteger(config.max_fix_attempts) ??
+      DEFAULT_PRE_REVIEW_VERIFY_MAX_FIX_ATTEMPTS,
+    commands: {
+      typecheck:
+        readCommandString(commands.typecheck) ??
+        DEFAULT_PRE_REVIEW_VERIFY_TYPECHECK_COMMAND,
+      lint:
+        readCommandString(commands.lint) ??
+        DEFAULT_PRE_REVIEW_VERIFY_LINT_COMMAND,
+      build:
+        readCommandString(commands.build) ??
+        DEFAULT_PRE_REVIEW_VERIFY_BUILD_COMMAND,
+      unit:
+        readCommandString(commands.unit) ??
+        DEFAULT_PRE_REVIEW_VERIFY_UNIT_COMMAND,
+      smoke: readCommandString(commands.smoke),
+    },
   };
 }
 
@@ -690,6 +726,15 @@ function readString(value: unknown): string | null {
   }
 
   return value;
+}
+
+function readCommandString(value: unknown): string | null {
+  const command = readString(value);
+  if (command === null) {
+    return null;
+  }
+  const trimmed = command.trim();
+  return trimmed === "" ? null : trimmed;
 }
 
 function readScript(value: unknown): string | null {

@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import type { AgentRunResult } from "../../src/agent/runner.js";
+import type { WorkflowPreReviewVerifyConfig } from "../../src/config/types.js";
 import type { Issue } from "../../src/domain/model.js";
 import {
   createCrabrunnerReviewStageDispatcher,
@@ -259,6 +260,113 @@ describe("createCrabrunnerReviewStageDispatcher", () => {
     }
   });
 
+  it("runs pre-review verify before dispatching council lanes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "symph913-dispatcher-green-"));
+    try {
+      const workspaceRoot = join(root, "workspace");
+      const artifactRoot = join(root, "artifacts");
+      await mkdir(workspaceRoot, { recursive: true });
+      await mkdir(artifactRoot, { recursive: true });
+      const backend = new MarkdownArtifactBackend(artifactRoot);
+      const issue = createIssue();
+      const verifyCalls: string[] = [];
+      const dispatcher = createDispatcher({
+        runCommand: fakeGitAndVerifyCommand({
+          verifyCalls,
+          verifyResults: [{ exitCode: 0, stdout: "ok\n", stderr: "" }],
+        }),
+        preReviewVerify: singleCommandVerifyConfig({ maxFixAttempts: 1 }),
+      });
+
+      const result = await dispatcher(
+        dispatchContext({ issue, workspaceRoot, artifactRoot, backend }),
+      );
+
+      expect(verifyCalls).toEqual(["pnpm typecheck"]);
+      expect(backend.inputs).toHaveLength(1);
+      expect(backend.inputs[0]?.job.identity.stageName).toBe("pi-deepseek");
+      expect(result.preReviewVerify?.status).toBe("green");
+      expect(result.preReviewVerify?.metrics.fixAttempts).toBe(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks council dispatch when pre-review verify is red and the fix loop is exhausted", async () => {
+    const root = await mkdtemp(join(tmpdir(), "symph913-dispatcher-red-"));
+    try {
+      const workspaceRoot = join(root, "workspace");
+      const artifactRoot = join(root, "artifacts");
+      await mkdir(workspaceRoot, { recursive: true });
+      await mkdir(artifactRoot, { recursive: true });
+      const backend = new MarkdownArtifactBackend(artifactRoot);
+      const issue = createIssue();
+      const dispatcher = createDispatcher({
+        runCommand: fakeGitAndVerifyCommand({
+          verifyResults: [
+            { exitCode: 2, stdout: "", stderr: "typecheck failed\n" },
+          ],
+        }),
+        preReviewVerify: singleCommandVerifyConfig({ maxFixAttempts: 0 }),
+      });
+
+      await expect(
+        dispatcher(
+          dispatchContext({ issue, workspaceRoot, artifactRoot, backend }),
+        ),
+      ).rejects.toThrow(
+        "pre-review verify gate failed closed: typecheck exited 2",
+      );
+      expect(backend.inputs).toHaveLength(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("dispatches one cheap repair lane and re-verifies before admitting council", async () => {
+    const root = await mkdtemp(join(tmpdir(), "symph913-dispatcher-repair-"));
+    try {
+      const workspaceRoot = join(root, "workspace");
+      const artifactRoot = join(root, "artifacts");
+      await mkdir(workspaceRoot, { recursive: true });
+      await mkdir(artifactRoot, { recursive: true });
+      const backend = new MarkdownArtifactBackend(artifactRoot);
+      const issue = createIssue();
+      const dispatcher = createDispatcher({
+        runCommand: fakeGitAndVerifyCommand({
+          verifyResults: [
+            { exitCode: 1, stdout: "", stderr: "lint failed\n" },
+            { exitCode: 0, stdout: "ok\n", stderr: "" },
+          ],
+        }),
+        preReviewVerify: singleCommandVerifyConfig({ maxFixAttempts: 1 }),
+      });
+
+      const result = await dispatcher(
+        dispatchContext({ issue, workspaceRoot, artifactRoot, backend }),
+      );
+
+      expect(backend.inputs).toHaveLength(2);
+      const repair = backend.inputs[0]!;
+      expect(repair.job.identity.stageName).toBe("review/pre-review-repair-1");
+      expect(repair.job.role).toBe("implementer");
+      expect(repair.job.phase).toBe("verify");
+      expect(repair.job.runner.reasoningEffort).toBe("low");
+      expect(repair.runnerInput.reasoningEffort).toBe("low");
+      expect(repair.runnerInput.stage?.prompt).toContain("lint failed");
+      expect(backend.inputs[1]?.job.identity.stageName).toBe("pi-deepseek");
+      expect(result.preReviewVerify?.status).toBe("green");
+      expect(result.preReviewVerify?.metrics).toMatchObject({
+        gateCaughtCount: 1,
+        fixAttempts: 1,
+        fixedPreCouncil: true,
+        councilRoundsAvoided: 0,
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("normalizes and validates review lane reasoning effort", () => {
     const lane: CrabrunnerReviewLaneSpec = {
       laneId: "pi-deepseek",
@@ -423,6 +531,7 @@ class MixedArtifactBackend
 
 function createDispatcher(input: {
   runCommand: CommandRunner;
+  preReviewVerify?: WorkflowPreReviewVerifyConfig;
 }): ReturnType<typeof createCrabrunnerReviewStageDispatcher> {
   return createCrabrunnerReviewStageDispatcher({
     env: {
@@ -434,8 +543,27 @@ function createDispatcher(input: {
     defaultRunnerModel: null,
     defaultTurnTimeoutMs: 3_600_000,
     defaultStallTimeoutMs: 300_000,
+    ...(input.preReviewVerify === undefined
+      ? {}
+      : { preReviewVerify: input.preReviewVerify }),
     runCommand: input.runCommand,
   });
+}
+
+function singleCommandVerifyConfig(input: {
+  maxFixAttempts: number;
+}): WorkflowPreReviewVerifyConfig {
+  return {
+    enabled: true,
+    maxFixAttempts: input.maxFixAttempts,
+    commands: {
+      typecheck: "pnpm typecheck",
+      lint: null,
+      build: null,
+      unit: null,
+      smoke: null,
+    },
+  };
 }
 
 function dispatchContext(input: {
@@ -515,6 +643,26 @@ function fakeGitCommand(
       };
     }
     return { exitCode: 1, stdout: "", stderr: `unexpected git args ${args}` };
+  };
+}
+
+function fakeGitAndVerifyCommand(input: {
+  verifyResults: { exitCode: number; stdout: string; stderr: string }[];
+  verifyCalls?: string[];
+}): CommandRunner {
+  const git = fakeGitCommand();
+  let verifyIndex = 0;
+  return async (command, args, options) => {
+    if (command === "sh" && args[0] === "-lc") {
+      input.verifyCalls?.push(String(args[1]));
+      const result =
+        input.verifyResults[
+          Math.min(verifyIndex, input.verifyResults.length - 1)
+        ];
+      verifyIndex += 1;
+      return result ?? { exitCode: 1, stdout: "", stderr: "missing result" };
+    }
+    return git(command, args, options);
   };
 }
 
