@@ -3,6 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { CrabboxSpineClient } from "./crabbox-spine-client.js";
+import {
+  type JudgeDecorrelationDecision,
+  type JudgeDecorrelationUnsatisfiedReason,
+  decideJudgeDecorrelation,
+} from "./judge-decorrelation.js";
 import type {
   ReviewQualityLedgerClient,
   RqlCrossExamVerdict,
@@ -84,6 +89,33 @@ export interface AggregatedReview {
    * the verdict; the ledger uses it to record CONFIRM vs `none` honestly.
    */
   judgeConfirmedFps: string[];
+  /**
+   * SYMPH-925 — the deterministic judge-family decorrelation decision for THIS
+   * round.
+   *
+   * NON-NULL whenever the adjudication PATH was entered — i.e. a judge was
+   * supplied AND cross-exam was required AND the escalate bucket was non-empty —
+   * REGARDLESS of whether the judge then ran (`satisfied: true`) or was REFUSED
+   * (`satisfied: false`). A refused judge is reported, not erased: a `satisfied:
+   * false` decision means every escalated finding default-blocks fail-closed and
+   * the supplied judge never ran (the reason says why).
+   *
+   * `null` ONLY when the adjudication path was NOT entered: no judge supplied, OR
+   * cross-exam not required, OR no escalations. So a caller MUST NOT read
+   * `judgeDecorrelation === null` as "the judge passed" — `null` means "no judge
+   * adjudicated this round", while a refused judge is a NON-NULL `satisfied:
+   * false`. Additive: the verdict already reflects the fail-closed blocking; this
+   * field reports WHY for operators and the ledger.
+   */
+  judgeDecorrelation: JudgeDecorrelationDecision | null;
+  /**
+   * SYMPH-925 — the fail-closed degraded reason when an otherwise-eligible judge
+   * was refused for failing the family-exclusion precondition (`null` when the
+   * judge was proven decorrelated, or when no judge adjudicated this round). This
+   * is the merge-precondition signal: a non-null value means adjudication was
+   * NOT decorrelated and the round's escalations blocked without a trusted judge.
+   */
+  judgeDecorrelationDegradedReason: JudgeDecorrelationUnsatisfiedReason | null;
 }
 
 /**
@@ -123,6 +155,26 @@ export interface AggregateReviewInput {
    */
   judge?: EscalateJudge;
   /**
+   * SYMPH-925 — judge-family decorrelation metadata. The escalate-bucket judge is
+   * the blocking AUTHORITY, so it must be proven to sit OUTSIDE the author/executor
+   * model family before it may adjudicate (crucible MOB-386: decorrelate the judge,
+   * not the finder). Supply BOTH the author/executor family and the judge's own
+   * family. When a judge would adjudicate (judge supplied AND cross-exam required)
+   * but this precondition is unsatisfied — either family unkeyable, or the judge is
+   * the author's family — the judge is REFUSED and every escalation default-blocks
+   * fail-closed (mirrors the `routing_author_provenance_missing` fail-closed
+   * pattern). Omit when no judge is supplied; the existing fail-closed default-block
+   * already covers the no-judge path.
+   *
+   * Resolve `authorFamily` from EXPLICIT review provenance only
+   * (`SYMPHONY_COUNCIL_AUTHOR_FAMILY` / `inferAuthorFamilies`), never ambient
+   * process env — see the MOB-399/392 env-leak note in `judge-decorrelation.ts`.
+   */
+  judgeDecorrelation?: {
+    authorFamily?: string | null;
+    judgeFamily?: string | null;
+  };
+  /**
    * Optional review-quality ledger capture (SYMPH-924). A pure, fail-closed
    * side-effect: it cannot change the returned `AggregatedReview` or the verdict.
    */
@@ -155,7 +207,13 @@ export class ReviewAggregator {
         refutedFindings,
         judgedTargetCount,
         confirmedFps,
-      } = await this.adjudicate(triage, crossExam, input.judge);
+        judgeDecorrelation,
+      } = await this.adjudicate(
+        triage,
+        crossExam,
+        input.judge,
+        input.judgeDecorrelation,
+      );
 
       const convergence =
         input.rounds === undefined
@@ -184,6 +242,11 @@ export class ReviewAggregator {
         refutedFindings,
         judgedTargetCount,
         judgeConfirmedFps: confirmedFps,
+        judgeDecorrelation,
+        judgeDecorrelationDegradedReason:
+          judgeDecorrelation !== null && !judgeDecorrelation.satisfied
+            ? judgeDecorrelation.reason
+            : null,
       };
 
       // SYMPH-924: pure, fail-closed side-effect — capture the review-quality
@@ -270,6 +333,9 @@ export class ReviewAggregator {
     triage: CouncilTriageResult,
     crossExam: CrossExamSelectResult,
     judge: EscalateJudge | undefined,
+    judgeDecorrelationInput:
+      | { authorFamily?: string | null; judgeFamily?: string | null }
+      | undefined,
   ): Promise<{
     blockingFindings: TriageFinding[];
     refutedFindings: TriageFinding[];
@@ -280,6 +346,16 @@ export class ReviewAggregator {
      * recorded as judge-confirmed).
      */
     confirmedFps: string[];
+    /**
+     * SYMPH-925 — the family-decorrelation decision. NON-NULL whenever the
+     * adjudication path was entered (judge supplied AND cross-exam required AND
+     * escalations exist), REGARDLESS of whether the judge then ran
+     * (`satisfied:true`) or was REFUSED (`satisfied:false`). `null` ONLY when that
+     * path was not entered (no judge / no cross-exam / no escalations). A
+     * `satisfied:false` decision means the judge was REFUSED and the escalations
+     * default-blocked fail-closed.
+     */
+    judgeDecorrelation: JudgeDecorrelationDecision | null;
   }> {
     const escalate = triage.escalate;
     if (escalate.length === 0) {
@@ -288,6 +364,7 @@ export class ReviewAggregator {
         refutedFindings: [],
         judgedTargetCount: 0,
         confirmedFps: [],
+        judgeDecorrelation: null,
       };
     }
     // Fail-closed: escalated findings block unless a judge is supplied AND
@@ -300,6 +377,32 @@ export class ReviewAggregator {
         // No judge ran → nothing was explicitly confirmed. These block fail-closed
         // but must be recorded as cross_exam_verdict "none", not CONFIRM.
         confirmedFps: [],
+        // No judge adjudicated → no judge to decorrelate this round.
+        judgeDecorrelation: null,
+      };
+    }
+    // SYMPH-925 — judge-family decorrelation is a DETERMINISTIC merge precondition,
+    // proven BEFORE the judge adjudicates. The escalate-bucket judge is the blocking
+    // AUTHORITY, so it must sit OUTSIDE the author/executor model family (crucible
+    // MOB-386: decorrelate the judge, not the finder). FAIL-CLOSED: if the author or
+    // judge family is unkeyable, or the judge IS the author's family, the supplied
+    // judge is REFUSED — every escalation default-blocks (never a silent pass) and
+    // the degraded reason is surfaced. This mirrors the finder-layer
+    // `routing_author_provenance_missing` fail-closed pattern and crucible's
+    // `COUNCIL_DECORRELATION_UNSATISFIED` reasons; the merge decision is unchanged in
+    // shape (escalations block), only the JUDGE never runs.
+    const judgeDecorrelation = decideJudgeDecorrelation({
+      authorFamily: judgeDecorrelationInput?.authorFamily ?? null,
+      judgeFamily: judgeDecorrelationInput?.judgeFamily ?? null,
+    });
+    if (!judgeDecorrelation.satisfied) {
+      return {
+        blockingFindings: [...escalate],
+        refutedFindings: [],
+        judgedTargetCount: 0,
+        // The judge was refused before running → nothing was confirmed.
+        confirmedFps: [],
+        judgeDecorrelation,
       };
     }
     const verdicts = await judge(
@@ -335,6 +438,8 @@ export class ReviewAggregator {
       refutedFindings,
       judgedTargetCount: crossExam.targets.length,
       confirmedFps,
+      // The judge ran because it was proven decorrelated; surface that proof.
+      judgeDecorrelation,
     };
   }
 
