@@ -49,6 +49,11 @@ import {
   reviewVerdictWithRoutingGuarantees,
   routingGuaranteeEscalationPredicates,
 } from "./review-verdict.js";
+import {
+  type GateAggregatorCapture,
+  type GateAggregatorCaptureResult,
+  createGateAggregatorCapture,
+} from "./spine/gate-aggregator-capture.js";
 import { stableJsonStringify } from "./stable-json.js";
 
 export { buildArtifactSectionHeadingKeys } from "./review-artifacts.js";
@@ -616,6 +621,13 @@ export interface SynthesizeStructuredReviewerArtifactRecordInput {
   mode: CouncilReviewMode;
   routingMode: CouncilRoutingMode | null;
   round: number;
+  /**
+   * SYMPH-917 — parse legacy severity sections in addition to the new
+   * `## Findings` + `## Triage` sections. Default OFF (new-only). Callers resolve
+   * it from `SYMPHONY_REVIEW_PARSE_LEGACY_SECTIONS` (e.g.
+   * `shouldParseLegacySections(env)`); omitted → new-only.
+   */
+  parseLegacySections?: boolean;
 }
 
 export interface CouncilReviewMetadata {
@@ -771,6 +783,15 @@ interface HeadlessCouncilGateDependencies {
    * in tests.
    */
   overallLaneDeadlineMs?: number;
+  /**
+   * SYMPH-927 — gate-side `ReviewAggregator` capture (ledger + judge-decorrelation),
+   * run ALONGSIDE the live verdict path. Injected in tests to avoid real spine
+   * shelling; in production it is built from the live spine behind the
+   * `SYMPHONY_REVIEW_AGGREGATOR_CAPTURE` flag (default ON only when the spine is
+   * present). Report-only by default — a capture failure never alters the merge
+   * decision.
+   */
+  reviewAggregatorCapture?: GateAggregatorCapture;
 }
 
 interface CmuxRunJson {
@@ -1403,10 +1424,29 @@ export async function runHeadlessCouncilGate(
   degradedConditions.push(...routingGuaranteeConditions);
 
   const laneVerdict = aggregateHeadlessVerdict(lanes);
-  const verdict = reviewVerdictWithRoutingGuarantees({
+  const laneRoutingVerdict = reviewVerdictWithRoutingGuarantees({
     laneVerdict,
     routingGuaranteeConditions,
   });
+
+  // SYMPH-927 — run the deterministic ReviewAggregator (SYMPH-924 ledger +
+  // SYMPH-925 judge-family decorrelation) ALONGSIDE the live verdict path. The
+  // ledger capture is report-only (a failure never alters the merge decision); the
+  // aggregator verdict only escalates the gate to non-pass when explicitly made
+  // authoritative (default off, measure-before-caps). The author-family basis comes
+  // from EXPLICIT provenance (`inferAuthorFamilies`), never ambient process env.
+  const verdict = await applyAggregatorCapture({
+    baseVerdict: laneRoutingVerdict,
+    lanes,
+    context,
+    provenance: input.provenance ?? [],
+    env,
+    round,
+    dependencies,
+    progress,
+    degradedConditions,
+  });
+
   const summary = summarizeVerdict(verdict, lanes, degradedConditions);
   // Resolve durable Linear IDs for the surviving Track findings before the
   // closeout so the assessment, report, and review-result.json all carry an
@@ -1453,6 +1493,168 @@ export async function runHeadlessCouncilGate(
     },
     summary,
   });
+}
+
+/**
+ * SYMPH-927 — run the gate-side `ReviewAggregator` capture and fold its outcome
+ * into the gate verdict.
+ *
+ * Resolution order for the capture: an injected `dependencies.reviewAggregatorCapture`
+ * (tests), else the production default built from the live spine — but ONLY when the
+ * `SYMPHONY_REVIEW_AGGREGATOR_CAPTURE` flag is on (default ON when the spine is
+ * present; the default capture's own `existsSync` gate makes it a no-op otherwise).
+ *
+ * The capture is report-only by default: the ledger write is a swallowed side-effect
+ * and the aggregator verdict does NOT override `baseVerdict` unless the operator
+ * opts into `SYMPHONY_REVIEW_AGGREGATOR_AUTHORITATIVE`. When authoritative AND the
+ * aggregator returns non-pass (`fail`/`degraded`), the gate escalates to non-pass
+ * (`error`) and records a degraded condition — never a silent pass (SYMPH-926/927).
+ *
+ * The author-family basis is `inferAuthorFamilies(provenance)` (the SAME explicit
+ * provenance the finder layer uses, which already incorporates
+ * `SYMPHONY_COUNCIL_AUTHOR_FAMILY`), never ambient `process.env` (MOB-399/392).
+ */
+async function applyAggregatorCapture(args: {
+  baseVerdict: HeadlessGateVerdict;
+  lanes: readonly HeadlessLaneResult[];
+  context: ReviewContext;
+  provenance: readonly ReviewBundleProvenanceEntry[];
+  env: NodeJS.ProcessEnv;
+  round: number;
+  dependencies: HeadlessCouncilGateDependencies;
+  progress: (message: string) => void;
+  degradedConditions: string[];
+}): Promise<HeadlessGateVerdict> {
+  const capture = resolveReviewAggregatorCapture(args.env, args.dependencies, {
+    progress: args.progress,
+  });
+  if (capture === null) {
+    return args.baseVerdict;
+  }
+  const laneArtifacts = await collectAggregatorLaneArtifacts(args.lanes);
+  if (laneArtifacts.length === 0) {
+    return args.baseVerdict;
+  }
+  // EXPLICIT-provenance author family (single, keyable family only); ambiguous /
+  // multi-family provenance is left null so the judge precondition fails closed.
+  const authorFamilies = inferAuthorFamilies(args.provenance);
+  const authorFamily =
+    authorFamilies.length === 1 ? (authorFamilies[0] ?? null) : null;
+  const judgeFamily = explicitJudgeFamily(args.env);
+  const currentDiffHash =
+    args.context.headSha ?? hashReviewDiff(args.context.diff);
+  const authoritative = envFlag(
+    args.env.SYMPHONY_REVIEW_AGGREGATOR_AUTHORITATIVE,
+  );
+
+  let result: GateAggregatorCaptureResult | null;
+  try {
+    result = await capture({
+      laneArtifacts,
+      currentDiffHash,
+      authorFamily,
+      judgeFamily,
+      round: args.round,
+      authoritative,
+      ...(args.context.repo !== null && args.context.prNumber !== null
+        ? { pr: `${args.context.repo}#${args.context.prNumber}` }
+        : {}),
+      ...(args.context.headSha === null
+        ? {}
+        : { headSha: args.context.headSha }),
+    });
+  } catch (error) {
+    // Defense-in-depth: the capture is documented never-throws, but a throw here
+    // must NEVER alter the merge decision (no-vote invariant). Swallow + report.
+    args.progress(
+      `review-aggregator-capture: swallowed error: ${formatError(error)}`,
+    );
+    return args.baseVerdict;
+  }
+  if (result === null) {
+    return args.baseVerdict;
+  }
+  // Report-only by default: the aggregator verdict is recorded for observability
+  // but does not change the decision unless authoritative.
+  args.progress(
+    `review-aggregator-capture: verdict=${result.review.verdict} degradedLanes=${result.review.degradedLaneCount} blocking=${result.review.blockingFindings.length} authoritative=${authoritative}`,
+  );
+  if (!result.shouldEscalateToNonPass) {
+    return args.baseVerdict;
+  }
+  // Authoritative non-pass (fail/degraded) → escalate, never a silent pass.
+  args.degradedConditions.push(`review_aggregator_${result.review.verdict}`);
+  return args.baseVerdict === "pass" ? "error" : args.baseVerdict;
+}
+
+/**
+ * SYMPH-927 — resolve the gate-aggregator capture: prefer an injected one (tests);
+ * otherwise build the production default behind `SYMPHONY_REVIEW_AGGREGATOR_CAPTURE`
+ * (default ON when the spine is present). Returns `null` when disabled.
+ */
+function resolveReviewAggregatorCapture(
+  env: NodeJS.ProcessEnv,
+  dependencies: HeadlessCouncilGateDependencies,
+  options: { progress: (message: string) => void },
+): GateAggregatorCapture | null {
+  if (dependencies.reviewAggregatorCapture !== undefined) {
+    return dependencies.reviewAggregatorCapture;
+  }
+  // Default ON unless explicitly disabled. The default capture's own existsSync
+  // spine gate makes it a no-op on hosts/CI without crucible, so "default ON" is
+  // safe: it only does work where the spine is actually present.
+  if (
+    env.SYMPHONY_REVIEW_AGGREGATOR_CAPTURE !== undefined &&
+    !envFlag(env.SYMPHONY_REVIEW_AGGREGATOR_CAPTURE)
+  ) {
+    return null;
+  }
+  return createGateAggregatorCapture({
+    env,
+    onLedgerError: (error) =>
+      options.progress(
+        `review-aggregator-ledger: swallowed capture error: ${formatError(error)}`,
+      ),
+  });
+}
+
+/**
+ * SYMPH-927 — read each merge-authoritative reviewer lane's on-disk crucible-
+ * contract markdown (the same artifact crucible's council-triage consumes). Lanes
+ * without a readable artifact are skipped (the existing lane-verdict path already
+ * accounts for their degradation); the aggregator only needs the readable ones.
+ */
+async function collectAggregatorLaneArtifacts(
+  lanes: readonly HeadlessLaneResult[],
+): Promise<Array<{ reviewer: string; markdown: string }>> {
+  const artifacts: Array<{ reviewer: string; markdown: string }> = [];
+  for (const lane of mergeAuthoritativeLanes([...lanes])) {
+    if (lane.artifactPath === null) {
+      continue;
+    }
+    try {
+      const markdown = await readFile(lane.artifactPath, "utf-8");
+      artifacts.push({ reviewer: lane.laneId, markdown });
+    } catch {
+      // Unreadable artifact → skip; never throw into the decision path.
+    }
+  }
+  return artifacts;
+}
+
+/**
+ * SYMPH-927 — the escalate-bucket judge's model family for the decorrelation
+ * precondition, from EXPLICIT config only (`SYMPHONY_COUNCIL_JUDGE_FAMILY`), never
+ * inferred from ambient runtime env (MOB-399/392). `null` when unset.
+ */
+function explicitJudgeFamily(env: NodeJS.ProcessEnv): string | null {
+  const raw = env.SYMPHONY_COUNCIL_JUDGE_FAMILY;
+  return raw !== undefined && raw.trim() !== "" ? raw.trim() : null;
+}
+
+/** SYMPH-927 — a stable per-round diff identity when no head SHA is available. */
+function hashReviewDiff(diff: string): string {
+  return createHash("sha256").update(diff, "utf8").digest("hex");
 }
 
 export async function assertFreshCouncilReview(
@@ -1907,6 +2109,7 @@ export async function synthesizeStructuredReviewerArtifactRecord(
     routingMode: input.routingMode,
     round: input.round,
     reviewBundle: input.reviewBundle,
+    parseLegacySections: input.parseLegacySections ?? false,
   });
   await writeFile(
     input.structuredArtifactPath,
@@ -2545,6 +2748,18 @@ function parseCouncilRoutingMode(
 
 function envFlag(value: string | undefined): boolean {
   return value === "1" || value === "true" || value === "yes";
+}
+
+/**
+ * SYMPH-917 — resolve whether the legacy `## P1`/`## P2`/`## Track`/`## Dismissed`
+ * sections should be parsed in addition to the new `## Findings` + `## Triage`
+ * sections. Default OFF (new-only) so a transitional reviewer emitting BOTH shapes
+ * is not double-counted; `SYMPHONY_REVIEW_PARSE_LEGACY_SECTIONS=1` re-enables the
+ * legacy code path (escape hatch). Keyed on the gate's threaded `env` (never
+ * ambient `process.env`) so it honors the hermetic test env.
+ */
+function shouldParseLegacySections(env: NodeJS.ProcessEnv): boolean {
+  return envFlag(env.SYMPHONY_REVIEW_PARSE_LEGACY_SECTIONS);
 }
 
 function parseEnvNumber(value: string | undefined, fallback: number): number {
@@ -3709,6 +3924,7 @@ async function runReviewerLane(input: {
       input.artifactDir,
       input.lane.laneId,
     ),
+    parseLegacySections: shouldParseLegacySections(input.env),
   });
   const afterWorkspaceIntegrity = await captureWorkspaceIntegritySnapshot({
     runCommand: input.runCommand,
@@ -3849,6 +4065,7 @@ async function runCodexLeadLane(input: {
       input.artifactDir,
       laneId,
     ),
+    parseLegacySections: shouldParseLegacySections(input.env),
   });
   const afterWorkspaceIntegrity = await captureWorkspaceIntegritySnapshot({
     runCommand: input.runCommand,
@@ -4437,6 +4654,8 @@ async function parseLaneResult(input: {
   round: number;
   priorMirror: CmuxMirrorPriorState;
   structuredArtifactPath: string;
+  /** SYMPH-917 — parse legacy severity sections (resolved from threaded env). */
+  parseLegacySections: boolean;
 }): Promise<HeadlessLaneResult> {
   const {
     commandResult,
@@ -4444,6 +4663,7 @@ async function parseLaneResult(input: {
     mode,
     routingMode,
     round,
+    parseLegacySections,
     structuredArtifactPath,
     ...laneIdentity
   } = input;
@@ -4563,6 +4783,7 @@ async function parseLaneResult(input: {
     routingMode,
     round,
     reviewBundle: input.reviewBundle,
+    parseLegacySections,
   });
   await writeFile(
     structuredArtifactPath,
@@ -4842,8 +5063,21 @@ function buildStructuredReviewerArtifact(input: {
   routingMode: CouncilRoutingMode | null;
   round: number;
   reviewBundle: ReviewBundleReference | null;
+  /**
+   * SYMPH-917 — parse the LEGACY `## P1 Must Fix` / `## P2 Should Fix` / `## Track`
+   * / `## Dismissed Or Theoretical` sections IN ADDITION to the new single
+   * `## Findings` + `## Triage` sections. Default OFF (new-only): a transitional
+   * reviewer that emits BOTH the new `## Findings` section AND the legacy severity
+   * sections would otherwise DOUBLE-COUNT every finding. The legacy code path is
+   * kept intact behind this flag as an escape hatch. Callers resolve it from
+   * `SYMPHONY_REVIEW_PARSE_LEGACY_SECTIONS` via `shouldParseLegacySections(env)`
+   * (threaded from the gate's `input.env`, never ambient `process.env`, so it
+   * honors the hermetic test env like the rest of the gate). Omitted → `false`.
+   */
+  parseLegacySections?: boolean;
 }): StructuredReviewerArtifact {
   const normalizedArtifact = normalizeArtifactStart(input.artifact);
+  const parseLegacySections = input.parseLegacySections ?? false;
   const sections = {
     findings: artifactSectionContent(normalizedArtifact, "Findings"),
     p1: artifactSectionContent(normalizedArtifact, "P1 Must Fix"),
@@ -4865,41 +5099,59 @@ function buildStructuredReviewerArtifact(input: {
     changedPaths,
     round: input.round,
   });
+  // The NEW contract sections (`## Findings` + `## Triage`) are ALWAYS parsed. The
+  // LEGACY severity sections (`## P1`/`## P2`/`## Track`/`## Dismissed`) are parsed
+  // only when explicitly opted in, so a transitional reviewer emitting BOTH shapes
+  // is not double-counted (SYMPH-917). When the flag is on, the legacy findings keep
+  // their original positions in the concatenated list so on-mode behavior is
+  // byte-for-byte the prior behavior (escape hatch).
+  const legacyP1 = parseLegacySections
+    ? parseSectionFindings({
+        severity: "P1",
+        content: sections.p1,
+        changedPaths,
+        round: input.round,
+        category: "must_fix",
+      })
+    : [];
+  const legacyP2 = parseLegacySections
+    ? parseSectionFindings({
+        severity: "P2",
+        content: sections.p2,
+        changedPaths,
+        round: input.round,
+        category: "should_fix",
+      })
+    : [];
+  const legacyTrack = parseLegacySections
+    ? parseSectionFindings({
+        severity: "Track",
+        content: sections.track,
+        changedPaths,
+        round: input.round,
+        category: "track",
+      })
+    : [];
+  const legacyDismissed = parseLegacySections
+    ? parseSectionFindings({
+        severity: "Dismissed",
+        content: sections.dismissedOrTheoretical,
+        changedPaths,
+        round: input.round,
+        category: "dismissed_or_theoretical",
+      })
+    : [];
   const findings = [
     ...parseCrucibleContractFindings({
       content: sections.findings,
       changedPaths,
       round: input.round,
     }),
-    ...parseSectionFindings({
-      severity: "P1",
-      content: sections.p1,
-      changedPaths,
-      round: input.round,
-      category: "must_fix",
-    }),
-    ...parseSectionFindings({
-      severity: "P2",
-      content: sections.p2,
-      changedPaths,
-      round: input.round,
-      category: "should_fix",
-    }),
+    ...legacyP1,
+    ...legacyP2,
     ...triage.findings,
-    ...parseSectionFindings({
-      severity: "Track",
-      content: sections.track,
-      changedPaths,
-      round: input.round,
-      category: "track",
-    }),
-    ...parseSectionFindings({
-      severity: "Dismissed",
-      content: sections.dismissedOrTheoretical,
-      changedPaths,
-      round: input.round,
-      category: "dismissed_or_theoretical",
-    }),
+    ...legacyTrack,
+    ...legacyDismissed,
   ];
   const familySyntheses = buildFamilySyntheses(findings);
 
@@ -5029,19 +5281,28 @@ function parseCrucibleContractFindings(input: {
   });
 }
 
-// The crucible reviewer contract carries optional indented `evidence:`/`failure:`/
-// `test:` sub-fields under each finding bullet. Those are explanatory metadata, not
+// The crucible reviewer contract carries optional `evidence:`/`failure:`/`test:`
+// sub-fields under each finding bullet. Those are explanatory metadata, not
 // additional evidence locations — the authoritative location is the bullet's
 // `file:line`. `sectionFindingEntries` trims and space-joins continuation lines into
 // a single entry, so the sub-fields must be removed from the section content *before*
 // that collapse — otherwise a path-like token inside a `test:` command or `failure:`
 // prose is mis-attributed as finding evidence (which would also corrupt the
-// deterministic fingerprint). Sub-fields are indented per the contract. Preserving
-// their content into the structured finding is tracked separately (SYMPH-910).
+// deterministic fingerprint). Preserving their content into the structured finding is
+// tracked separately (SYMPH-910).
+//
+// SYMPH-917 — TOLERATE flush-left sub-fields. The contract indents these lines, but a
+// reviewer that emits them flush-left (no leading whitespace) would otherwise leak the
+// sub-field into the prior finding's title/fingerprint. The anchor is `^\s*` (zero or
+// more leading spaces), not `^\s+`, so both indented AND flush-left `evidence:` /
+// `failure:` / `test:` lines are stripped. The leading `(?:evidence|failure|test)\s*:`
+// token still anchors the match, so legitimate finding prose that merely contains the
+// words "evidence"/"failure"/"test" mid-line is NOT stripped — only lines that START
+// with one of those exact sub-field labels followed by a colon.
 function stripCrucibleFindingSubFieldLines(content: string): string {
   return content
     .split(/\r?\n/)
-    .filter((line) => !/^\s+(?:evidence|failure|test)\s*:/i.test(line))
+    .filter((line) => !/^\s*(?:evidence|failure|test)\s*:/i.test(line))
     .join("\n");
 }
 
@@ -6533,7 +6794,11 @@ function buildReviewerPrompt(
     "- P1: must fix before merge.",
     "- P2: should fix before merge.",
     "- P3/Track: durable follow-up not introduced by this diff, non-blocking.",
-    "Defect classes: correctness, safety, security, data integrity, contract/API, and operator-risk regressions.",
+    // SYMPH-917 — the reviewer's hunt list must name ALL of the gate's documented
+    // review-for classes. The prior list omitted tautological tests, missing edge
+    // cases, and dead code / no-ops; without naming them, reviewers under-report
+    // those defect classes. Keep the original six and append the missing three.
+    "Defect classes: correctness, safety, security, data integrity, contract/API, operator-risk regressions, tautological tests, missing edge cases, and dead code / no-ops.",
     "Use CHANGES_REQUESTED only when P1 or P2 contains blocking content. Use PASS when there are no findings or only Track content. Use BLOCKED only when the review cannot be completed because required evidence is unavailable.",
     "Put findings outside the changed lines in Track unless the diff directly introduces or exposes the issue. Do not silently drop out-of-diff findings.",
     "For each finding, include a concise title, file:line evidence when available, confidence, and whether it repeats a prior fingerprint.",

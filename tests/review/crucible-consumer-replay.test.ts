@@ -186,15 +186,16 @@ describe.skipIf(!existsSync(LIVE_SPINE_PATH))(
       expect(result.trackFindings[0]?.fp).toBe(trackFp);
     });
 
-    it("documents the unparseable-lane fail-open signal the consumer must honor (SYMPH-926)", async () => {
+    it("closes the unparseable-lane fail-open: an all-unparseable round is degraded, never a silent pass (SYMPH-926)", async () => {
       // A truly-unparseable artifact (no `## Verdict`) is NOT silently dropped by the
       // spine: the lane is marked `fail_open: true` and counted in
       // `summary.unparseable_lanes`, with no escalate/track findings. The standalone
-      // ReviewAggregator derives its verdict from escalate/track ONLY, so an
-      // all-unparseable round would currently yield verdict "pass" — a fail-OPEN hole.
-      // A fail-closed consumer MUST gate on these degradation signals; tracked as
-      // SYMPH-926. We assert the SIGNAL exists (not the aggregator verdict,
-      // which would encode the bug as expected) so the gap is documented, not shipped.
+      // ReviewAggregator USED to derive its verdict from escalate/track ONLY, so an
+      // all-unparseable round yielded verdict "pass" — a fail-OPEN hole. SYMPH-926
+      // closed it: the aggregator now reads the degradation signals and returns a
+      // NON-PASS "degraded" verdict with `degradedLanes` populated. This test runs
+      // the all-unparseable artifact through `aggregate()` end to end and asserts the
+      // CLOSED behavior (the gap is now closed, not merely documented).
       const dir = await mkdtemp(join(tmpdir(), "crucible-replay-malformed-"));
       try {
         const file = join(dir, "malformed.md");
@@ -204,17 +205,36 @@ describe.skipIf(!existsSync(LIVE_SPINE_PATH))(
           "utf8",
         );
         const client = new CrabboxSpineClient({ spinePath: LIVE_SPINE_PATH });
+
+        // The raw degradation signal still exists (this is what the aggregator now
+        // honors): the lane is unparseable + fail-open, producing no findings.
         const triage = await client.councilTriage({
           reviews: [{ file, reviewer: "deepseek" }],
         });
-
         expect(triage.lanes[0]?.parse_quality).toBe("unparseable");
         expect(triage.lanes[0]?.fail_open).toBe(true);
         expect(triage.summary.unparseable_lanes).toBe(1);
-        // The degradation produces no findings — which is exactly why an
-        // escalate/track-only verdict would fail open here.
         expect(triage.escalate).toHaveLength(0);
         expect(triage.track).toHaveLength(0);
+
+        // CLOSED behavior: the same all-unparseable round through the aggregator is
+        // NON-PASS ("degraded"), never a silent "pass", with the degraded lane
+        // surfaced for the gate/operator. No real blocker exists, so it is
+        // "degraded" (couldn't review), not "fail" (real blocker).
+        const result = await aggregator.aggregate({
+          laneArtifacts: [
+            { reviewer: "deepseek", markdown: await readFile(file, "utf8") },
+          ],
+          currentDiffHash: "head-unparseable-0001",
+        });
+        expect(result.verdict).toBe("degraded");
+        expect(result.verdict).not.toBe("pass");
+        expect(result.blockingFindings).toHaveLength(0);
+        expect(result.degradedLaneCount).toBe(1);
+        expect(result.degradedLanes).toHaveLength(1);
+        expect(result.degradedLanes[0]?.reviewer).toBe("deepseek");
+        expect(result.degradedLanes[0]?.parse_quality).toBe("unparseable");
+        expect(result.degradedLanes[0]?.reason).toBe("fail_open");
       } finally {
         await rm(dir, { recursive: true, force: true }).catch(() => {});
       }

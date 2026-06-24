@@ -67,10 +67,48 @@ export type EscalateJudge = (
   targets: readonly JudgeTarget[],
 ) => Promise<readonly JudgeVerdict[]>;
 
-export type AggregateVerdict = "pass" | "fail";
+/**
+ * SYMPH-926 — the aggregator's review outcome.
+ *
+ * - `pass` — clean: no real blockers AND the round was fully reviewable.
+ * - `fail` — at least one real blocker (a confirmed/default-blocked escalation).
+ *   A real blocker is STRONGER than degradation, so it always wins precedence.
+ * - `degraded` — NOT a real blocker, but the round could NOT be trusted as a
+ *   clean pass: a lane was unparseable/blocked or failed open (every consumer
+ *   treats this as NON-PASS, exactly like `fail`, so an all-unparseable round can
+ *   never silently pass — closing the SYMPH-926 fail-open hole). Distinct from
+ *   `fail` only so the gate / operator can tell "real blocker" from "couldn't
+ *   review".
+ */
+export type AggregateVerdict = "pass" | "fail" | "degraded";
+
+/**
+ * SYMPH-926 — one degraded reviewer lane (unparseable, blocked, or fail-open).
+ * Surfaced whenever the round could not be trusted as a clean pass so the gate
+ * and operators can see WHICH lanes were not reviewable, even when the verdict is
+ * `fail` (a real blocker co-occurring with degradation still records this).
+ */
+export interface DegradedLane {
+  /** The reviewer/lane label from the triage lane. */
+  reviewer: string;
+  /** The spine's `parse_quality` for the lane (e.g. "unparseable", "blocked"). */
+  parse_quality: string;
+  /** Why the lane is degraded (the dominant signal that flagged it). */
+  reason: "unparseable" | "blocked" | "fail_open";
+}
 
 export interface AggregatedReview {
   verdict: AggregateVerdict;
+  /**
+   * SYMPH-926 — the lanes that could not be trusted as a clean review this round
+   * (unparseable / blocked / fail-open). Non-empty iff the round was degraded;
+   * empty on a clean pass or a fail driven purely by real blockers without any
+   * degradation. Populated EVEN when `verdict === "fail"` (a real blocker takes
+   * verdict precedence over degradation, but the degradation is still surfaced).
+   */
+  degradedLanes: DegradedLane[];
+  /** SYMPH-926 — count of `degradedLanes` (convenience for callers/observability). */
+  degradedLaneCount: number;
   triage: CouncilTriageResult;
   crossExam: CrossExamSelectResult;
   convergence: ConvergenceDecisionResult | null;
@@ -232,8 +270,39 @@ export class ReviewAggregator {
               ),
             });
 
+      // SYMPH-926 — close the fail-open hole. The verdict previously derived ONLY
+      // from `blockingFindings` (escalate/track), so an all-unparseable / blocked
+      // round with zero escalations silently returned "pass". Read the degradation
+      // signals the spine already emits (per-lane `fail_open` / `parse_quality`,
+      // and the `summary.unparseable_lanes` / `summary.blocked_lanes` counts) and:
+      //   - a real blocker → "fail" (a real blocker is stronger than "couldn't
+      //     review", so it takes precedence even if degradation co-occurs);
+      //   - else any degradation → "degraded" (NON-PASS, blocks merge — never a
+      //     silent pass);
+      //   - else → "pass".
+      // `degradedLanes` is surfaced whenever degradation exists, EVEN under a
+      // `fail` verdict, so the gate/operator can always see which lanes were not
+      // reviewable.
+      const degradedLanes = collectDegradedLanes(triage);
+      // Honor the round-level summary counts too (the ticket's explicit OR): a
+      // producer could in principle report `summary.unparseable_lanes` /
+      // `summary.blocked_lanes > 0` without a per-lane signal we keyed on. Fold
+      // them into the degradation predicate so the verdict can never silent-pass a
+      // round the summary already flagged.
+      const summaryDegraded =
+        triage.summary.unparseable_lanes > 0 ||
+        triage.summary.blocked_lanes > 0;
+      const verdict: AggregateVerdict =
+        blockingFindings.length > 0
+          ? "fail"
+          : degradedLanes.length > 0 || summaryDegraded
+            ? "degraded"
+            : "pass";
+
       const review: AggregatedReview = {
-        verdict: blockingFindings.length > 0 ? "fail" : "pass",
+        verdict,
+        degradedLanes,
+        degradedLaneCount: degradedLanes.length,
         triage,
         crossExam,
         convergence,
@@ -471,4 +540,38 @@ export class ReviewAggregator {
 
 function sanitize(reviewer: string): string {
   return reviewer.replace(/[^a-zA-Z0-9_-]/g, "_") || "lane";
+}
+
+/**
+ * SYMPH-926 — collect the reviewer lanes that could not be trusted as a clean
+ * review this round. A lane is degraded when it is `fail_open` (the spine could
+ * not derive a real verdict and defaulted open), OR its `parse_quality` is
+ * `unparseable` / `blocked`. The summary counts (`unparseable_lanes` /
+ * `blocked_lanes`) are the round-level corroboration the ticket calls out; we
+ * derive the per-lane list from the lanes themselves so the gate gets WHICH lanes
+ * degraded, then keep the order deterministic (triage lane order). A lane is
+ * listed at most once, with `fail_open` taking precedence over `parse_quality`
+ * for the recorded `reason` (fail-open is the load-bearing fail-OPEN signal).
+ */
+function collectDegradedLanes(triage: CouncilTriageResult): DegradedLane[] {
+  const degraded: DegradedLane[] = [];
+  for (const lane of triage.lanes) {
+    const parseQuality = lane.parse_quality;
+    const reason: DegradedLane["reason"] | null = lane.fail_open
+      ? "fail_open"
+      : parseQuality === "unparseable"
+        ? "unparseable"
+        : parseQuality === "blocked"
+          ? "blocked"
+          : null;
+    if (reason === null) {
+      continue;
+    }
+    degraded.push({
+      reviewer: lane.reviewer,
+      parse_quality: parseQuality,
+      reason,
+    });
+  }
+  return degraded;
 }

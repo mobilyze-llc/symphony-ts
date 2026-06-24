@@ -10,7 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   type CommandResult,
@@ -24,6 +24,11 @@ import {
   execFileCommand,
   runHeadlessCouncilGate as runHeadlessCouncilGateImpl,
 } from "../../src/review/headless-council-gate.js";
+import type {
+  GateAggregatorCapture,
+  GateAggregatorCaptureInput,
+} from "../../src/review/spine/gate-aggregator-capture.js";
+import type { AggregatedReview } from "../../src/review/spine/review-aggregator.js";
 import { stableJsonStringify } from "../../src/review/stable-json.js";
 
 // Hermetic env for gate tests (SYMPH-768): the gate resolves reviewer lanes
@@ -35,7 +40,15 @@ import { stableJsonStringify } from "../../src/review/stable-json.js";
 // never on the ambient environment. The harness mocks all command execution, so
 // the gate never needs real process.env. Tests that need specific env still pass
 // their own `env` and are left untouched.
-const HERMETIC_GATE_ENV: NodeJS.ProcessEnv = Object.freeze({});
+// SYMPH-917: this suite predates the legacy-section gate and asserts findings
+// parsed from the legacy `## P1`/`## P2`/`## Track`/`## Dismissed` sections, which
+// are now OFF by default (`SYMPHONY_REVIEW_PARSE_LEGACY_SECTIONS`). Default the
+// hermetic env to legacy-ON so the existing cases keep exercising that (now
+// escape-hatch) path unchanged; the dedicated both-flag-state tests below pass an
+// explicit `env` to override and pin the default-OFF / opt-in-ON behavior.
+const HERMETIC_GATE_ENV: NodeJS.ProcessEnv = Object.freeze({
+  SYMPHONY_REVIEW_PARSE_LEGACY_SECTIONS: "1",
+});
 const runHeadlessCouncilGate: typeof runHeadlessCouncilGateImpl = (
   input,
   dependencies,
@@ -48,7 +61,14 @@ const runHeadlessCouncilGate: typeof runHeadlessCouncilGateImpl = (
         : {}),
       ...(input.env === undefined ? { env: HERMETIC_GATE_ENV } : {}),
     },
-    dependencies,
+    {
+      // SYMPH-927: default the gate-aggregator capture to a hermetic no-op so the
+      // existing suite never shells out to the live crucible spine (the production
+      // default is ON when the spine is present, which is true on the dev host).
+      // Dedicated SYMPH-927 tests inject their own capture to exercise the wiring.
+      reviewAggregatorCapture: async () => null,
+      ...dependencies,
+    },
   );
 const TEST_LANE_STALL_DEADLINE_MS = 500;
 
@@ -1598,6 +1618,11 @@ describe("runHeadlessCouncilGate", () => {
           SYMPHONY_COUNCIL_ACCEPT_NARROWER_RISK: "1",
           SYMPHONY_COUNCIL_OPERATOR_OVERRIDE_REASON:
             "operator accepts Pi-only decorrelation until disagreement",
+          // SYMPH-917: this case's pi-deepseek lane raises its P1 via a legacy
+          // `## P1 Must Fix` section; opt into legacy parsing so the disagreement
+          // predicate still fires (this test passes its own env, bypassing the
+          // suite's legacy-on hermetic default).
+          SYMPHONY_REVIEW_PARSE_LEGACY_SECTIONS: "1",
         },
       },
       { runCommand: harness.runCommand },
@@ -1974,6 +1999,24 @@ describe("runHeadlessCouncilGate", () => {
     expect(reviewerPrompt).toContain("DIFF_DATA diff --git");
     expect(reviewerPrompt).toContain("DIFF_DATA +const ok = true;");
     expect(reviewerPrompt).not.toContain("```diff");
+    // SYMPH-917 — the hunt list names ALL documented review-for classes, including
+    // the three previously omitted (tautological tests, missing edge cases, dead
+    // code / no-ops) alongside the original six.
+    expect(reviewerPrompt).toContain("Defect classes:");
+    expect(reviewerPrompt).toContain("tautological tests");
+    expect(reviewerPrompt).toContain("missing edge cases");
+    expect(reviewerPrompt).toContain("dead code / no-ops");
+    // The original six are retained.
+    for (const original of [
+      "correctness",
+      "safety",
+      "security",
+      "data integrity",
+      "contract/API",
+      "operator-risk",
+    ]) {
+      expect(reviewerPrompt).toContain(original);
+    }
     const claudeArtifact = await readFile(
       result.lanes.find((lane) => lane.laneId === "claude-opus")!.artifactPath!,
       "utf-8",
@@ -3856,6 +3899,151 @@ describe("runHeadlessCouncilGate", () => {
     );
     expect(report).toContain(structured.reviewBundle!.hash);
     expect(report).toContain(structured.reviewBundle!.bundleHash);
+  });
+
+  // SYMPH-917 item 2 — legacy `## P1`/`## P2`/`## Track`/`## Dismissed` parsing is
+  // gated behind `SYMPHONY_REVIEW_PARSE_LEGACY_SECTIONS`, default OFF (new-only) so a
+  // transitional reviewer emitting BOTH the new `## Findings` section AND the legacy
+  // severity sections is not double-counted. ON re-parses the legacy sections.
+  describe("legacy section parsing flag (SYMPH-917)", () => {
+    // A transitional artifact: a new `## Findings` bullet AND a legacy `## P1 Must
+    // Fix` bullet for DIFFERENT findings, so the count cleanly distinguishes the two
+    // code paths (new-only = 1 finding; legacy-on = both = 2).
+    const transitionalArtifact = [
+      "## Verdict",
+      "CHANGES_REQUESTED",
+      "",
+      "## Findings",
+      "- [P1] src/review/headless-council-gate.ts:10 — new-section finding",
+      "",
+      "## P1 Must Fix",
+      "- src/review/headless-council-gate.ts:20 legacy-section finding. confidence: 0.9",
+    ].join("\n");
+    const transitionalDiff = [
+      "diff --git a/src/review/headless-council-gate.ts b/src/review/headless-council-gate.ts",
+      "+const ok = true;",
+    ].join("\n");
+
+    it("default (flag OFF) parses only the new ## Findings section — no double count", async () => {
+      const harness = await createHarness({
+        laneBehavior: { "claude-opus": { artifact: transitionalArtifact } },
+      });
+      await writeFile(harness.diffPath, transitionalDiff);
+      const result = await runHeadlessCouncilGate(
+        {
+          issueId: "SYMPH-917",
+          workspace: harness.workspace,
+          artifactDir: harness.artifactDir,
+          diffPath: harness.diffPath,
+          reviewerLanes: [opusLane()],
+          codexLead: false,
+          // Explicit env WITHOUT the legacy flag → default-OFF (new-only).
+          env: {},
+        },
+        { runCommand: harness.runCommand },
+      );
+      const findings = result.lanes[0]!.structuredArtifact!.findings;
+      // Only the new `## Findings` bullet is parsed; the legacy section is ignored.
+      expect(findings).toHaveLength(1);
+      expect(findings[0]?.title).toContain("new-section finding");
+      expect(
+        findings.some((f) => f.title.includes("legacy-section finding")),
+      ).toBe(false);
+    });
+
+    it("flag ON re-parses the legacy severity sections (escape hatch)", async () => {
+      const harness = await createHarness({
+        laneBehavior: { "claude-opus": { artifact: transitionalArtifact } },
+      });
+      await writeFile(harness.diffPath, transitionalDiff);
+      const result = await runHeadlessCouncilGate(
+        {
+          issueId: "SYMPH-917",
+          workspace: harness.workspace,
+          artifactDir: harness.artifactDir,
+          diffPath: harness.diffPath,
+          reviewerLanes: [opusLane()],
+          codexLead: false,
+          env: { SYMPHONY_REVIEW_PARSE_LEGACY_SECTIONS: "1" },
+        },
+        { runCommand: harness.runCommand },
+      );
+      const findings = result.lanes[0]!.structuredArtifact!.findings;
+      // Both the new `## Findings` bullet AND the legacy `## P1` bullet are parsed.
+      expect(findings).toHaveLength(2);
+      expect(
+        findings.some((f) => f.title.includes("new-section finding")),
+      ).toBe(true);
+      expect(
+        findings.some((f) => f.title.includes("legacy-section finding")),
+      ).toBe(true);
+    });
+  });
+
+  // SYMPH-917 item 1 — flush-left `evidence:`/`failure:`/`test:` sub-field lines must
+  // be stripped (not folded into the prior finding's title/fingerprint), while
+  // legitimate finding prose is not over-stripped.
+  it("strips a FLUSH-LEFT crucible sub-field line without over-stripping finding prose", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact: [
+            "## Verdict",
+            "CHANGES_REQUESTED",
+            "",
+            "## Findings",
+            "- [P1] src/review/headless-council-gate.ts:10 — token can be undefined",
+            // Flush-left (no leading whitespace) sub-field lines — these must be
+            // stripped so they never fold into the finding title/fingerprint.
+            "evidence: src/review/secret.ts:99 leaked path",
+            "failure: a NullPointer is thrown at runtime",
+            "test: pnpm vitest run secret.test.ts",
+            // A legitimate second finding whose prose merely CONTAINS the words
+            // must NOT be over-stripped.
+            "- [P2] src/review/other.ts:5 — the test harness needs more failure evidence coverage",
+          ].join("\n"),
+        },
+      },
+    });
+    await writeFile(
+      harness.diffPath,
+      [
+        "diff --git a/src/review/headless-council-gate.ts b/src/review/headless-council-gate.ts",
+        "+const token = maybe();",
+        "diff --git a/src/review/other.ts b/src/review/other.ts",
+        "+const other = true;",
+      ].join("\n"),
+    );
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-917",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    const findings = result.lanes[0]!.structuredArtifact!.findings;
+    // Exactly the two real findings — the flush-left sub-field lines did NOT become
+    // their own finding nor fold into the first finding's title.
+    expect(findings).toHaveLength(2);
+    const p1 = findings[0]!;
+    // The first finding's title is its bullet summary, not polluted by the
+    // flush-left sub-field text below it.
+    expect(p1.title).toContain("token can be undefined");
+    expect(p1.title).not.toContain("leaked path");
+    expect(p1.title).not.toContain("NullPointer");
+    expect(p1.title).not.toContain("pnpm vitest");
+    // The stripped sub-field's path must NOT have been mis-attributed as evidence.
+    expect(p1.evidence.some((e) => e.path === "src/review/secret.ts")).toBe(
+      false,
+    );
+    // The legitimate second finding (prose contains "failure"/"evidence") survives.
+    expect(findings[1]?.title).toContain("test harness needs more failure");
   });
 
   it("keeps blank-line continuation paragraphs attached to their list-item finding", async () => {
@@ -8164,6 +8352,202 @@ describe("runHeadlessCouncilGate", () => {
       secondResult.lanes[0]!.structuredArtifact!.findings[0],
     ).toMatchObject({
       introducedIn: "fix_round_2",
+    });
+  });
+
+  // SYMPH-927 — the gate runs the ReviewAggregator capture (ledger +
+  // judge-decorrelation) ALONGSIDE the live verdict path. Report-only by default;
+  // an authoritative non-pass aggregator verdict escalates the gate to non-pass; a
+  // throwing/failing capture NEVER alters the merge decision (no-vote invariant);
+  // and the author-family basis comes from EXPLICIT provenance, not ambient env.
+  describe("ReviewAggregator capture wiring (SYMPH-927)", () => {
+    function aggregatedReview(
+      over: Partial<AggregatedReview> = {},
+    ): AggregatedReview {
+      return {
+        verdict: "pass",
+        degradedLanes: [],
+        degradedLaneCount: 0,
+        triage: {
+          schema: "crucible.session-orchestrator.council-triage.v1",
+          lanes: [],
+          summary: {
+            lanes: 0,
+            track: 0,
+            escalate: 0,
+            unparseable_lanes: 0,
+            blocked_lanes: 0,
+            partial_lanes: 0,
+          },
+          track: [],
+          escalate: [],
+          next_action: "no_blocking_findings_this_round",
+        },
+        crossExam: {
+          schema: "crucible.session-orchestrator.cross-exam-select.v1",
+          cross_exam_required: false,
+          reason: "none",
+          fix_diff_changed: false,
+          fix_size_lines: null,
+          fix_trivial: null,
+          parseable_lanes: 0,
+          target_count: 0,
+          targets: [],
+        },
+        convergence: null,
+        blockingFindings: [],
+        trackFindings: [],
+        refutedFindings: [],
+        judgedTargetCount: 0,
+        judgeConfirmedFps: [],
+        judgeDecorrelation: null,
+        judgeDecorrelationDegradedReason: null,
+        ...over,
+      };
+    }
+
+    async function passingHarness() {
+      const harness = await createHarness({
+        laneBehavior: {
+          "claude-opus": {
+            artifact: "## Verdict\nPASS\n\n## Findings\nNone\n",
+          },
+        },
+      });
+      return harness;
+    }
+
+    it("sources authorFamily from EXPLICIT provenance (codex), not ambient env", async () => {
+      const harness = await passingHarness();
+      let captured: GateAggregatorCaptureInput | undefined;
+      const capture: GateAggregatorCapture = async (captureInput) => {
+        captured = captureInput;
+        return {
+          review: aggregatedReview(),
+          shouldEscalateToNonPass: false,
+        };
+      };
+      const result = await runHeadlessCouncilGate(
+        {
+          issueId: "SYMPH-927",
+          workspace: harness.workspace,
+          artifactDir: harness.artifactDir,
+          diffPath: harness.diffPath,
+          reviewerLanes: [opusLane()],
+          codexLead: false,
+          provenance: [codexImplementerProvenance()],
+          // The ambient/threaded env carries a CONFLICTING author family; the gate
+          // must IGNORE it and key on provenance (MOB-399/392).
+          env: { SYMPHONY_COUNCIL_AUTHOR_FAMILY: "anthropic" },
+        },
+        { runCommand: harness.runCommand, reviewAggregatorCapture: capture },
+      );
+      expect(result.verdict).toBe("pass");
+      // Author family is the provenance family (codex), NOT the env's "anthropic".
+      expect(captured?.authorFamily).toBe("openai-codex");
+      // Lane artifacts were threaded for the merge-authoritative lane.
+      expect(captured?.laneArtifacts.map((l) => l.reviewer)).toEqual([
+        "claude-opus",
+      ]);
+    });
+
+    it("escalates a PASS gate to non-pass when an authoritative aggregator verdict is degraded", async () => {
+      const harness = await passingHarness();
+      const capture: GateAggregatorCapture = async () => ({
+        review: aggregatedReview({
+          verdict: "degraded",
+          degradedLanes: [
+            {
+              reviewer: "claude-opus",
+              parse_quality: "unparseable",
+              reason: "fail_open",
+            },
+          ],
+          degradedLaneCount: 1,
+        }),
+        // Authoritative escalation requested.
+        shouldEscalateToNonPass: true,
+      });
+      const result = await runHeadlessCouncilGate(
+        {
+          issueId: "SYMPH-927",
+          workspace: harness.workspace,
+          artifactDir: harness.artifactDir,
+          diffPath: harness.diffPath,
+          reviewerLanes: [opusLane()],
+          codexLead: false,
+          provenance: [codexImplementerProvenance()],
+        },
+        { runCommand: harness.runCommand, reviewAggregatorCapture: capture },
+      );
+      // The lanes passed, but the authoritative degraded aggregator verdict blocks.
+      expect(result.verdict).toBe("error");
+      expect(result.degradedConditions).toContain("review_aggregator_degraded");
+    });
+
+    it("report-only: a non-pass aggregator verdict does NOT change a PASS gate", async () => {
+      const harness = await passingHarness();
+      const capture: GateAggregatorCapture = async () => ({
+        review: aggregatedReview({ verdict: "degraded", degradedLaneCount: 1 }),
+        // Report-only → no escalation.
+        shouldEscalateToNonPass: false,
+      });
+      const result = await runHeadlessCouncilGate(
+        {
+          issueId: "SYMPH-927",
+          workspace: harness.workspace,
+          artifactDir: harness.artifactDir,
+          diffPath: harness.diffPath,
+          reviewerLanes: [opusLane()],
+          codexLead: false,
+          provenance: [codexImplementerProvenance()],
+        },
+        { runCommand: harness.runCommand, reviewAggregatorCapture: capture },
+      );
+      expect(result.verdict).toBe("pass");
+      expect(result.degradedConditions).not.toContain(
+        "review_aggregator_degraded",
+      );
+    });
+
+    it("a THROWING capture never alters the merge decision (no-vote invariant)", async () => {
+      const harness = await passingHarness();
+      const capture: GateAggregatorCapture = async () => {
+        throw new Error("capture blew up");
+      };
+      const result = await runHeadlessCouncilGate(
+        {
+          issueId: "SYMPH-927",
+          workspace: harness.workspace,
+          artifactDir: harness.artifactDir,
+          diffPath: harness.diffPath,
+          reviewerLanes: [opusLane()],
+          codexLead: false,
+          provenance: [codexImplementerProvenance()],
+        },
+        { runCommand: harness.runCommand, reviewAggregatorCapture: capture },
+      );
+      // The throwing capture is swallowed; the gate verdict is unchanged.
+      expect(result.verdict).toBe("pass");
+    });
+
+    it("a null capture (spine absent / disabled) leaves the gate verdict unchanged", async () => {
+      const harness = await passingHarness();
+      const capture = vi.fn<GateAggregatorCapture>(async () => null);
+      const result = await runHeadlessCouncilGate(
+        {
+          issueId: "SYMPH-927",
+          workspace: harness.workspace,
+          artifactDir: harness.artifactDir,
+          diffPath: harness.diffPath,
+          reviewerLanes: [opusLane()],
+          codexLead: false,
+          provenance: [codexImplementerProvenance()],
+        },
+        { runCommand: harness.runCommand, reviewAggregatorCapture: capture },
+      );
+      expect(capture).toHaveBeenCalledTimes(1);
+      expect(result.verdict).toBe("pass");
     });
   });
 });
