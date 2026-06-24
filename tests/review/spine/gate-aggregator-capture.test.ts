@@ -284,6 +284,41 @@ describe("createGateAggregatorCapture (SYMPH-927)", () => {
     expect(errors).toHaveLength(1);
   });
 
+  it("resolves null (never rejects) when the aggregator fails AND onLedgerError itself throws (council P2)", async () => {
+    // The observer hook is untrusted: if it THROWS in the outer catch, an unguarded
+    // call would reject the capture and break the documented "never throws"
+    // contract. The nested guard must swallow it so the capture still resolves null.
+    let onErrorCalled = false;
+    const throwingAggregator = new ReviewAggregator(
+      new CrabboxSpineClient({
+        runCommand: async () => ({
+          stdout: "not json",
+          stderr: "boom",
+          exitCode: 1,
+        }),
+      }),
+    );
+    const capture = createGateAggregatorCapture({
+      aggregator: throwingAggregator,
+      ledgerClient: recordingLedger().client,
+      onLedgerError: () => {
+        onErrorCalled = true;
+        throw new Error("observability hook blew up");
+      },
+    });
+
+    // Must RESOLVE null, not reject — assert via a resolved value, and additionally
+    // pin that it does not reject.
+    await expect(
+      capture({
+        laneArtifacts: LANES,
+        currentDiffHash: "head",
+        authorFamily: "openai-codex",
+      }),
+    ).resolves.toBeNull();
+    expect(onErrorCalled).toBe(true);
+  });
+
   it("constructs a default ledger client with env-overridable paths", () => {
     // Smoke: the builder accepts env (threaded, not ambient) and does not throw at
     // construction time. The real client paths come from the env overrides.

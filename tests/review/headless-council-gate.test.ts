@@ -24,11 +24,21 @@ import {
   execFileCommand,
   runHeadlessCouncilGate as runHeadlessCouncilGateImpl,
 } from "../../src/review/headless-council-gate.js";
-import type {
-  GateAggregatorCapture,
-  GateAggregatorCaptureInput,
+import {
+  CrabboxSpineClient,
+  type SpineCommandResult,
+  type SpineCommandRunner,
+} from "../../src/review/spine/crabbox-spine-client.js";
+import {
+  type GateAggregatorCapture,
+  type GateAggregatorCaptureInput,
+  createGateAggregatorCapture,
 } from "../../src/review/spine/gate-aggregator-capture.js";
-import type { AggregatedReview } from "../../src/review/spine/review-aggregator.js";
+import {
+  type AggregatedReview,
+  ReviewAggregator,
+} from "../../src/review/spine/review-aggregator.js";
+import { ReviewQualityLedgerClient } from "../../src/review/spine/review-quality-ledger-client.js";
 import { stableJsonStringify } from "../../src/review/stable-json.js";
 
 // Hermetic env for gate tests (SYMPH-768): the gate resolves reviewer lanes
@@ -8548,6 +8558,138 @@ describe("runHeadlessCouncilGate", () => {
       );
       expect(capture).toHaveBeenCalledTimes(1);
       expect(result.verdict).toBe("pass");
+    });
+
+    // E2E (council Track#2): drive the FULL chain
+    // `SYMPHONY_REVIEW_AGGREGATOR_AUTHORITATIVE` (threaded env) → `authoritative`
+    // input → real capture escalation → gate non-pass. Uses the REAL
+    // `createGateAggregatorCapture` (every link except the spine subprocess, which
+    // is a fake runner) so no link is mocked away.
+    function authoritativeChainHarnessCapture(triageOut: unknown) {
+      const spineRunner: SpineCommandRunner = async (
+        argv,
+      ): Promise<SpineCommandResult> => {
+        const sub = argv[1];
+        const pick =
+          sub === "council-triage"
+            ? triageOut
+            : {
+                schema: "crucible.session-orchestrator.cross-exam-select.v1",
+                cross_exam_required: false,
+                reason: "none",
+                fix_diff_changed: false,
+                fix_size_lines: null,
+                fix_trivial: null,
+                parseable_lanes: 1,
+                target_count: 0,
+                targets: [],
+              };
+        return { stdout: JSON.stringify(pick), stderr: "", exitCode: 0 };
+      };
+      const ledgerClient = new ReviewQualityLedgerClient({
+        ledgerScriptPath: "/fake/rql.mjs",
+        ledgerFile: "/tmp/ledger.jsonl",
+        runCommand: async () => ({
+          stdout: JSON.stringify({
+            schema: "crucible.review-quality-ledger.record-result.v1",
+            ledger_file: "/tmp/ledger.jsonl",
+            ledger_source: "explicit",
+            dry_run: false,
+            finding_count: 0,
+            appended: 0,
+            deduped: 0,
+            classification_counts: {},
+          }),
+          stderr: "",
+          exitCode: 0,
+        }),
+      });
+      return createGateAggregatorCapture({
+        aggregator: new ReviewAggregator(
+          new CrabboxSpineClient({ runCommand: spineRunner }),
+        ),
+        ledgerClient,
+      });
+    }
+
+    // An all-unparseable triage → the aggregator yields a NON-PASS "degraded"
+    // verdict (SYMPH-926), with no escalate/track findings.
+    const degradedTriageOut = {
+      schema: "crucible.session-orchestrator.council-triage.v1",
+      lanes: [
+        {
+          reviewer: "claude-opus",
+          file: "a.md",
+          verdict: "UNKNOWN",
+          parse_quality: "unparseable",
+          finding_count: 0,
+          none: false,
+          fail_open: true,
+        },
+      ],
+      summary: {
+        lanes: 1,
+        track: 0,
+        escalate: 0,
+        unparseable_lanes: 1,
+        blocked_lanes: 0,
+        partial_lanes: 0,
+      },
+      track: [],
+      escalate: [],
+      next_action: "no_blocking_findings_this_round",
+    };
+
+    it("E2E: SYMPHONY_REVIEW_AGGREGATOR_AUTHORITATIVE truthy escalates a PASS gate to non-pass via the real capture", async () => {
+      const harness = await passingHarness();
+      const result = await runHeadlessCouncilGate(
+        {
+          issueId: "SYMPH-927",
+          workspace: harness.workspace,
+          artifactDir: harness.artifactDir,
+          diffPath: harness.diffPath,
+          reviewerLanes: [opusLane()],
+          codexLead: false,
+          provenance: [codexImplementerProvenance()],
+          // The full chain is driven by this threaded env flag.
+          env: { SYMPHONY_REVIEW_AGGREGATOR_AUTHORITATIVE: "1" },
+        },
+        {
+          runCommand: harness.runCommand,
+          reviewAggregatorCapture:
+            authoritativeChainHarnessCapture(degradedTriageOut),
+        },
+      );
+      // Lanes passed, but the authoritative degraded aggregator verdict blocks.
+      expect(result.verdict).toBe("error");
+      expect(result.degradedConditions).toContain("review_aggregator_degraded");
+    });
+
+    it("E2E inverse: flag unset leaves the same non-pass aggregator verdict report-only (gate unchanged)", async () => {
+      const harness = await passingHarness();
+      const result = await runHeadlessCouncilGate(
+        {
+          issueId: "SYMPH-927",
+          workspace: harness.workspace,
+          artifactDir: harness.artifactDir,
+          diffPath: harness.diffPath,
+          reviewerLanes: [opusLane()],
+          codexLead: false,
+          provenance: [codexImplementerProvenance()],
+          // Authoritative flag NOT set → report-only.
+          env: {},
+        },
+        {
+          runCommand: harness.runCommand,
+          reviewAggregatorCapture:
+            authoritativeChainHarnessCapture(degradedTriageOut),
+        },
+      );
+      // The degraded aggregator verdict is recorded but does NOT change the gate.
+      expect(result.verdict).toBe("pass");
+      expect(result.degradedConditions).not.toContain(
+        "review_aggregator_degraded",
+      );
     });
   });
 });

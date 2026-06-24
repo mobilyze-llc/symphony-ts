@@ -191,7 +191,18 @@ export function createGateAggregatorCapture(
       // Fail-closed-on-capture is REPORT-ONLY: a spine/aggregator failure must
       // NEVER block or alter the merge decision (no-vote invariant). Swallow it,
       // surface it for observability, and return null so the gate is unchanged.
-      config.onLedgerError?.(error);
+      //
+      // SYMPH-927 (council P2): the observer hook is itself untrusted — if
+      // `onLedgerError` THROWS, an unguarded call here would reject the capture and
+      // break the documented "never throws" contract (re-entering the gate decision
+      // path). Guard it with a nested try/catch that swallows, mirroring
+      // `ReviewAggregator.captureLedger()`. The observability hook can never alter
+      // the verdict or make the capture throw.
+      try {
+        config.onLedgerError?.(error);
+      } catch {
+        // intentionally ignored — the observability hook cannot break the contract.
+      }
       return null;
     }
   };
