@@ -250,6 +250,169 @@ describe("ReviewAggregator", () => {
 });
 
 /**
+ * SYMPH-926 — the all-unparseable / blocked fail-open close. A round where every
+ * lane failed open (unparseable / blocked) with ZERO escalate/track findings used
+ * to derive verdict "pass" — a fail-OPEN hole. It must now be NON-PASS
+ * ("degraded") with `degradedLanes` populated, while a clean pass and a track-only
+ * pass stay "pass" (no regression), and a real blocker still wins as "fail".
+ */
+describe("ReviewAggregator degradation fail-open close (SYMPH-926)", () => {
+  /** A lane row helper for the triage stub. */
+  function lane(over: Record<string, unknown> = {}) {
+    return {
+      reviewer: "deepseek",
+      file: "a.md",
+      verdict: "PASS",
+      parse_quality: "clean",
+      finding_count: 0,
+      none: true,
+      fail_open: false,
+      ...over,
+    };
+  }
+
+  it("returns NON-PASS 'degraded' for an all-unparseable round with no escalate/track", async () => {
+    const agg = aggregatorWith({
+      triage: triage({
+        lanes: [
+          lane({
+            verdict: "UNKNOWN",
+            parse_quality: "unparseable",
+            fail_open: true,
+          }),
+        ],
+        // The fail-open signals live in the lane AND the summary counts.
+        summary: { ...triage().summary, unparseable_lanes: 1 },
+      }),
+      crossExam: crossExam(),
+    });
+    const result = await agg.aggregate({
+      laneArtifacts: lanes,
+      currentDiffHash: "head",
+    });
+    expect(result.verdict).toBe("degraded");
+    expect(result.verdict).not.toBe("pass");
+    expect(result.blockingFindings).toHaveLength(0);
+    expect(result.degradedLaneCount).toBe(1);
+    expect(result.degradedLanes).toEqual([
+      {
+        reviewer: "deepseek",
+        parse_quality: "unparseable",
+        reason: "fail_open",
+      },
+    ]);
+  });
+
+  it("returns NON-PASS 'degraded' for a blocked-lane round with no escalate/track", async () => {
+    const agg = aggregatorWith({
+      triage: triage({
+        lanes: [lane({ verdict: "BLOCKED", parse_quality: "blocked" })],
+        summary: { ...triage().summary, blocked_lanes: 1 },
+      }),
+      crossExam: crossExam(),
+    });
+    const result = await agg.aggregate({
+      laneArtifacts: lanes,
+      currentDiffHash: "head",
+    });
+    expect(result.verdict).toBe("degraded");
+    expect(result.degradedLanes).toEqual([
+      { reviewer: "deepseek", parse_quality: "blocked", reason: "blocked" },
+    ]);
+  });
+
+  it("flags a fail-open lane even when parse_quality is not unparseable/blocked", async () => {
+    const agg = aggregatorWith({
+      triage: triage({
+        lanes: [lane({ parse_quality: "partial", fail_open: true })],
+      }),
+      crossExam: crossExam(),
+    });
+    const result = await agg.aggregate({
+      laneArtifacts: lanes,
+      currentDiffHash: "head",
+    });
+    expect(result.verdict).toBe("degraded");
+    expect(result.degradedLanes).toEqual([
+      { reviewer: "deepseek", parse_quality: "partial", reason: "fail_open" },
+    ]);
+  });
+
+  it("keeps a clean PASS round 'pass' with no degraded lanes (no regression)", async () => {
+    const agg = aggregatorWith({ triage: triage(), crossExam: crossExam() });
+    const result = await agg.aggregate({
+      laneArtifacts: lanes,
+      currentDiffHash: "head",
+    });
+    expect(result.verdict).toBe("pass");
+    expect(result.degradedLanes).toEqual([]);
+    expect(result.degradedLaneCount).toBe(0);
+  });
+
+  it("keeps a track-only round 'pass' (track findings never degrade)", async () => {
+    const agg = aggregatorWith({
+      triage: triage({
+        track: [finding({ severity: "Track" })],
+        summary: { ...triage().summary, track: 1 },
+      }),
+      crossExam: crossExam(),
+    });
+    const result = await agg.aggregate({
+      laneArtifacts: lanes,
+      currentDiffHash: "head",
+    });
+    expect(result.verdict).toBe("pass");
+    expect(result.degradedLanes).toEqual([]);
+  });
+
+  it("a real blocker wins precedence over degradation: verdict 'fail', degradedLanes still surfaced", async () => {
+    const agg = aggregatorWith({
+      triage: triage({
+        lanes: [
+          lane({
+            reviewer: "opus",
+            verdict: "CHANGES_REQUESTED",
+            parse_quality: "clean",
+            finding_count: 1,
+            none: false,
+          }),
+          lane({
+            reviewer: "deepseek",
+            verdict: "UNKNOWN",
+            parse_quality: "unparseable",
+            fail_open: true,
+          }),
+        ],
+        escalate: [finding()],
+        summary: {
+          ...triage().summary,
+          lanes: 2,
+          escalate: 1,
+          unparseable_lanes: 1,
+        },
+      }),
+      // No judge → the escalation default-blocks fail-closed (a real blocker).
+      crossExam: crossExam({ cross_exam_required: true }),
+    });
+    const result = await agg.aggregate({
+      laneArtifacts: lanes,
+      currentDiffHash: "head",
+    });
+    // A real blocker is stronger than "couldn't review" → "fail", not "degraded".
+    expect(result.verdict).toBe("fail");
+    expect(result.blockingFindings).toHaveLength(1);
+    // …but the degraded lane is STILL surfaced for the gate/operator.
+    expect(result.degradedLanes).toEqual([
+      {
+        reviewer: "deepseek",
+        parse_quality: "unparseable",
+        reason: "fail_open",
+      },
+    ]);
+  });
+});
+
+/**
  * SYMPH-924 — the ledger is DATA CAPTURE ONLY. These tests pin the crucible
  * determinism-boundary invariant: enabling, succeeding, or FAILING the ledger
  * capture must NEVER change the aggregator's verdict / convergence outcome. The
