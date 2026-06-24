@@ -9930,6 +9930,7 @@ function fakeReviewStageResult(
       provenance: { runGroupId: "rg-855", currentHeadSha: "head", lanes: [] },
       qa: null,
     },
+    preReviewVerify: null,
   };
 }
 

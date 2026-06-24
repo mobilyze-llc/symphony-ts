@@ -26,6 +26,7 @@ import type {
   StructuredReviewerArtifact,
   TargetedConvergenceHypothesis,
 } from "./headless-council-gate.js";
+import type { PreReviewVerifyGateOutcome } from "./pre-review-verify-gate.js";
 import {
   collectRoutingGuaranteeDegradedConditions,
   reviewVerdictWithRoutingGuarantees,
@@ -78,6 +79,7 @@ export interface RunCrabrunnerReviewStageInput {
   reviewBundle?: ReviewBundleReference | null;
   targetedConvergence?: TargetedConvergenceHypothesis | null;
   diffPath?: string | null;
+  preReviewVerify?: PreReviewVerifyGateOutcome | null;
   previousReviewedHeadSha?: string | null;
   lanes: readonly CrabrunnerReviewLaneSpec[];
   backend: StageExecutionBackendRunner<CrabrunnerStageExecutionEvidence>;
@@ -104,6 +106,8 @@ export interface CrabrunnerReviewStageResult {
   markerMessage: string;
   /** The underlying job-group result (provenance/QA), for observability. */
   jobGroup: CrabrunnerReviewJobGroupResult;
+  /** Report-only pre-council deterministic verification metrics. */
+  preReviewVerify: PreReviewVerifyGateOutcome | null;
 }
 
 /**
@@ -266,6 +270,7 @@ export async function runCrabrunnerReviewStage(
     reviewResultPath,
     markerMessage: `${REVIEW_GATE_RESULT_MARKER_PREFIX} ${reviewResultPath}${REVIEW_GATE_RESULT_MARKER_SUFFIX}`,
     jobGroup,
+    preReviewVerify: input.preReviewVerify ?? null,
   };
 }
 

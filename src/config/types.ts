@@ -197,6 +197,24 @@ export interface WorkflowReviewExecutionConfig {
   crabrunnerJobGroup: {
     enabled: boolean;
   };
+  preReviewVerify?: WorkflowPreReviewVerifyConfig;
+}
+
+export type PreReviewVerifyCategory =
+  | "typecheck"
+  | "lint"
+  | "build"
+  | "unit"
+  | "smoke";
+
+export type PreReviewVerifyCommands = Readonly<
+  Record<PreReviewVerifyCategory, string | null>
+>;
+
+export interface WorkflowPreReviewVerifyConfig {
+  enabled: boolean;
+  maxFixAttempts: number;
+  commands: PreReviewVerifyCommands;
 }
 
 /**

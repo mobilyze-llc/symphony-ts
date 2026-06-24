@@ -280,6 +280,17 @@ describe("config-resolver", () => {
     // a workflow in, so it can shadow before cutover.
     expect(resolved.reviewExecution).toEqual({
       crabrunnerJobGroup: { enabled: false },
+      preReviewVerify: {
+        enabled: true,
+        maxFixAttempts: 1,
+        commands: {
+          typecheck: "pnpm typecheck",
+          lint: "pnpm lint",
+          build: "pnpm build",
+          unit: "pnpm test",
+          smoke: null,
+        },
+      },
     });
   });
 
@@ -292,12 +303,30 @@ describe("config-resolver", () => {
           crabrunner_job_group: {
             enabled: true,
           },
+          pre_review_verify: {
+            max_fix_attempts: 2,
+            commands: {
+              typecheck: "pnpm exec tsc --noEmit",
+              smoke: "pnpm smoke",
+            },
+          },
         },
       },
     });
 
     expect(resolved.reviewExecution).toEqual({
       crabrunnerJobGroup: { enabled: true },
+      preReviewVerify: {
+        enabled: true,
+        maxFixAttempts: 2,
+        commands: {
+          typecheck: "pnpm exec tsc --noEmit",
+          lint: "pnpm lint",
+          build: "pnpm build",
+          unit: "pnpm test",
+          smoke: "pnpm smoke",
+        },
+      },
     });
   });
 

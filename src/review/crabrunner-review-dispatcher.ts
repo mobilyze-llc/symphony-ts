@@ -5,6 +5,7 @@ import type { AgentRunInput } from "../agent/runner.js";
 import { SPEC_DEFAULTS } from "../config/defaults.js";
 import type {
   StageDefinition,
+  WorkflowPreReviewVerifyConfig,
   WorkflowHardStopsConfig,
 } from "../config/types.js";
 import type { Issue, ReasoningEffort } from "../domain/model.js";
@@ -31,6 +32,10 @@ import {
   prepareHeadlessCouncilReviewForDispatch,
   synthesizeStructuredReviewerArtifactRecord,
 } from "./headless-council-gate.js";
+import {
+  type PreReviewVerifyGateOutcome,
+  runPreReviewVerifyGate,
+} from "./pre-review-verify-gate.js";
 
 const REVIEW_STAGE_NAME = "review";
 const REVIEW_LANE_HEARTBEAT_INTERVAL_MS = 30_000;
@@ -46,6 +51,7 @@ export interface CreateCrabrunnerReviewStageDispatcherOptions {
   defaultRunnerProvider?: string | null;
   defaultTurnTimeoutMs?: number | null;
   defaultStallTimeoutMs?: number | null;
+  preReviewVerify?: WorkflowPreReviewVerifyConfig;
   runCommand?: CommandRunner;
 }
 
@@ -88,6 +94,12 @@ export function createCrabrunnerReviewStageDispatcher(
     }
 
     const runGroupId = reviewRunGroupId(context);
+    const preReviewVerify = await maybeRunPreReviewVerifyGate({
+      context,
+      plan,
+      runGroupId,
+      options,
+    });
     const lanes = plan.reviewerLanes.map(reviewLaneSpec);
     const laneConfigs = new Map(
       plan.reviewerLanes.map((lane) => [lane.laneId, lane] as const),
@@ -129,6 +141,7 @@ export function createCrabrunnerReviewStageDispatcher(
       reviewBundle: plan.reviewBundle,
       targetedConvergence: plan.targetedConvergence,
       diffPath: plan.diffPath,
+      preReviewVerify,
       previousReviewedHeadSha: context.previousReviewedHeadSha ?? null,
       lanes,
       backend: context.backend,
@@ -163,6 +176,40 @@ export function createCrabrunnerReviewStageDispatcher(
       },
     });
   };
+}
+
+async function maybeRunPreReviewVerifyGate(input: {
+  context: CrabrunnerReviewStageDispatchContext;
+  plan: Awaited<ReturnType<typeof prepareHeadlessCouncilReviewForDispatch>>;
+  runGroupId: string;
+  options: CreateCrabrunnerReviewStageDispatcherOptions;
+}): Promise<PreReviewVerifyGateOutcome | null> {
+  const config = input.options.preReviewVerify;
+  if (config === undefined || config.enabled !== true) {
+    return null;
+  }
+  return runPreReviewVerifyGate({
+    config,
+    issue: input.context.issue,
+    attempt: input.context.attempt,
+    stage: input.context.stage,
+    workspaceRoot: input.context.workspaceRoot,
+    artifactRoot: input.context.artifactRoot,
+    baseRef: input.context.baseRef ?? "origin/main",
+    runGroupId: input.runGroupId,
+    headSha: input.plan.context.headSha ?? "",
+    backend: input.context.backend,
+    signal: input.context.signal,
+    defaultRunnerKind: input.options.defaultRunnerKind,
+    defaultRunnerModel: input.options.defaultRunnerModel,
+    defaultRunnerProvider: input.options.defaultRunnerProvider ?? null,
+    hardStops: input.options.hardStops ?? SPEC_DEFAULTS.hardStops,
+    defaultTurnTimeoutMs: input.options.defaultTurnTimeoutMs ?? null,
+    defaultStallTimeoutMs: input.options.defaultStallTimeoutMs ?? null,
+    ...(input.options.runCommand === undefined
+      ? {}
+      : { runCommand: input.options.runCommand }),
+  });
 }
 
 function reviewLaneSpec(
