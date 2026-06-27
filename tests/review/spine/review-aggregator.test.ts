@@ -338,6 +338,33 @@ describe("ReviewAggregator degradation fail-open close (SYMPH-926)", () => {
     ]);
   });
 
+  it("keeps degraded verdict observable when only summary counts report degradation", async () => {
+    const agg = aggregatorWith({
+      triage: triage({
+        lanes: [lane()],
+        summary: {
+          ...triage().summary,
+          unparseable_lanes: 1,
+          blocked_lanes: 1,
+        },
+      }),
+      crossExam: crossExam(),
+    });
+    const result = await agg.aggregate({
+      laneArtifacts: lanes,
+      currentDiffHash: "head",
+    });
+    expect(result.verdict).toBe("degraded");
+    expect(result.degradedLaneCount).toBeGreaterThanOrEqual(1);
+    expect(result.degradedLanes).toEqual([
+      {
+        reviewer: "round-summary",
+        parse_quality: "unparseable_lanes+blocked_lanes",
+        reason: "summary_count",
+      },
+    ]);
+  });
+
   it("keeps a clean PASS round 'pass' with no degraded lanes (no regression)", async () => {
     const agg = aggregatorWith({ triage: triage(), crossExam: crossExam() });
     const result = await agg.aggregate({
