@@ -83,18 +83,20 @@ export type EscalateJudge = (
 export type AggregateVerdict = "pass" | "fail" | "degraded";
 
 /**
- * SYMPH-926 — one degraded reviewer lane (unparseable, blocked, or fail-open).
- * Surfaced whenever the round could not be trusted as a clean pass so the gate
- * and operators can see WHICH lanes were not reviewable, even when the verdict is
- * `fail` (a real blocker co-occurring with degradation still records this).
+ * SYMPH-926/SYMPH-934 — one degraded reviewer lane (unparseable, blocked, or
+ * fail-open), or a synthesized round-summary entry when only aggregate summary
+ * counts report degradation. Surfaced whenever the round could not be trusted as
+ * a clean pass so the gate and operators can see why the round was degraded, even
+ * when the verdict is `fail` (a real blocker co-occurring with degradation still
+ * records this).
  */
 export interface DegradedLane {
-  /** The reviewer/lane label from the triage lane. */
+  /** The reviewer/lane label from the triage lane, or `round-summary`. */
   reviewer: string;
-  /** The spine's `parse_quality` for the lane (e.g. "unparseable", "blocked"). */
+  /** The spine's lane `parse_quality`, or the summary count source(s). */
   parse_quality: string;
   /** Why the lane is degraded (the dominant signal that flagged it). */
-  reason: "unparseable" | "blocked" | "fail_open";
+  reason: "unparseable" | "blocked" | "fail_open" | "summary_count";
 }
 
 export interface AggregatedReview {
@@ -281,21 +283,13 @@ export class ReviewAggregator {
       //     silent pass);
       //   - else → "pass".
       // `degradedLanes` is surfaced whenever degradation exists, EVEN under a
-      // `fail` verdict, so the gate/operator can always see which lanes were not
-      // reviewable.
+      // `fail` verdict, so the gate/operator can always see which lanes, or which
+      // summary signal, made the round not fully reviewable.
       const degradedLanes = collectDegradedLanes(triage);
-      // Honor the round-level summary counts too (the ticket's explicit OR): a
-      // producer could in principle report `summary.unparseable_lanes` /
-      // `summary.blocked_lanes > 0` without a per-lane signal we keyed on. Fold
-      // them into the degradation predicate so the verdict can never silent-pass a
-      // round the summary already flagged.
-      const summaryDegraded =
-        triage.summary.unparseable_lanes > 0 ||
-        triage.summary.blocked_lanes > 0;
       const verdict: AggregateVerdict =
         blockingFindings.length > 0
           ? "fail"
-          : degradedLanes.length > 0 || summaryDegraded
+          : degradedLanes.length > 0
             ? "degraded"
             : "pass";
 
@@ -547,11 +541,14 @@ function sanitize(reviewer: string): string {
  * review this round. A lane is degraded when it is `fail_open` (the spine could
  * not derive a real verdict and defaulted open), OR its `parse_quality` is
  * `unparseable` / `blocked`. The summary counts (`unparseable_lanes` /
- * `blocked_lanes`) are the round-level corroboration the ticket calls out; we
- * derive the per-lane list from the lanes themselves so the gate gets WHICH lanes
- * degraded, then keep the order deterministic (triage lane order). A lane is
- * listed at most once, with `fail_open` taking precedence over `parse_quality`
- * for the recorded `reason` (fail-open is the load-bearing fail-OPEN signal).
+ * `blocked_lanes`) are the round-level corroboration the ticket calls out. We
+ * derive the list from the lanes themselves when possible so the gate gets WHICH
+ * lanes degraded, then synthesize a round-summary entry if counts indicate
+ * degradation but no lane carries the matching signal. This keeps the invariant
+ * that a degraded verdict is observable via at least one `degradedLanes` row.
+ * A lane is listed at most once, with `fail_open` taking precedence over
+ * `parse_quality` for the recorded `reason` (fail-open is the load-bearing
+ * fail-OPEN signal).
  */
 function collectDegradedLanes(triage: CouncilTriageResult): DegradedLane[] {
   const degraded: DegradedLane[] = [];
@@ -571,6 +568,20 @@ function collectDegradedLanes(triage: CouncilTriageResult): DegradedLane[] {
       reviewer: lane.reviewer,
       parse_quality: parseQuality,
       reason,
+    });
+  }
+  if (
+    degraded.length === 0 &&
+    (triage.summary.unparseable_lanes > 0 || triage.summary.blocked_lanes > 0)
+  ) {
+    const summarySignals = [
+      triage.summary.unparseable_lanes > 0 ? "unparseable_lanes" : null,
+      triage.summary.blocked_lanes > 0 ? "blocked_lanes" : null,
+    ].filter((signal): signal is string => signal !== null);
+    degraded.push({
+      reviewer: "round-summary",
+      parse_quality: summarySignals.join("+"),
+      reason: "summary_count",
     });
   }
   return degraded;
