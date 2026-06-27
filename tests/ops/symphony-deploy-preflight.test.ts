@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readFile,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -148,12 +149,14 @@ it("reinstalls launchd when an env refresh requires it", async () => {
 });
 
 describe("crabrunner review substrate preflight", () => {
-  it("passes as a no-op when the crabrunner root is unset", async () => {
+  it("fails closed when enabled workflow has no crabrunner root configured", async () => {
     const workflowPath = await writeWorkflow(true);
     const result = await runCrabrunnerPreflight({ workflowPath });
 
-    expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toContain("SYMPHONY_CRABRUNNER_ROOT not set");
+    expect(result.status).toBe(1);
+    expect(`${result.stdout}\n${result.stderr}`).toContain(
+      "SYMPHONY_CRABRUNNER_ROOT",
+    );
   });
 
   it("passes as a no-op when the workflow does not enable crabrunner review", async () => {
@@ -183,6 +186,44 @@ describe("crabrunner review substrate preflight", () => {
     expect(result.stderr).toContain("missing");
     expect(result.stderr).toContain("bin/crabrunner");
     expect(result.stderr).toContain("SYMPHONY_CRABRUNNER_ROOT");
+  });
+
+  it("fails closed when bin/crabrunner resolves outside the configured root", async () => {
+    const workflowPath = await writeWorkflow(true);
+    const crabrunnerRoot = await makeTempDir("symphony-deploy-crabrunner-");
+    const outsideRoot = await makeTempDir("symphony-deploy-outside-");
+    const binDir = join(crabrunnerRoot, "bin");
+    const outsideBin = join(outsideRoot, "crabrunner");
+    const crabrunnerBin = join(binDir, "crabrunner");
+    await mkdir(binDir, { recursive: true });
+    await writeFile(outsideBin, "#!/usr/bin/env bash\nexit 0\n");
+    await chmod(outsideBin, 0o755);
+    await symlink(outsideBin, crabrunnerBin);
+
+    const result = await runCrabrunnerPreflight({
+      workflowPath,
+      crabrunnerRoot,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "resolves outside SYMPHONY_CRABRUNNER_ROOT",
+    );
+  });
+
+  it("fails closed when bin/crabrunner is a directory", async () => {
+    const workflowPath = await writeWorkflow(true);
+    const crabrunnerRoot = await makeTempDir("symphony-deploy-crabrunner-");
+    const crabrunnerBin = join(crabrunnerRoot, "bin", "crabrunner");
+    await mkdir(crabrunnerBin, { recursive: true });
+
+    const result = await runCrabrunnerPreflight({
+      workflowPath,
+      crabrunnerRoot,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("must be an executable file");
   });
 
   it("passes when bin/crabrunner resolves under the configured root", async () => {

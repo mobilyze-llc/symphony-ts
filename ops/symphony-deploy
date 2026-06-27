@@ -283,8 +283,7 @@ run_crabrunner_review_preflight() {
 
   crabrunner_root="$(deploy_config_value SYMPHONY_CRABRUNNER_ROOT "$env_file")"
   if [[ -z "$crabrunner_root" ]]; then
-    info "Crabrunner review preflight skipped (SYMPHONY_CRABRUNNER_ROOT not set)."
-    return 0
+    die "Crabrunner review preflight failed: the active workflow enables review_execution.crabrunner_job_group.enabled but SYMPHONY_CRABRUNNER_ROOT is not set. Set SYMPHONY_CRABRUNNER_ROOT to the Crucible checkout that owns bin/crabrunner, or disable review_execution.crabrunner_job_group.enabled in $workflow_path."
   fi
 
   if [[ ! -d "$crabrunner_root" ]]; then
