@@ -289,12 +289,12 @@ export function evaluateReplanPredicates(input: {
 
   // Guard #5 (SYMPH-815): a canary head is stuck and cannot progress. A
   // lookahead canary-chain batch dispatches only its head until EVERY head
-  // member merges (SYMPH-800 contingent-release); if NO head member is a
-  // candidate, running, OR merged, the head can neither advance nor validate —
-  // the contingent tail is held with nothing left to release it, and guard #2
-  // stays quiet because the still-candidate tail (or another batch) keeps a
-  // lookahead member eligible. Re-plan so the Manager can drop/re-rank the stuck
-  // canary instead of stalling the tail indefinitely.
+  // member merges (SYMPH-800 contingent-release); if an un-merged head member
+  // is neither a candidate nor running, the head can never validate. The
+  // contingent tail is held with nothing left to release it, and guard #2 stays
+  // quiet because the still-candidate tail (or another batch) keeps a lookahead
+  // member eligible. Re-plan so the Manager can drop/re-rank the stuck canary
+  // instead of stalling the tail indefinitely.
   if (
     input.runningIssueIdentifiers !== undefined &&
     input.mergedIssueIdentifiers !== undefined
@@ -305,16 +305,15 @@ export function evaluateReplanPredicates(input: {
       if (batch.mode !== "canary-chain" || batch.canary === null) {
         continue;
       }
-      const head = batch.canary.headIssueIdentifiers;
-      const headCanProgress = head.some(
+      const headStuck = batch.canary.headIssueIdentifiers.some(
         (identifier) =>
-          input.candidateIdentifiers.has(identifier) ||
-          running.has(identifier) ||
-          merged.has(identifier),
+          !merged.has(identifier) &&
+          !input.candidateIdentifiers.has(identifier) &&
+          !running.has(identifier),
       );
-      if (head.length > 0 && !headCanProgress) {
+      if (headStuck) {
         reasons.push(
-          `canary-chain batch ${batch.batchId} head is stuck (no head member is a candidate, running, or merged)`,
+          `canary-chain batch ${batch.batchId} head is stuck (an un-merged head member is neither a candidate nor running, so the tail can never release)`,
         );
       }
     }

@@ -422,6 +422,18 @@ describe("evaluateReplanPredicates", () => {
     expect(result.reasons.join(" ")).toMatch(/canary|stuck|head/i);
   });
 
+  it("forces a re-plan when one member of a multi-member canary head is stuck", () => {
+    const result = evaluateReplanPredicates({
+      plan: plan([canaryBatch("b1", ["SYMPH-1", "SYMPH-2"], ["SYMPH-3"])]),
+      currentEnvelope: ENVELOPE,
+      candidateIdentifiers: new Set(["SYMPH-3"]),
+      runningIssueIdentifiers: new Set(),
+      mergedIssueIdentifiers: new Set(["SYMPH-1"]),
+    });
+    expect(result.forceReplan).toBe(true);
+    expect(result.reasons.join(" ")).toMatch(/canary|stuck|head/i);
+  });
+
   it("does NOT re-plan for a canary head that is still a candidate", () => {
     const result = evaluateReplanPredicates({
       plan: plan([canaryBatch()]),
