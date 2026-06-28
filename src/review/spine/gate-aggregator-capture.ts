@@ -6,6 +6,7 @@ import { CrabboxSpineClient } from "./crabbox-spine-client.js";
 import {
   type AggregatedReview,
   ReviewAggregator,
+  type ReviewRoundRecord,
 } from "./review-aggregator.js";
 import { ReviewQualityLedgerClient } from "./review-quality-ledger-client.js";
 
@@ -15,15 +16,10 @@ import { ReviewQualityLedgerClient } from "./review-quality-ledger-client.js";
  * decorrelation precondition) ALONGSIDE the live headless-council-gate verdict
  * path.
  *
- * CUTOVER SHAPE (measure-before-caps): the aggregator is wired REPORT-ONLY by
- * default. Its sole side-effect is the ledger capture (data-only; a capture
- * failure is swallowed and can never alter or block the merge decision — the
- * no-vote invariant). The aggregator's own verdict (including SYMPH-926
- * `"degraded"`) is recorded for observability but does NOT override the gate's
- * existing lane-based decision UNLESS the operator explicitly opts in to make it
- * authoritative (`authoritative: true`). When authoritative, a non-pass aggregator
- * verdict (`"fail"` or `"degraded"`) escalates the gate to non-pass — never a
- * silent pass — satisfying SYMPH-927 (e) / SYMPH-926.
+ * CUTOVER SHAPE: the aggregator is merge-authoritative by default. Its ledger
+ * capture remains data-only (a capture failure is swallowed and can never alter
+ * the already-decided review), while a non-pass aggregator verdict (`"fail"` or
+ * `"degraded"`) escalates the gate to non-pass — never a silent pass.
  *
  * SPINE-PRESENCE GATE: the capture runs only when the crucible spine entrypoint is
  * present on the host (mirrors the `existsSync` gate the live-spine conformance
@@ -62,16 +58,21 @@ export interface GateAggregatorCaptureInput {
   pr?: string;
   headSha?: string;
   round?: number;
+  rounds?: readonly ReviewRoundRecord[];
   runId?: string;
   reviewTier?: string;
   /**
    * When `true`, a non-pass aggregator verdict (`"fail"`/`"degraded"`) makes the
-   * gate non-pass. Default `false` (report-only) per measure-before-caps.
+   * gate non-pass. Default `true` after the spine cutover; set `false` only for
+   * explicit diagnostic/report-only runs.
    */
   authoritative?: boolean;
 }
 
-export interface GateAggregatorCaptureResult {
+export type GateAggregatorCapturedReview = AggregatedReview;
+
+export interface GateAggregatorCaptureSuccessResult {
+  status: "ok";
   /** The aggregator's review (verdict + degradedLanes + findings). */
   review: AggregatedReview;
   /**
@@ -82,11 +83,23 @@ export interface GateAggregatorCaptureResult {
   shouldEscalateToNonPass: boolean;
 }
 
+export interface GateAggregatorCaptureFailureResult {
+  status: "failed";
+  review?: never;
+  degradedCondition: "review_aggregator_capture_failed";
+  shouldEscalateToNonPass: boolean;
+}
+
+export type GateAggregatorCaptureResult =
+  | GateAggregatorCaptureSuccessResult
+  | GateAggregatorCaptureFailureResult;
+
 /**
  * A capture function injectable into the gate for tests (no real spine shelling)
  * and overridable in production. Returns `null` when the capture was skipped (flag
- * off, spine absent, or no lanes), and never throws — capture failures are
- * swallowed so the merge decision is untouched.
+ * off, spine absent, or no lanes), and never throws. If the spine/aggregator
+ * verdict path is attempted but fails, it returns an explicit failed result so an
+ * authoritative gate can fail closed while report-only runs remain no-vote.
  */
 export type GateAggregatorCapture = (
   input: GateAggregatorCaptureInput,
@@ -160,6 +173,7 @@ export function createGateAggregatorCapture(
           markdown: lane.markdown,
         })),
         currentDiffHash: input.currentDiffHash,
+        ...(input.rounds === undefined ? {} : { rounds: input.rounds }),
         // SYMPH-925: the judge-decorrelation author basis comes from EXPLICIT
         // provenance only (resolved by the caller), never ambient process env.
         judgeDecorrelation: {
@@ -182,28 +196,33 @@ export function createGateAggregatorCapture(
             : { onError: config.onLedgerError }),
         },
       });
-      const nonPass = review.verdict !== "pass";
+      const nonPass =
+        review.verdict !== "pass" ||
+        review.convergence?.state === "continue" ||
+        review.convergence?.state === "escalate";
       return {
+        status: "ok",
         review,
-        shouldEscalateToNonPass: (input.authoritative ?? false) && nonPass,
+        shouldEscalateToNonPass: (input.authoritative ?? true) && nonPass,
       };
     } catch (error) {
-      // Fail-closed-on-capture is REPORT-ONLY: a spine/aggregator failure must
-      // NEVER block or alter the merge decision (no-vote invariant). Swallow it,
-      // surface it for observability, and return null so the gate is unchanged.
+      // The ledger side-effect is swallowed inside ReviewAggregator; reaching this
+      // catch means the authoritative spine/aggregator VERDICT path was attempted
+      // but failed. Return an explicit failed result (not null) so the gate can
+      // fail closed in authoritative mode while report-only runs stay no-vote.
       //
-      // SYMPH-927 (council P2): the observer hook is itself untrusted — if
-      // `onLedgerError` THROWS, an unguarded call here would reject the capture and
-      // break the documented "never throws" contract (re-entering the gate decision
-      // path). Guard it with a nested try/catch that swallows, mirroring
-      // `ReviewAggregator.captureLedger()`. The observability hook can never alter
-      // the verdict or make the capture throw.
+      // The observer hook is itself untrusted. Guard it so observability cannot
+      // make the capture throw.
       try {
         config.onLedgerError?.(error);
       } catch {
         // intentionally ignored — the observability hook cannot break the contract.
       }
-      return null;
+      return {
+        status: "failed",
+        degradedCondition: "review_aggregator_capture_failed",
+        shouldEscalateToNonPass: input.authoritative ?? true,
+      };
     }
   };
 }

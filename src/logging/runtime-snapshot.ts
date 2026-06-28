@@ -526,7 +526,6 @@ export interface RuntimeSnapshotCouncilReviewTermination {
   reason: string | null;
   action: string | null;
   alert_level: string | null;
-  tripwire_family_count: number | null;
   synthesis_count: number | null;
   blocking_finding_count: number | null;
   non_blocking_finding_count: number | null;
@@ -1017,7 +1016,6 @@ const REVIEW_JOURNAL_EVENT_KINDS = new Set<DispatcherRunJournalEventKind>([
   "review_rework",
   "review_lane",
   "review_finding",
-  "review_synthesis",
   "review_escalation",
   "review_gate_result",
 ]);
@@ -1478,7 +1476,6 @@ function reviewTerminationFromMetadata(
     reason,
     action,
     alert_level: alertLevel,
-    tripwire_family_count: numberFieldOrNull(metadata.tripwire_family_count),
     synthesis_count: numberFieldOrNull(metadata.synthesis_count),
     blocking_finding_count: numberFieldOrNull(metadata.blocking_finding_count),
     non_blocking_finding_count: numberFieldOrNull(
@@ -1518,9 +1515,6 @@ function councilReviewNextAction(
   gateVerdict: string | null,
   termination?: RuntimeSnapshotCouncilReviewTermination,
 ): string {
-  if (termination?.status === "restructure_required") {
-    return "restructure_or_park_with_synthesis";
-  }
   if (termination?.status === "operator_decision") {
     return "operator_decision_required";
   }
@@ -1837,8 +1831,7 @@ export const STATE_DELTA_MAX_LIMIT = 500;
  * known-safe scalar fields ever cross the delta endpoint.
  *
  * Review metadata follows the same contract: array-valued fields such as
- * `review_rework.metadata.introduced_in`,
- * `review_synthesis.metadata.finding_fingerprints`,
+ * `review_rework.metadata.introduced_in` and
  * `review_escalation.metadata.degraded_conditions`, `related_paths`, and
  * `evidence_locations` remain raw-journal-only. Operator surfaces use bounded
  * scalar/count projections like `rework_finding_count`,
@@ -1951,7 +1944,6 @@ export interface StateDeltaEntryMetadata {
   rounds_per_cycle?: number;
   round_warning_threshold?: number;
   round_cap?: number;
-  tripwire_family_count?: number;
   synthesis_count?: number;
   non_blocking_finding_count?: number;
   track_finding_count?: number;
@@ -2088,7 +2080,6 @@ const STATE_DELTA_METADATA_NUMBER_FIELDS = [
   "rounds_per_cycle",
   "round_warning_threshold",
   "round_cap",
-  "tripwire_family_count",
   "synthesis_count",
   "non_blocking_finding_count",
   "track_finding_count",

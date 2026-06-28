@@ -710,18 +710,6 @@ function priorStructuredReviewerArtifact(): StructuredReviewerArtifact {
         },
       },
     ],
-    familySyntheses: [
-      {
-        name: "review-state contract",
-        safetyClaim:
-          "re-review dispatch carries prior reviewer artifacts into targeting",
-        nextRoundQuestion:
-          "does the re-review prompt preserve prior finding context?",
-        fixedSymptoms: [],
-        remainingSymptoms: ["prior artifact context missing"],
-        findingFingerprints: ["prior-fingerprint"],
-      },
-    ],
   };
 }
 
@@ -774,7 +762,6 @@ function structuredReviewerArtifact(
       triage: "",
     },
     findings: [],
-    familySyntheses: [],
   };
 }
 

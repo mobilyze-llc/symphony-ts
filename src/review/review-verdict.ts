@@ -221,6 +221,7 @@ function isReviewSubstrateDegradedCondition(condition: string): boolean {
     return false;
   }
   return (
+    condition === "review_aggregator_capture_failed" ||
     condition.startsWith("malformed_artifact:") ||
     condition.startsWith("malformed_substrate_json:") ||
     condition.startsWith("artifact_persistence_failed:") ||

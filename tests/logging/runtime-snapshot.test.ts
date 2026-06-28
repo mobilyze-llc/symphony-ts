@@ -2430,12 +2430,10 @@ describe("state-document enrichment (SYMPH-407)", () => {
         sequence: 14,
         kind: "review_escalation",
         metadata: ladderMetadata({
-          escalation_reason: "same_family_reopen",
-          termination_status: "restructure_required",
-          termination_reason: "same_family_reopen",
-          termination_action:
-            "restructure_against_named_contract_or_park_with_synthesis",
-          tripwire_family_count: 1,
+          escalation_reason: "spine_escalate",
+          termination_status: "operator_decision",
+          termination_reason: "spine_escalate",
+          termination_action: "operator_decision_required_with_synthesis",
           synthesis_count: 2,
           blocking_finding_count: 1,
           non_blocking_finding_count: 1,
@@ -2447,11 +2445,9 @@ describe("state-document enrichment (SYMPH-407)", () => {
         kind: "review_gate_result",
         metadata: ladderMetadata({
           gate_verdict: "fail",
-          termination_status: "restructure_required",
-          termination_reason: "same_family_reopen",
-          termination_action:
-            "restructure_against_named_contract_or_park_with_synthesis",
-          tripwire_family_count: 1,
+          termination_status: "operator_decision",
+          termination_reason: "spine_escalate",
+          termination_action: "operator_decision_required_with_synthesis",
           synthesis_count: 2,
           blocking_finding_count: 1,
           non_blocking_finding_count: 1,
@@ -2463,7 +2459,7 @@ describe("state-document enrichment (SYMPH-407)", () => {
     const review = buildRuntimeSnapshot(state).council_reviews!["issue-1"]!;
 
     expect(review.status).toBe("escalated");
-    expect(review.next_action).toBe("restructure_or_park_with_synthesis");
+    expect(review.next_action).toBe("operator_decision_required");
     expect(review.rounds_per_cycle).toEqual({
       current: 3,
       warning_threshold: 2,
@@ -2471,11 +2467,10 @@ describe("state-document enrichment (SYMPH-407)", () => {
       alert_level: "operator",
     });
     expect(review.termination).toEqual({
-      status: "restructure_required",
-      reason: "same_family_reopen",
-      action: "restructure_against_named_contract_or_park_with_synthesis",
+      status: "operator_decision",
+      reason: "spine_escalate",
+      action: "operator_decision_required_with_synthesis",
       alert_level: "operator",
-      tripwire_family_count: 1,
       synthesis_count: 2,
       blocking_finding_count: 1,
       non_blocking_finding_count: 1,
@@ -3430,7 +3425,6 @@ describe("buildStateDelta (SYMPH-407)", () => {
         rounds_per_cycle: 3,
         round_warning_threshold: 2,
         round_cap: 3,
-        tripwire_family_count: 0,
         synthesis_count: 1,
         non_blocking_finding_count: 0,
         track_finding_count: 0,
@@ -3469,7 +3463,6 @@ describe("buildStateDelta (SYMPH-407)", () => {
         rounds_per_cycle: 3,
         round_warning_threshold: 2,
         round_cap: 3,
-        tripwire_family_count: 0,
         synthesis_count: 1,
         non_blocking_finding_count: 0,
         track_finding_count: 0,

@@ -9316,16 +9316,7 @@ describe("stage execution backend boundary", () => {
       const olderArtifact = runtimePriorStructuredArtifact();
       const malformedLatestArtifact = {
         ...runtimePriorStructuredArtifact(),
-        familySyntheses: [
-          {
-            name: "bad synthesis",
-            safetyClaim: null,
-            nextRoundQuestion: null,
-            fixedSymptoms: "not-an-array",
-            remainingSymptoms: [],
-            findingFingerprints: [],
-          },
-        ],
+        malformedReason: "malformed prior artifact",
       } as unknown as StructuredReviewerArtifact;
       writeFileSync(
         olderReviewResultPath,
@@ -10132,7 +10123,6 @@ function runtimePriorStructuredArtifact(): StructuredReviewerArtifact {
       triage: "",
     },
     findings: [],
-    familySyntheses: [],
   };
 }
 
@@ -10175,7 +10165,6 @@ async function writeRealReviewResult(
       triage: "",
     },
     findings: [],
-    familySyntheses: [],
   };
   const lane: CrabrunnerReviewLaneSpec = {
     laneId,

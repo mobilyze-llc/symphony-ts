@@ -3850,7 +3850,6 @@ describe("runHeadlessCouncilGate", () => {
       routing: { mode: "full", round: 1 },
     });
     expect(structured.findings).toHaveLength(4);
-    expect(structured.familySyntheses).toEqual([]);
     expect(structured.findings[0]).toMatchObject({
       severity: "P1",
       emittedSeverity: "P1",
@@ -4310,29 +4309,13 @@ describe("runHeadlessCouncilGate", () => {
     expect(structured.findings[0]!.titleStem).not.toContain("family");
     expect(structured.findings[1]!.title).not.toContain("family:");
     expect(structured.findings[1]!.titleStem).not.toContain("family");
-    expect(structured.familySyntheses).toEqual([
-      {
-        name: "journal-first pause lifecycle",
-        safetyClaim: "every pause fact gates dispatch before side effects",
-        nextRoundQuestion:
-          "did every producer and consumer honor the pause fact?",
-        fixedSymptoms: ["tracker write ordering"],
-        remainingSymptoms: ["retry timer bypass", "poll admission gap"],
-        findingFingerprints: fingerprints,
-      },
-    ]);
-
     const artifactFromDisk = JSON.parse(
       await readFile(result.lanes[0]!.structuredArtifactPath!, "utf-8"),
     ) as StructuredReviewerArtifact;
-    expect(artifactFromDisk.familySyntheses).toEqual(
-      structured.familySyntheses,
-    );
+    expect(artifactFromDisk).not.toHaveProperty("familySyntheses");
     const report = await readFile(result.artifactPaths.councilReport, "utf-8");
     expect(report).toContain("## Family Synthesis");
-    expect(report).toContain("journal-first pause lifecycle");
-    expect(report).toContain(fingerprints[0]!);
-    expect(report).toContain(fingerprints[1]!);
+    expect(report).toContain("- None");
   });
 
   it("does not parse prose family labels or synthesize dismissed findings", async () => {
@@ -4392,7 +4375,6 @@ describe("runHeadlessCouncilGate", () => {
         name: "dismissed pause lifecycle",
       }),
     });
-    expect(structured.familySyntheses).toEqual([]);
   });
 
   it("preserves P1 severity and explicit disposition from Codex lead triage", async () => {
@@ -4458,17 +4440,6 @@ describe("runHeadlessCouncilGate", () => {
       leadDisposition: "refuted",
       repeatOf: "abc12345",
     });
-    expect(leadArtifact.familySyntheses).toEqual([
-      {
-        name: "artifact durability",
-        safetyClaim:
-          "review artifacts must be durable before pass/fail routing",
-        nextRoundQuestion: "can a malformed lane lose the artifact?",
-        fixedSymptoms: [],
-        remainingSymptoms: ["missing write barrier"],
-        findingFingerprints: [leadArtifact.findings[0]!.fingerprint],
-      },
-    ]);
   });
 
   it("warns on malformed triage rows while preserving fail-closed P2 behavior", async () => {
@@ -4643,7 +4614,6 @@ describe("runHeadlessCouncilGate", () => {
       thresholds: {
         roundWarning: 2,
         roundCap: 3,
-        sameFamilyReopenLimit: 2,
       },
     });
     const findings = result.lanes[0]!.structuredArtifact!.findings;
@@ -4885,7 +4855,7 @@ describe("runHeadlessCouncilGate", () => {
     });
   });
 
-  it("trips the termination ladder on a second same-family reopen", async () => {
+  it("does not trip the retired same-family reopen termination branch", async () => {
     const artifact = [
       "## Verdict",
       "FINDINGS",
@@ -4902,6 +4872,71 @@ describe("runHeadlessCouncilGate", () => {
       "## Dismissed Or Theoretical",
       "None",
     ].join("\n");
+    const continuedAggregatorCapture: GateAggregatorCapture = async (input) => {
+      const blockingFinding = {
+        severity: "P2",
+        location: "src/review/headless-council-gate.ts:10",
+        summary: "still violates the review-state contract",
+        evidence: "review-state contract evidence",
+        failure: "projection can still loop",
+        test: "deterministic spine continue fixture",
+        fp: "review-state-contract-fp",
+        reviewer: "claude-opus",
+      };
+      const review: AggregatedReview = {
+        verdict: "fail",
+        degradedLanes: [],
+        degradedLaneCount: 0,
+        triage: {
+          schema: "crucible.session-orchestrator.council-triage.v1",
+          lanes: [],
+          summary: {
+            lanes: 1,
+            track: 0,
+            escalate: 1,
+            unparseable_lanes: 0,
+            blocked_lanes: 0,
+            partial_lanes: 0,
+          },
+          track: [],
+          escalate: [blockingFinding],
+          next_action: "fix_blocking_findings",
+        },
+        crossExam: {
+          schema: "crucible.session-orchestrator.cross-exam-select.v1",
+          cross_exam_required: false,
+          reason: "none",
+          fix_diff_changed: false,
+          fix_size_lines: null,
+          fix_trivial: null,
+          parseable_lanes: 1,
+          target_count: 0,
+          targets: [],
+        },
+        convergence: {
+          schema: "crucible.session-orchestrator.convergence-decision.v1",
+          input_rounds: input.round ?? 1,
+          state: "continue",
+          reason: "blocking findings remain",
+          rounds: input.round ?? 1,
+        },
+        blockingFindings: [blockingFinding],
+        trackFindings: [],
+        refutedFindings: [],
+        familySyntheses: [],
+        familySynthesisCount: 0,
+        synthesisFamilyNames: [],
+        judgedTargetCount: 0,
+        judgeConfirmedFps: [],
+        judgeDecorrelation: null,
+        judgeDecorrelationDegradedReason: null,
+      };
+      return {
+        status: "ok",
+        review,
+        shouldEscalateToNonPass: false,
+      };
+    };
     const firstHarness = await createHarness({
       laneBehavior: { "claude-opus": { artifact } },
     });
@@ -4914,7 +4949,10 @@ describe("runHeadlessCouncilGate", () => {
         reviewerLanes: [opusLane()],
         codexLead: false,
       },
-      { runCommand: firstHarness.runCommand },
+      {
+        runCommand: firstHarness.runCommand,
+        reviewAggregatorCapture: continuedAggregatorCapture,
+      },
     );
     const priorArtifact = firstResult.lanes[0]!.structuredArtifact;
     if (priorArtifact === null || priorArtifact === undefined) {
@@ -4936,7 +4974,10 @@ describe("runHeadlessCouncilGate", () => {
         round: 2,
         priorStructuredArtifacts: [priorArtifact],
       },
-      { runCommand: secondHarness.runCommand },
+      {
+        runCommand: secondHarness.runCommand,
+        reviewAggregatorCapture: continuedAggregatorCapture,
+      },
     );
     const firstReopenArtifact = firstReopenResult.lanes[0]!.structuredArtifact;
     if (firstReopenArtifact === null || firstReopenArtifact === undefined) {
@@ -4946,7 +4987,6 @@ describe("runHeadlessCouncilGate", () => {
     expect(firstReopenResult.termination).toMatchObject({
       status: "continue",
       reason: "blocking_findings",
-      tripwireFamilyNames: [],
       roundsPerCycle: 2,
     });
 
@@ -4965,31 +5005,31 @@ describe("runHeadlessCouncilGate", () => {
         round: 3,
         priorStructuredArtifacts: [priorArtifact, firstReopenArtifact],
       },
-      { runCommand: thirdHarness.runCommand },
+      {
+        runCommand: thirdHarness.runCommand,
+        reviewAggregatorCapture: continuedAggregatorCapture,
+      },
     );
 
     expect(secondReopenResult.verdict).toBe("fail");
     expect(secondReopenResult.termination).toMatchObject({
-      status: "restructure_required",
-      reason: "same_family_reopen",
-      action: "restructure_against_named_contract_or_park_with_synthesis",
+      status: "continue",
+      reason: "blocking_findings",
+      action: "continue_fix_loop",
       alertLevel: "operator",
       blockingFindingCount: 1,
-      familySynthesisCount: 1,
-      synthesisAttached: true,
-      tripwireFamilyNames: ["review-state contract"],
-      synthesisFamilyNames: ["review-state contract"],
+      familySynthesisCount: 0,
+      synthesisAttached: false,
+      synthesisFamilyNames: [],
       roundsPerCycle: 3,
     });
     const report = await readFile(
       secondReopenResult.artifactPaths.councilReport,
       "utf-8",
     );
-    expect(report).toContain("- Reason: same_family_reopen");
-    expect(report).toContain(
-      "- Action: restructure_against_named_contract_or_park_with_synthesis",
-    );
-    expect(report).toContain("- Trip-wire families: review-state contract");
+    expect(report).toContain("- Reason: blocking_findings");
+    expect(report).not.toContain("Trip-wire families");
+    expect(report).not.toContain("- Reason: same_family_reopen");
   });
 
   it("counts same-family reopens by prior round instead of reviewer artifact count", async () => {
@@ -5076,7 +5116,6 @@ describe("runHeadlessCouncilGate", () => {
       reason: "blocking_findings",
       action: "continue_fix_loop",
       blockingFindingCount: 1,
-      tripwireFamilyNames: [],
     });
   });
 
@@ -5131,8 +5170,8 @@ describe("runHeadlessCouncilGate", () => {
       status: "continue",
       reason: "blocking_findings",
       blockingFindingCount: 1,
-      familySynthesisCount: 1,
-      synthesisFamilyNames: ["lead contract"],
+      familySynthesisCount: 0,
+      synthesisFamilyNames: [],
     });
   });
 
@@ -5181,8 +5220,8 @@ describe("runHeadlessCouncilGate", () => {
       action: "operator_decision_required_with_synthesis",
       alertLevel: "operator",
       blockingFindingCount: 1,
-      familySynthesisCount: 1,
-      synthesisAttached: true,
+      familySynthesisCount: 0,
+      synthesisAttached: false,
       roundsPerCycle: 3,
       thresholds: {
         roundWarning: 2,
@@ -8366,10 +8405,10 @@ describe("runHeadlessCouncilGate", () => {
   });
 
   // SYMPH-927 — the gate runs the ReviewAggregator capture (ledger +
-  // judge-decorrelation) ALONGSIDE the live verdict path. Report-only by default;
-  // an authoritative non-pass aggregator verdict escalates the gate to non-pass; a
-  // throwing/failing capture NEVER alters the merge decision (no-vote invariant);
-  // and the author-family basis comes from EXPLICIT provenance, not ambient env.
+  // judge-decorrelation) as the authoritative spine path by default; a non-pass
+  // aggregator verdict escalates the gate to non-pass; a throwing/failing capture
+  // NEVER alters the merge decision (no-vote invariant); and the author-family
+  // basis comes from EXPLICIT provenance, not ambient env.
   describe("ReviewAggregator capture wiring (SYMPH-927)", () => {
     function aggregatedReview(
       over: Partial<AggregatedReview> = {},
@@ -8408,6 +8447,9 @@ describe("runHeadlessCouncilGate", () => {
         blockingFindings: [],
         trackFindings: [],
         refutedFindings: [],
+        familySyntheses: [],
+        familySynthesisCount: 0,
+        synthesisFamilyNames: [],
         judgedTargetCount: 0,
         judgeConfirmedFps: [],
         judgeDecorrelation: null,
@@ -8433,6 +8475,7 @@ describe("runHeadlessCouncilGate", () => {
       const capture: GateAggregatorCapture = async (captureInput) => {
         captured = captureInput;
         return {
+          status: "ok",
           review: aggregatedReview(),
           shouldEscalateToNonPass: false,
         };
@@ -8464,6 +8507,7 @@ describe("runHeadlessCouncilGate", () => {
     it("escalates a PASS gate to non-pass when an authoritative aggregator verdict is degraded", async () => {
       const harness = await passingHarness();
       const capture: GateAggregatorCapture = async () => ({
+        status: "ok",
         review: aggregatedReview({
           verdict: "degraded",
           degradedLanes: [
@@ -8495,11 +8539,51 @@ describe("runHeadlessCouncilGate", () => {
       expect(result.degradedConditions).toContain("review_aggregator_degraded");
     });
 
-    it("report-only: a non-pass aggregator verdict does NOT change a PASS gate", async () => {
+    it("escalates a PASS gate to non-pass when spine convergence escalates", async () => {
       const harness = await passingHarness();
       const capture: GateAggregatorCapture = async () => ({
+        status: "ok",
+        review: aggregatedReview({
+          verdict: "pass",
+          convergence: {
+            schema: "crucible.session-orchestrator.convergence-decision.v1",
+            input_rounds: 3,
+            state: "escalate",
+            reason: "stuck fingerprints",
+            rounds: 3,
+            fingerprints: ["src/x.ts::abc"],
+          },
+        }),
+        shouldEscalateToNonPass: true,
+      });
+      const result = await runHeadlessCouncilGate(
+        {
+          issueId: "SYMPH-923",
+          workspace: harness.workspace,
+          artifactDir: harness.artifactDir,
+          diffPath: harness.diffPath,
+          reviewerLanes: [opusLane()],
+          codexLead: false,
+          provenance: [codexImplementerProvenance()],
+        },
+        { runCommand: harness.runCommand, reviewAggregatorCapture: capture },
+      );
+      expect(result.verdict).toBe("error");
+      expect(result.termination).toMatchObject({
+        status: "operator_decision",
+        reason: "spine_escalate",
+      });
+      expect(result.degradedConditions).toContain(
+        "review_aggregator_convergence_escalate",
+      );
+    });
+
+    it("explicit report-only: a non-pass aggregator verdict does NOT change a PASS gate", async () => {
+      const harness = await passingHarness();
+      const capture: GateAggregatorCapture = async () => ({
+        status: "ok",
         review: aggregatedReview({ verdict: "degraded", degradedLaneCount: 1 }),
-        // Report-only → no escalation.
+        // Explicit report-only → no escalation.
         shouldEscalateToNonPass: false,
       });
       const result = await runHeadlessCouncilGate(
@@ -8520,7 +8604,80 @@ describe("runHeadlessCouncilGate", () => {
       );
     });
 
-    it("a THROWING capture never alters the merge decision (no-vote invariant)", async () => {
+    it("routes spine-sourced Track findings to the filer when the aggregator is active", async () => {
+      const harness = await createHarness({
+        laneBehavior: {
+          "claude-opus": {
+            artifact: [
+              "## Verdict",
+              "PASS",
+              "",
+              "## Findings",
+              "None",
+              "",
+              "## Track",
+              "- docs/legacy.md:4 legacy lane track item",
+            ].join("\n"),
+          },
+        },
+      });
+      const filedFingerprints: string[][] = [];
+      const spineTrack = {
+        severity: "Track",
+        location: "docs/spine.md:7",
+        summary: "spine owns this track item",
+        evidence: "spine evidence",
+        failure: "follow-up needed",
+        test: "n/a",
+        fp: "spine-track-fp",
+        reviewer: "claude-opus",
+      };
+      const capture: GateAggregatorCapture = async () => ({
+        status: "ok",
+        review: aggregatedReview({
+          trackFindings: [spineTrack],
+        }),
+        shouldEscalateToNonPass: false,
+      });
+
+      const result = await runHeadlessCouncilGate(
+        {
+          issueId: "SYMPH-760",
+          workspace: harness.workspace,
+          artifactDir: harness.artifactDir,
+          diffPath: harness.diffPath,
+          reviewerLanes: [opusLane()],
+          codexLead: false,
+          provenance: [codexImplementerProvenance()],
+          trackFindingFiler: async (findings) => {
+            filedFingerprints.push(
+              findings.map((finding) => finding.fingerprint),
+            );
+            return findings.map((finding) => ({
+              fingerprint: finding.fingerprint,
+              issueId: `ISSUE-${finding.fingerprint}`,
+              url: null,
+            }));
+          },
+        },
+        { runCommand: harness.runCommand, reviewAggregatorCapture: capture },
+      );
+
+      expect(filedFingerprints).toEqual([["spine-track-fp"]]);
+      expect(result.termination?.trackFindingCount).toBe(1);
+      expect(result.termination?.trackFiling).toMatchObject({
+        status: "filed",
+        findings: [
+          {
+            fingerprint: "spine-track-fp",
+            title: "spine owns this track item",
+            issueId: "ISSUE-spine-track-fp",
+          },
+        ],
+      });
+    });
+
+    it("fails closed when an authoritative attempted capture throws", async () => {
       const harness = await passingHarness();
       const capture: GateAggregatorCapture = async () => {
         throw new Error("capture blew up");
@@ -8537,8 +8694,41 @@ describe("runHeadlessCouncilGate", () => {
         },
         { runCommand: harness.runCommand, reviewAggregatorCapture: capture },
       );
-      // The throwing capture is swallowed; the gate verdict is unchanged.
+      expect(result.verdict).toBe("error");
+      expect(result.degradedConditions).toContain(
+        "review_aggregator_capture_failed",
+      );
+      expect(result.termination).toMatchObject({
+        status: "degraded",
+        reason: "degraded_review_substrate",
+        action: "inspect_review_substrate",
+      });
+    });
+
+    it("keeps attempted capture failure report-only when authoritative is false", async () => {
+      const harness = await passingHarness();
+      const capture: GateAggregatorCapture = async () => ({
+        status: "failed",
+        degradedCondition: "review_aggregator_capture_failed",
+        shouldEscalateToNonPass: false,
+      });
+      const result = await runHeadlessCouncilGate(
+        {
+          issueId: "SYMPH-927",
+          workspace: harness.workspace,
+          artifactDir: harness.artifactDir,
+          diffPath: harness.diffPath,
+          reviewerLanes: [opusLane()],
+          codexLead: false,
+          provenance: [codexImplementerProvenance()],
+          env: { SYMPHONY_REVIEW_AGGREGATOR_AUTHORITATIVE: "0" },
+        },
+        { runCommand: harness.runCommand, reviewAggregatorCapture: capture },
+      );
       expect(result.verdict).toBe("pass");
+      expect(result.degradedConditions).not.toContain(
+        "review_aggregator_capture_failed",
+      );
     });
 
     it("a null capture (spine absent / disabled) leaves the gate verdict unchanged", async () => {
@@ -8560,9 +8750,8 @@ describe("runHeadlessCouncilGate", () => {
       expect(result.verdict).toBe("pass");
     });
 
-    // E2E (council Track#2): drive the FULL chain
-    // `SYMPHONY_REVIEW_AGGREGATOR_AUTHORITATIVE` (threaded env) → `authoritative`
-    // input → real capture escalation → gate non-pass. Uses the REAL
+    // E2E (council Track#2): drive the FULL default-authoritative chain
+    // gate input → real capture escalation → gate non-pass. Uses the REAL
     // `createGateAggregatorCapture` (every link except the spine subprocess, which
     // is a fake runner) so no link is mocked away.
     function authoritativeChainHarnessCapture(triageOut: unknown) {
@@ -8573,17 +8762,26 @@ describe("runHeadlessCouncilGate", () => {
         const pick =
           sub === "council-triage"
             ? triageOut
-            : {
-                schema: "crucible.session-orchestrator.cross-exam-select.v1",
-                cross_exam_required: false,
-                reason: "none",
-                fix_diff_changed: false,
-                fix_size_lines: null,
-                fix_trivial: null,
-                parseable_lanes: 1,
-                target_count: 0,
-                targets: [],
-              };
+            : sub === "cross-exam-select"
+              ? {
+                  schema: "crucible.session-orchestrator.cross-exam-select.v1",
+                  cross_exam_required: false,
+                  reason: "none",
+                  fix_diff_changed: false,
+                  fix_size_lines: null,
+                  fix_trivial: null,
+                  parseable_lanes: 1,
+                  target_count: 0,
+                  targets: [],
+                }
+              : {
+                  schema:
+                    "crucible.session-orchestrator.convergence-decision.v1",
+                  input_rounds: 1,
+                  state: "continue",
+                  reason: "blocking/degraded review remains",
+                  rounds: 1,
+                };
         return { stdout: JSON.stringify(pick), stderr: "", exitCode: 0 };
       };
       const ledgerClient = new ReviewQualityLedgerClient({
@@ -8640,7 +8838,7 @@ describe("runHeadlessCouncilGate", () => {
       next_action: "no_blocking_findings_this_round",
     };
 
-    it("E2E: SYMPHONY_REVIEW_AGGREGATOR_AUTHORITATIVE truthy escalates a PASS gate to non-pass via the real capture", async () => {
+    it("E2E: default-authoritative capture escalates a PASS gate to non-pass via the real capture", async () => {
       const harness = await passingHarness();
       const result = await runHeadlessCouncilGate(
         {
@@ -8651,8 +8849,7 @@ describe("runHeadlessCouncilGate", () => {
           reviewerLanes: [opusLane()],
           codexLead: false,
           provenance: [codexImplementerProvenance()],
-          // The full chain is driven by this threaded env flag.
-          env: { SYMPHONY_REVIEW_AGGREGATOR_AUTHORITATIVE: "1" },
+          env: {},
         },
         {
           runCommand: harness.runCommand,
@@ -8665,7 +8862,7 @@ describe("runHeadlessCouncilGate", () => {
       expect(result.degradedConditions).toContain("review_aggregator_degraded");
     });
 
-    it("E2E inverse: flag unset leaves the same non-pass aggregator verdict report-only (gate unchanged)", async () => {
+    it("E2E inverse: explicit authoritative=0 leaves the same non-pass aggregator verdict report-only", async () => {
       const harness = await passingHarness();
       const result = await runHeadlessCouncilGate(
         {
@@ -8676,8 +8873,7 @@ describe("runHeadlessCouncilGate", () => {
           reviewerLanes: [opusLane()],
           codexLead: false,
           provenance: [codexImplementerProvenance()],
-          // Authoritative flag NOT set → report-only.
-          env: {},
+          env: { SYMPHONY_REVIEW_AGGREGATOR_AUTHORITATIVE: "0" },
         },
         {
           runCommand: harness.runCommand,
@@ -9248,7 +9444,6 @@ function cleanPiLaneResult() {
         triage: "None",
       },
       findings: [],
-      familySyntheses: [],
     },
   };
 }

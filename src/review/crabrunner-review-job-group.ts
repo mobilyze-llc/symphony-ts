@@ -877,12 +877,10 @@ function parseReviewerArtifact(value: unknown): ParsedReviewerArtifact | null {
   if (!isWellFormedReviewerSections(record.sections)) {
     return null;
   }
-  // Findings + familySyntheses must be present arrays (entries may be empty,
-  // e.g. a clean PASS).
+  // Findings must be present (entries may be empty, e.g. a clean PASS). Legacy
+  // per-lane familySyntheses were removed at the spine cutover; spine-sourced
+  // family synthesis is reported on the aggregate review/termination instead.
   if (!Array.isArray(record.findings)) {
-    return null;
-  }
-  if (!Array.isArray(record.familySyntheses)) {
     return null;
   }
   // parseStatus is the artifact's self-report of its own parse. The only

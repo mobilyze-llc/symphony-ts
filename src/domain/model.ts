@@ -261,7 +261,6 @@ export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
   "review_rework",
   "fix_round",
   "review_gate_result",
-  "review_synthesis",
   // Merge candidates and actuator side-effect barriers (SYMPH-722): a clean,
   // merge-authoritative council PASS can publish a deterministic candidate.
   // The orchestrator actuator consumes only these records and journals every

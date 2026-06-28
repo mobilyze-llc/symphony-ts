@@ -90,7 +90,6 @@ function laneWithFindings(
         triage: "",
       },
       findings,
-      familySyntheses: [],
     },
   };
 }

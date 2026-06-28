@@ -99,6 +99,18 @@ export interface DegradedLane {
   reason: "unparseable" | "blocked" | "fail_open" | "summary_count";
 }
 
+export interface ReviewFamilySynthesis {
+  /** Stable report identity: spine `family` when supplied, otherwise `fp`. */
+  key: string;
+  /** Operator-facing family name: spine `family` when supplied, otherwise `fp`. */
+  name: string;
+  safetyClaim: string | null;
+  nextRoundQuestion: string | null;
+  fixedSymptoms: string[];
+  remainingSymptoms: string[];
+  findingFingerprints: string[];
+}
+
 export interface AggregatedReview {
   verdict: AggregateVerdict;
   /**
@@ -120,6 +132,15 @@ export interface AggregatedReview {
   trackFindings: TriageFinding[];
   /** Escalated findings the judge refuted (kept for audit, non-blocking). */
   refutedFindings: TriageFinding[];
+  /**
+   * SYMPH-923 — operator-facing family synthesis sourced from the spine triage
+   * contract, after adjudication. Refuted/absent families are not reported; a
+   * family that persists as blocking or Track remains visible with its current
+   * fixed/remaining symptom trailer.
+   */
+  familySyntheses: ReviewFamilySynthesis[];
+  familySynthesisCount: number;
+  synthesisFamilyNames: string[];
   judgedTargetCount: number;
   /**
    * SYMPH-924 — fps the judge EXPLICITLY confirmed real (`real === true`). A strict
@@ -262,7 +283,12 @@ export class ReviewAggregator {
               roundsFile: await this.writeJson(
                 dir,
                 "rounds.json",
-                input.rounds.map((round) => ({
+                withCurrentSpineRound({
+                  rounds: input.rounds,
+                  currentDiffHash: input.currentDiffHash,
+                  blockingFindings,
+                  crossExamined: crossExam.cross_exam_required,
+                }).map((round) => ({
                   diff_hash: round.diffHash,
                   blocking: round.blocking.map((b) => ({ fp: b.fp })),
                   ...(round.crossExamined === undefined
@@ -292,6 +318,10 @@ export class ReviewAggregator {
           : degradedLanes.length > 0
             ? "degraded"
             : "pass";
+      const familySyntheses = buildReviewFamilySyntheses([
+        ...blockingFindings,
+        ...triage.track,
+      ]);
 
       const review: AggregatedReview = {
         verdict,
@@ -303,6 +333,11 @@ export class ReviewAggregator {
         blockingFindings,
         trackFindings: [...triage.track],
         refutedFindings,
+        familySyntheses,
+        familySynthesisCount: familySyntheses.length,
+        synthesisFamilyNames: familySyntheses.map(
+          (synthesis) => synthesis.name,
+        ),
         judgedTargetCount,
         judgeConfirmedFps: confirmedFps,
         judgeDecorrelation,
@@ -585,4 +620,81 @@ function collectDegradedLanes(triage: CouncilTriageResult): DegradedLane[] {
     });
   }
   return degraded;
+}
+
+function buildReviewFamilySyntheses(
+  findings: readonly TriageFinding[],
+): ReviewFamilySynthesis[] {
+  const groups = new Map<string, ReviewFamilySynthesis>();
+  for (const finding of findings) {
+    const name = normalizeOptionalLabel(finding.family) ?? finding.fp;
+    const key = normalizeFamilyKey(name);
+    const existing =
+      groups.get(key) ??
+      ({
+        key,
+        name,
+        safetyClaim: null,
+        nextRoundQuestion: null,
+        fixedSymptoms: [],
+        remainingSymptoms: [],
+        findingFingerprints: [],
+      } satisfies ReviewFamilySynthesis);
+    existing.safetyClaim ??= normalizeOptionalLabel(finding.safety_claim);
+    existing.nextRoundQuestion ??= normalizeOptionalLabel(
+      finding.next_round_question,
+    );
+    existing.fixedSymptoms = uniqueInEncounterOrder([
+      ...existing.fixedSymptoms,
+      ...(finding.fixed_symptoms ?? []).map(normalizeSymptom),
+    ]);
+    existing.remainingSymptoms = uniqueInEncounterOrder([
+      ...existing.remainingSymptoms,
+      ...(finding.remaining_symptoms ?? []).map(normalizeSymptom),
+    ]);
+    existing.findingFingerprints = uniqueInEncounterOrder([
+      ...existing.findingFingerprints,
+      finding.fp,
+    ]);
+    groups.set(key, existing);
+  }
+  return [...groups.values()].sort((left, right) =>
+    left.name.localeCompare(right.name, "en"),
+  );
+}
+
+function normalizeOptionalLabel(value: string | undefined): string | null {
+  const normalized = value?.replace(/\s+/g, " ").trim() ?? "";
+  return normalized === "" ? null : normalized;
+}
+
+function normalizeFamilyKey(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function normalizeSymptom(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function uniqueInEncounterOrder(values: readonly string[]): string[] {
+  return [...new Set(values.filter((value) => value !== ""))];
+}
+
+function withCurrentSpineRound(input: {
+  rounds: readonly ReviewRoundRecord[];
+  currentDiffHash: string;
+  blockingFindings: readonly TriageFinding[];
+  crossExamined: boolean;
+}): ReviewRoundRecord[] {
+  const current: ReviewRoundRecord = {
+    diffHash: input.currentDiffHash,
+    blocking: input.blockingFindings.map((finding) => ({ fp: finding.fp })),
+    crossExamined: input.crossExamined,
+  };
+  const rounds = [...input.rounds];
+  const last = rounds.at(-1);
+  if (last?.diffHash === input.currentDiffHash) {
+    return [...rounds.slice(0, -1), current];
+  }
+  return [...rounds, current];
 }

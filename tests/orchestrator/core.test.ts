@@ -16683,7 +16683,7 @@ function trackFilingTermination(
     reason: "disposition_exit",
     action: "continue_pipeline",
     roundsPerCycle: 1,
-    thresholds: { sameFamilyReopenLimit: 2, roundWarning: 2, roundCap: 3 },
+    thresholds: { roundWarning: 2, roundCap: 3 },
     alertLevel: status === "unfiled" ? "warning" : "ok",
     blockingFindingCount: 0,
     nonBlockingFindingCount: required,
@@ -16700,9 +16700,9 @@ function trackFilingTermination(
             : "track_findings_partially_filed",
       findings,
     },
+    familySyntheses: [],
     familySynthesisCount: 0,
     synthesisAttached: false,
-    tripwireFamilyNames: [],
     synthesisFamilyNames: [],
   };
 }
