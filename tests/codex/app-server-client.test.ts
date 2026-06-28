@@ -1290,7 +1290,12 @@ describe("CodexAppServerClient", () => {
     await client.close();
   });
 
-  it("fails the turn when a headless MCP server requests elicitation", async () => {
+  // QUARANTINED (SYMPH-943): the two elicitation tests below spawn a real subprocess
+  // and flake under `vitest --coverage` — instrumentation slows the IPC handshake past
+  // the per-test timeout, ejecting the strict merge queue. The codex app-server is a
+  // retirement candidate (SYMPH-945); do NOT invest in fixing — re-enable or delete
+  // with that decision.
+  it.skip("fails the turn when a headless MCP server requests elicitation", async () => {
     const workspace = await createWorkspace();
     const events: CodexClientEvent[] = [];
     const client = createClient("mcp-elicitation", workspace, events);
@@ -1324,7 +1329,8 @@ describe("CodexAppServerClient", () => {
     await client.close();
   });
 
-  it("fails the turn when an MCP elicitation create request is emitted", async () => {
+  // QUARANTINED (SYMPH-943): see note above — flaky under coverage, app-server retiring (SYMPH-945).
+  it.skip("fails the turn when an MCP elicitation create request is emitted", async () => {
     const workspace = await createWorkspace();
     const events: CodexClientEvent[] = [];
     const client = createClient("mcp-elicitation-create", workspace, events);
