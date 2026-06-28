@@ -526,7 +526,7 @@ function isPlanEnvelope(value: unknown): value is PlanEnvelope {
   );
 }
 
-function isPlanBatch(value: unknown): value is PlanBatch {
+export function isPlanBatch(value: unknown): value is PlanBatch {
   if (
     !isRecord(value) ||
     typeof value.batchId !== "string" ||
