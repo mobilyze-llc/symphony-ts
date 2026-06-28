@@ -14,8 +14,8 @@ import {
 
 /**
  * SYMPH-927 — unit tests for the gate-side ReviewAggregator capture builder. The
- * capture runs the aggregator + ledger ALONGSIDE the gate, report-only by default
- * (a ledger failure / spine absence never alters or blocks the merge decision).
+ * capture runs the aggregator + ledger as the gate's authoritative spine path by
+ * default (a ledger failure / spine absence never alters or blocks the decision).
  */
 
 const LANES = [
@@ -175,8 +175,12 @@ describe("createGateAggregatorCapture (SYMPH-927)", () => {
     expect(calls[0]?.[1]).toBe("record");
     expect(calls[0]).toContain("--pr");
     // No judge supplied to the gate path → the escalation default-blocks fail-closed.
-    expect(result?.review.verdict).toBe("fail");
-    expect(result?.review.blockingFindings).toHaveLength(1);
+    expect(result?.status).toBe("ok");
+    if (result?.status !== "ok") {
+      throw new Error("expected successful aggregator capture");
+    }
+    expect(result.review.verdict).toBe("fail");
+    expect(result.review.blockingFindings).toHaveLength(1);
   });
 
   it("routes a swallowed ledger failure to onLedgerError without altering the verdict", async () => {
@@ -209,12 +213,15 @@ describe("createGateAggregatorCapture (SYMPH-927)", () => {
       authorFamily: "openai-codex",
     });
     // The capture still returned a review; the ledger failure was swallowed + logged.
-    expect(result).not.toBeNull();
-    expect(result?.review.verdict).toBe("fail");
+    expect(result?.status).toBe("ok");
+    if (result?.status !== "ok") {
+      throw new Error("expected successful aggregator capture");
+    }
+    expect(result.review.verdict).toBe("fail");
     expect(errors).toHaveLength(1);
   });
 
-  it("escalates only when authoritative: report-only never sets shouldEscalateToNonPass", async () => {
+  it("is authoritative by default and keeps an explicit report-only escape hatch", async () => {
     // A degraded (all-unparseable) round: non-pass aggregator verdict.
     const degradedTriage = triage({
       lanes: [
@@ -232,6 +239,21 @@ describe("createGateAggregatorCapture (SYMPH-927)", () => {
     });
     const { client } = recordingLedger();
 
+    const defaultAuthoritative = await createGateAggregatorCapture({
+      aggregator: fakeAggregator(degradedTriage),
+      ledgerClient: client,
+    })({
+      laneArtifacts: LANES,
+      currentDiffHash: "head",
+      authorFamily: "openai-codex",
+    });
+    expect(defaultAuthoritative?.status).toBe("ok");
+    if (defaultAuthoritative?.status !== "ok") {
+      throw new Error("expected successful default-authoritative capture");
+    }
+    expect(defaultAuthoritative.review.verdict).toBe("degraded");
+    expect(defaultAuthoritative.shouldEscalateToNonPass).toBe(true);
+
     const reportOnly = await createGateAggregatorCapture({
       aggregator: fakeAggregator(degradedTriage),
       ledgerClient: client,
@@ -241,23 +263,15 @@ describe("createGateAggregatorCapture (SYMPH-927)", () => {
       authorFamily: "openai-codex",
       authoritative: false,
     });
-    expect(reportOnly?.review.verdict).toBe("degraded");
-    expect(reportOnly?.shouldEscalateToNonPass).toBe(false);
-
-    const authoritative = await createGateAggregatorCapture({
-      aggregator: fakeAggregator(degradedTriage),
-      ledgerClient: client,
-    })({
-      laneArtifacts: LANES,
-      currentDiffHash: "head",
-      authorFamily: "openai-codex",
-      authoritative: true,
-    });
-    expect(authoritative?.review.verdict).toBe("degraded");
-    expect(authoritative?.shouldEscalateToNonPass).toBe(true);
+    expect(reportOnly?.status).toBe("ok");
+    if (reportOnly?.status !== "ok") {
+      throw new Error("expected successful report-only capture");
+    }
+    expect(reportOnly.review.verdict).toBe("degraded");
+    expect(reportOnly.shouldEscalateToNonPass).toBe(false);
   });
 
-  it("never throws and reports via onLedgerError when the aggregator itself fails", async () => {
+  it("returns an attempted-failure result when the aggregator itself fails", async () => {
     const errors: unknown[] = [];
     // An aggregator whose spine runner always errors → aggregate() rejects.
     const throwingAggregator = new ReviewAggregator(
@@ -279,15 +293,45 @@ describe("createGateAggregatorCapture (SYMPH-927)", () => {
       currentDiffHash: "head",
       authorFamily: "openai-codex",
     });
-    // Swallowed → null (gate unchanged) and surfaced for observability.
-    expect(result).toBeNull();
+    expect(result).toEqual({
+      status: "failed",
+      degradedCondition: "review_aggregator_capture_failed",
+      shouldEscalateToNonPass: true,
+    });
     expect(errors).toHaveLength(1);
   });
 
-  it("resolves null (never rejects) when the aggregator fails AND onLedgerError itself throws (council P2)", async () => {
+  it("keeps attempted aggregator failure report-only when authoritative is false", async () => {
+    const throwingAggregator = new ReviewAggregator(
+      new CrabboxSpineClient({
+        runCommand: async () => ({
+          stdout: "not json",
+          stderr: "boom",
+          exitCode: 1,
+        }),
+      }),
+    );
+    const capture = createGateAggregatorCapture({
+      aggregator: throwingAggregator,
+      ledgerClient: recordingLedger().client,
+    });
+    const result = await capture({
+      laneArtifacts: LANES,
+      currentDiffHash: "head",
+      authorFamily: "openai-codex",
+      authoritative: false,
+    });
+    expect(result).toMatchObject({
+      status: "failed",
+      degradedCondition: "review_aggregator_capture_failed",
+      shouldEscalateToNonPass: false,
+    });
+  });
+
+  it("resolves attempted failure when the aggregator fails AND onLedgerError itself throws (council P2)", async () => {
     // The observer hook is untrusted: if it THROWS in the outer catch, an unguarded
     // call would reject the capture and break the documented "never throws"
-    // contract. The nested guard must swallow it so the capture still resolves null.
+    // contract. The nested guard must swallow it so the capture still resolves.
     let onErrorCalled = false;
     const throwingAggregator = new ReviewAggregator(
       new CrabboxSpineClient({
@@ -307,15 +351,17 @@ describe("createGateAggregatorCapture (SYMPH-927)", () => {
       },
     });
 
-    // Must RESOLVE null, not reject — assert via a resolved value, and additionally
-    // pin that it does not reject.
     await expect(
       capture({
         laneArtifacts: LANES,
         currentDiffHash: "head",
         authorFamily: "openai-codex",
       }),
-    ).resolves.toBeNull();
+    ).resolves.toMatchObject({
+      status: "failed",
+      degradedCondition: "review_aggregator_capture_failed",
+      shouldEscalateToNonPass: true,
+    });
     expect(onErrorCalled).toBe(true);
   });
 

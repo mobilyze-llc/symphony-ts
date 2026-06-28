@@ -41,7 +41,6 @@ describe("review journal events", () => {
       "review_round",
       "review_lane",
       "review_finding",
-      "review_synthesis",
       "review_escalation",
       "review_gate_result",
     ]);
@@ -77,14 +76,6 @@ describe("review journal events", () => {
       introduced_in: "original_diff",
       family: "journal substrate",
     });
-    expect(
-      entries.find((entry) => entry.kind === "review_synthesis")?.metadata,
-    ).toMatchObject({
-      family: "journal substrate",
-      narrowing_status: "open",
-      narrowing_rationale: "family retained: 1 remaining symptom(s), 1 fixed",
-    });
-
     const serialized = JSON.stringify(entries);
     expect(serialized).not.toContain("SECRET");
     expect(serialized).not.toContain("diff --git");
@@ -209,9 +200,9 @@ describe("review journal events", () => {
     const replayed = await readDispatcherRunJournal(workspaceRoot);
     const delta = buildStateDelta(replayed, { sinceSeq: 0 });
 
-    expect(appendResult.appendedEntries).toHaveLength(8);
+    expect(appendResult.appendedEntries).toHaveLength(7);
     expect(replayed.map((entry) => entry.sequence)).toEqual([
-      1, 2, 3, 4, 5, 6, 7, 8,
+      1, 2, 3, 4, 5, 6, 7,
     ]);
     expect(replayed.map((entry) => entry.kind)).toEqual([
       "review_round",
@@ -219,11 +210,10 @@ describe("review journal events", () => {
       "review_rework",
       "review_lane",
       "review_finding",
-      "review_synthesis",
       "review_escalation",
       "review_gate_result",
     ]);
-    expect(delta.entries).toHaveLength(8);
+    expect(delta.entries).toHaveLength(7);
     expect(
       delta.entries.find((entry) => entry.kind === "fix_round")?.metadata,
     ).toMatchObject({
@@ -271,15 +261,6 @@ describe("review journal events", () => {
       family: "journal substrate",
       category: "correctness",
       confidence: 0.91,
-    });
-    expect(
-      delta.entries.find((entry) => entry.kind === "review_synthesis")
-        ?.metadata,
-    ).toMatchObject({
-      narrowing_status: "open",
-      narrowing_rationale: "family retained: 1 remaining symptom(s), 1 fixed",
-      fixed_symptom_count: 1,
-      remaining_symptom_count: 1,
     });
     const escalationDelta = delta.entries.find(
       (entry) => entry.kind === "review_escalation",
@@ -441,7 +422,6 @@ describe("review journal events", () => {
         action: "operator_decision_required_with_synthesis",
         roundsPerCycle: 3,
         thresholds: {
-          sameFamilyReopenLimit: 2,
           roundWarning: 2,
           roundCap: 3,
         },
@@ -456,9 +436,19 @@ describe("review journal events", () => {
           reason: null,
           findings: [],
         },
+        familySyntheses: [
+          {
+            key: "termination ladder",
+            name: "termination ladder",
+            safetyClaim: null,
+            nextRoundQuestion: null,
+            fixedSymptoms: [],
+            remainingSymptoms: [],
+            findingFingerprints: [],
+          },
+        ],
         familySynthesisCount: 1,
         synthesisAttached: true,
-        tripwireFamilyNames: [],
         synthesisFamilyNames: ["termination ladder"],
       },
     });
@@ -497,7 +487,6 @@ describe("review journal events", () => {
       round_warning_threshold: 2,
       round_cap: 3,
       termination_alert_level: "operator",
-      tripwire_family_count: 0,
       synthesis_count: 1,
       non_blocking_finding_count: 0,
       track_finding_count: 0,
@@ -515,7 +504,7 @@ describe("review journal events", () => {
         reason: "disposition_exit",
         action: "continue_pipeline",
         roundsPerCycle: 1,
-        thresholds: { sameFamilyReopenLimit: 2, roundWarning: 2, roundCap: 3 },
+        thresholds: { roundWarning: 2, roundCap: 3 },
         alertLevel: "warning",
         blockingFindingCount: 0,
         nonBlockingFindingCount: 1,
@@ -534,9 +523,9 @@ describe("review journal events", () => {
             },
           ],
         },
+        familySyntheses: [],
         familySynthesisCount: 0,
         synthesisAttached: false,
-        tripwireFamilyNames: [],
         synthesisFamilyNames: [],
       },
     });
@@ -568,20 +557,7 @@ describe("review journal events", () => {
       round: 2,
       mode: "convergence",
       previousReviewedHeadSha: "previous-head-sha",
-      artifact: {
-        ...artifact,
-        familySyntheses: [
-          ...artifact.familySyntheses,
-          {
-            name: "dispatcher lifecycle",
-            safetyClaim: "dispatch state remains monotonic",
-            nextRoundQuestion: "did dispatch state regress?",
-            fixedSymptoms: ["stale admission card"],
-            remainingSymptoms: ["rewrite can reopen dispatch"],
-            findingFingerprints: ["fp-dispatch-1"],
-          },
-        ],
-      },
+      artifact,
       targetedConvergence,
     });
 
@@ -609,31 +585,6 @@ describe("review journal events", () => {
       skip_unchanged_remainder: true,
     });
     expect(
-      entries.find(
-        (entry) =>
-          entry.kind === "review_synthesis" &&
-          entry.metadata.family === "journal substrate",
-      )?.metadata,
-    ).toMatchObject({
-      narrowing_rationale:
-        "2 confirmed findings asserted family journal substrate; next round narrows to falsifying every journal write is replayable while still reviewing the fix delta",
-      targeting_hypothesis_version: "targeted_convergence_v1",
-    });
-    const nonTargetedSynthesis = entries.find(
-      (entry) =>
-        entry.kind === "review_synthesis" &&
-        entry.metadata.family === "dispatcher lifecycle",
-    );
-    expect(nonTargetedSynthesis?.metadata).toMatchObject({
-      narrowing_rationale: "family retained: 1 remaining symptom(s), 1 fixed",
-    });
-    expect(nonTargetedSynthesis?.metadata).not.toHaveProperty(
-      "targeting_family",
-    );
-    expect(nonTargetedSynthesis?.metadata).not.toHaveProperty(
-      "targeting_hypothesis_version",
-    );
-    expect(
       entries.find((entry) => entry.kind === "review_gate_result")?.metadata,
     ).toMatchObject({
       targeting_trigger: "shared_asserted_family",
@@ -650,7 +601,6 @@ describe("review journal events", () => {
         action: "operator_decision_required_with_synthesis",
         roundsPerCycle: 3,
         thresholds: {
-          sameFamilyReopenLimit: 2,
           roundWarning: 2,
           roundCap: 3,
         },
@@ -665,9 +615,19 @@ describe("review journal events", () => {
           reason: null,
           findings: [],
         },
+        familySyntheses: [
+          {
+            key: "termination ladder",
+            name: "termination ladder",
+            safetyClaim: null,
+            nextRoundQuestion: null,
+            fixedSymptoms: [],
+            remainingSymptoms: [],
+            findingFingerprints: [],
+          },
+        ],
         familySynthesisCount: 1,
         synthesisAttached: true,
-        tripwireFamilyNames: [],
         synthesisFamilyNames: ["termination ladder"],
       },
     });
@@ -1010,7 +970,6 @@ function defaultTerminationAssessment(
           : "continue_fix_loop",
     roundsPerCycle: round,
     thresholds: {
-      sameFamilyReopenLimit: 2,
       roundWarning: 2,
       roundCap: 3,
     },
@@ -1029,11 +988,10 @@ function defaultTerminationAssessment(
             reason: "track_findings_unfiled",
             findings: [],
           },
-    familySynthesisCount: artifact?.familySyntheses.length ?? 0,
-    synthesisAttached: (artifact?.familySyntheses.length ?? 0) > 0,
-    tripwireFamilyNames: [],
-    synthesisFamilyNames:
-      artifact?.familySyntheses.map((synthesis) => synthesis.name) ?? [],
+    familySynthesisCount: 0,
+    synthesisAttached: false,
+    synthesisFamilyNames: [],
+    familySyntheses: [],
   };
 }
 
@@ -1218,16 +1176,6 @@ function structuredArtifact(input: {
           fixedSymptoms: ["SECRET fixed symptom"],
           remainingSymptoms: ["SECRET remaining symptom"],
         },
-      },
-    ],
-    familySyntheses: [
-      {
-        name: "journal substrate",
-        safetyClaim: "SECRET family safety claim",
-        nextRoundQuestion: "SECRET next round question",
-        fixedSymptoms: ["SECRET fixed symptom"],
-        remainingSymptoms: ["SECRET remaining symptom"],
-        findingFingerprints: ["fp-review-1"],
       },
     ],
   };

@@ -546,7 +546,6 @@ const SNAPSHOT_REFRESH_EXTERNAL_JOURNAL_KINDS =
     "review_rework",
     "review_lane",
     "review_finding",
-    "review_synthesis",
     "review_escalation",
     "review_gate_result",
     "spec_review_result",
@@ -6798,6 +6797,7 @@ function isCrabrunnerReviewSubstrateOnlyFailure(
 
 function isReviewSubstrateDegradedCondition(condition: string): boolean {
   return (
+    condition === "review_aggregator_capture_failed" ||
     condition.startsWith("substrate_stall:") ||
     condition.startsWith("malformed_substrate_json:") ||
     condition === "routing_author_provenance_missing" ||
@@ -7434,6 +7434,14 @@ interface PriorReviewLaneRecord {
   structuredArtifact?: unknown;
 }
 
+const REQUIRED_PRIOR_REVIEWER_SECTION_KEYS = [
+  "p1",
+  "p2",
+  "track",
+  "dismissedOrTheoretical",
+  "triage",
+] as const;
+
 async function loadPriorCrabrunnerReviewState(input: {
   journal: readonly DispatcherRunJournalEntry[];
   issueId: string;
@@ -7541,14 +7549,31 @@ function isPriorStructuredArtifactRecord(
   return (
     value.schemaVersion === 1 &&
     value.kind === "symphony-headless-council-reviewer-artifact" &&
+    (value.verdict === "pass" ||
+      value.verdict === "fail" ||
+      value.verdict === "error") &&
     isRecord(lane) &&
     typeof lane.laneId === "string" &&
     isRecord(routing) &&
     typeof routing.round === "number" &&
+    typeof value.confidence === "number" &&
+    Number.isFinite(value.confidence) &&
+    isPriorStructuredSectionsRecord(value.sections) &&
     Array.isArray(value.findings) &&
     value.findings.every(isPriorStructuredFindingRecord) &&
-    Array.isArray(value.familySyntheses) &&
-    value.familySyntheses.every(isPriorStructuredFamilySynthesisRecord)
+    value.parseStatus === "synthesized_from_markdown" &&
+    value.malformedReason === null &&
+    isPresentNullableString(value, "rawArtifactPath") &&
+    isPresentNullableObject(value, "reviewBundle")
+  );
+}
+
+function isPriorStructuredSectionsRecord(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    REQUIRED_PRIOR_REVIEWER_SECTION_KEYS.every(
+      (key) => typeof value[key] === "string",
+    )
   );
 }
 
@@ -7571,24 +7596,26 @@ function isPriorStructuredFindingRecord(value: unknown): boolean {
   );
 }
 
-function isPriorStructuredFamilySynthesisRecord(value: unknown): boolean {
-  if (!isRecord(value)) {
-    return false;
-  }
+function isPresentNullableString(
+  record: Record<string, unknown>,
+  key: string,
+): boolean {
   return (
-    typeof value.name === "string" &&
-    (value.safetyClaim === null || typeof value.safetyClaim === "string") &&
-    (value.nextRoundQuestion === null ||
-      typeof value.nextRoundQuestion === "string") &&
-    isStringArray(value.fixedSymptoms) &&
-    isStringArray(value.remainingSymptoms) &&
-    isStringArray(value.findingFingerprints)
+    Object.hasOwn(record, key) &&
+    (record[key] === null || typeof record[key] === "string")
   );
 }
 
-function isStringArray(value: unknown): value is string[] {
+function isPresentNullableObject(
+  record: Record<string, unknown>,
+  key: string,
+): boolean {
   return (
-    Array.isArray(value) && value.every((item) => typeof item === "string")
+    Object.hasOwn(record, key) &&
+    (record[key] === null ||
+      (typeof record[key] === "object" &&
+        record[key] !== null &&
+        !Array.isArray(record[key])))
   );
 }
 

@@ -239,6 +239,87 @@ describe("ReviewAggregator", () => {
     expect(result.convergence?.state).toBe("converged");
   });
 
+  it("reports spine family synthesis for surviving findings", async () => {
+    const agg = aggregatorWith({
+      triage: triage({
+        escalate: [
+          finding({
+            family: "review-state contract",
+            safety_claim: "review state gates dispatch",
+            next_round_question: "did dispatch honor the state?",
+            fixed_symptoms: ["stale write"],
+            remaining_symptoms: ["retry bypass"],
+          }),
+        ],
+        summary: { ...triage().summary, escalate: 1 },
+      }),
+      crossExam: crossExam({ cross_exam_required: false }),
+    });
+    const result = await agg.aggregate({
+      laneArtifacts: lanes,
+      currentDiffHash: "head",
+    });
+    expect(result.familySynthesisCount).toBe(1);
+    expect(result.synthesisFamilyNames).toEqual(["review-state contract"]);
+    expect(result.familySyntheses).toEqual([
+      {
+        key: "review-state contract",
+        name: "review-state contract",
+        safetyClaim: "review state gates dispatch",
+        nextRoundQuestion: "did dispatch honor the state?",
+        fixedSymptoms: ["stale write"],
+        remainingSymptoms: ["retry bypass"],
+        findingFingerprints: ["src/x.ts::abc"],
+      },
+    ]);
+  });
+
+  it("drops a resolved family from synthesis after judge refutation", async () => {
+    const judge: EscalateJudge = async (targets) =>
+      targets.map((target) => ({ fp: target.fp, real: false }));
+    const agg = aggregatorWith({
+      triage: triage({
+        escalate: [
+          finding({
+            family: "resolved contract",
+            remaining_symptoms: ["old symptom"],
+          }),
+        ],
+        summary: { ...triage().summary, escalate: 1 },
+      }),
+      crossExam: crossExam({
+        cross_exam_required: true,
+        target_count: 1,
+        targets: [
+          {
+            fp: "src/x.ts::abc",
+            severity: "P1",
+            location: "src/x.ts:1",
+            summary: "boom",
+            reviewers: ["opus"],
+            lane_count: 1,
+            agreement: "single_lane",
+            family: "resolved contract",
+            remaining_symptoms: ["old symptom"],
+          },
+        ],
+      }),
+    });
+    const result = await agg.aggregate({
+      laneArtifacts: lanes,
+      currentDiffHash: "head",
+      judge,
+      judgeDecorrelation: {
+        authorFamily: "openai-codex",
+        judgeFamily: "anthropic",
+      },
+    });
+    expect(result.verdict).toBe("pass");
+    expect(result.refutedFindings).toHaveLength(1);
+    expect(result.familySyntheses).toEqual([]);
+    expect(result.synthesisFamilyNames).toEqual([]);
+  });
+
   it("omits convergence when no round history is supplied", async () => {
     const agg = aggregatorWith({ triage: triage(), crossExam: crossExam() });
     const result = await agg.aggregate({

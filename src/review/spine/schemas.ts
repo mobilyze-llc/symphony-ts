@@ -29,8 +29,21 @@ const triageFindingSchema = z
     test: z.string(),
     fp: z.string(),
     reviewer: z.string(),
+    family: z.string().optional(),
+    safety_claim: z.string().optional(),
+    next_round_question: z.string().optional(),
+    fixed_symptoms: z.array(z.string()).optional(),
+    remaining_symptoms: z.array(z.string()).optional(),
   })
   .passthrough();
+
+const familyTrailerFieldsSchema = {
+  family: z.string().optional(),
+  safety_claim: z.string().optional(),
+  next_round_question: z.string().optional(),
+  fixed_symptoms: z.array(z.string()).optional(),
+  remaining_symptoms: z.array(z.string()).optional(),
+};
 
 export const councilTriageResultSchema = z
   .object({
@@ -84,6 +97,7 @@ export const crossExamSelectResultSchema = z
           reviewers: z.array(z.string()),
           lane_count: z.number(),
           agreement: z.string(),
+          ...familyTrailerFieldsSchema,
         })
         .passthrough(),
     ),

@@ -62,7 +62,6 @@ function reviewerArtifact(input: {
       triage: "",
     },
     findings: [],
-    familySyntheses: [],
   };
 }
 

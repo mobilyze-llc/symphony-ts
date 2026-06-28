@@ -8,7 +8,6 @@ import type {
   CouncilTerminationAssessment,
   HeadlessCouncilGateResult,
   HeadlessLaneResult,
-  StructuredReviewFamilySynthesis,
   StructuredReviewFinding,
   StructuredReviewerArtifact,
   TargetedConvergenceHypothesis,
@@ -175,39 +174,6 @@ export function buildReviewJournalEntries(
         },
       }),
     );
-  }
-
-  for (const { lane, artifact } of authoritativeStructuredArtifacts) {
-    for (const synthesis of artifact.familySyntheses) {
-      entries.push(
-        entryFor(context, {
-          kind: "review_synthesis",
-          timestamp: normalizeTimestamp(result.completedAt, result.startedAt),
-          keyParts: ["synthesis", lane.laneId, synthesis.name],
-          summary: `Council review synthesis ${safeLabel(synthesis.name)} recorded for ${context.issueIdentifier}.`,
-          metadata: {
-            ...baseMetadata(context, "structured_v1"),
-            lane_id: lane.laneId,
-            lane_agent: artifact.lane.agent,
-            lane_role: artifact.lane.role,
-            family: safeLabel(synthesis.name),
-            finding_fingerprints: [...synthesis.findingFingerprints].sort(),
-            fixed_symptom_count: synthesis.fixedSymptoms.length,
-            remaining_symptom_count: synthesis.remainingSymptoms.length,
-            narrowing_status:
-              synthesis.remainingSymptoms.length === 0 ? "narrowed" : "open",
-            narrowing_rationale: narrowingRationaleForSynthesis(
-              result.targeted_convergence,
-              synthesis,
-            ),
-            ...targetedConvergenceMetadataForSynthesis(
-              result.targeted_convergence,
-              synthesis,
-            ),
-          },
-        }),
-      );
-    }
   }
 
   if (
@@ -546,10 +512,10 @@ function escalationReasonFor(
 function isEscalatingTermination(
   termination: CouncilTerminationAssessment | undefined,
 ): termination is CouncilTerminationAssessment & {
-  reason: "same_family_reopen" | "round_cap_hit";
+  reason: "spine_escalate" | "round_cap_hit";
 } {
   return (
-    termination?.reason === "same_family_reopen" ||
+    termination?.reason === "spine_escalate" ||
     termination?.reason === "round_cap_hit"
   );
 }
@@ -579,7 +545,6 @@ function terminationMetadata(
     termination_status: termination.status,
     termination_reason: termination.reason,
     termination_action: termination.action,
-    tripwire_family_count: termination.tripwireFamilyNames.length,
     synthesis_count: termination.familySynthesisCount,
     blocking_finding_count: termination.blockingFindingCount,
     non_blocking_finding_count: termination.nonBlockingFindingCount,
@@ -619,35 +584,6 @@ function targetedConvergenceMetadata(
   });
 }
 
-function targetedConvergenceMetadataForSynthesis(
-  targetedConvergence: TargetedConvergenceHypothesis | null,
-  synthesis: StructuredReviewFamilySynthesis,
-): Record<string, unknown> {
-  return targetedConvergenceAppliesToSynthesis(targetedConvergence, synthesis)
-    ? targetedConvergenceMetadata(targetedConvergence)
-    : {};
-}
-
-function narrowingRationaleForSynthesis(
-  targetedConvergence: TargetedConvergenceHypothesis | null,
-  synthesis: StructuredReviewFamilySynthesis,
-): string {
-  return targetedConvergenceAppliesToSynthesis(targetedConvergence, synthesis)
-    ? targetedConvergence.narrowingRationale
-    : narrowingRationale(synthesis);
-}
-
-function targetedConvergenceAppliesToSynthesis(
-  targetedConvergence: TargetedConvergenceHypothesis | null,
-  synthesis: StructuredReviewFamilySynthesis,
-): targetedConvergence is TargetedConvergenceHypothesis {
-  return (
-    targetedConvergence !== null &&
-    normalizeFamilyKey(targetedConvergence.family) ===
-      normalizeFamilyKey(synthesis.name)
-  );
-}
-
 function blockingFindingCount(
   findings: readonly StructuredReviewFinding[],
 ): number {
@@ -656,17 +592,6 @@ function blockingFindingCount(
       (finding.severity === "P1" || finding.severity === "P2") &&
       finding.leadDisposition === "open",
   ).length;
-}
-
-function narrowingRationale(
-  synthesis: StructuredReviewFamilySynthesis,
-): string {
-  const fixed = synthesis.fixedSymptoms.length;
-  const remaining = synthesis.remainingSymptoms.length;
-  if (remaining === 0) {
-    return `family narrowed: ${fixed} fixed symptom(s), 0 remaining`;
-  }
-  return `family retained: ${remaining} remaining symptom(s), ${fixed} fixed`;
 }
 
 function defaultActor(
@@ -688,10 +613,6 @@ function normalizeTimestamp(primary: string, fallback: string): string {
 
 function stableUnique(values: readonly string[]): string[] {
   return [...new Set(values)].sort();
-}
-
-function normalizeFamilyKey(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
 function compactMetadata(

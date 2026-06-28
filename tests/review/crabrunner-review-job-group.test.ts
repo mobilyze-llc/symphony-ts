@@ -57,7 +57,6 @@ function reviewerArtifact(input: {
       triage: "",
     },
     findings: [],
-    familySyntheses: [],
   };
 }
 
@@ -1145,7 +1144,7 @@ describe("runCrabrunnerReviewJobGroup", () => {
 
   // P2-C: the FULL StructuredReviewerArtifact top-level contract must be present
   // before an artifact is accepted. parseStatus/reviewBundle/rawArtifactPath/
-  // malformedReason/familySyntheses are part of that contract; omitting them on a
+  // malformedReason are part of that contract; omitting them on a
   // verdict:"pass" artifact must still fail closed.
   it("fails closed when a pass-verdict artifact omits parseStatus", async () => {
     const artifact = reviewerArtifact({
@@ -1231,42 +1230,6 @@ describe("runCrabrunnerReviewJobGroup", () => {
       verdict: "pass",
     });
     artifact.reviewBundle = undefined;
-    const backend = fakeBackend({
-      "codex-high-lead": {
-        terminal: { state: "succeeded", artifactRefs: ["/a.json"] },
-        collectedArtifact: artifact,
-      },
-    });
-
-    const result = await runCrabrunnerReviewJobGroup({
-      ...baseInput({
-        lanes: [
-          reviewerLane({
-            laneId: "codex-high-lead",
-            agent: "codex",
-            modelFamily: "codex",
-          }),
-        ],
-        backend,
-      }),
-      collectArtifact: async (lane: ReviewJobGroupLaneEvidence) =>
-        backendArtifactFor(backend, lane),
-    });
-
-    expect(result.verdict).toBe("error");
-    expect(result.degradedConditions).toContain(
-      "malformed_artifact:codex-high-lead",
-    );
-  });
-
-  it("fails closed when a pass-verdict artifact's familySyntheses is not an array", async () => {
-    const artifact = reviewerArtifact({
-      laneId: "codex-high-lead",
-      agent: "codex",
-      modelFamily: "codex",
-      verdict: "pass",
-    });
-    artifact.familySyntheses = undefined;
     const backend = fakeBackend({
       "codex-high-lead": {
         terminal: { state: "succeeded", artifactRefs: ["/a.json"] },
