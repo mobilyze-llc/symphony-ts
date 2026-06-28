@@ -5529,7 +5529,7 @@ function structuredTrackFindingFromSpine(
     category: "track",
     confidence: 1,
     evidence: [],
-    relatedPaths: [],
+    relatedPaths: finding.location ? [finding.location] : [],
     rationale: finding.evidence,
     leadDisposition: "track",
     repeatOf: null,

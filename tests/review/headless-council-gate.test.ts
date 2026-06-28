@@ -8622,6 +8622,7 @@ describe("runHeadlessCouncilGate", () => {
         },
       });
       const filedFingerprints: string[][] = [];
+      const filedRelatedPaths: string[][] = [];
       const spineTrack = {
         severity: "Track",
         location: "docs/spine.md:7",
@@ -8653,6 +8654,9 @@ describe("runHeadlessCouncilGate", () => {
             filedFingerprints.push(
               findings.map((finding) => finding.fingerprint),
             );
+            filedRelatedPaths.push(
+              findings.flatMap((finding) => finding.relatedPaths),
+            );
             return findings.map((finding) => ({
               fingerprint: finding.fingerprint,
               issueId: `ISSUE-${finding.fingerprint}`,
@@ -8664,6 +8668,7 @@ describe("runHeadlessCouncilGate", () => {
       );
 
       expect(filedFingerprints).toEqual([["spine-track-fp"]]);
+      expect(filedRelatedPaths).toEqual([["docs/spine.md:7"]]);
       expect(result.termination?.trackFindingCount).toBe(1);
       expect(result.termination?.trackFiling).toMatchObject({
         status: "filed",
