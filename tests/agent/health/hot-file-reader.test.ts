@@ -122,12 +122,31 @@ describe("readHotFileGrowth", () => {
     expect(result).toBeNull();
   });
 
-  it("returns null when the subprocess times out", async () => {
+  it("returns null when the subprocess times out / errors (degradation)", async () => {
     const repo = await initRepo();
     await commitFile(repo, "hot.ts", lines("hot", 100), "seed hot");
 
-    // A 1ms hard timeout cannot complete even a trivial git log → kill → null.
-    const result = await readHotFileGrowth({ repoPath: repo, timeoutMs: 1 });
+    // Inject a runner that rejects with a timeout/kill-shaped error. This makes
+    // the degradation path deterministic — a real 1ms timeout races the git
+    // spawn and is flaky (sometimes git flushes output before the kill lands).
+    const timeoutError = Object.assign(
+      new Error("Command failed: git log ... ETIMEDOUT"),
+      {
+        killed: true,
+        signal: "SIGTERM",
+        code: null,
+      },
+    );
+    const result = await readHotFileGrowth({
+      repoPath: repo,
+      timeoutMs: 1,
+      // The runner only ever throws here, so its declared return type is moot.
+      // `as never` satisfies the `typeof execFileAsync` seam (whose real return
+      // is a PromiseWithChild) without fabricating a ChildProcess.
+      execFileImpl: (async () => {
+        throw timeoutError;
+      }) as never,
+    });
 
     expect(result).toBeNull();
   });

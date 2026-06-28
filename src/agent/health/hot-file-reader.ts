@@ -36,6 +36,13 @@ export interface ReadHotFileGrowthInput {
   maxDays?: number;
   /** Hard subprocess timeout (ms); breach → null (default 5000). */
   timeoutMs?: number;
+  /**
+   * Internal test seam (SYMPH-939): the subprocess runner, defaulting to the real
+   * promisified execFile. Production callers MUST NOT set this. Tests inject a fake
+   * to exercise the timeout/error degradation deterministically — a real 1ms timeout
+   * races the git spawn and is flaky.
+   */
+  execFileImpl?: typeof execFileAsync;
 }
 
 /**
@@ -81,11 +88,15 @@ export async function readHotFileGrowth(
     const maxCommits = input.maxCommits ?? DEFAULT_MAX_COMMITS;
     const maxDays = input.maxDays ?? DEFAULT_MAX_DAYS;
     const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    // Resolve the subprocess runner once. Production leaves this unset, so the
+    // real promisified execFile is used and behavior is byte-identical; tests
+    // inject a fake to drive timeout/error degradation deterministically.
+    const run = input.execFileImpl ?? execFileAsync;
 
     // %x00 emits a bare NUL per commit header and nothing else, so the only
     // non-empty, tab-bearing lines in stdout are numstat rows
     // (added<TAB>deleted<TAB>path). --no-renames keeps each path on one line.
-    const { stdout } = await execFileAsync(
+    const { stdout } = await run(
       "git",
       [
         "log",
