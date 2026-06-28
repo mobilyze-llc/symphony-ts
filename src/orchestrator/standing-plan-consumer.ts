@@ -116,9 +116,8 @@ export function selectDispatchableBatchMembers(
 
     // canary-chain dispatches only the head until EVERY head member has merged
     // (SYMPH-800 contingent-release); then the contingent tail releases. The
-    // head/tail validation reads recorded `merged` outcomes (SYMPH-803). NOTE: a
-    // head that fails/parks (never merges) holds the tail with no auto-replan —
-    // tracked as SYMPH-815 (a canary-head-stuck re-plan predicate).
+    // head/tail validation reads recorded `merged` outcomes (SYMPH-803). NOTE:
+    // a head that fails/parks holds the tail; guard #5 (SYMPH-815) re-plans.
     const merged = input.mergedIssueIdentifiers ?? EMPTY_IDENTIFIER_SET;
     let members = batch.members;
     if (batch.mode === "canary-chain" && batch.canary !== null) {
@@ -193,11 +192,12 @@ export const DEFAULT_MERGE_WORLD_SHIFT_THRESHOLD = 3;
 /**
  * Cheap deterministic guards that decide WHETHER to request a re-plan — they
  * never call the model (zero-LLM-on-dispatch). The re-plan itself runs on the
- * off-hot-path heartbeat. Guards (SYMPH-787 + SYMPH-801):
+ * off-hot-path heartbeat. Guards (SYMPH-787 + SYMPH-801 + SYMPH-815):
  *  #1 envelope changed · #2 no planned member still a candidate ·
- *  #3 new-work-outranks-by-priority-band · #4 merge-moved-the-world.
- * The richer inputs (priority bands, merges-since) are OPTIONAL so callers that
- * cannot supply them keep the original two guards.
+ *  #3 new-work-outranks-by-priority-band · #4 merge-moved-the-world ·
+ *  #5 canary-head-stuck.
+ * The richer inputs (priority bands, merges-since, running/merged sets) are
+ * OPTIONAL so callers that cannot supply them keep the original guards.
  */
 export function evaluateReplanPredicates(input: {
   plan: StandingPlan;
@@ -207,6 +207,10 @@ export function evaluateReplanPredicates(input: {
   candidatePriorityBands?: ReadonlyMap<string, number>;
   /** merged outcomes recorded since the plan was computed; SYMPH-801 guard #4. */
   mergedSincePlanCount?: number;
+  /** Issue identifiers already dispatched/running; SYMPH-815 guard #5. */
+  runningIssueIdentifiers?: ReadonlySet<string>;
+  /** Issue identifiers with a recorded merged outcome; SYMPH-815 guard #5. */
+  mergedIssueIdentifiers?: ReadonlySet<string>;
   mergeWorldShiftThreshold?: number;
 }): ReplanPredicateResult {
   const reasons: string[] = [];
@@ -283,6 +287,39 @@ export function evaluateReplanPredicates(input: {
     );
   }
 
+  // Guard #5 (SYMPH-815): a canary head is stuck and cannot progress. A
+  // lookahead canary-chain batch dispatches only its head until EVERY head
+  // member merges (SYMPH-800 contingent-release); if NO head member is a
+  // candidate, running, OR merged, the head can neither advance nor validate —
+  // the contingent tail is held with nothing left to release it, and guard #2
+  // stays quiet because the still-candidate tail (or another batch) keeps a
+  // lookahead member eligible. Re-plan so the Manager can drop/re-rank the stuck
+  // canary instead of stalling the tail indefinitely.
+  if (
+    input.runningIssueIdentifiers !== undefined &&
+    input.mergedIssueIdentifiers !== undefined
+  ) {
+    const running = input.runningIssueIdentifiers;
+    const merged = input.mergedIssueIdentifiers;
+    for (const batch of lookahead) {
+      if (batch.mode !== "canary-chain" || batch.canary === null) {
+        continue;
+      }
+      const head = batch.canary.headIssueIdentifiers;
+      const headCanProgress = head.some(
+        (identifier) =>
+          input.candidateIdentifiers.has(identifier) ||
+          running.has(identifier) ||
+          merged.has(identifier),
+      );
+      if (head.length > 0 && !headCanProgress) {
+        reasons.push(
+          `canary-chain batch ${batch.batchId} head is stuck (no head member is a candidate, running, or merged)`,
+        );
+      }
+    }
+  }
+
   return { forceReplan: reasons.length > 0, reasons };
 }
 
@@ -352,12 +389,16 @@ export function decidePlanDrivenDispatch(
     plan: input.plan,
     currentEnvelope: cfg.envelope,
     candidateIdentifiers: input.candidateIdentifiers,
+    runningIssueIdentifiers: input.runningIssueIdentifiers,
     ...(input.candidatePriorityBands === undefined
       ? {}
       : { candidatePriorityBands: input.candidatePriorityBands }),
     ...(input.mergedSincePlanCount === undefined
       ? {}
       : { mergedSincePlanCount: input.mergedSincePlanCount }),
+    ...(input.mergedIssueIdentifiers === undefined
+      ? {}
+      : { mergedIssueIdentifiers: input.mergedIssueIdentifiers }),
   });
   if (predicates.forceReplan) {
     // A misaligned plan: dispatch via the comparator this tick, re-plan next.
