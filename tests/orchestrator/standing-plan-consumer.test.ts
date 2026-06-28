@@ -75,6 +75,20 @@ function approve(batchId: string, revision = 1): PlanDecision {
   };
 }
 
+function canaryBatch(
+  batchId = "b1",
+  head: string[] = ["SYMPH-1"],
+  tail: string[] = ["SYMPH-2", "SYMPH-3"],
+): PlanBatch {
+  return batch(batchId, [...head, ...tail], {
+    mode: "canary-chain",
+    canary: {
+      headIssueIdentifiers: head,
+      contingentIssueIdentifiers: tail,
+    },
+  });
+}
+
 describe("selectDispatchableBatchMembers (posture-B)", () => {
   it("auto-releases up to the frontier bound and holds the rest", () => {
     const result = selectDispatchableBatchMembers({
@@ -395,6 +409,83 @@ describe("evaluateReplanPredicates", () => {
     });
     expect(result.forceReplan).toBe(false);
   });
+
+  it("forces a re-plan when a canary head is stuck while the tail is still candidate", () => {
+    const result = evaluateReplanPredicates({
+      plan: plan([canaryBatch()]),
+      currentEnvelope: ENVELOPE,
+      candidateIdentifiers: new Set(["SYMPH-2", "SYMPH-3"]),
+      runningIssueIdentifiers: new Set(),
+      mergedIssueIdentifiers: new Set(),
+    });
+    expect(result.forceReplan).toBe(true);
+    expect(result.reasons.join(" ")).toMatch(/canary|stuck|head/i);
+  });
+
+  it("forces a re-plan when one member of a multi-member canary head is stuck", () => {
+    const result = evaluateReplanPredicates({
+      plan: plan([canaryBatch("b1", ["SYMPH-1", "SYMPH-2"], ["SYMPH-3"])]),
+      currentEnvelope: ENVELOPE,
+      candidateIdentifiers: new Set(["SYMPH-3"]),
+      runningIssueIdentifiers: new Set(),
+      mergedIssueIdentifiers: new Set(["SYMPH-1"]),
+    });
+    expect(result.forceReplan).toBe(true);
+    expect(result.reasons.join(" ")).toMatch(/canary|stuck|head/i);
+  });
+
+  it("does NOT re-plan for a canary head that is still a candidate", () => {
+    const result = evaluateReplanPredicates({
+      plan: plan([canaryBatch()]),
+      currentEnvelope: ENVELOPE,
+      candidateIdentifiers: new Set(["SYMPH-1", "SYMPH-2", "SYMPH-3"]),
+      runningIssueIdentifiers: new Set(),
+      mergedIssueIdentifiers: new Set(),
+    });
+    expect(result.forceReplan).toBe(false);
+  });
+
+  it("does NOT re-plan for a canary head that is already running", () => {
+    const result = evaluateReplanPredicates({
+      plan: plan([canaryBatch()]),
+      currentEnvelope: ENVELOPE,
+      candidateIdentifiers: new Set(["SYMPH-2", "SYMPH-3"]),
+      runningIssueIdentifiers: new Set(["SYMPH-1"]),
+      mergedIssueIdentifiers: new Set(),
+    });
+    expect(result.forceReplan).toBe(false);
+  });
+
+  it("does NOT re-plan for a canary head that has merged", () => {
+    const result = evaluateReplanPredicates({
+      plan: plan([canaryBatch()]),
+      currentEnvelope: ENVELOPE,
+      candidateIdentifiers: new Set(["SYMPH-2", "SYMPH-3"]),
+      runningIssueIdentifiers: new Set(),
+      mergedIssueIdentifiers: new Set(["SYMPH-1"]),
+    });
+    expect(result.forceReplan).toBe(false);
+  });
+
+  it("does NOT re-plan for a parallel-isolated non-candidate member", () => {
+    const result = evaluateReplanPredicates({
+      plan: plan([batch("b1", ["SYMPH-1"]), batch("b2", ["SYMPH-2"])]),
+      currentEnvelope: ENVELOPE,
+      candidateIdentifiers: new Set(["SYMPH-2"]),
+      runningIssueIdentifiers: new Set(),
+      mergedIssueIdentifiers: new Set(),
+    });
+    expect(result.forceReplan).toBe(false);
+  });
+
+  it("keeps guard #5 inert when running and merged sets are omitted", () => {
+    const result = evaluateReplanPredicates({
+      plan: plan([canaryBatch()]),
+      currentEnvelope: ENVELOPE,
+      candidateIdentifiers: new Set(["SYMPH-2", "SYMPH-3"]),
+    });
+    expect(result.forceReplan).toBe(false);
+  });
 });
 
 describe("decidePlanDrivenDispatch (hot-path composition)", () => {
@@ -472,6 +563,22 @@ describe("decidePlanDrivenDispatch (hot-path composition)", () => {
       honoredApprovals: [],
       candidateIdentifiers: new Set(["SYMPH-99"]), // plan members all gone
       runningIssueIdentifiers: new Set(),
+      nowMs,
+    });
+    expect(d.action).toBe("degrade");
+    expect(d.forceReplan).toBe(true);
+  });
+
+  it("degrades + requests a re-plan when a canary head is stuck", () => {
+    const d = decidePlanDrivenDispatch({
+      config: config(),
+      plan: plan([canaryBatch()], {
+        updatedAt: "2026-06-18T00:00:00.000Z",
+      }),
+      honoredApprovals: [],
+      candidateIdentifiers: new Set(["SYMPH-2", "SYMPH-3"]),
+      runningIssueIdentifiers: new Set(),
+      mergedIssueIdentifiers: new Set(),
       nowMs,
     });
     expect(d.action).toBe("degrade");
@@ -714,6 +821,39 @@ describe("resolvePlanDrivenDispatchForTick — single-snapshot read (SYMPH-830)"
     expect(decision.action).toBe("plan");
     // head SYMPH-1 merged ⇒ tail releases; the merged head is not re-dispatched.
     expect(decision.orderedIssueIdentifiers).toEqual(["SYMPH-2", "SYMPH-3"]);
+  });
+
+  it("forces a re-plan from one snapshot when a canary head parked and dropped from candidates", async () => {
+    const canaryPlan = plan([canaryBatch()], {
+      updatedAt: "2026-06-18T00:00:00.000Z",
+    });
+    const parkedHead: PlanOutcome = {
+      outcomeId: "o-parked-head",
+      planId: canaryPlan.planId,
+      revision: canaryPlan.revision,
+      batchId: "b1",
+      result: "parked",
+      issueIdentifiers: ["SYMPH-1"],
+      createdAt: "2026-06-18T00:02:00.000Z",
+    };
+    let calls = 0;
+    const decision = await resolvePlanDrivenDispatchForTick({
+      config: triageConfig,
+      readJournal: async () => {
+        calls += 1;
+        return journalOf(canaryPlan, [], [parkedHead]);
+      },
+      candidates: [
+        { identifier: "SYMPH-2", priority: 2 },
+        { identifier: "SYMPH-3", priority: 2 },
+      ],
+      runningIssueIdentifiers: new Set(),
+      nowMs,
+      teamScoped: false,
+    });
+    expect(calls).toBe(1);
+    expect(decision.action).toBe("degrade");
+    expect(decision.forceReplan).toBe(true);
   });
 
   it("propagates a readJournal rejection so the host owns the degrade (SYMPH-830)", async () => {
