@@ -4,12 +4,19 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import type { PlannerRunResult } from "../../src/agent/triage-planner.js";
+import type {
+  HotFileGrowth,
+  PlannerRunResult,
+  QueueHealth,
+} from "../../src/agent/triage-planner.js";
 import type { WorkflowQueueTriageConfig } from "../../src/config/types.js";
 import type { Issue } from "../../src/domain/model.js";
 import type { PlanEnvelope } from "../../src/domain/standing-plan.js";
 import {
   assembleShadowPlannerContext,
+  buildQueueHealth,
+  computeResidualShare,
+  computeTriageIntake,
   enrichPlannerContextWithComments,
   runShadowPlanCycle,
   runStandingPlanShadowTick,
@@ -145,6 +152,34 @@ describe("assembleShadowPlannerContext", () => {
       envelope: ENVELOPE,
     });
     expect(context.backlog[0]?.pathHints).toEqual([]);
+  });
+
+  it("omits the health own-property when no triageHealthInput is given (SYMPH-939 U1, byte-unchanged)", () => {
+    const context = assembleShadowPlannerContext({
+      candidates: [issue("u1", "SYMPH-1")],
+      inFlight: [],
+      envelope: ENVELOPE,
+    });
+    expect("health" in context).toBe(false);
+  });
+
+  it("threads triageHealthInput onto context.health when given (SYMPH-939 U1)", () => {
+    const health: QueueHealth = {
+      triageIntake: { depth: 7, inflowRate: 2 },
+      residualShare: 0.3,
+      hotFileGrowth: {
+        topFileChurnFraction: 0.5,
+        godFileConcentration: "high",
+      },
+      reviewRoundDepth: 1,
+    };
+    const context = assembleShadowPlannerContext({
+      candidates: [issue("u1", "SYMPH-1")],
+      inFlight: [],
+      envelope: ENVELOPE,
+      triageHealthInput: health,
+    });
+    expect(context.health).toEqual(health);
   });
 });
 
@@ -817,6 +852,244 @@ describe("enrichPlannerContextWithComments (SYMPH-896)", () => {
     expect(result.measurement.candidatesFetched).toBe(1);
     // the failed fetch still cost a round trip — counted, not silently dropped.
     expect(result.measurement.candidatesFailed).toBe(1);
+  });
+});
+
+function healthIssue(over: Partial<Issue> = {}): Issue {
+  return { ...issue("h1", "SYMPH-100"), ...over };
+}
+
+describe("SYMPH-939 health signals", () => {
+  // A fixed "now" the inflow-window math is computed against.
+  const NOW = new Date("2026-06-27T00:00:00.000Z");
+  const NOW_MS = NOW.getTime();
+  // 1 day before now — inside the 7-day inflow window.
+  const RECENT = "2026-06-26T00:00:00.000Z";
+  // 30 days before now — outside the 7-day inflow window.
+  const STALE = "2026-05-28T00:00:00.000Z";
+
+  describe("computeTriageIntake", () => {
+    it("reports depth and counts only recent createdAt as inflow", () => {
+      // 5 issues; exactly 2 created inside the 7-day window relative to NOW.
+      const issues = [
+        healthIssue({ id: "a", createdAt: RECENT }),
+        healthIssue({ id: "b", createdAt: RECENT }),
+        healthIssue({ id: "c", createdAt: STALE }),
+        healthIssue({ id: "d", createdAt: STALE }),
+        healthIssue({ id: "e", createdAt: STALE }),
+      ];
+      expect(computeTriageIntake(issues, NOW_MS)).toEqual({
+        depth: 5,
+        inflowRate: 2,
+      });
+    });
+
+    it("skips null and unparseable createdAt (never counted as inflow)", () => {
+      const issues = [
+        healthIssue({ id: "a", createdAt: RECENT }),
+        healthIssue({ id: "b", createdAt: null }),
+        healthIssue({ id: "c", createdAt: "not-a-date" }),
+      ];
+      expect(computeTriageIntake(issues, NOW_MS)).toEqual({
+        depth: 3,
+        inflowRate: 1,
+      });
+    });
+
+    it("reads empty Triage as depth 0, inflowRate 0", () => {
+      expect(computeTriageIntake([], NOW_MS)).toEqual({
+        depth: 0,
+        inflowRate: 0,
+      });
+    });
+  });
+
+  describe("computeResidualShare", () => {
+    it("is the fraction of titles carrying the [track:] marker", () => {
+      // 4 issues, exactly 1 title with the residual marker → 0.25.
+      const issues = [
+        healthIssue({ id: "a", title: "[track:abc] residual follow-up" }),
+        healthIssue({ id: "b", title: "Plain ticket" }),
+        healthIssue({ id: "c", title: "Another plain ticket" }),
+        healthIssue({ id: "d", title: "Yet another" }),
+      ];
+      expect(computeResidualShare(issues)).toBe(0.25);
+    });
+
+    it("reads an empty population as 0 (a valid 'no residual' reading, not null)", () => {
+      expect(computeResidualShare([])).toBe(0);
+    });
+
+    it("REGRESSION GUARD: residual reflects the residual population, not the candidate backlog", () => {
+      // The candidate/activeStates backlog carries NO [track:] markers (it excludes
+      // Backlog/Triage). The state-aware residual fetch DOES. computeResidualShare must
+      // read the population it is handed — proving it cannot be fed the candidate backlog
+      // and silently read ~0.
+      const candidateBacklog = [
+        healthIssue({ id: "c1", title: "active work, no marker" }),
+        healthIssue({ id: "c2", title: "more active work" }),
+      ];
+      const residualPopulation = [
+        healthIssue({ id: "r1", title: "[track:def] residual" }),
+        healthIssue({ id: "r2", title: "plain backlog item" }),
+      ];
+      expect(computeResidualShare(candidateBacklog)).toBe(0);
+      expect(computeResidualShare(residualPopulation)).toBe(0.5);
+    });
+  });
+
+  describe("buildQueueHealth", () => {
+    const HOT: HotFileGrowth = {
+      topFileChurnFraction: 0.7,
+      godFileConcentration: "high",
+    };
+
+    it("returns QueueHealth when the three core signals are non-null", () => {
+      expect(
+        buildQueueHealth({
+          triageIntake: { depth: 5, inflowRate: 2 },
+          residualShare: 0.25,
+          hotFileGrowth: HOT,
+          reviewRoundDepth: 3,
+        }),
+      ).toEqual({
+        triageIntake: { depth: 5, inflowRate: 2 },
+        residualShare: 0.25,
+        hotFileGrowth: HOT,
+        reviewRoundDepth: 3,
+      });
+    });
+
+    it("carries reviewRoundDepth=null as-is (its null is a legitimate reading)", () => {
+      const health = buildQueueHealth({
+        triageIntake: { depth: 0, inflowRate: 0 },
+        residualShare: 0,
+        hotFileGrowth: HOT,
+        reviewRoundDepth: null,
+      });
+      expect(health).toBeDefined();
+      expect(health?.reviewRoundDepth).toBeNull();
+    });
+
+    it("returns undefined when any core signal is null (a tracker error → health absent)", () => {
+      expect(
+        buildQueueHealth({
+          triageIntake: null,
+          residualShare: 0.25,
+          hotFileGrowth: HOT,
+          reviewRoundDepth: 3,
+        }),
+      ).toBeUndefined();
+      expect(
+        buildQueueHealth({
+          triageIntake: { depth: 5, inflowRate: 2 },
+          residualShare: null,
+          hotFileGrowth: HOT,
+          reviewRoundDepth: 3,
+        }),
+      ).toBeUndefined();
+      expect(
+        buildQueueHealth({
+          triageIntake: { depth: 5, inflowRate: 2 },
+          residualShare: 0.25,
+          hotFileGrowth: null,
+          reviewRoundDepth: 3,
+        }),
+      ).toBeUndefined();
+    });
+
+    it("empty Triage + empty residual still yields health when core parts are present", () => {
+      // depth 0 / inflowRate 0 / residualShare 0 are all valid readings (not null), so
+      // with a hot-file reading present the bundle is emitted.
+      const health = buildQueueHealth({
+        triageIntake: { depth: 0, inflowRate: 0 },
+        residualShare: 0,
+        hotFileGrowth: HOT,
+        reviewRoundDepth: null,
+      });
+      expect(health).toEqual({
+        triageIntake: { depth: 0, inflowRate: 0 },
+        residualShare: 0,
+        hotFileGrowth: HOT,
+        reviewRoundDepth: null,
+      });
+    });
+  });
+
+  describe("runStandingPlanShadowTick wiring (end-to-end)", () => {
+    const fullHealthDeps = (root: string) => ({
+      config: triageConfig(),
+      workspaceRoot: root,
+      fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+      getInFlight: () => [],
+      createPlannerRunner: () => okPlanner().runClaude,
+      log: () => undefined,
+      now: () => NOW,
+      fetchTriageIssues: async () => [
+        healthIssue({ id: "t1", createdAt: RECENT }),
+        healthIssue({ id: "t2", createdAt: STALE }),
+      ],
+      fetchResidualIssues: async () => [
+        healthIssue({ id: "r1", title: "[track:abc] residual" }),
+        healthIssue({ id: "r2", title: "plain" }),
+      ],
+      getReviewRoundDepth: async () => 3 as number | null,
+      getHotFileGrowth: async () =>
+        ({
+          topFileChurnFraction: 0.7,
+          godFileConcentration: "high",
+        }) as HotFileGrowth | null,
+    });
+
+    it("completes (status ok) when all four health deps are wired", async () => {
+      const root = mkdtempSync(join(tmpdir(), "symph-shadow-health-"));
+      try {
+        const result = await runStandingPlanShadowTick(fullHealthDeps(root));
+        expect(result.status).toBe("ok");
+        expect((await loadStandingPlan(root))?.revision).toBe(1);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it("completes (status ok) when no health deps are wired (back-compat)", async () => {
+      const root = mkdtempSync(join(tmpdir(), "symph-shadow-health-"));
+      try {
+        // No fetchTriageIssues/fetchResidualIssues/etc. → health is omitted entirely,
+        // and the tick still records a plan (the prompt is byte-unchanged).
+        const result = await runStandingPlanShadowTick({
+          config: triageConfig(),
+          workspaceRoot: root,
+          fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+          getInFlight: () => [],
+          createPlannerRunner: () => okPlanner().runClaude,
+          log: () => undefined,
+          now: () => NOW,
+        });
+        expect(result.status).toBe("ok");
+        expect((await loadStandingPlan(root))?.revision).toBe(1);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it("a health-fetch throw degrades to no health and the tick still completes", async () => {
+      const root = mkdtempSync(join(tmpdir(), "symph-shadow-health-"));
+      try {
+        // fetchTriageIssues throws → triageIntake null → buildQueueHealth undefined →
+        // health absent. The tick must NOT throw and must still record a plan.
+        const result = await runStandingPlanShadowTick({
+          ...fullHealthDeps(root),
+          fetchTriageIssues: async () => {
+            throw new Error("tracker down");
+          },
+        });
+        expect(result.status).toBe("ok");
+        expect((await loadStandingPlan(root))?.revision).toBe(1);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
   });
 });
 

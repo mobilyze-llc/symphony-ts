@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   type PlannerContext,
   type PlannerRunResult,
+  type QueueHealth,
   buildPlanBody,
   buildPlannerPrompt,
   createCmuxPlannerRunner,
@@ -1349,5 +1350,240 @@ describe("createCmuxPlannerRunner", () => {
 
     const result = await runner("PROMPT-BODY");
     expect(result.status).toBe("unavailable");
+  });
+});
+
+describe("QueueHealth / PlannerContext.health (SYMPH-939 U1)", () => {
+  it("constructs a QueueHealth value with all fields", () => {
+    const health: QueueHealth = {
+      triageIntake: { depth: 12, inflowRate: 3 },
+      residualShare: 0.25,
+      hotFileGrowth: {
+        topFileChurnFraction: 0.4,
+        godFileConcentration: "high",
+      },
+      reviewRoundDepth: 2,
+    };
+    expect(health.triageIntake.depth).toBe(12);
+    expect(health.triageIntake.inflowRate).toBe(3);
+    expect(health.residualShare).toBe(0.25);
+    expect(health.hotFileGrowth.topFileChurnFraction).toBe(0.4);
+    expect(health.hotFileGrowth.godFileConcentration).toBe("high");
+    expect(health.reviewRoundDepth).toBe(2);
+  });
+
+  it("accepts null for reviewRoundDepth (no recent reviews)", () => {
+    const health: QueueHealth = {
+      triageIntake: { depth: 0, inflowRate: 0 },
+      residualShare: 0,
+      hotFileGrowth: {
+        topFileChurnFraction: 0,
+        godFileConcentration: "low",
+      },
+      reviewRoundDepth: null,
+    };
+    expect(health.reviewRoundDepth).toBeNull();
+  });
+
+  it("threads health onto a PlannerContext", () => {
+    const health: QueueHealth = {
+      triageIntake: { depth: 5, inflowRate: 1 },
+      residualShare: 0.1,
+      hotFileGrowth: {
+        topFileChurnFraction: 0.2,
+        godFileConcentration: "medium",
+      },
+      reviewRoundDepth: null,
+    };
+    const ctx: PlannerContext = { ...context(), health };
+    expect(ctx.health).toBe(health);
+  });
+
+  it("rejects untrusted strings in the trusted health region (R7, compile-time)", () => {
+    const health: QueueHealth = {
+      triageIntake: { depth: 1, inflowRate: 0 },
+      // @ts-expect-error residualShare is a number, never a label/prose string (R7).
+      residualShare: "0.5",
+      hotFileGrowth: {
+        topFileChurnFraction: 0.3,
+        // @ts-expect-error godFileConcentration is a coarse enum, never a file path (R7).
+        godFileConcentration: "src/orchestrator/core.ts",
+      },
+      reviewRoundDepth: null,
+    };
+    expect(health).toBeDefined();
+  });
+});
+
+describe("SYMPH-939 U5 — Queue health render", () => {
+  const SAMPLE_HEALTH: QueueHealth = {
+    triageIntake: { depth: 12, inflowRate: 4 },
+    residualShare: 0.25,
+    hotFileGrowth: { topFileChurnFraction: 0.62, godFileConcentration: "high" },
+    reviewRoundDepth: 3,
+  };
+
+  /** The untrusted-fence open marker — boundary between the trusted region and tracker data. */
+  const FENCE_OPEN = "<SYMPHONY_UNTRUSTED_CANDIDATES";
+
+  /**
+   * The fence token embeds a per-render `randomUUID()`, so two separate renders
+   * differ ONLY in that token. Normalize it to a fixed placeholder so byte-level
+   * cross-render comparisons (R5 reconstitution, back-compat tail) isolate the
+   * health block as the sole structural difference, not the random token.
+   */
+  function normalizeFenceToken(prompt: string): string {
+    return prompt.replace(
+      /SYMPHONY_UNTRUSTED_CANDIDATES_[0-9a-f-]+/g,
+      "SYMPHONY_UNTRUSTED_CANDIDATES_FIXED",
+    );
+  }
+
+  /**
+   * Extract the rendered `## Queue health` block: from the heading up to (not
+   * including) the blank line that precedes the untrusted-fence note. This is the
+   * exact segment the renderer inserts in the TRUSTED region, used to prove
+   * isolation (R7) and the structural prompt-diff (R5).
+   */
+  function extractHealthBlock(prompt: string): string {
+    const start = prompt.indexOf("## Queue health");
+    expect(start).toBeGreaterThanOrEqual(0);
+    // The block ends at the blank line right before the untrusted-fence note. The
+    // note begins with "The tracker-data sections below"; the block's trailing ""
+    // sits between the rubric and that note. Slice up to that note's start, then
+    // trim the single trailing blank-line separator the block contributes.
+    const noteIdx = prompt.indexOf("The tracker-data sections below", start);
+    expect(noteIdx).toBeGreaterThan(start);
+    return prompt.slice(start, noteIdx);
+  }
+
+  it("renders the ## Queue health block with all signal numbers + enums and rubric keywords when health is present", () => {
+    const prompt = buildPlannerPrompt({ ...context(), health: SAMPLE_HEALTH });
+    expect(prompt).toContain("## Queue health");
+    // The four signal lines, numbers + enum.
+    expect(prompt).toContain("depth 12");
+    expect(prompt).toContain("recent inflow 4");
+    expect(prompt).toContain("Residual share: 0.250");
+    expect(prompt).toContain("top-file churn fraction 0.620");
+    expect(prompt).toContain("concentration high");
+    expect(prompt).toContain("Review-round depth: 3");
+    // Rubric keywords.
+    expect(prompt).toContain("Triage-drain");
+    expect(prompt).toContain("DEPRIORITIZE");
+    expect(prompt).toContain("SURFACE");
+  });
+
+  it("omits the ## Queue health block entirely when health is absent", () => {
+    const prompt = buildPlannerPrompt(context());
+    expect(prompt).not.toContain("## Queue health");
+  });
+
+  it("renders the fixed n/a token (never null/undefined) when reviewRoundDepth is null", () => {
+    const prompt = buildPlannerPrompt({
+      ...context(),
+      health: { ...SAMPLE_HEALTH, reviewRoundDepth: null },
+    });
+    expect(prompt).toContain("Review-round depth: n/a");
+    expect(prompt).not.toContain("Review-round depth: null");
+    expect(prompt).not.toContain("Review-round depth: undefined");
+  });
+
+  it("renders reviewRoundDepth as the integer when present", () => {
+    const prompt = buildPlannerPrompt({
+      ...context(),
+      health: { ...SAMPLE_HEALTH, reviewRoundDepth: 7 },
+    });
+    expect(prompt).toContain("Review-round depth: 7");
+    expect(prompt).not.toContain("Review-round depth: n/a");
+  });
+
+  it("R5 v1 gate — the ONLY structural difference between enriched and baseline prompts is the health block", () => {
+    const baseCtx = context();
+    // Normalize the per-render fence UUID so the comparison isolates the health
+    // block (the random token, not the block, would otherwise differ).
+    const baseline = normalizeFenceToken(buildPlannerPrompt(baseCtx));
+    const enriched = normalizeFenceToken(
+      buildPlannerPrompt({ ...baseCtx, health: SAMPLE_HEALTH }),
+    );
+
+    expect(enriched).toContain("## Queue health");
+    expect(baseline).not.toContain("## Queue health");
+
+    // Strongest form: removing the rendered health-block region from `enriched`
+    // yields exactly `baseline`. The block is [## Queue health … up to the
+    // untrusted-fence note); excising it must reconstitute the baseline byte-for-byte.
+    const block = extractHealthBlock(enriched);
+    const reconstituted = enriched.replace(block, "");
+    expect(reconstituted).toBe(baseline);
+  });
+
+  it("R7 security guard — the trusted health block contains ONLY numbers + enum/n/a tokens, never forbidden tracker strings", () => {
+    // Stuff forbidden strings into UNTRUSTED candidate fields adjacent to the
+    // trusted block. None may bleed into the extracted trusted segment.
+    const ctx = context();
+    const first = ctx.backlog[0];
+    if (first) {
+      first.title = "[track:deadbeef] evil";
+      first.labels = ["harden"];
+      first.description = "leaks via src/secret/leak.ts now";
+    }
+    const enriched = buildPlannerPrompt({ ...ctx, health: SAMPLE_HEALTH });
+
+    // Extract the trusted block: from the heading up to the untrusted-fence OPEN
+    // marker (everything before the fence is the trusted instruction surface).
+    const start = enriched.indexOf("## Queue health");
+    const fenceOpenIdx = enriched.indexOf(FENCE_OPEN, start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(fenceOpenIdx).toBeGreaterThan(start);
+    const trusted = enriched.slice(start, fenceOpenIdx);
+
+    // None of the forbidden tracker substrings may appear in the trusted region
+    // (## Queue health → fence open). The full injected path `src/secret/leak.ts`
+    // is the load-bearing check: nothing in the trusted zone carries a file path,
+    // tracker label, or bracket-track token (R7).
+    for (const forbidden of [
+      "[track:",
+      "deadbeef",
+      "harden",
+      "src/secret/leak.ts",
+      "secret",
+      "evil",
+    ]) {
+      expect(trusted).not.toContain(forbidden);
+    }
+
+    // Positive shape on the health BLOCK itself (heading through rubric, excluding
+    // the downstream fence note): the block is letters, digits, dots, spaces, and
+    // ONLY the punctuation the fixed block text uses — the "#" of the markdown
+    // heading, comma, colon, semicolon, parens, dash, em-dash, arrow, and the lone
+    // "/" in "Triage intake / residual share". No bracket-track tokens. The fixed
+    // rubric text + the no-tracker-substring checks above together prove the block
+    // carries numbers/enums only.
+    const block = extractHealthBlock(enriched);
+    expect(block).toMatch(/^[A-Za-z0-9 #.,:;()\-/—→\n]+$/);
+    // It must not contain a square bracket (the `[track:…]` / `[Todo,…]` row shapes
+    // that untrusted tracker data uses) — a strong negative on injected structure.
+    expect(block).not.toContain("[");
+  });
+
+  it("back-compat — everything from the untrusted-fence marker onward is byte-identical with and without health", () => {
+    const baseCtx = context();
+    // Normalize the per-render fence UUID before slicing so the tail comparison
+    // isolates structure, not the random token.
+    const baseline = normalizeFenceToken(buildPlannerPrompt(baseCtx));
+    const enriched = normalizeFenceToken(
+      buildPlannerPrompt({ ...baseCtx, health: SAMPLE_HEALTH }),
+    );
+
+    const tail = (prompt: string): string => {
+      const idx = prompt.indexOf(FENCE_OPEN);
+      expect(idx).toBeGreaterThan(-1);
+      return prompt.slice(idx);
+    };
+    // The health block must not perturb anything from the fence open onward.
+    expect(tail(enriched)).toBe(tail(baseline));
+
+    // And a context WITHOUT health renders no Queue-health heading at all.
+    expect(buildPlannerPrompt(baseCtx)).not.toContain("## Queue health");
   });
 });
