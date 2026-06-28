@@ -867,6 +867,8 @@ describe("SYMPH-939 health signals", () => {
   const RECENT = "2026-06-26T00:00:00.000Z";
   // 30 days before now — outside the 7-day inflow window.
   const STALE = "2026-05-28T00:00:00.000Z";
+  // 1 minute AFTER now — a future-dated createdAt (clock skew / non-server data).
+  const FUTURE = new Date(NOW_MS + 60_000).toISOString();
 
   describe("computeTriageIntake", () => {
     it("reports depth and counts only recent createdAt as inflow", () => {
@@ -900,6 +902,19 @@ describe("SYMPH-939 health signals", () => {
       expect(computeTriageIntake([], NOW_MS)).toEqual({
         depth: 0,
         inflowRate: 0,
+      });
+    });
+
+    it("counts a future-dated createdAt in depth but NOT in inflow (negative age is not recent)", () => {
+      // A createdAt AFTER nowMs (clock skew / non-server data) yields a negative age,
+      // which must NOT pass the past-bounded inflow window and inflate the signal.
+      const issues = [
+        healthIssue({ id: "a", createdAt: RECENT }),
+        healthIssue({ id: "b", createdAt: FUTURE }),
+      ];
+      expect(computeTriageIntake(issues, NOW_MS)).toEqual({
+        depth: 2,
+        inflowRate: 1,
       });
     });
   });
@@ -994,6 +1009,49 @@ describe("SYMPH-939 health signals", () => {
           residualShare: 0.25,
           hotFileGrowth: null,
           reviewRoundDepth: 3,
+        }),
+      ).toBeUndefined();
+    });
+
+    it("returns undefined when a core numeric is non-finite (NaN/Infinity → health absent, never the trusted block)", () => {
+      // A non-finite numeric would otherwise render into the trusted "## Queue health"
+      // block (R7) and throw renderQueueHealthBlock's .toFixed(3) inside the
+      // fire-and-forget tick. It must degrade to health-absent instead.
+      expect(
+        buildQueueHealth({
+          triageIntake: { depth: 5, inflowRate: 2 },
+          residualShare: Number.NaN,
+          hotFileGrowth: HOT,
+          reviewRoundDepth: 3,
+        }),
+      ).toBeUndefined();
+      expect(
+        buildQueueHealth({
+          triageIntake: { depth: Number.POSITIVE_INFINITY, inflowRate: 2 },
+          residualShare: 0.25,
+          hotFileGrowth: HOT,
+          reviewRoundDepth: 3,
+        }),
+      ).toBeUndefined();
+      // A non-finite hot-file fraction is equally rejected.
+      expect(
+        buildQueueHealth({
+          triageIntake: { depth: 5, inflowRate: 2 },
+          residualShare: 0.25,
+          hotFileGrowth: {
+            topFileChurnFraction: Number.NaN,
+            godFileConcentration: "high",
+          },
+          reviewRoundDepth: 3,
+        }),
+      ).toBeUndefined();
+      // A non-finite (non-null) reviewRoundDepth is rejected; null stays a valid reading.
+      expect(
+        buildQueueHealth({
+          triageIntake: { depth: 5, inflowRate: 2 },
+          residualShare: 0.25,
+          hotFileGrowth: HOT,
+          reviewRoundDepth: Number.POSITIVE_INFINITY,
         }),
       ).toBeUndefined();
     });

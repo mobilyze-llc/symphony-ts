@@ -133,8 +133,11 @@ export const RESIDUAL_TRACK_MARKER = "[track:";
  * Shape a Triage-intake reading (SYMPH-939) from the Triage-state issue population:
  * `depth` is the total count; `inflowRate` is the count created within
  * TRIAGE_INFLOW_WINDOW_MS before `nowMs`. Issue.createdAt is `string | null` — null /
- * unparseable timestamps are skipped (they never count toward inflow). Pure: the caller
- * owns the (best-effort) fetch and degrades a throw to null.
+ * unparseable timestamps are skipped (they never count toward inflow). A FUTURE-dated
+ * timestamp (createdMs > nowMs, e.g. clock skew or non-server data) is likewise NOT
+ * recent inflow: the window is constrained to the past (ageMs >= 0), so a negative age
+ * cannot inflate the trusted queue-health signal. Pure: the caller owns the
+ * (best-effort) fetch and degrades a throw to null.
  */
 export function computeTriageIntake(
   issues: Issue[],
@@ -149,7 +152,8 @@ export function computeTriageIntake(
     if (Number.isNaN(createdMs)) {
       continue;
     }
-    if (nowMs - createdMs <= TRIAGE_INFLOW_WINDOW_MS) {
+    const ageMs = nowMs - createdMs;
+    if (ageMs >= 0 && ageMs <= TRIAGE_INFLOW_WINDOW_MS) {
       inflowRate += 1;
     }
   }
@@ -186,6 +190,13 @@ export function computeResidualShare(issues: Issue[]): number {
  * `reviewRoundDepth` is carried as-is (its `null` is a legitimate "no recent reviews"
  * reading, not a missing signal). Any core part being null → `undefined` (health absent:
  * a tracker error degrades to no health, and the tick still completes).
+ *
+ * NON-FINITE DEFENSE (R7 + fire-and-forget never-throws): a `NaN`/`Infinity` in any
+ * RENDERED numeric would otherwise reach the TRUSTED `## Queue health` prompt block
+ * (e.g. "Residual share: NaN", an R7 leak) and would throw inside renderQueueHealthBlock's
+ * `.toFixed(3)` — inside the fire-and-forget tick. Not reachable today, but any non-finite
+ * core numeric degrades to health-absent (`undefined`) so it can never reach the trusted
+ * block or throw the renderer.
  */
 export function buildQueueHealth(parts: {
   triageIntake: TriageIntakeHealth | null;
@@ -199,6 +210,15 @@ export function buildQueueHealth(parts: {
     triageIntake === null ||
     residualShare === null ||
     hotFileGrowth === null
+  ) {
+    return undefined;
+  }
+  if (
+    !Number.isFinite(triageIntake.depth) ||
+    !Number.isFinite(triageIntake.inflowRate) ||
+    !Number.isFinite(residualShare) ||
+    !Number.isFinite(hotFileGrowth.topFileChurnFraction) ||
+    (reviewRoundDepth !== null && !Number.isFinite(reviewRoundDepth))
   ) {
     return undefined;
   }
