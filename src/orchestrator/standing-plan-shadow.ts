@@ -7,10 +7,13 @@ import {
   measurePlannerCommentEnrichment,
 } from "../agent/planner-comment-curation.js";
 import type {
+  HotFileGrowth,
   PlannerContext,
   PlannerInFlight,
   PlannerPrInfo,
   PlannerRunResult,
+  QueueHealth,
+  TriageIntakeHealth,
   TriagePlannerDeps,
 } from "../agent/triage-planner.js";
 import { runTriagePlanner } from "../agent/triage-planner.js";
@@ -44,6 +47,13 @@ export interface AssembleShadowPlannerContextInput {
   envelope: PlanEnvelope;
   openPrs?: PlannerPrInfo[];
   recentlyMerged?: PlannerPrInfo[];
+  /**
+   * Pre-computed per-queue health (SYMPH-939). Computed by the async caller
+   * (runStandingPlanShadowTick) from injected deps and passed into this pure,
+   * synchronous assembler — which only threads it onto `context.health`. Absent →
+   * `health` omitted (back-compat).
+   */
+  triageHealthInput?: QueueHealth;
 }
 
 export function assembleShadowPlannerContext(
@@ -88,6 +98,135 @@ export function assembleShadowPlannerContext(
     openPrs: input.openPrs ?? [],
     recentlyMerged: input.recentlyMerged ?? [],
     envelope: input.envelope,
+    ...(input.triageHealthInput === undefined
+      ? {}
+      : { health: input.triageHealthInput }),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Per-queue health signals (SYMPH-939)
+//
+// runStandingPlanShadowTick computes a QueueHealth bundle from the injected,
+// best-effort deps on StandingPlanShadowTickDeps and threads it into the assembled
+// planner context. Each read is independently wrapped so a throw degrades to a null
+// part — this tick is fire-and-forget and must NEVER break the poll. The pure
+// shapers below are exported for direct unit testing (deterministic, no I/O).
+// ---------------------------------------------------------------------------
+
+/**
+ * Recent-inflow window for Triage-intake (SYMPH-939): a Triage issue counts toward
+ * `inflowRate` when its createdAt falls within this many ms before now. v1 bound — a
+ * 7-day window; re-tune from observed intake once the signal is calibrated.
+ */
+export const TRIAGE_INFLOW_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Residual-fingerprint title marker (SYMPH-939). The tracker stamps `[track:<fingerprint>]`
+ * into the TITLE of every residual/tracked issue it auto-files (see
+ * src/tracker/linear-client.ts:1163), so the residual share is the fraction of the
+ * fetched population whose title contains this prefix.
+ */
+export const RESIDUAL_TRACK_MARKER = "[track:";
+
+/**
+ * Shape a Triage-intake reading (SYMPH-939) from the Triage-state issue population:
+ * `depth` is the total count; `inflowRate` is the count created within
+ * TRIAGE_INFLOW_WINDOW_MS before `nowMs`. Issue.createdAt is `string | null` — null /
+ * unparseable timestamps are skipped (they never count toward inflow). A FUTURE-dated
+ * timestamp (createdMs > nowMs, e.g. clock skew or non-server data) is likewise NOT
+ * recent inflow: the window is constrained to the past (ageMs >= 0), so a negative age
+ * cannot inflate the trusted queue-health signal. Pure: the caller owns the
+ * (best-effort) fetch and degrades a throw to null.
+ */
+export function computeTriageIntake(
+  issues: Issue[],
+  nowMs: number,
+): TriageIntakeHealth {
+  let inflowRate = 0;
+  for (const issue of issues) {
+    if (issue.createdAt === null) {
+      continue;
+    }
+    const createdMs = Date.parse(issue.createdAt);
+    if (Number.isNaN(createdMs)) {
+      continue;
+    }
+    const ageMs = nowMs - createdMs;
+    if (ageMs >= 0 && ageMs <= TRIAGE_INFLOW_WINDOW_MS) {
+      inflowRate += 1;
+    }
+  }
+  return { depth: issues.length, inflowRate };
+}
+
+/**
+ * Compute the residual share (SYMPH-939): the fraction of the fetched population whose
+ * TITLE contains RESIDUAL_TRACK_MARKER. An empty population (0 issues) reads as `0` — a
+ * valid "no residual" reading, NOT a degradation; only a fetch FAILURE (handled by the
+ * caller) reads as null.
+ *
+ * REGRESSION GUARD (the original-defect guard): this MUST be fed from the state-aware
+ * Backlog/Triage fetch (deps.fetchResidualIssues), NOT from the candidate backlog
+ * (deps.fetchCandidates / context.backlog). The candidate backlog is the activeStates
+ * set, which excludes Backlog/Triage and would read ~0 residual. Keeping this a pure
+ * function over an explicitly-passed population is what makes the wrong source a
+ * compile/test-visible choice rather than a silent miswire.
+ */
+export function computeResidualShare(issues: Issue[]): number {
+  if (issues.length === 0) {
+    return 0;
+  }
+  const residual = issues.filter((issue) =>
+    issue.title.includes(RESIDUAL_TRACK_MARKER),
+  ).length;
+  return residual / issues.length;
+}
+
+/**
+ * Assemble the QueueHealth bundle (SYMPH-939) from the four independently-computed parts.
+ * Returns a QueueHealth ONLY when the three CORE signals — triageIntake, residualShare,
+ * and hotFileGrowth — are all non-null (the plan's QueueHealth type requires them).
+ * `reviewRoundDepth` is carried as-is (its `null` is a legitimate "no recent reviews"
+ * reading, not a missing signal). Any core part being null → `undefined` (health absent:
+ * a tracker error degrades to no health, and the tick still completes).
+ *
+ * NON-FINITE DEFENSE (R7 + fire-and-forget never-throws): a `NaN`/`Infinity` in any
+ * RENDERED numeric would otherwise reach the TRUSTED `## Queue health` prompt block
+ * (e.g. "Residual share: NaN", an R7 leak) and would throw inside renderQueueHealthBlock's
+ * `.toFixed(3)` — inside the fire-and-forget tick. Not reachable today, but any non-finite
+ * core numeric degrades to health-absent (`undefined`) so it can never reach the trusted
+ * block or throw the renderer.
+ */
+export function buildQueueHealth(parts: {
+  triageIntake: TriageIntakeHealth | null;
+  residualShare: number | null;
+  hotFileGrowth: HotFileGrowth | null;
+  reviewRoundDepth: number | null;
+}): QueueHealth | undefined {
+  const { triageIntake, residualShare, hotFileGrowth, reviewRoundDepth } =
+    parts;
+  if (
+    triageIntake === null ||
+    residualShare === null ||
+    hotFileGrowth === null
+  ) {
+    return undefined;
+  }
+  if (
+    !Number.isFinite(triageIntake.depth) ||
+    !Number.isFinite(triageIntake.inflowRate) ||
+    !Number.isFinite(residualShare) ||
+    !Number.isFinite(hotFileGrowth.topFileChurnFraction) ||
+    (reviewRoundDepth !== null && !Number.isFinite(reviewRoundDepth))
+  ) {
+    return undefined;
+  }
+  return {
+    triageIntake,
+    residualShare,
+    hotFileGrowth,
+    reviewRoundDepth,
   };
 }
 
@@ -323,6 +462,23 @@ export interface StandingPlanShadowTickDeps {
     "operatorAllowlist" | "serviceAccounts"
   >;
   /**
+   * SYMPH-939 health signals — all OPTIONAL and injected (mirroring fetchIssueComments).
+   * When wired, runStandingPlanShadowTick computes QueueHealth from them; when absent,
+   * health is omitted and the prompt is byte-unchanged. Each is independently best-effort.
+   *
+   * Production binding (out of scope for this PR — see runtime-host.ts:6171) wires these
+   * to fetchIssuesByStates(['Triage']) / fetchIssuesByStates(['Backlog','Triage']) / the
+   * persisted review journal / () => readHotFileGrowth({ repoPath: resolveRuntimeRepoRoot() }).
+   */
+  /** Fetch Triage-state issues for Triage-intake (depth + recent inflow). */
+  fetchTriageIssues?: () => Promise<Issue[]>;
+  /** Fetch the Backlog+Triage population for residual-share (the [track:] marker fraction). */
+  fetchResidualIssues?: () => Promise<Issue[]>;
+  /** Read the persisted review-round depth (rounds_per_cycle); null when no recent reviews. */
+  getReviewRoundDepth?: () => Promise<number | null>;
+  /** Read hot-file growth (bound thunk over the git-churn reader); null on any read failure. */
+  getHotFileGrowth?: () => Promise<HotFileGrowth | null>;
+  /**
    * Bypass the heartbeat cadence and re-plan now (SYMPH-787/789): a re-plan
    * trigger predicate tripped, or an operator modify_plan intent landed.
    */
@@ -394,10 +550,55 @@ export async function runStandingPlanShadowTick(
     // consumer), so there is nothing to warn about here.
 
     const candidates = await deps.fetchCandidates();
+
+    // SYMPH-939 health signals: compute each part independently and best-effort.
+    // EVERY read is wrapped so a throw degrades to null — this tick is fire-and-forget
+    // and must never break the poll. A null in any of the three CORE parts (triage
+    // intake / residual / hot-file) makes buildQueueHealth return undefined → health is
+    // simply omitted from the context (prompt byte-unchanged), and the tick continues.
+    let triageIntake: TriageIntakeHealth | null = null;
+    try {
+      const triageIssues = (await deps.fetchTriageIssues?.()) ?? null;
+      triageIntake =
+        triageIssues === null ? null : computeTriageIntake(triageIssues, nowMs);
+    } catch {
+      triageIntake = null;
+    }
+    let residualShare: number | null = null;
+    try {
+      // REGRESSION GUARD: residual is fed from the state-aware Backlog/Triage fetch,
+      // NOT from `candidates`/`context.backlog` (the activeStates set excludes
+      // Backlog/Triage and would read ~0). See computeResidualShare's doc.
+      const residualIssues = (await deps.fetchResidualIssues?.()) ?? null;
+      residualShare =
+        residualIssues === null ? null : computeResidualShare(residualIssues);
+    } catch {
+      residualShare = null;
+    }
+    let hotFileGrowth: HotFileGrowth | null = null;
+    try {
+      hotFileGrowth = (await deps.getHotFileGrowth?.()) ?? null;
+    } catch {
+      hotFileGrowth = null;
+    }
+    let reviewRoundDepth: number | null = null;
+    try {
+      reviewRoundDepth = (await deps.getReviewRoundDepth?.()) ?? null;
+    } catch {
+      reviewRoundDepth = null;
+    }
+    const health = buildQueueHealth({
+      triageIntake,
+      residualShare,
+      hotFileGrowth,
+      reviewRoundDepth,
+    });
+
     let context = assembleShadowPlannerContext({
       candidates,
       inFlight: deps.getInFlight(),
       envelope: config.envelope,
+      ...(health === undefined ? {} : { triageHealthInput: health }),
     });
     // Curated-comment enrichment (SYMPH-896): default-off; when an operator opts
     // in AND a comment fetch is wired, inject curated comments into the planner
