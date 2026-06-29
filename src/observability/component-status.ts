@@ -10,10 +10,10 @@
  * config plus cheap runtime presence checks. What is NOT detectable cheaply
  * (and therefore intentionally absent): live Slack webhook health (a dead
  * webhook URL still counts as "enabled" until a post fails), Linear API
- * availability for the watchdog filer, and the local judge endpoint actually
- * answering (the AC gate / spec-fidelity / pause-triage lanes are reported
- * from config; a flapping endpoint surfaces via the ac_gate_fail_open alert
- * stream, not this section).
+ * availability for the watchdog filer, the local judge endpoint actually
+ * answering for AC/pause triage, and crabrunner substrate health for the
+ * report-only spec-fidelity lane. Those surface at lane dispatch time rather
+ * than in this config projection.
  */
 
 import type { ResolvedWorkflowConfig } from "../config/types.js";
@@ -115,19 +115,14 @@ export function buildComponentStatuses(
     components.ac_gate = { enabled: true };
   }
 
-  // Spec-fidelity judge lane (SYMPH-343): advisory; same local-judge
-  // endpoint dependency as the AC gate.
+  // Spec-fidelity judge lane (SYMPH-971): report-only adjacent crabrunner lane.
+  // Backend absence/version skew is a dispatch-time fail-open condition, not a
+  // local endpoint prerequisite here.
   if (!config.specFidelity.enabled) {
     components.spec_fidelity = {
       enabled: false,
       degraded_reason:
         "spec_fidelity.enabled=false; review exits carry no independent spec verdict",
-    };
-  } else if (!pauseTriageConfigured) {
-    components.spec_fidelity = {
-      enabled: true,
-      degraded_reason:
-        "spec_fidelity enabled but pause_triage endpoint unset; judge lane fails open",
     };
   } else {
     components.spec_fidelity = { enabled: true };

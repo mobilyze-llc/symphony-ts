@@ -6239,7 +6239,7 @@ describe("orchestrator core", () => {
             concurrency: null,
             transitions: {
               onComplete: null,
-              onRework: "review",
+              onRework: null,
               onApprove: null,
             },
           },
@@ -6260,7 +6260,7 @@ describe("orchestrator core", () => {
       postComment: async (_id, body) => {
         comments.push(body);
       },
-      runSpecFidelityJudge: async (evidence) => {
+      runSpecFidelityLane: async (evidence) => {
         judged.push(evidence.issueIdentifier);
         return {
           verdict: "rework",
@@ -6289,13 +6289,19 @@ describe("orchestrator core", () => {
 
     expect(
       comments.some((body) =>
-        body.includes("Spec-fidelity verdict (independent judge): rework"),
+        body.includes("Spec-fidelity report-only verdict: rework"),
       ),
     ).toBe(true);
     const journal = orchestrator
       .getState()
       .dispatcherRunJournal.filter((e) => e.kind === "spec_fidelity");
     expect(journal).toHaveLength(1);
+    expect(journal[0]?.metadata).toMatchObject({
+      status: "completed",
+      verdict: "non_gating",
+      original_verdict: "rework",
+      reason: "report_only_symph_971",
+    });
     // No merge candidate was promoted (the review stage does not transition to
     // merge), so the verdict carries no reviewed head and stays purely advisory
     // — nothing for the merge actuator to correlate or hold (SYMPH-758).
@@ -6379,7 +6385,7 @@ describe("orchestrator core", () => {
         verdict: "pass" as const,
         feedback: "All criteria falsifiable.",
       }),
-      runSpecFidelityJudge: async (evidence) => {
+      runSpecFidelityLane: async (evidence) => {
         judgedAcs.push(evidence.acceptanceCriteria);
         return { verdict: "pass", findings: "AC1 PASS: covered by diff." };
       },
@@ -6530,7 +6536,7 @@ describe("orchestrator core", () => {
         verdict: "pass" as const,
         feedback: "unused on the fast-track path",
       }),
-      runSpecFidelityJudge: async (evidence) => {
+      runSpecFidelityLane: async (evidence) => {
         judgedAcs.push(evidence.acceptanceCriteria);
         return { verdict: "pass", findings: "AC1 PASS: covered by diff." };
       },
@@ -6644,7 +6650,7 @@ describe("orchestrator core", () => {
         verdict: "pass" as const,
         feedback: "unused on the fast-track path",
       }),
-      runSpecFidelityJudge: async () => {
+      runSpecFidelityLane: async () => {
         judgeCalls += 1;
         // If the judge were (wrongly) invoked with no canonical AC, it would
         // rework — exactly the SYMPH-759 false positive this guards against.
@@ -6781,7 +6787,7 @@ describe("orchestrator core", () => {
       now: () => new Date("2026-03-06T00:00:05.000Z"),
       postComment: async () => {},
       runAcGate: async () => ({ verdict: "pass" as const, feedback: "x" }),
-      runSpecFidelityJudge: async () => ({
+      runSpecFidelityLane: async () => ({
         verdict: "pass",
         findings: "AC1 PASS.",
       }),
@@ -8533,13 +8539,11 @@ describe("live merge actuator (SYMPH-735)", () => {
     });
   }
 
-  it("holds merge actuation when a late spec-fidelity rework lands for the reviewed head (SYMPH-758)", async () => {
-    // End-to-end canary (SYMPH-639 ordering): the review gate passes and
-    // promotes a merge candidate, THEN the advisory spec-fidelity judge
-    // (SYMPH-343) returns `rework` for the SAME reviewed head after the
-    // candidate already exists. The actuator must hold — never enqueue or write
-    // tracker_done — and park for an operator, instead of letting the rework
-    // race behind merge actuation as it did for PR #574.
+  it("keeps SYMPH-971 spec-fidelity lane records report-only for merge actuation", async () => {
+    // The review gate passes and promotes a merge candidate, then the adjacent
+    // spec-fidelity lane returns `rework` for the same reviewed head. SYMPH-971
+    // v1 records the finding as non-gating evidence only; the later enforcement
+    // writer flip owns converting these records into merge holds.
     const reviewResultPath = await writeReviewGateResultFixture();
     const deferred: Array<() => Promise<void>> = [];
     const markReady = vi.fn(async () => {});
@@ -8547,13 +8551,6 @@ describe("live merge actuator (SYMPH-735)", () => {
     const writeTrackerDone = vi.fn(async () => {});
 
     const config = createLiveMergeActuatorConfig();
-    // The advisory judge only fires when the review stage declares an onRework
-    // transition; wire one and enable spec-fidelity so the verdict is recorded.
-    const reviewStage = config.stages?.stages.review;
-    if (reviewStage === undefined) {
-      throw new Error("expected a review stage in the live-actuator config");
-    }
-    reviewStage.transitions.onRework = "review";
     config.specFidelity = { enabled: true };
 
     const orchestrator = new OrchestratorCore({
@@ -8567,7 +8564,7 @@ describe("live merge actuator (SYMPH-735)", () => {
         monitorHandle: { ref: "monitor-1" },
       }),
       now: () => new Date("2026-03-06T00:00:05.000Z"),
-      runSpecFidelityJudge: async () => ({
+      runSpecFidelityLane: async () => ({
         verdict: "rework",
         findings: "AC1 FAIL: named regression test absent from the diff.",
       }),
@@ -8592,8 +8589,8 @@ describe("live merge actuator (SYMPH-735)", () => {
       endedAt: new Date("2026-03-06T00:01:05.000Z"),
     });
 
-    // Drain the deferred verdict task: records spec_fidelity:rework keyed to the
-    // candidate's reviewed head.
+    // Drain the deferred verdict task: records non-gating spec_fidelity evidence
+    // keyed to the candidate's reviewed head.
     await new Promise((resolve) => setTimeout(resolve, 0));
     for (const task of deferred) {
       await task();
@@ -8605,17 +8602,22 @@ describe("live merge actuator (SYMPH-735)", () => {
       .getState()
       .dispatcherRunJournal.find((entry) => entry.kind === "spec_fidelity");
     expect(specEntry?.metadata.reviewed_head_sha).toBe("head-sha");
+    expect(specEntry?.metadata).toMatchObject({
+      status: "completed",
+      verdict: "non_gating",
+      original_verdict: "rework",
+      reason: "report_only_symph_971",
+    });
 
-    // Drive the actuator cycle: it must hold rather than enqueue/merge.
+    // Drive the actuator cycle: report-only spec-fidelity records do not hold.
     await orchestrator.onRetryTimer("1");
 
     const state = orchestrator.getState();
-    expect(enqueue).not.toHaveBeenCalled();
+    expect(enqueue).toHaveBeenCalledTimes(1);
     expect(writeTrackerDone).not.toHaveBeenCalled();
     expect(markReady).not.toHaveBeenCalled();
     expect(state.completed.has("1")).toBe(false);
-    expect(state.failed.has("1")).toBe(true);
-    // Parked specifically for the rework hold, not some unrelated block.
+    expect(state.failed.has("1")).toBe(false);
     expect(
       state.dispatcherRunJournal.some(
         (entry) =>
@@ -8623,7 +8625,7 @@ describe("live merge actuator (SYMPH-735)", () => {
           typeof entry.metadata.reason === "string" &&
           entry.metadata.reason.includes("spec_fidelity_rework"),
       ),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("keys a late spec-fidelity verdict to the round's reviewed head, not a newer candidate (SYMPH-758, council R1 P1)", async () => {
@@ -8655,7 +8657,7 @@ describe("live merge actuator (SYMPH-735)", () => {
         monitorHandle: { ref: "monitor-1" },
       }),
       now: () => new Date("2026-03-06T00:00:05.000Z"),
-      runSpecFidelityJudge: async () => ({
+      runSpecFidelityLane: async () => ({
         verdict: "rework",
         findings: "AC1 FAIL: named regression test absent from the diff.",
       }),
@@ -8966,7 +8968,7 @@ describe("live merge actuator (SYMPH-735)", () => {
       postComment: async (_issueId, body) => {
         comments.push(body);
       },
-      runSpecFidelityJudge: async () => judgePromise,
+      runSpecFidelityLane: async () => judgePromise,
       scheduleDeferred: (task) => {
         deferred.push(task);
       },
@@ -8997,18 +8999,22 @@ describe("live merge actuator (SYMPH-735)", () => {
       status: "completed",
       verdict: "non_gating",
       original_verdict: "rework",
-      reason: "post_completion_tracker_done",
+      reason: "report_only_symph_971",
       reviewed_head_sha: "head-sha",
     });
     expect(
       specEntries.some((entry) => entry.metadata.verdict === "rework"),
     ).toBe(false);
     expect(
-      comments.some((body) => body.includes("non-gating post-completion")),
+      comments.some((body) =>
+        body.includes("Spec-fidelity report-only verdict: rework"),
+      ),
     ).toBe(true);
     expect(
       comments.some((body) =>
-        body.includes("Spec-fidelity verdict (independent judge): rework"),
+        body.includes(
+          ["Spec-fidelity verdict", "(independent judge): rework"].join(" "),
+        ),
       ),
     ).toBe(false);
   });
@@ -16347,7 +16353,7 @@ function createOrchestrator(overrides?: {
   requestTrackerIssueWrite?: OrchestratorCoreOptions["requestTrackerIssueWrite"];
   fileTrackFindings?: OrchestratorCoreOptions["fileTrackFindings"];
   runContinuousFeedback?: OrchestratorCoreOptions["runContinuousFeedback"];
-  runSpecFidelityJudge?: OrchestratorCoreOptions["runSpecFidelityJudge"];
+  runSpecFidelityLane?: OrchestratorCoreOptions["runSpecFidelityLane"];
   scheduleDeferred?: OrchestratorCoreOptions["scheduleDeferred"];
   postComment?: OrchestratorCoreOptions["postComment"];
   writeRunJournalEntry?: OrchestratorCoreOptions["writeRunJournalEntry"];
@@ -16419,8 +16425,8 @@ function createOrchestrator(overrides?: {
     options.runContinuousFeedback = overrides.runContinuousFeedback;
   }
 
-  if (overrides?.runSpecFidelityJudge !== undefined) {
-    options.runSpecFidelityJudge = overrides.runSpecFidelityJudge;
+  if (overrides?.runSpecFidelityLane !== undefined) {
+    options.runSpecFidelityLane = overrides.runSpecFidelityLane;
   }
 
   if (overrides?.scheduleDeferred !== undefined) {
@@ -18128,7 +18134,7 @@ describe("egress sanitization retrofit (SYMPH-421)", () => {
       postComment: async (_id, body) => {
         comments.push(body);
       },
-      runSpecFidelityJudge: async () => ({
+      runSpecFidelityLane: async () => ({
         verdict: "rework",
         findings:
           "AC1 FAIL: diff leaked LINEAR_API_KEY=lin_api_0123456789 and digest 0123456789abcdef0123456789abcdef.",
@@ -18148,7 +18154,7 @@ describe("egress sanitization retrofit (SYMPH-421)", () => {
     await deferred[deferred.length - 1]?.();
 
     const verdictComment = comments.find((body) =>
-      body.includes("Spec-fidelity verdict"),
+      body.includes("Spec-fidelity report-only verdict"),
     );
     expect(verdictComment).toBeDefined();
     expect(verdictComment).toContain("LINEAR_API_KEY=[REDACTED]");

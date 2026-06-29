@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -450,6 +451,161 @@ describe("OrchestratorRuntimeHost", () => {
       ]);
     } finally {
       rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
+  it("assembles spec-fidelity auxiliary evidence from workpad comments, PR body, and commits", async () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), "symph-spec-evidence-"));
+    const binPath = mkdtempSync(join(tmpdir(), "symph-gh-bin-"));
+    const ghPath = join(binPath, "gh");
+    const originalPath = process.env.PATH;
+    try {
+      writeFileSync(
+        ghPath,
+        [
+          "#!/bin/sh",
+          "cat <<'JSON'",
+          JSON.stringify({
+            body: "PR body describes the implementation.",
+            commits: {
+              nodes: [
+                {
+                  oid: "abc123",
+                  messageHeadline: "Add spec fidelity coverage",
+                },
+              ],
+            },
+          }),
+          "JSON",
+          "",
+        ].join("\n"),
+      );
+      chmodSync(ghPath, 0o755);
+      process.env.PATH = `${binPath}${
+        originalPath === undefined ? "" : `:${originalPath}`
+      }`;
+
+      const tracker = createLinearTrackerForPipelineStatus();
+      vi.spyOn(tracker, "fetchIssueComments").mockResolvedValue([
+        {
+          id: "comment-old",
+          body: "## Workpad\nOlder plan.",
+          createdAt: "2026-03-06T00:00:00.000Z",
+          updatedAt: "2026-03-06T00:00:00.000Z",
+          user: null,
+          botActor: null,
+        },
+        {
+          id: "comment-latest",
+          body: "## Workpad\nLatest plan.",
+          createdAt: "2026-03-06T00:01:00.000Z",
+          updatedAt: "2026-03-06T00:05:00.000Z",
+          user: null,
+          botActor: null,
+        },
+        {
+          id: "comment-no-workpad",
+          body: "Operator note.",
+          createdAt: "2026-03-06T00:10:00.000Z",
+          updatedAt: "2026-03-06T00:10:00.000Z",
+          user: null,
+          botActor: null,
+        },
+      ]);
+      const host = new OrchestratorRuntimeHost({
+        config: createConfig(),
+        tracker,
+        createAgentRunner: ({ onEvent }) => {
+          const runner = new FakeAgentRunner();
+          runner.onEvent = onEvent;
+          return runner;
+        },
+      });
+
+      const evidence = await specFidelityHostAccess(
+        host,
+      ).buildSpecFidelityAuxiliaryEvidence({
+        issue: createIssue(),
+        workspacePath,
+      });
+
+      expect(evidence).toEqual({
+        planNarrative: "## Workpad\nLatest plan.",
+        prBody: "PR body describes the implementation.",
+        commits: "- abc123: Add spec fidelity coverage",
+      });
+    } finally {
+      if (originalPath === undefined) {
+        Reflect.deleteProperty(process.env, "PATH");
+      } else {
+        process.env.PATH = originalPath;
+      }
+      rmSync(workspacePath, { recursive: true, force: true });
+      rmSync(binPath, { recursive: true, force: true });
+    }
+  });
+
+  it("fails open for spec-fidelity workpad comment fetch failures", async () => {
+    const tracker = createLinearTrackerForPipelineStatus();
+    vi.spyOn(tracker, "fetchIssueComments").mockRejectedValue(
+      new Error("Linear unavailable"),
+    );
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      createAgentRunner: ({ onEvent }) => {
+        const runner = new FakeAgentRunner();
+        runner.onEvent = onEvent;
+        return runner;
+      },
+    });
+
+    await expect(
+      specFidelityHostAccess(host).fetchLatestWorkpadCommentBody(createIssue()),
+    ).resolves.toBeNull();
+  });
+
+  it("fails open for missing or unparseable gh spec-fidelity PR evidence", async () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), "symph-spec-pr-"));
+    const missingGhPath = mkdtempSync(join(tmpdir(), "symph-no-gh-"));
+    const invalidGhBinPath = mkdtempSync(join(tmpdir(), "symph-bad-gh-"));
+    const invalidGhPath = join(invalidGhBinPath, "gh");
+    const originalPath = process.env.PATH;
+    try {
+      const host = new OrchestratorRuntimeHost({
+        config: createConfig(),
+        tracker: createTracker(),
+        createAgentRunner: ({ onEvent }) => {
+          const runner = new FakeAgentRunner();
+          runner.onEvent = onEvent;
+          return runner;
+        },
+      });
+
+      process.env.PATH = missingGhPath;
+      await expect(
+        specFidelityHostAccess(host).fetchSpecFidelityPrEvidence(workspacePath),
+      ).resolves.toEqual({ prBody: null, commits: null });
+
+      writeFileSync(
+        invalidGhPath,
+        ["#!/bin/sh", "printf '%s\\n' 'not-json'", ""].join("\n"),
+      );
+      chmodSync(invalidGhPath, 0o755);
+      process.env.PATH = invalidGhBinPath;
+
+      await expect(
+        specFidelityHostAccess(host).fetchSpecFidelityPrEvidence(workspacePath),
+      ).resolves.toEqual({ prBody: null, commits: null });
+    } finally {
+      if (originalPath === undefined) {
+        Reflect.deleteProperty(process.env, "PATH");
+      } else {
+        process.env.PATH = originalPath;
+      }
+      rmSync(workspacePath, { recursive: true, force: true });
+      rmSync(missingGhPath, { recursive: true, force: true });
+      rmSync(invalidGhBinPath, { recursive: true, force: true });
     }
   });
 
@@ -10930,6 +11086,27 @@ function createTracker(input?: {
   };
 
   return tracker;
+}
+
+type SpecFidelityHostAccess = {
+  buildSpecFidelityAuxiliaryEvidence(input: {
+    issue: Issue;
+    workspacePath: string;
+  }): Promise<{
+    planNarrative: string | null;
+    prBody: string | null;
+    commits: string | null;
+  }>;
+  fetchLatestWorkpadCommentBody(issue: Issue): Promise<string | null>;
+  fetchSpecFidelityPrEvidence(
+    workspacePath: string,
+  ): Promise<{ prBody: string | null; commits: string | null }>;
+};
+
+function specFidelityHostAccess(
+  host: OrchestratorRuntimeHost,
+): SpecFidelityHostAccess {
+  return host as unknown as SpecFidelityHostAccess;
 }
 
 function createLinearTrackerForPipelineStatus(): LinearTrackerClient {

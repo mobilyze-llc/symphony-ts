@@ -175,10 +175,10 @@ export interface WorkflowMergeActuatorConfig {
 }
 
 /**
- * Spec-fidelity judge lane (SYMPH-343): at review-stage exit the local
- * model renders an independent verdict over the actual diff vs the tagged
- * acceptance criteria. Advisory in this slice (journal + comment); becomes
- * enforcing when SYMPH-355 publishes it as a required commit status.
+ * Spec-fidelity judge lane (SYMPH-971): at review-stage exit an adjacent
+ * crabrunner Opus job renders an independent report-only verdict over the
+ * actual diff vs the tagged acceptance criteria. v1 records journal + comment
+ * evidence only; it emits no commit status and adds no merge-blocking gate.
  */
 export interface WorkflowSpecFidelityConfig {
   enabled: boolean;

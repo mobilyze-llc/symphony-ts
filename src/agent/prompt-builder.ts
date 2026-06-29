@@ -278,7 +278,7 @@ export function buildContinuationPrompt(input: {
         );
         break;
       case "review":
-        // The spec-fidelity judge (SYMPH-343) reads this stage's completion
+        // The spec-fidelity judge lane (SYMPH-971) reads this stage's completion
         // message at review exit and checks it for the live-proof disposition
         // line (SYMPH-377). Document the contract on the very prompt that
         // produces the message the judge reads (SYMPH-767), carrying the

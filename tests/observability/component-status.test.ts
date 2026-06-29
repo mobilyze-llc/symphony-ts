@@ -110,15 +110,13 @@ describe("buildComponentStatuses (SYMPH-407)", () => {
       rateLimitTelemetryPresent: false,
     });
 
-    // Enabled gates with no judge endpoint are permanently fail-open.
+    // AC still needs the local judge endpoint; spec-fidelity is now the
+    // adjacent crabrunner lane and has no pause-triage endpoint prerequisite.
     expect(components.ac_gate).toEqual({
       enabled: true,
       degraded_reason: expect.stringContaining("fails open"),
     });
-    expect(components.spec_fidelity).toEqual({
-      enabled: true,
-      degraded_reason: expect.stringContaining("fails open"),
-    });
+    expect(components.spec_fidelity).toEqual({ enabled: true });
     // Floors set but no telemetry observed: floor fails open.
     expect(components.rate_limit_admission).toEqual({
       enabled: true,

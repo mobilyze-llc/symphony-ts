@@ -360,13 +360,13 @@ export function reduceMergeCandidates(
 }
 
 /**
- * SYMPH-758: report whether a CURRENT spec-fidelity `rework` verdict stands for
- * the candidate's reviewed head. The advisory spec-fidelity judge (SYMPH-343)
- * posts verdicts asynchronously, so a `rework` can race in AFTER a passed review
- * gate has already promoted a merge candidate (the SYMPH-639 canary: a rework
- * landed between enqueue and merge). Correlating verdicts to the candidate by
+ * SYMPH-758: report whether a CURRENT enforcing spec-fidelity `rework` verdict
+ * stands for the candidate's reviewed head. SYMPH-971 v1 writes report-only
+ * `non_gating` records; this reducer path remains for the later enforcement
+ * writer flip, where a `rework` can race in AFTER a passed review gate has
+ * already promoted a merge candidate. Correlating verdicts to the candidate by
  * `reviewed_head_sha` lets the merge actuator hold actuation until the rework is
- * resolved or superseded.
+ * resolved or superseded once enforcement is enabled.
  *
  * "Current" = the LATEST spec-fidelity verdict (in durable journal order) keyed
  * to this candidate's reviewed head is `rework`. A later `pass` for the same
@@ -422,8 +422,8 @@ export function decideMergeActuation(input: {
    * reviewed head (SYMPH-758), derived by {@link hasCurrentSpecFidelityRework}
    * from the durable journal. When true, every merge-advancing action is held
    * (see the gate below). Default false keeps spec-fidelity non-gating in the
-   * absence of a rework — the advisory judge (SYMPH-343) only blocks when it has
-   * actually returned a rework for this commit.
+   * absence of an enforcing rework row. SYMPH-971 report-only rows use
+   * `verdict: "non_gating"` and do not trip this input.
    */
   specFidelityRework?: boolean;
 }): MergeActuatorDecision {
@@ -436,9 +436,10 @@ export function decideMergeActuation(input: {
     return leaseDecision;
   }
 
-  // Spec-fidelity rework gate (SYMPH-758 + SYMPH-766). The advisory judge
-  // (SYMPH-343) posts verdicts asynchronously, so an independent-judge `rework`
-  // can land AFTER a passed review gate promoted — and possibly enqueued — this
+  // Spec-fidelity rework gate (SYMPH-758 + SYMPH-766). This only consumes
+  // explicit enforcing `verdict: "rework"` rows; SYMPH-971 report-only rows are
+  // `non_gating`. Once the later enforcement writer is enabled, a rework can
+  // land AFTER a passed review gate promoted — and possibly enqueued — this
   // candidate. While that rework stands for the reviewed head, SYMPH-758 holds
   // every merge-advancing action (mark_ready, enqueue, tracker_done) so the
   // issue never auto-completes as Done. Placed first, before the MERGED/OPEN
