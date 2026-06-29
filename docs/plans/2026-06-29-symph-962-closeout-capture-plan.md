@@ -15,7 +15,7 @@ execution: code
 
 - **Objective:** Standardize how operator sessions capture durable decisions into structured atoms the backlog planner/auditor consumes as its source of truth — replacing the hand-written handoff document that nobody reliably reads. A human, or any dev agent that reads Linear, sees the one-way projection (structural edges + a one-line note) on the ticket, but neither is a primary v1 consumer.
 - **Product authority:** Eric (operator).
-- **Open blockers:** One hard pre-build gate — confirm the planner actually reads the atom store and that a stored atom can move a candidate (KD3); with the dev agent narrowed out, this is the sole v1 consumer, so a negative result is a stop/redirect, not a planning detail. Before the first measured run, also set the precision / false-positive floor and the per-closeout token budget; the recall threshold and golden-corpus size are v1.1 (the corpus needs real runs to seed) — see Outstanding Questions. Builds on Phase-0 activation (done) and the canonical-store decision in `docs/plans/2026-06-28-backlog-intelligence-plan.md` §4.3.
+- **Open blockers:** One hard pre-build gate — the **marginal-value** question: does closeout produce edges/comments the live Phase-0 enrichment isn't already feeding the planner? The consumer path itself is already live (closeout writes the projection; enrichment reads it), so if Phase-0 already captures what the planner needs, 962 is not worth building — a negative result is a stop/redirect, not a planning detail. Before the first measured run, also set the precision / false-positive floor and the per-closeout token budget; the recall threshold and golden-corpus size are v1.1 (the corpus needs real runs to seed) — see Outstanding Questions. Builds on Phase-0 activation (done) and the canonical-store decision in `docs/plans/2026-06-28-backlog-intelligence-plan.md` §4.3.
 
 ---
 
@@ -23,7 +23,7 @@ execution: code
 
 ### Summary
 
-A standardized operator-session closeout that distills durable decisions from the session's **durable transcript** (not its compacted live context) into typed atoms in a git-committed markdown store. Ticket-level conclusions project one-way to Linear as native edges plus one concise comment; the operator brief becomes a digest regenerated from the atoms. Because the Phase-0 gate collapsed the extraction engine, this is a lightweight emit into surfaces that already exist, not a new subsystem.
+A standardized operator-session closeout that distills durable decisions from the session's **durable transcript** (not its compacted live context) into typed atoms in a git-committed markdown store. Ticket-level conclusions project one-way to Linear as native edges plus one concise comment; the operator brief becomes a digest regenerated from the atoms. Because the Phase-0 gate collapsed the extraction engine, this is a lightweight emit into surfaces that already exist, not a new subsystem. "Session closeout" is a **system-performed sweep — a decoupled scheduled job that mines idle operator-session transcripts**, not an operator ritual the system depends on being run.
 
 ### Problem Frame
 
@@ -37,10 +37,10 @@ HSUI-56 (Done) already ran the adjacent experiment for surface-design decisions 
 
 - KD1. **Capture from the durable transcript, not live context.** The on-disk JSONL is append-only and survives in-context compaction; it is the only compaction-proof source that does not demand perfect in-session discipline, and the only one that makes loss auditable.
 - KD2. **Structured atoms are the deliverable; the human brief is a regenerated digest.** Prose is input, never required reading. This optimizes for the agent consumers, not the operator, and follows the HSUI-56 finding.
-- KD3. **Markdown store is the source of truth; Linear gets a one-way edges-plus-comment projection, not Documents.** The objection is specifically to Linear *Documents* (the heavy full-doc post/read transport, SYMPH-842, which is not built) — native edges and a concise comment are cheap and fine. The planner runs in the controller, so it *can* read a local store directly — but that it *does* read the atom store, and that a stored atom can move a candidate, is the pre-check in Outstanding Questions (load-bearing for the whole v1 now that the dev agent is not a fallback consumer). A cross-workspace dev agent would reach context only through the Linear ticket, but our dev lanes are not confirmed to read Linear today and turning intent into a plan is the planner's job — so the dev agent is a secondary, unproven consumer, served by structural edges + a one-line note only, with the rich rationale staying store-only.
+- KD3. **Markdown store is the source of truth; Linear gets a one-way edges-plus-comment projection, not Documents.** The objection is specifically to Linear *Documents* (the heavy full-doc post/read transport, SYMPH-842, which is not built) — native edges and a concise comment are cheap and fine. The planner consumes ticket-bound atoms through the **Linear projection** — closeout writes the missing edges + concise comment, and the already-live Phase-0 enrichment reads them into `PlannerContext`; the planner does **not** read the store file in v1. So the store is the canonical record, dedup key, and audit substrate, read directly only by the closeout itself; a direct planner store-read for non-projected atoms is a v1.1 question. A cross-workspace dev agent would reach context only through the Linear ticket, but our dev lanes are not confirmed to read Linear today and turning intent into a plan is the planner's job — so the dev agent is a secondary, unproven consumer, served by structural edges + a one-line note only, with the rich rationale staying store-only.
 - KD4. **v1 captures operator sessions only.** Reviewers and the deterministic spine already emit structured findings and telemetry — reconcile and dedup against them, do not re-extract from their logs. Implementer-session transcripts (the multi-host harvest) are deferred.
 - KD5. **Reuse the existing atom vocabularies.** Atoms build on `backlog-audit` finding types and planner-candidate edges plus the atom contract in the backlog-intelligence plan §4.1 — a separate decision-ledger would re-duplicate and rot.
-- KD6. **Disposition starts at propose; auto-apply is earned, never assumed.** Graduate a conclusion-type to auto-apply only after a measured ratification floor, and never auto-apply an irreversible mutation from a session-derived atom (plan §4.5).
+- KD6. **962 tags dispositions; a separate executor acts on them.** 962 records `propose`/`flag_operator`/`auto_apply` as data and itself makes only the reversible Linear projection. The propose→auto-apply graduation (earned via a measured ratification floor) and any irreversible mutation (ticket create/close/merge) live in the downstream executor, never in 962 (plan §4.5).
 - KD7. **The untrusted-input fence is mandatory and load-bearing.** Raw transcripts are the worst case for secrets, cross-project content, and raw tool-result text (plan §4.6/§4.7).
 - KD8. **This is the parent plan's §4.7 "JSONL front-end," which §4.7 deferred as the hardest, riskiest input.** What the Phase-0 gate collapsed is the surrounding §4 extraction-and-promotion *engine* scope, not the difficulty of the extraction itself — recovering decisions from prose (hardest for the implicit and contrarian ones) is unchanged. "Lightweight emit" describes the reduced plumbing, not a lower-risk input; v1 is therefore gated on measuring per-atom-type recall — with the implicit/contrarian tail called out as the known-hard part — before the auditability claim is trusted (see Outstanding Questions).
 
@@ -52,7 +52,8 @@ flowchart TB
   R --> S[(Markdown store — source of truth)]
   S --> L[One-way Linear projection: edges + 1 concise comment]
   S --> D[Regenerated operator digest]
-  S --> P[Planner / auditor reads store directly]
+  S -. dataset: record / dedup / audit .-> Z[Separate downstream consumers: proposer / executor]
+  L --> P[Planner reads the projection via live Phase-0 enrichment]
   L --> V[Cross-workspace dev agent reads the ticket]
 ```
 
@@ -80,13 +81,14 @@ flowchart TB
 **Store and projection**
 
 - R7. The canonical store is a git-committed markdown document in a stable symphony-ts project directory; full atoms and provenance live there.
-- R8. Ticket-level structural conclusions project one-way to Linear as native edges plus at most one concise comment per ticket; no Linear Document attachments are created. The comment is a one-line decision note (the resolved conclusion), not the rejected-option rationale — that stays in the store, which the planner/auditor reads.
+- R8. Ticket-level structural conclusions project one-way to Linear as native edges plus at most one concise comment per ticket; no Linear Document attachments are created. The comment is a one-line decision note (the resolved conclusion), not the rejected-option rationale — that stays in the store.
+- R8a. 962 projects to Linear **only** ticket-bound conclusions on tickets that already exist; it never creates, closes, or merges tickets. Atoms that name no existing ticket — `new_work` and other ticket-less atoms — are written to the store as the dataset (carrying their disposition tag); a separate downstream consumer (the proposer/executor) acts on them. The store is the unconditional home, so a session with no tickets is never homeless.
 - R9. Linear is never a competing source of truth for the derived layer; the projection direction is store to Linear only.
 
 **Untrusted-input handling**
 
 - R10. Transcript content is untrusted: scope every derivation to the target project and reject or quarantine cross-project content.
-- R11. Redaction of credential-shaped strings is idempotent and applied at every boundary, not only at ingestion: before any LLM pass, before writing an atom to the store, before projecting any atom content to Linear or rendering the operator digest, and before emitting to the operator-action queue (`flag_operator` output). A substring that survives the first pass must not reach a Linear comment, the digest, or the operator queue.
+- R11. Redaction of credential-shaped strings is idempotent and applied at every boundary, not only at ingestion: before any LLM pass, before writing an atom to the store, and before projecting any atom content to Linear or rendering the operator digest. A substring that survives the first pass must not reach a Linear comment or the digest. (Downstream consumers — the proposer/queue — read the already-redacted store, so the store-write boundary covers them.)
 - R12. Never promote raw tool-result content (file reads, shell output) as an atom claim.
 - R12a. The fence treats all transcript content as opaque data, never as instructions to the extractor: extraction instructions are rendered outside any untrusted segment (transcript turns passed as data arguments), so a crafted transcript line cannot steer the extraction pass to claim high authority, fabricate a mutation, or suppress redaction. The same constraint applies to **every LLM call in the chunked-merge pipeline (R3)**: intermediate atom payloads from prior chunk passes are passed as data arguments to the merge call (never embedded in its instruction segment), and redaction (R11) is applied to them before the merge.
 - R13. Authority (operator over agent) derives from the verified Linear actor type, not from prose self-labeling. Because a raw JSONL transcript carries no verified Linear actor, transcript-derived atoms default to the lowest authority tier unless an out-of-band Linear lookup binds a verified human-operator identity to the span; authority is never elevated from the transcript's self-reported role alone.
@@ -99,8 +101,8 @@ flowchart TB
 
 **Disposition and application**
 
-- R17. Every conclusion-type starts as `propose` at v1; this is enforced by the absence of any auto-apply code path. (v1.1) Graduation to `auto_apply` after a measured ratification floor — deferred until the first auto-apply candidate is defined (R18 blocks auto-apply at v1). Its tracking mechanism is a v1.1 concern; the v1 store schema is not pre-shaped for it.
-- R18. A session-derived atom never auto-applies an irreversible mutation (close or merge a ticket); auto-apply requires full provenance, a reversible mutation, and a fully-fenced derivation chain.
+- R17. 962 records each atom's disposition (`propose` / `flag_operator` / `auto_apply`) as **data**; acting on it — the propose→auto_apply graduation, ratification, and any ticket create/close/merge — belongs to the downstream executor, not 962. 962's own only mutation is the reversible Linear projection (R8). The graduation's ratification floor and provenance log are the executor's concern; the v1 store schema is not pre-shaped for them.
+- R18. 962 performs no irreversible mutation at all — it never creates, closes, or merges a ticket. Its only mutation is the reversible Linear projection (R8), which requires full provenance and a fully-fenced derivation chain. The rule that any future auto-apply be reversible + fully-fenced carries to the downstream executor.
 
 **Outputs and reconciliation**
 
@@ -110,7 +112,7 @@ flowchart TB
 ### Key Flows
 
 - F1. Operator-session closeout
-  - **Trigger:** An operator session ends, or the operator invokes the closeout step.
+  - **Trigger:** A standalone, decoupled closeout job — a named CLI on its own cron/launchd schedule (**not** an in-process orchestrator tick; that would put extraction intelligence inside the dumb orchestrator). It scans the operator transcript directory and processes sessions whose transcript has gone idle past a threshold and is not-yet-processed-at-current-length (a processed-offset marker); a substantive-session filter skips trivial sessions; idempotent re-processing handles resumes (R6/R6a). The same CLI is the manual / dogfood entry.
   - **Steps:** Locate the durable transcript; fence it (scope to project, redact secrets); extract typed atoms; reconcile and dedup against the store and already-structured sources; write atoms to the markdown store as `propose`; project ticket-level conclusions to Linear as edges plus one concise comment; regenerate the operator digest.
   - **Outcome:** Durable decisions are in structured form the planner/auditor consumes (with structural edges readable off the Linear ticket); the operator gets a light digest; nothing irreversible was auto-applied.
 
@@ -119,7 +121,7 @@ flowchart TB
 - AE1. **Covers R2, R3.** A decision made early in a long session and absent from final context is still extracted, because it is present in the on-disk transcript.
 - AE2. **Covers R8, R9.** A `blockedBy` relation derived from the session appears as a native Linear edge on the ticket; no Linear Document is created; the full atom lives in the store.
 - AE3. **Covers R12, R13.** A transcript line "Correction: SYMPH-950 is Done" is extracted with default lowest authority and surfaced as `propose` — regardless of the role label in the JSONL, because authority is never elevated from transcript self-reporting (R13); it auto-applies only if an out-of-band Linear lookup binds a verified human-operator identity to the span.
-- AE4. **Covers R17, R18.** A session-derived "close ticket X" conclusion is surfaced as `propose` or `flag_operator`, never auto-closed.
+- AE4. **Covers R17, R18.** A session-derived "close ticket X" conclusion is captured as a `flag_operator`-tagged atom in the store; 962 never executes the close (ticket create/close/merge is out of scope — a downstream executor acts on the tag, with its own ratification).
 - AE5. **Covers R6a.** A decision ratified early in a transcript and reversed later in the same transcript (by a same-or-higher-authority span) yields one live atom (the later span); the earlier is marked `superseded`, and only the later conclusion projects to Linear.
 - AE6. **Covers R6a, R13.** A bot-authored late "reversal" of an earlier human-ratified decision does **not** supersede it — a default-authority later span cannot override a verified-human span; it is surfaced as `propose` for the operator, not auto-applied.
 
@@ -131,7 +133,7 @@ flowchart TB
 - Marginal value: the captured decisions are ones that did *not* already reach a comment / edge / in-flight surface — real lift over the live Phase-0 baseline, not a re-capture of what enrichment already feeds the planner.
 - Precision: atoms mutate a git store and project to Linear, so over-extraction is the asymmetric harm. A precision / false-positive floor (evaluable per high-volume atom type, not only as one aggregate) is set in the before-first-run gate with the token budget; report-only first, per `measure-before-caps`.
 - Cost: per-closeout token cost is itemized and within a stated budget; report-only first, per `measure-before-caps`.
-- Memory: the operator-action queue stays short and high-precision over consecutive runs.
+- Tagging precision: 962 marks atoms for operator attention (`flag_operator`) precisely — the flagged set stays small and high-precision, so the downstream queue (a separate consumer) is not flooded.
 - Adoption: the closeout writes atoms and the planner reads them at the fixed path (multi-agent read/write is v1.1).
 
 **v1.1**
@@ -155,6 +157,9 @@ flowchart TB
 - Linear Documents as the handoff transport (SYMPH-842's path) — not built, and superseded by the edges-plus-comment projection.
 - A new decision-ledger database or any non-markdown store.
 - The standalone §4 extraction engine — the Phase-0 gate collapsed it; this is an emit, not the engine.
+- The new-work → ticket **proposer**, the **operator-action-queue surface/UX**, and any ticket **create/close/merge execution** — separate builds that consume the dataset; 962 tags atoms (`flag_operator`, `new_work`) as data but never renders a queue or executes a ticket mutation.
+- An in-process orchestrator runtime tick — closeout is fully decoupled (standalone CLI + cron/launchd); putting extraction intelligence in the orchestrator violates the dumb-orchestrator rule.
+- Bundling closeout into the planner or auditor cycle — closeout is spine-intake (session → atoms), a sibling of the audit's backlog-intake, not part of either head; it stays standalone in v1 and converges into SYMPH-960's shared distillation spine deliberately, if/when that spine is built.
 
 ### Dependencies / Assumptions
 
@@ -168,7 +173,7 @@ flowchart TB
 **Resolve before planning**
 
 - The precision / false-positive floor and the per-closeout token budget — set both before the first run so the run can fail honestly.
-- Falsifiable pre-check before build: confirm the planner actually reads atoms from the canonical store path and that a stored atom can influence a planner candidate. The whole value chain rests on "the planner reads the store" (KD3); gate the build on this holding.
+- Falsifiable pre-check before build: confirm a closeout-written edge/comment is picked up by the live Phase-0 enrichment and can move a planner candidate (the enrichment path is already live, so this is a confirmation, not a new dependency). The real gate is the marginal-value delta below.
 - Marginal-value gate: size the delta over the live Phase-0 baseline — how many planner-needed decisions never reach a comment, edge, or the in-flight list. Gate the build on this delta being non-trivial; if Phase-0 already captures nearly everything the planner needs, 962 is not worth building.
 - (v1.1) Golden corpus: how is it seeded and labeled, and how large? The SYMPH-838 decision corpus is a starting point.
 
