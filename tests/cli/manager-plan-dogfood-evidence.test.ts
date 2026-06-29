@@ -94,4 +94,21 @@ describe("manager-plan dogfood evidence (SYMPH-961)", () => {
       reasons: ["manager_plan_dogfood_missing"],
     });
   });
+
+  it("fails closed when classification identifiers include non-strings", () => {
+    const evidence = completeEvidence({
+      classifications: [
+        {
+          category: "a",
+          issueIdentifiers: ["SYMPH-941", 123] as unknown as string[],
+          rationale: "Malformed identifiers must not be normalized away.",
+        },
+        ...completeEvidence().classifications.slice(1),
+      ],
+    });
+
+    expect(
+      parseManagerPlanDogfoodEvidence(JSON.parse(JSON.stringify(evidence))),
+    ).toBeNull();
+  });
 });

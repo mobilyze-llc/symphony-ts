@@ -154,9 +154,10 @@ function parseClassifications(
     ) {
       return null;
     }
-    const issueIdentifiers = record.issueIdentifiers.filter(
-      (identifier): identifier is string => typeof identifier === "string",
-    );
+    const issueIdentifiers = parseStringArray(record.issueIdentifiers);
+    if (issueIdentifiers === null) {
+      return null;
+    }
     parsed.push({
       category: record.category,
       issueIdentifiers,
@@ -164,6 +165,20 @@ function parseClassifications(
     });
   }
   return parsed;
+}
+
+function parseStringArray(value: unknown): string[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const strings: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string") {
+      return null;
+    }
+    strings.push(entry);
+  }
+  return strings;
 }
 
 function parsePhase0Gate(value: unknown): ManagerPlanDogfoodPhase0Gate | null {

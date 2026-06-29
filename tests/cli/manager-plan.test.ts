@@ -536,6 +536,53 @@ describe("runManagerPlanCli", () => {
     expect(out()).not.toContain("MOB-LINEAR");
   });
 
+  it("loads runtime-state in-flight with an abortable fetch (SYMPH-961)", async () => {
+    const { io, out } = captureIo();
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(
+      async (_input: Parameters<typeof fetch>[0], _init?: RequestInit) => {
+        return new Response(
+          JSON.stringify({
+            running: [{ issue_identifier: "MOB-RUNTIME", state: "Resume" }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    );
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    try {
+      const code = await runManagerPlanCli(
+        [
+          "--team",
+          "MOB",
+          "--state",
+          "Backlog",
+          "--runtime-state-base-url",
+          "http://127.0.0.1:4321",
+          "--prompt-only",
+        ],
+        {
+          io,
+          env: {},
+          loadCandidates: async () => [issue("u1", "MOB-1")],
+          createPlannerRunner: okRunner,
+        },
+      );
+
+      expect(code).toBe(0);
+      expect(fetchMock).toHaveBeenCalledWith(
+        "http://127.0.0.1:4321/api/v1/state",
+        expect.objectContaining({ headers: { accept: "application/json" } }),
+      );
+      const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      expect(out()).toContain("- MOB-RUNTIME (Resume)");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("--no-comment-enrichment does not fetch issue comments (SYMPH-961)", async () => {
     const { io, out } = captureIo();
     const fetchIssueComments = vi.fn(async () => [

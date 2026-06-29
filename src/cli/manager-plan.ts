@@ -64,6 +64,7 @@ export const DEFAULT_MANAGER_PLAN_IN_FLIGHT_STATES = [
 ] as const;
 export const MANAGER_PLAN_RUNTIME_STATE_BASE_URL_ENV =
   "SYMPHONY_MANAGER_PLAN_RUNTIME_STATE_BASE_URL";
+const MANAGER_PLAN_RUNTIME_STATE_FETCH_TIMEOUT_MS = 10_000;
 
 export const MANAGER_PLAN_EXIT = {
   ok: 0,
@@ -661,6 +662,7 @@ async function defaultLoadRuntimeInFlight(
 ): Promise<PlannerInFlight[]> {
   const response = await fetch(`${trimTrailingSlash(baseUrl)}/api/v1/state`, {
     headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(MANAGER_PLAN_RUNTIME_STATE_FETCH_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(`GET /api/v1/state failed with HTTP ${response.status}`);

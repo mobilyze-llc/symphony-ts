@@ -6332,11 +6332,42 @@ export async function startRuntimeService(
         runId: `backlog-hygiene-${runStartedAt.toISOString()}`,
         codeGroundingTarget: null,
       });
+      let recordedProposalCount = 0;
+      let recordFailureCount = 0;
       for (const proposal of result.proposals) {
-        await runtimeHost.recordBacklogHygieneProposal({
-          proposal,
-          actor: { kind: "dispatcher", host: hostname() },
-        });
+        try {
+          const sequence = await runtimeHost.recordBacklogHygieneProposal({
+            proposal,
+            actor: { kind: "dispatcher", host: hostname() },
+          });
+          if (sequence === null) {
+            recordFailureCount += 1;
+            await logger.warn(
+              "backlog_hygiene_proposal_record_failed",
+              "Failed to record backlog hygiene proposal (report-only; dispatch unaffected).",
+              {
+                outcome: "degraded",
+                proposal_id: proposal.proposalId,
+                issue_identifiers: proposal.issueIdentifiers,
+                detail: "record returned no journal sequence",
+              },
+            );
+            continue;
+          }
+          recordedProposalCount += 1;
+        } catch (error) {
+          recordFailureCount += 1;
+          await logger.warn(
+            "backlog_hygiene_proposal_record_failed",
+            "Failed to record backlog hygiene proposal (report-only; dispatch unaffected).",
+            {
+              outcome: "degraded",
+              proposal_id: proposal.proposalId,
+              issue_identifiers: proposal.issueIdentifiers,
+              detail: toErrorMessage(error),
+            },
+          );
+        }
       }
       await logger.info(
         "backlog_hygiene_tick_completed",
@@ -6346,6 +6377,8 @@ export async function startRuntimeService(
           status: result.status,
           issue_count: candidateIssues.length,
           proposal_count: result.proposals.length,
+          recorded_proposal_count: recordedProposalCount,
+          record_failure_count: recordFailureCount,
           warning_count: result.warnings.length,
           warnings: result.warnings,
         },
