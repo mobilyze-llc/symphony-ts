@@ -5,6 +5,7 @@ import {
   type BacklogAuditFindingType,
   type BacklogAuditReport,
   type RunBacklogAuditInput,
+  normalizeCullRootIssueIdentifier,
   runBacklogAudit,
   stableCullMarker,
 } from "../audit/backlog-audit.js";
@@ -521,7 +522,9 @@ export function buildConservativeCullApplicationPlan(input: {
   });
   const markerLabels =
     agreed && canonicalMarker !== null ? [canonicalMarker] : [];
-  const rootIssueIdentifier = cull.rootIssueIdentifier;
+  const rootIssueIdentifier = normalizeCullRootIssueIdentifier(
+    cull.rootIssueIdentifier,
+  );
   // A kill may only cancel when it has a valid stable-reason marker (SYMPH-966
   // AC#4): a reasonless kill (killReason:null → null marker) must not cancel a
   // ticket, or a malformed kill could silently drop a real defect.

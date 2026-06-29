@@ -356,7 +356,9 @@ function normalizeBacklogAuditFindingShape(value: unknown): unknown {
     return value;
   }
   const cull = value.cull;
+  const classification = cull.classification;
   const killReason =
+    (classification === "kill" || classification === "downgrade") &&
     typeof cull.killReason === "string" &&
     BACKLOG_AUDIT_CULL_KILL_REASONS.includes(
       cull.killReason as BacklogAuditCullKillReason,
@@ -370,7 +372,7 @@ function normalizeBacklogAuditFindingShape(value: unknown): unknown {
   // stray `downgraded:` marker (or vice versa) can never emit a mismatched
   // label downstream.
   const marker = stableCullMarker({
-    classification: cull.classification,
+    classification,
     killReason,
   });
   return {
@@ -379,11 +381,9 @@ function normalizeBacklogAuditFindingShape(value: unknown): unknown {
       ...cull,
       killReason,
       marker,
-      rootIssueIdentifier:
-        typeof cull.rootIssueIdentifier === "string" &&
-        cull.rootIssueIdentifier.trim() !== ""
-          ? cull.rootIssueIdentifier
-          : null,
+      rootIssueIdentifier: normalizeCullRootIssueIdentifier(
+        cull.rootIssueIdentifier,
+      ),
     },
   };
 }
@@ -910,11 +910,12 @@ export function buildBacklogAuditPrompt(
           "- Evaluate only standing defensive or Track-originated tickets supplied in this prompt; non-defensive tickets are out of scope and must not receive findings.",
           "- Attempt to disprove each supplied ticket under no delivery pressure.",
           "- Classify each finding in cull.classification as kill, downgrade, keep, or symptomatic_of_root.",
-          "- kill means unreachable, impossible-state, duplicate, or deprecating-surface; set cull.killReason to one of unreachable, impossible_state, duplicate, deprecating_surface.",
-          "- downgrade means real but over-scoped/defensive; set cull.killReason to the closest stable reason.",
-          "- keep means real and directly actionable; do not set a marker.",
-          "- symptomatic_of_root means real but parked behind an existing fix ticket; set cull.rootIssueIdentifier from supplied tracker evidence, never from a hand-maintained registry.",
-          "- For kill or downgrade, emit cull.marker as a stable join key label: killed:<reason> or downgraded:<reason>.",
+          "- kill means unreachable, impossible_state, duplicate, or deprecating_surface; set cull.killReason to exactly one of those values.",
+          "- downgrade means real but over-scoped/defensive; set cull.killReason to the closest stable reason from the same values.",
+          "- keep means real and directly actionable; set cull.killReason to null and do not set a marker.",
+          "- symptomatic_of_root means real but parked behind an existing fix ticket; set cull.killReason to null and set cull.rootIssueIdentifier from supplied tracker evidence, never from a hand-maintained registry.",
+          "- Leave cull.marker omitted or null. The system derives canonical marker labels from cull.classification and cull.killReason.",
+          '- Nullable cull fields may be omitted or set to JSON null. Never emit the string "null".',
           "- A kill is only a proposal. Cancellation requires later operator agree through the hygiene gate.",
           "",
         ]
@@ -966,7 +967,7 @@ export function buildBacklogAuditPrompt(
     "",
     "Respond with JSON only using exactly this shape:",
     mode === "off_pressure_cull"
-      ? '{"summary":"one concise sentence","findingTypeVolume":{"duplicate":0,"supersession":0,"stale":0,"thin_spec":0,"review_dispatch_mismatch":0,"other":0},"findings":[{"findingId":"F-1","type":"other","issueIdentifiers":["SYMPH-123"],"summary":"one sentence","evidence":"specific supplied-field evidence","confidence":"low|medium|high","cull":{"classification":"kill|downgrade|keep|symptomatic_of_root","killReason":"unreachable|impossible_state|duplicate|deprecating_surface|null","marker":"killed:unreachable|null","rootIssueIdentifier":"SYMPH-947|null"}}]}'
+      ? '{"summary":"one concise sentence","findingTypeVolume":{"duplicate":0,"supersession":0,"stale":0,"thin_spec":0,"review_dispatch_mismatch":0,"other":0},"findings":[{"findingId":"F-1","type":"other","issueIdentifiers":["SYMPH-123"],"summary":"one sentence","evidence":"specific supplied-field evidence","confidence":"low|medium|high","cull":{"classification":"kill","killReason":"unreachable","marker":null,"rootIssueIdentifier":null}}]}'
       : '{"summary":"one concise sentence","findingTypeVolume":{"duplicate":0,"supersession":0,"stale":0,"thin_spec":0,"review_dispatch_mismatch":0,"other":0},"findings":[{"findingId":"F-1","type":"thin_spec","issueIdentifiers":["SYMPH-123"],"summary":"one sentence","evidence":"specific supplied-field evidence","confidence":"low|medium|high"}]}',
     "findingTypeVolume must count your findings by type. Use [] for findings when there are no findings. Keep findings concise and evidence-backed.",
   ].join("\n");
@@ -1017,6 +1018,19 @@ export function stableCullMarker(input: {
     return `downgraded:${input.killReason}`;
   }
   return null;
+}
+
+export function normalizeCullRootIssueIdentifier(
+  value: unknown,
+): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim().toUpperCase();
+  if (normalized === "" || normalized === "NULL") {
+    return null;
+  }
+  return /^[A-Z][A-Z0-9]*-\d+$/.test(normalized) ? normalized : null;
 }
 
 export function boundBacklogAuditRuntimeEvidence(

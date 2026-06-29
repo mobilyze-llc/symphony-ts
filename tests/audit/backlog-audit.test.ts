@@ -348,6 +348,14 @@ describe("backlog audit", () => {
         expect(prompt).toContain("Audit mode: off_pressure_cull");
         expect(prompt).toContain("SYMPH-958");
         expect(prompt).not.toContain("SYMPH-956");
+        expect(prompt).not.toContain(
+          '"killReason":"unreachable|impossible_state|duplicate|deprecating_surface|null"',
+        );
+        expect(prompt).not.toContain('"marker":"killed:unreachable|null"');
+        expect(prompt).not.toContain('"rootIssueIdentifier":"SYMPH-947|null"');
+        expect(prompt).not.toContain("impossible-state");
+        expect(prompt).not.toContain("deprecating-surface");
+        expect(prompt).toContain("The system derives canonical marker labels");
         return chatCompletionResponse(
           JSON.stringify({
             summary: "Cull found one unreachable defensive ticket.",
@@ -402,6 +410,116 @@ describe("backlog audit", () => {
       defensive,
     ]);
     expect(isStandingDefensiveIssue(userReported)).toBe(false);
+  });
+
+  it("normalizes missing optional cull fields and literal null strings to safe nulls", async () => {
+    const keepIssue = {
+      ...ISSUE,
+      id: "issue-keep",
+      identifier: "SYMPH-958",
+      title: "Defensive Track-originated survivor",
+      labels: ["source:tracked-items"],
+    };
+    const symptomIssue = {
+      ...ISSUE,
+      id: "issue-symptom",
+      identifier: "SYMPH-959",
+      title: "Defensive Track-originated symptom",
+      labels: ["source:tracked-items"],
+    };
+    const contradictoryKeepIssue = {
+      ...ISSUE,
+      id: "issue-contradictory-keep",
+      identifier: "SYMPH-960",
+      title: "Defensive Track-originated contradictory survivor",
+      labels: ["source:tracked-items"],
+    };
+    const fetchFn = vi.fn(async () =>
+      chatCompletionResponse(
+        JSON.stringify({
+          summary: "Cull returned nullable fields in different shapes.",
+          findingTypeVolume: {
+            duplicate: 0,
+            supersession: 0,
+            stale: 0,
+            thin_spec: 0,
+            review_dispatch_mismatch: 0,
+            other: 3,
+          },
+          findings: [
+            {
+              findingId: "F-missing",
+              type: "other",
+              issueIdentifiers: ["SYMPH-958"],
+              summary: "Keep with omitted optional cull fields.",
+              evidence: "Still directly actionable.",
+              confidence: "medium",
+              cull: { classification: "keep" },
+            },
+            {
+              findingId: "F-contradictory-keep",
+              type: "other",
+              issueIdentifiers: ["SYMPH-960"],
+              summary: "Keep with a stray valid kill reason.",
+              evidence: "Model emitted contradictory cull fields.",
+              confidence: "medium",
+              cull: {
+                classification: "keep",
+                killReason: "unreachable",
+                marker: "killed:unreachable",
+              },
+            },
+            {
+              findingId: "F-literal-null",
+              type: "other",
+              issueIdentifiers: ["SYMPH-959"],
+              summary: "Symptom with literal null strings.",
+              evidence: "Model emitted string nulls.",
+              confidence: "medium",
+              cull: {
+                classification: "symptomatic_of_root",
+                killReason: "null",
+                marker: "null",
+                rootIssueIdentifier: "null",
+              },
+            },
+          ],
+        }),
+      ),
+    );
+
+    const report = await runBacklogAudit({
+      mode: "off_pressure_cull",
+      config: {
+        baseUrl: "http://studio2.local:8000/v1",
+        model: "deepseek-v4-flash",
+        apiKey: null,
+        timeoutMs: 60_000,
+      },
+      issues: [keepIssue, symptomIssue, contradictoryKeepIssue],
+      runtimeEvidence: RUNTIME_EVIDENCE,
+      fetchFn: fetchFn as unknown as typeof fetch,
+    });
+
+    expect(report.verdict.findings).toHaveLength(3);
+    expect(report.verdict.findings[0]?.cull).toMatchObject({
+      classification: "keep",
+      killReason: null,
+      marker: null,
+      rootIssueIdentifier: null,
+    });
+    expect(report.verdict.findings[1]?.cull).toMatchObject({
+      classification: "keep",
+      killReason: null,
+      marker: null,
+      rootIssueIdentifier: null,
+    });
+    expect(report.verdict.findings[2]?.cull).toMatchObject({
+      classification: "symptomatic_of_root",
+      killReason: null,
+      marker: null,
+      rootIssueIdentifier: null,
+    });
   });
 
   it("does not treat untrusted prose mentioning 'defensive' as a standing defensive issue", () => {

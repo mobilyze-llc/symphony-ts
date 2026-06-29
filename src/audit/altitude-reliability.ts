@@ -129,6 +129,11 @@ export async function runAltitudeReliabilityRetest(
 export function scoreAltitudeReliability(
   results: readonly AltitudeReliabilityCaseResult[],
 ): AltitudeReliabilityRunResult["metrics"] {
+  if (results.length === 0) {
+    throw new Error(
+      "Altitude reliability results must be non-empty; zero observations cannot measure capability",
+    );
+  }
   const correct = results.filter((result) => result.correct).length;
   const actualKills = results.filter(
     (result) => result.actualVerdict === "kill",

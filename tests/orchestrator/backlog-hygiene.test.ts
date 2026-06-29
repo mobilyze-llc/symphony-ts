@@ -9,6 +9,7 @@ import { BACKLOG_AUDIT_FINDING_TYPES } from "../../src/audit/backlog-audit.js";
 import type { Issue } from "../../src/domain/model.js";
 import {
   BACKLOG_HYGIENE_PROPOSAL_LABELS,
+  type BacklogHygieneProposal,
   QUEUE_TRIAGE_EVALUATION_DIMENSIONS,
   QUEUE_TRIAGE_GOLDEN_CORPUS,
   buildBacklogHygieneCodeGroundingInput,
@@ -511,6 +512,73 @@ describe("backlog hygiene proposal lane (SYMPH-484)", () => {
         decision: "agreed",
       }).blockedBy,
     ).toEqual([]);
+  });
+
+  it.each([
+    ["missing", {}],
+    ["null", { rootIssueIdentifier: null }],
+    ['literal "null"', { rootIssueIdentifier: "null" }],
+  ])(
+    "does not create blockedBy for a symptomatic cull with a %s root identifier",
+    (_name, rootPatch) => {
+      const proposal = {
+        proposalId: "p-unsafe-root",
+        findingId: "F-unsafe-root",
+        findingType: "other",
+        issueIds: ["956"],
+        issueIdentifiers: ["SYMPH-956"],
+        summary: "Symptomatic finding with unsafe root",
+        evidence: "Root identifier is not a valid issue identifier.",
+        confidence: "medium",
+        cull: {
+          classification: "symptomatic_of_root",
+          killReason: null,
+          marker: null,
+          ...rootPatch,
+        },
+        codeGroundingStatus: null,
+        codeGroundingEvidence: null,
+        generatedAt: "2026-06-29T00:00:00.000Z",
+        modelTier: "local_low_risk",
+      } as BacklogHygieneProposal;
+
+      expect(
+        buildConservativeCullApplicationPlan({
+          proposal,
+          decision: "agreed",
+        }).blockedBy,
+      ).toEqual([]);
+    },
+  );
+
+  it("accepts valid single-letter root identifiers when parking symptomatic survivors", () => {
+    const proposal = {
+      proposalId: "p-single-letter-root",
+      findingId: "F-single-letter-root",
+      findingType: "other",
+      issueIds: ["956"],
+      issueIdentifiers: ["SYMPH-956"],
+      summary: "Symptomatic finding with a compact root key",
+      evidence: "Root identifier is a valid one-letter project key.",
+      confidence: "medium",
+      cull: {
+        classification: "symptomatic_of_root",
+        killReason: null,
+        marker: null,
+        rootIssueIdentifier: "s-1",
+      },
+      codeGroundingStatus: null,
+      codeGroundingEvidence: null,
+      generatedAt: "2026-06-29T00:00:00.000Z",
+      modelTier: "local_low_risk",
+    } as BacklogHygieneProposal;
+
+    expect(
+      buildConservativeCullApplicationPlan({
+        proposal,
+        decision: "agreed",
+      }).blockedBy,
+    ).toEqual([{ issueIdentifier: "SYMPH-956", rootIssueIdentifier: "S-1" }]);
   });
 
   it("parks symptomatic survivors behind their existing root ticket via blockedBy intent", () => {
