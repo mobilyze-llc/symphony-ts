@@ -507,8 +507,16 @@ export function buildConservativeCullApplicationPlan(input: {
     };
   }
   const agreed = input.decision === "agreed";
+  // Only kill/downgrade classifications emit a join-key marker (SYMPH-966 AC#4).
+  // Gate on classification, not just the label prefix, so a keep/symptomatic
+  // finding carrying a stray `killed:`/`downgraded:` marker (e.g. a
+  // model-supplied marker) can never add a kill/downgrade label.
+  const markerEligible =
+    cull.classification === "kill" || cull.classification === "downgrade";
   const markerLabels =
-    agreed && isCullMarkerLabel(cull.marker) ? [cull.marker] : [];
+    agreed && markerEligible && isCullMarkerLabel(cull.marker)
+      ? [cull.marker]
+      : [];
   const rootIssueIdentifier = cull.rootIssueIdentifier;
   return {
     proposalId: input.proposal.proposalId,

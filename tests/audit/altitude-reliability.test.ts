@@ -45,4 +45,27 @@ describe("altitude reliability re-test protocol", () => {
       metrics: { falseKills: 1 },
     });
   });
+
+  it("denies capability to a model that makes no kills when the corpus expects them", async () => {
+    const result = await runAltitudeReliabilityRetest({
+      model: "do-nothing-v0",
+      generatedAt: "2026-06-29T00:00:00.000Z",
+      runVerdict: async () => "keep",
+    });
+
+    // A model that never kills must not be rewarded with perfect kill precision
+    // (the zero-denominator trap) and must not pass the capability bar.
+    expect(result.metrics.killPrecision).toBe(0);
+    expect(result.capabilityArrived).toBe(false);
+  });
+
+  it("refuses to score an empty corpus instead of reporting phantom capability", async () => {
+    await expect(
+      runAltitudeReliabilityRetest({
+        model: "x",
+        corpus: [],
+        runVerdict: async () => "keep",
+      }),
+    ).rejects.toThrow(/corpus must be non-empty/);
+  });
 });

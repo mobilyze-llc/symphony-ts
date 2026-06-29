@@ -89,6 +89,14 @@ export async function runAltitudeReliabilityRetest(
   input: AltitudeReliabilityRunInput,
 ): Promise<AltitudeReliabilityRunResult> {
   const corpus = input.corpus ?? ALTITUDE_RELIABILITY_CORPUS;
+  if (corpus.length === 0) {
+    // An empty corpus scores accuracy/precision as a vacuous 1 and would emit a
+    // misleading capabilityArrived=true with nothing measured. Fail loudly
+    // rather than report a phantom "capability arrived".
+    throw new Error(
+      "Altitude reliability corpus must be non-empty; an empty corpus cannot measure capability",
+    );
+  }
   const bar = { ...DEFAULT_ALTITUDE_RELIABILITY_BAR, ...input.bar };
   validateReliabilityBar(bar);
   const results: AltitudeReliabilityCaseResult[] = [];
@@ -135,7 +143,17 @@ export function scoreAltitudeReliability(
   const falseKills = results.filter((result) => result.falseKill).length;
   return {
     accuracy: ratio(correct, results.length),
-    killPrecision: actualKills === 0 ? 1 : ratio(trueKills, actualKills),
+    // A model that makes no kills while the corpus expects kills has zero
+    // effective kill precision: the zero-denominator must not be rewarded as 1,
+    // or a do-nothing model passes the capability bar (SYMPH-968: kill
+    // precision is the load-bearing metric, false-kills are the dangerous
+    // direction). Only a corpus with no expected kills is a vacuous 1.
+    killPrecision:
+      actualKills === 0
+        ? expectedKills === 0
+          ? 1
+          : 0
+        : ratio(trueKills, actualKills),
     killRecall: expectedKills === 0 ? 1 : ratio(trueKills, expectedKills),
     falseKills,
   };

@@ -369,6 +369,68 @@ describe("backlog hygiene proposal lane (SYMPH-484)", () => {
     ]);
   });
 
+  it("never emits a marker label for a non-kill/downgrade cull carrying a stray kill marker", () => {
+    const [proposal] = buildBacklogHygieneProposals({
+      report: {
+        generatedAt: "2026-06-29T00:00:00.000Z",
+        issueCount: 1,
+        runtimeSources: ["/api/v1/state"],
+        verdict: {
+          summary: "Symptomatic survivor with a stray marker.",
+          findingTypeVolume: {
+            duplicate: 0,
+            supersession: 0,
+            stale: 0,
+            thin_spec: 0,
+            review_dispatch_mismatch: 0,
+            other: 1,
+          },
+          findings: [
+            {
+              findingId: "F-3",
+              type: "other",
+              issueIdentifiers: ["SYMPH-956"],
+              summary: "Real symptom of root ticket",
+              evidence:
+                "Existing root fix SYMPH-947 owns the underlying cause.",
+              confidence: "medium",
+              cull: {
+                classification: "symptomatic_of_root",
+                killReason: null,
+                // Stray kill marker on a non-kill classification must be ignored.
+                marker: "killed:unreachable",
+                rootIssueIdentifier: "SYMPH-947",
+              },
+            },
+          ],
+        },
+      },
+      candidateIssues: [issue({ id: "956", identifier: "SYMPH-956" })],
+      maxProposalsPerProductPerPoll: 1,
+      modelTierDecision: decideBacklogHygieneModelTier(passingEvaluation()),
+    });
+
+    expect(
+      buildConservativeCullApplicationPlan({
+        proposal: proposal!,
+        decision: "agreed",
+      }).markerLabels,
+    ).toEqual([]);
+
+    const decisionEntry = buildBacklogHygieneDecisionJournalEntry({
+      proposal: proposal!,
+      decision: "accepted",
+      actor: { kind: "interactive-agent", host: "local", session: "s1" },
+      ownerId: null,
+      reason: "operator agreed to park symptomatic survivor",
+      timestamp: "2026-06-29T00:01:00.000Z",
+    });
+    expect(decisionEntry.metadata.label_transition).toEqual({
+      remove: [BACKLOG_HYGIENE_PROPOSAL_LABELS.proposed],
+      add: [BACKLOG_HYGIENE_PROPOSAL_LABELS.accepted],
+    });
+  });
+
   it("builds code-grounding input from resolved workflow config only when enabled", () => {
     const enabled = buildBacklogHygieneCodeGroundingInput({
       workflowConfig: {

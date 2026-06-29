@@ -200,7 +200,7 @@ export async function runBacklogAudit(
     ),
   });
 
-  return {
+  const report: BacklogAuditReport = {
     generatedAt: input.generatedAt ?? new Date().toISOString(),
     issueCount: issues.length,
     runtimeSources: [
@@ -211,6 +211,17 @@ export async function runBacklogAudit(
     ],
     verdict,
   };
+  // The cull is off-scope-bounded: the model is fed only standing-defensive
+  // issues, but a strayed/hallucinated finding referencing a non-eligible issue
+  // must be dropped so a non-defensive ticket is never proposed for cull
+  // (SYMPH-966 AC#5/#6).
+  if (mode === "off_pressure_cull") {
+    return restrictCullReportToEligibleIssues(
+      report,
+      new Set(issues.map((issue) => issue.identifier)),
+    );
+  }
+  return report;
 }
 
 async function runLocalModelJudge(input: {
@@ -328,13 +339,19 @@ function normalizeBacklogAuditFindingShape(value: unknown): unknown {
     )
       ? (cull.killReason as BacklogAuditCullKillReason)
       : null;
-  const marker =
-    typeof cull.marker === "string" && cull.marker.trim() !== ""
+  // Markers are only meaningful for kill/downgrade (SYMPH-966 AC#4). Never
+  // carry a marker for keep/symptomatic, even one the model supplied, so a
+  // stray `killed:`/`downgraded:` string cannot leak downstream as a label.
+  const markerEligible =
+    cull.classification === "kill" || cull.classification === "downgrade";
+  const marker = markerEligible
+    ? typeof cull.marker === "string" && cull.marker.trim() !== ""
       ? cull.marker
       : stableCullMarker({
           classification: cull.classification,
           killReason,
-        });
+        })
+    : null;
   return {
     ...value,
     cull: {
@@ -528,6 +545,9 @@ async function runBacklogAuditCullChunked(
   input: RunBacklogAuditChunkedInput,
 ): Promise<BacklogAuditReport> {
   const issues = selectOffPressureCullIssues(input.issues);
+  // Off-scope findings (those referencing a non-defensive issue) are dropped by
+  // runBacklogAudit per call, so both the single-pass and per-chunk paths here
+  // are already cull-eligible-bounded (SYMPH-966 AC#5/#6).
   if (input.chunkSize === null || issues.length <= input.chunkSize) {
     return (input.runChunk ?? runBacklogAudit)({
       ...input,
@@ -560,6 +580,26 @@ async function runBacklogAuditCullChunked(
     generatedAt,
     issueCount: issues.length,
   });
+}
+
+function restrictCullReportToEligibleIssues(
+  report: BacklogAuditReport,
+  eligibleIdentifiers: ReadonlySet<string>,
+): BacklogAuditReport {
+  const findings = report.verdict.findings.filter(
+    (finding) =>
+      finding.issueIdentifiers.length > 0 &&
+      finding.issueIdentifiers.every((identifier) =>
+        eligibleIdentifiers.has(identifier),
+      ),
+  );
+  if (findings.length === report.verdict.findings.length) {
+    return report;
+  }
+  return {
+    ...report,
+    verdict: { ...report.verdict, findings },
+  };
 }
 
 function dedupeBacklogAuditFindings(

@@ -404,6 +404,82 @@ describe("backlog audit", () => {
     expect(isStandingDefensiveIssue(userReported)).toBe(false);
   });
 
+  it("drops cull findings that reference a non-defensive (off-scope) issue", async () => {
+    const defensive = {
+      ...ISSUE,
+      id: "issue-defensive",
+      identifier: "SYMPH-958",
+      title: "Defensive Track-originated workaround",
+      labels: ["source:tracked-items"],
+    };
+    const userReported = {
+      ...ISSUE,
+      id: "issue-user",
+      identifier: "SYMPH-956",
+      title: "Real user-visible bug",
+      labels: ["source:user-report"],
+    };
+    const fetchFn = vi.fn(async () =>
+      chatCompletionResponse(
+        JSON.stringify({
+          summary: "Cull returned one eligible and one stray finding.",
+          findingTypeVolume: {
+            duplicate: 0,
+            supersession: 0,
+            stale: 0,
+            thin_spec: 0,
+            review_dispatch_mismatch: 0,
+            other: 2,
+          },
+          findings: [
+            {
+              findingId: "F-eligible",
+              type: "other",
+              issueIdentifiers: ["SYMPH-958"],
+              summary: "Unreachable defensive ticket.",
+              evidence: "Owning surface removed.",
+              confidence: "high",
+              cull: { classification: "kill", killReason: "unreachable" },
+            },
+            {
+              // Off-scope: SYMPH-956 is not a standing-defensive issue and was
+              // never fed to the model; a stray finding for it must be dropped.
+              findingId: "F-offscope",
+              type: "other",
+              issueIdentifiers: ["SYMPH-956"],
+              summary: "Hallucinated kill of a real user-reported bug.",
+              evidence: "Model strayed outside the cull-eligible set.",
+              confidence: "high",
+              cull: { classification: "kill", killReason: "unreachable" },
+            },
+          ],
+        }),
+      ),
+    );
+
+    const report = await runBacklogAudit({
+      mode: "off_pressure_cull",
+      config: {
+        baseUrl: "http://studio2.local:8000/v1",
+        model: "deepseek-v4-flash",
+        apiKey: null,
+        timeoutMs: 60_000,
+      },
+      issues: [defensive, userReported],
+      runtimeEvidence: RUNTIME_EVIDENCE,
+      fetchFn: fetchFn as unknown as typeof fetch,
+    });
+
+    expect(
+      report.verdict.findings.map((finding) => finding.issueIdentifiers),
+    ).toEqual([["SYMPH-958"]]);
+    expect(
+      report.verdict.findings.some((finding) =>
+        finding.issueIdentifiers.includes("SYMPH-956"),
+      ),
+    ).toBe(false);
+  });
+
   it("wraps non-JSON local model response bodies", async () => {
     const fetchFn = vi.fn(
       async () => new Response("not json", { status: 200 }),
