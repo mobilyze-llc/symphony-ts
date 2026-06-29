@@ -478,6 +478,66 @@ describe("backlog audit", () => {
         finding.issueIdentifiers.includes("SYMPH-956"),
       ),
     ).toBe(false);
+    // The per-type volume must track the surviving findings, not the dropped one.
+    expect(report.verdict.findingTypeVolume.other).toBe(1);
+  });
+
+  it("canonicalizes a kill/downgrade marker that conflicts with its classification", async () => {
+    const defensive = {
+      ...ISSUE,
+      id: "issue-defensive",
+      identifier: "SYMPH-958",
+      title: "Defensive Track-originated workaround",
+      labels: ["source:tracked-items"],
+    };
+    const fetchFn = vi.fn(async () =>
+      chatCompletionResponse(
+        JSON.stringify({
+          summary: "Cull with a mismatched supplied marker.",
+          findingTypeVolume: {
+            duplicate: 0,
+            supersession: 0,
+            stale: 0,
+            thin_spec: 0,
+            review_dispatch_mismatch: 0,
+            other: 1,
+          },
+          findings: [
+            {
+              findingId: "F-1",
+              type: "other",
+              issueIdentifiers: ["SYMPH-958"],
+              summary: "Unreachable defensive ticket.",
+              evidence: "Owning surface removed.",
+              confidence: "high",
+              cull: {
+                classification: "kill",
+                killReason: "unreachable",
+                // Model supplied a marker that contradicts the classification.
+                marker: "downgraded:duplicate",
+              },
+            },
+          ],
+        }),
+      ),
+    );
+
+    const report = await runBacklogAudit({
+      mode: "off_pressure_cull",
+      config: {
+        baseUrl: "http://studio2.local:8000/v1",
+        model: "deepseek-v4-flash",
+        apiKey: null,
+        timeoutMs: 60_000,
+      },
+      issues: [defensive],
+      runtimeEvidence: RUNTIME_EVIDENCE,
+      fetchFn: fetchFn as unknown as typeof fetch,
+    });
+
+    // The marker is derived from (classification, killReason), never the stray
+    // model string, so a kill can never emit a downgrade label.
+    expect(report.verdict.findings[0]?.cull?.marker).toBe("killed:unreachable");
   });
 
   it("wraps non-JSON local model response bodies", async () => {

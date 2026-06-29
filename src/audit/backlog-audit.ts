@@ -339,19 +339,16 @@ function normalizeBacklogAuditFindingShape(value: unknown): unknown {
     )
       ? (cull.killReason as BacklogAuditCullKillReason)
       : null;
-  // Markers are only meaningful for kill/downgrade (SYMPH-966 AC#4). Never
-  // carry a marker for keep/symptomatic, even one the model supplied, so a
-  // stray `killed:`/`downgraded:` string cannot leak downstream as a label.
-  const markerEligible =
-    cull.classification === "kill" || cull.classification === "downgrade";
-  const marker = markerEligible
-    ? typeof cull.marker === "string" && cull.marker.trim() !== ""
-      ? cull.marker
-      : stableCullMarker({
-          classification: cull.classification,
-          killReason,
-        })
-    : null;
+  // Markers are only meaningful for kill/downgrade (SYMPH-966 AC#4) and must
+  // match the classification + kill reason. Always derive the canonical marker
+  // from (classification, killReason) rather than trusting a model-supplied
+  // string: a keep/symptomatic finding gets no marker, and a kill carrying a
+  // stray `downgraded:` marker (or vice versa) can never emit a mismatched
+  // label downstream.
+  const marker = stableCullMarker({
+    classification: cull.classification,
+    killReason,
+  });
   return {
     ...value,
     cull: {
@@ -596,9 +593,17 @@ function restrictCullReportToEligibleIssues(
   if (findings.length === report.verdict.findings.length) {
     return report;
   }
+  // Recompute the per-type volume so it stays consistent with the surviving
+  // findings; otherwise a dropped off-scope finding leaves an overstated count.
+  const findingTypeVolume = Object.fromEntries(
+    BACKLOG_AUDIT_FINDING_TYPES.map((type) => [
+      type,
+      findings.filter((finding) => finding.type === type).length,
+    ]),
+  ) as Record<BacklogAuditFindingType, number>;
   return {
     ...report,
-    verdict: { ...report.verdict, findings },
+    verdict: { ...report.verdict, findings, findingTypeVolume },
   };
 }
 

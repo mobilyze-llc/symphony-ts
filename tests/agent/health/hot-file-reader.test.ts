@@ -284,4 +284,27 @@ describe("evaluateDefensiveShareTripwire", () => {
       issueIdentifier: "SYMPH-948",
     });
   });
+
+  it("crosses on the hot-file-churn branch alone when defensive share is below threshold", () => {
+    const result = evaluateDefensiveShareTripwire({
+      defensiveShare: 0.1,
+      hotFileGrowth: {
+        topFileChurnFraction: 0.5,
+        godFileConcentration: "high",
+      },
+      config: {
+        defensiveShareThreshold: 0.3,
+        hotFileChurnFractionThreshold: 0.4,
+        reportOnly: false,
+        reopenIssueIdentifier: "SYMPH-948",
+      },
+      measuredAt: "2026-06-29T00:00:00.000Z",
+    });
+
+    expect(result.crossed).toBe(true);
+    expect(result.action).toEqual({
+      kind: "reopen_root_deferral",
+      issueIdentifier: "SYMPH-948",
+    });
+  });
 });
