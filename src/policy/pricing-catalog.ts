@@ -206,7 +206,8 @@ const pricingCatalog = {
       effective_date: "2026-06-18",
       retrieval_date: "2026-06-18",
       source: "DeepSeek API pricing",
-      source_url: "https://api-docs.deepseek.com/quick_start/pricing-details-usd",
+      source_url:
+        "https://api-docs.deepseek.com/quick_start/pricing-details-usd",
       source_note:
         "DeepSeek API pricing. input_per_million_usd uses cache-miss input; cache_read_per_million_usd uses cache-hit input.",
       input_per_million_usd: 0.27,
@@ -223,7 +224,8 @@ const pricingCatalog = {
       effective_date: "2026-06-18",
       retrieval_date: "2026-06-18",
       source: "DeepSeek API pricing",
-      source_url: "https://api-docs.deepseek.com/quick_start/pricing-details-usd",
+      source_url:
+        "https://api-docs.deepseek.com/quick_start/pricing-details-usd",
       source_note:
         "DeepSeek API pricing. input_per_million_usd uses cache-miss input; cache_read_per_million_usd uses cache-hit input.",
       input_per_million_usd: 0.55,

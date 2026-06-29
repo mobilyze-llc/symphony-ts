@@ -402,10 +402,7 @@ export class AgentRunner {
         issueId: issue.id,
         issueIdentifier: issue.identifier,
         attempt: input.attempt,
-        workspacePath,
         turnCount: liveSession.turnCount,
-        promptChars: currentPromptChars,
-        estimatedPromptTokens: currentEstimatedPromptTokens,
       });
     };
 
@@ -795,20 +792,16 @@ export class AgentRunner {
             signal: humanBlockSignal,
             turnCount: realTurnCount,
             totalTokens: liveSession.totalStageTotalTokens,
-            estimatedCostUsd:
-              postTurnBudgetStop?.estimatedCostUsd ??
-              estimateHumanBlockCostUsd(
-                liveSession.totalStageTotalTokens,
-                liveSession.totalStageCacheReadTokens,
-                hardStops,
-              ),
-            billableTokens:
-              postTurnBudgetStop?.billableTokens ??
-              computeBillableTokens({
-                totalTokens: liveSession.totalStageTotalTokens,
-                cacheReadTokens: liveSession.totalStageCacheReadTokens,
-                config: hardStops,
-              }),
+            estimatedCostUsd: estimateHumanBlockCostUsd(
+              liveSession.totalStageTotalTokens,
+              liveSession.totalStageCacheReadTokens,
+              hardStops,
+            ),
+            billableTokens: computeBillableTokens({
+              totalTokens: liveSession.totalStageTotalTokens,
+              cacheReadTokens: liveSession.totalStageCacheReadTokens,
+              config: hardStops,
+            }),
           });
           break;
         }

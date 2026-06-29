@@ -53,9 +53,7 @@ describe("pricing policy", () => {
       ),
     ).toBeCloseTo(2.2, 9);
 
-    expect(
-      usdCost({ input_tokens: 1_000_000 }, { ...BASE_ROW }),
-    ).toBeNull();
+    expect(usdCost({ input_tokens: 1_000_000 }, { ...BASE_ROW })).toBeNull();
   });
 
   it("uses catalog order as the tie-breaker for equal precedence matches", () => {
@@ -77,9 +75,9 @@ describe("pricing policy", () => {
       ],
     };
 
-    expect(
-      resolveBudgetBasis("test", "model", catalog).billing_mode,
-    ).toBe("diagnostic_only");
+    expect(resolveBudgetBasis("test", "model", catalog).billing_mode).toBe(
+      "diagnostic_only",
+    );
   });
 
   it("treats the freshness boundary as valid and stales only after it", () => {
