@@ -399,6 +399,9 @@ export function evaluateBudgetHardStop(input: {
     return null;
   }
 
+  // SYMPH-955 operator decision: dollar-budget, premium-spend-near-ceiling,
+  // and live grace apply only to api_token models with real USD. Subscription,
+  // credit, and uncatalogued models gate on weighted tokens alone, matching crucible.
   if (tokenVerdict.denomination === "usd") {
     const dollarVerdict = evaluateBudget({
       usage,

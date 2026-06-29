@@ -401,6 +401,8 @@ export class AgentRunner {
         },
         issueId: issue.id,
         issueIdentifier: issue.identifier,
+        // biome-ignore lint/style/noNonNullAssertion: workspace is assigned before budget notifications can be emitted
+        workspacePath: workspace!.path,
         attempt: input.attempt,
         turnCount: liveSession.turnCount,
       });

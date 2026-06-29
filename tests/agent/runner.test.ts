@@ -868,9 +868,15 @@ describe("AgentRunner", () => {
     const root = await createRoot();
     const close = vi.fn().mockResolvedValue(undefined);
     const continueTurn = vi.fn();
+    const config = createConfig(root, "unused");
     const runner = new AgentRunner({
       config: {
-        ...createConfig(root, "unused"),
+        ...config,
+        runner: {
+          ...config.runner,
+          provider: "anthropic",
+          model: "claude-opus-4-8",
+        },
         hardStops: {
           maxIterations: 5,
           noProgressTurns: 10,
@@ -896,9 +902,9 @@ describe("AgentRunner", () => {
             turnId: "turn-1",
             message: "live usage update",
             usage: {
-              inputTokens: 890,
-              outputTokens: 0,
-              totalTokens: 890,
+              inputTokens: 0,
+              outputTokens: 35_000,
+              totalTokens: 35_000,
             },
           });
 
@@ -925,7 +931,7 @@ describe("AgentRunner", () => {
     expect(result.hardStop).toMatchObject({
       outcome: "PAUSED-budget",
       trigger: "premium_spend_near_ceiling",
-      totalTokens: 890,
+      totalTokens: 35_000,
     });
     expect(result.hardStop?.reason).toContain("grace ceiling");
   });
