@@ -368,6 +368,55 @@ describe("backlog hygiene proposal lane (SYMPH-484)", () => {
     expect(plan.markerLabels).toEqual([]);
   });
 
+  it("does not let a kill carrying a mismatched downgrade marker cancel", () => {
+    const [proposal] = buildBacklogHygieneProposals({
+      report: {
+        generatedAt: "2026-06-29T00:00:00.000Z",
+        issueCount: 1,
+        runtimeSources: ["/api/v1/state"],
+        verdict: {
+          summary: "Kill with a mismatched marker prefix.",
+          findingTypeVolume: {
+            duplicate: 0,
+            supersession: 0,
+            stale: 0,
+            thin_spec: 0,
+            review_dispatch_mismatch: 0,
+            other: 1,
+          },
+          findings: [
+            {
+              findingId: "F-mismatch",
+              type: "other",
+              issueIdentifiers: ["SYMPH-958"],
+              summary: "Kill whose marker prefix does not match the class",
+              evidence: "Stray downgrade marker on a kill.",
+              confidence: "high",
+              cull: {
+                classification: "kill",
+                killReason: null,
+                // Prefix matches a marker but not the kill classification.
+                marker: "downgraded:unreachable",
+                rootIssueIdentifier: null,
+              },
+            },
+          ],
+        },
+      },
+      candidateIssues: [issue({ id: "958", identifier: "SYMPH-958" })],
+      maxProposalsPerProductPerPoll: 1,
+      modelTierDecision: decideBacklogHygieneModelTier(passingEvaluation()),
+    });
+
+    const plan = buildConservativeCullApplicationPlan({
+      proposal: proposal!,
+      decision: "agreed",
+    });
+    expect(plan.cancelIssue).toBe(false);
+    expect(plan.requiresOperatorAgree).toBe(false);
+    expect(plan.markerLabels).toEqual([]);
+  });
+
   it("parks symptomatic survivors behind their existing root ticket via blockedBy intent", () => {
     const [proposal] = buildBacklogHygieneProposals({
       report: {

@@ -507,22 +507,29 @@ export function buildConservativeCullApplicationPlan(input: {
     };
   }
   const agreed = input.decision === "agreed";
-  // Only kill/downgrade classifications emit a join-key marker (SYMPH-966 AC#4).
-  // Gate on classification, not just the label prefix, so a keep/symptomatic
-  // finding carrying a stray `killed:`/`downgraded:` marker (e.g. a
-  // model-supplied marker) can never add a kill/downgrade label.
-  const markerEligible =
-    cull.classification === "kill" || cull.classification === "downgrade";
+  // A marker is valid only when its prefix matches the classification
+  // (SYMPH-966 AC#4): kill -> `killed:`, downgrade -> `downgraded:`. This is
+  // classification-aware, not mere prefix-presence, so a keep/symptomatic
+  // finding — or a kill carrying a stray `downgraded:` marker — can never emit
+  // a label or authorize a cancel.
+  const markerMatchesClassification =
+    (cull.classification === "kill" &&
+      typeof cull.marker === "string" &&
+      cull.marker.startsWith(CONSERVATIVE_CULL_LABEL_PREFIXES.killed)) ||
+    (cull.classification === "downgrade" &&
+      typeof cull.marker === "string" &&
+      cull.marker.startsWith(CONSERVATIVE_CULL_LABEL_PREFIXES.downgraded));
   const markerLabels =
-    agreed && markerEligible && isCullMarkerLabel(cull.marker)
+    agreed && markerMatchesClassification && cull.marker !== null
       ? [cull.marker]
       : [];
   const rootIssueIdentifier = cull.rootIssueIdentifier;
-  // A kill may only cancel when it carries a valid stable-reason marker
-  // (SYMPH-966 AC#4): a kill normalized to killReason:null has no marker and
-  // must not cancel a ticket, or a reasonless kill could drop a real defect.
+  // A kill may only cancel when it carries a valid, classification-matching
+  // stable-reason marker (SYMPH-966 AC#4): a kill normalized to killReason:null
+  // has no marker and must not cancel a ticket, or a reasonless kill could drop
+  // a real defect.
   const killWithValidMarker =
-    cull.classification === "kill" && isCullMarkerLabel(cull.marker);
+    cull.classification === "kill" && markerMatchesClassification;
   return {
     proposalId: input.proposal.proposalId,
     classification: cull.classification,
@@ -539,14 +546,6 @@ export function buildConservativeCullApplicationPlan(input: {
           }))
         : [],
   };
-}
-
-function isCullMarkerLabel(value: string | null): value is string {
-  return (
-    value !== null &&
-    (value.startsWith(CONSERVATIVE_CULL_LABEL_PREFIXES.killed) ||
-      value.startsWith(CONSERVATIVE_CULL_LABEL_PREFIXES.downgraded))
-  );
 }
 
 function actorMetadata(actor: VerdictActor): {
