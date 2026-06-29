@@ -91,6 +91,7 @@ function matchRow(
         return false;
       }
       try {
+        // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp -- model_pattern is sourced from the trusted vendored pricing catalog (not user input); malformed patterns already fall back to exact-string match via the surrounding try/catch
         return new RegExp(row.model_pattern, "i").test(name);
       } catch {
         return row.model_pattern === name;
