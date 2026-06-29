@@ -5513,6 +5513,96 @@ describe("OrchestratorRuntimeHost", () => {
 });
 
 describe("startRuntimeService shutdown", () => {
+  it("runs the backlog hygiene proposal lane on a runtime tick when audit env is configured (SYMPH-961)", async () => {
+    vi.stubEnv("SYMPHONY_QUEUE_AUDIT_BASE_URL", "http://127.0.0.1:43210/v1");
+    vi.stubEnv("SYMPHONY_QUEUE_AUDIT_MODEL", "local-audit");
+    vi.stubEnv("SYMPHONY_QUEUE_HYGIENE_HEARTBEAT_MS", "900000");
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  summary: "No hygiene findings.",
+                  findingTypeVolume: {
+                    duplicate: 0,
+                    supersession: 0,
+                    stale: 0,
+                    thin_spec: 0,
+                    review_dispatch_mismatch: 0,
+                    other: 0,
+                  },
+                  findings: [],
+                }),
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    globalThis.fetch = fetchMock as typeof fetch;
+    const tracker = createTracker({ candidates: [] });
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const config = {
+      ...createConfig(),
+      polling: {
+        intervalMs: 5,
+      },
+    };
+
+    const service = await startRuntimeService({
+      config,
+      tracker,
+      logger,
+      workflowWatcher: null,
+      runtimeHost: new OrchestratorRuntimeHost({
+        config,
+        tracker,
+        logger,
+        agentRunner: new FakeAgentRunner(),
+        now: () => new Date("2026-03-06T00:00:05.000Z"),
+      }),
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(
+          entries.some(
+            (entry) => entry.event === "backlog_hygiene_tick_completed",
+          ),
+        ).toBe(true);
+      });
+      expect(fetchMock).toHaveBeenCalledWith(
+        "http://127.0.0.1:43210/v1/chat/completions",
+        expect.objectContaining({ method: "POST" }),
+      );
+      const completion = entries.find(
+        (entry) => entry.event === "backlog_hygiene_tick_completed",
+      );
+      expect(completion).toMatchObject({
+        outcome: "report_only",
+        status: "completed",
+        proposal_count: 0,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      await service.shutdown();
+      globalThis.fetch = originalFetch;
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("aborts running workers before waiting for idle on shutdown", async () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();

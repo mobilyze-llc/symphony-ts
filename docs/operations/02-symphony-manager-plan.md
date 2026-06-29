@@ -40,6 +40,11 @@ Options:
   --no-canary                  Drop canary-chain from the allowed modes (no canary runners)
   --model <name>               Planner model alias (default opus)
   --page-size <n>              Linear candidate page size
+  --out-dir <path>             Directory for planner artifacts and prompt-only prompt output
+  --runtime-state-base-url <url>
+                               Runtime host base URL for live in-flight issues (GET /api/v1/state)
+  --in-flight-state <name>     Linear fallback in-flight state (repeatable; defaults In Progress, In Review, Resume)
+  --no-comment-enrichment      Disable curated comment enrichment in the planner prompt
   --prompt-only                Print the assembled planner prompt and exit (no Opus pass)
   --json                       Emit the plan as JSON
   --help                       Show this help text
@@ -47,6 +52,8 @@ Options:
 Environment:
   LINEAR_API_KEY               Required (reads the backlog)
   LINEAR_ENDPOINT              Optional override of the Linear GraphQL endpoint
+  SYMPHONY_MANAGER_PLAN_RUNTIME_STATE_BASE_URL
+                               Optional runtime host base URL for live in-flight issues
 ```
 <!-- AUTOGEN:help END -->
 
@@ -81,10 +88,27 @@ symphony-manager-plan --initiative "Autonomous Work Selection & Dispatch" --prom
 symphony-manager-plan --team SYMPH --project 9c1064215e8d --json
 ```
 
+## Dogfood evidence
+
+When live Linear access is unavailable in a worker, the controller must generate
+the SYMPH-961 dogfood evidence with:
+
+```bash
+scripts/symphony-manager-plan --project 9c1064215e8d --state Backlog --state Todo --runtime-state-base-url http://127.0.0.1:4321 --prompt-only --out-dir /tmp/symphony-manager-plan-SYMPH-961-prompt-only
+```
+
+The artifact must follow `src/cli/manager-plan-dogfood-evidence.ts`: record the
+prompt-only/live-equivalent rerun, classify `SYMPH-941`,
+`SYMPH-877`/`SYMPH-878` with `SYMPH-947`, and `SYMPH-839` with in-flight
+`SYMPH-950` as category `(a)`/`(b)`/`(c)`, and include the Phase 0 gate
+decision. Do not mark the acceptance criteria complete without the live evidence
+artifact.
+
 ## Edge cases & gotchas
 
 - **No scope given** → exit 1 (`Provide at least one scope: --team … | --project … | --initiative …`).
 - **`--prompt-only` still calls Linear.** It fetches candidates to build the prompt; it only skips the Opus pass. It does not need network-free operation.
+- **Runtime in-flight context** comes from `--runtime-state-base-url` / `SYMPHONY_MANAGER_PLAN_RUNTIME_STATE_BASE_URL` when set; otherwise `--in-flight-state` uses the standalone Linear fallback.
 - **Empty result** → exit 0 with `No eligible candidates for <scope> in state(s) [...]`. Usually means `--state` doesn't match the scope's real state names, or the scope is empty.
 - **`--page-size 0` (or any non-positive integer)** → exit 1; `--concurrency-ceiling` likewise must be a positive integer.
 - **Portfolio-held candidates** are excluded before planning (the human/JSON output reports how many were held).

@@ -1,18 +1,27 @@
 #!/usr/bin/env node
 
 import { realpathSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
   type PlannerContext,
+  type PlannerInFlight,
   type PlannerRunResult,
   buildPlannerPrompt,
   createCmuxPlannerRunner,
   runTriagePlanner,
 } from "../agent/triage-planner.js";
-import { DEFAULT_LINEAR_ENDPOINT } from "../config/defaults.js";
+import {
+  DEFAULT_LINEAR_ENDPOINT,
+  DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_CANDIDATES,
+  DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_COMMENTS,
+  DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_COMMENT_CHARS,
+  DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_COMMENT_PAGES,
+  DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_TOTAL_CHARS,
+} from "../config/defaults.js";
 import type { Issue } from "../domain/model.js";
 import {
   DEFAULT_ENVELOPE_ALLOWED_MODES,
@@ -21,10 +30,16 @@ import {
   computeDependencyWaves,
   resolveStandingPlanEnvelope,
 } from "../domain/standing-plan.js";
-import { assembleShadowPlannerContext } from "../orchestrator/standing-plan-shadow.js";
+import {
+  assembleShadowPlannerContext,
+  enrichPlannerContextWithComments,
+} from "../orchestrator/standing-plan-shadow.js";
 import type { PlanBody } from "../orchestrator/standing-plan-supersession.js";
 import { partitionPortfolioEligibleIssues } from "../portfolio/eligibility.js";
-import { LinearTrackerClient } from "../tracker/linear-client.js";
+import {
+  type LinearIssueComment,
+  LinearTrackerClient,
+} from "../tracker/linear-client.js";
 
 // ---------------------------------------------------------------------------
 // symphony-manager-plan (SYMPH-837) — run the Queue Triage v2 backlog Manager
@@ -32,8 +47,9 @@ import { LinearTrackerClient } from "../tracker/linear-client.js";
 // suggested batch plan. OUTPUT-ONLY: it spends one Opus pass (unless
 // --prompt-only) and writes artifacts to its own temp dir, but writes NOTHING
 // to Linear, the live standing-plan store, or dispatch. It reuses the exact
-// planner core the live shadow tick uses; only the candidate SOURCE is a
-// standalone LinearTrackerClient instead of the orchestrator's.
+// planner core the live shadow tick uses; candidates come from standalone
+// Linear reads, while in-flight context can come from the runtime host snapshot
+// to match live shadow ticks.
 // ---------------------------------------------------------------------------
 
 /** CLI default operating-envelope concurrency ceiling (tunable via --concurrency-ceiling). */
@@ -41,6 +57,13 @@ export const DEFAULT_MANAGER_PLAN_CONCURRENCY_CEILING = 3;
 export const DEFAULT_MANAGER_PLAN_MODEL = "opus";
 /** Default eligible-to-start state when --state is omitted (SYMPH-867). */
 export const DEFAULT_MANAGER_PLAN_STATE = "Backlog";
+export const DEFAULT_MANAGER_PLAN_IN_FLIGHT_STATES = [
+  "In Progress",
+  "In Review",
+  "Resume",
+] as const;
+export const MANAGER_PLAN_RUNTIME_STATE_BASE_URL_ENV =
+  "SYMPHONY_MANAGER_PLAN_RUNTIME_STATE_BASE_URL";
 
 export const MANAGER_PLAN_EXIT = {
   ok: 0,
@@ -62,6 +85,10 @@ export interface ManagerPlanCliOptions {
   modes: PlanBatchMode[] | null;
   model: string;
   pageSize: number | null;
+  outDir: string | null;
+  runtimeStateBaseUrl: string | null;
+  inFlightStates: string[];
+  commentEnrichment: boolean;
   promptOnly: boolean;
   json: boolean;
   noCanary: boolean;
@@ -98,6 +125,15 @@ export interface ManagerPlanCliDependencies {
   io?: ManagerPlanCliIo;
   /** Defaults to a standalone LinearTrackerClient; injected in tests. */
   loadCandidates?: (query: ManagerPlanCandidateQuery) => Promise<Issue[]>;
+  /** Defaults to a standalone LinearTrackerClient; injected in tests. */
+  loadInFlight?: (query: ManagerPlanCandidateQuery) => Promise<Issue[]>;
+  /** Defaults to GET /api/v1/state when --runtime-state-base-url / env is set. */
+  loadRuntimeInFlight?: (baseUrl: string) => Promise<PlannerInFlight[]>;
+  /** Defaults on the production Linear path; injected tests opt in explicitly. */
+  fetchIssueComments?: (
+    issueId: string,
+    options: { maxPages?: number },
+  ) => Promise<LinearIssueComment[]>;
   /** Defaults to the production cmux/Opus runner; injected in tests. */
   createPlannerRunner?: CreateManagerPlanPlannerRunner;
   now?: () => Date;
@@ -122,6 +158,10 @@ export function parseManagerPlanCliArgs(
   let modes: PlanBatchMode[] | null = null;
   let model = DEFAULT_MANAGER_PLAN_MODEL;
   let pageSize: number | null = null;
+  let outDir: string | null = null;
+  let runtimeStateBaseUrl: string | null = null;
+  const inFlightStates: string[] = [];
+  let commentEnrichment = true;
   let promptOnly = false;
   let json = false;
   let noCanary = false;
@@ -147,6 +187,10 @@ export function parseManagerPlanCliArgs(
     }
     if (token === "--no-canary") {
       noCanary = true;
+      continue;
+    }
+    if (token === "--no-comment-enrichment") {
+      commentEnrichment = false;
       continue;
     }
 
@@ -189,6 +233,15 @@ export function parseManagerPlanCliArgs(
       case "--page-size":
         pageSize = parsePositiveInt(readValue("--page-size"), "--page-size");
         break;
+      case "--out-dir":
+        outDir = readValue("--out-dir");
+        break;
+      case "--runtime-state-base-url":
+        runtimeStateBaseUrl = readValue("--runtime-state-base-url");
+        break;
+      case "--in-flight-state":
+        inFlightStates.push(readValue("--in-flight-state"));
+        break;
       default:
         throw new ManagerPlanCliUsageError(`Unknown CLI argument: ${token}`);
     }
@@ -199,6 +252,9 @@ export function parseManagerPlanCliArgs(
   // value is still rejected downstream.
   if (states.length === 0) {
     states.push(DEFAULT_MANAGER_PLAN_STATE);
+  }
+  if (inFlightStates.length === 0) {
+    inFlightStates.push(...DEFAULT_MANAGER_PLAN_IN_FLIGHT_STATES);
   }
 
   return {
@@ -211,6 +267,10 @@ export function parseManagerPlanCliArgs(
     modes,
     model,
     pageSize,
+    outDir,
+    runtimeStateBaseUrl,
+    inFlightStates,
+    commentEnrichment,
     promptOnly,
     json,
     noCanary,
@@ -264,6 +324,20 @@ export async function runManagerPlanCli(
     io.stderr(`--state values must be non-empty.\n${renderUsage()}`);
     return MANAGER_PLAN_EXIT.usage;
   }
+  if (options.outDir !== null && options.outDir.trim() === "") {
+    io.stderr(`--out-dir must be non-empty.\n${renderUsage()}`);
+    return MANAGER_PLAN_EXIT.usage;
+  }
+  const rawRuntimeStateBaseUrl =
+    options.runtimeStateBaseUrl ??
+    env[MANAGER_PLAN_RUNTIME_STATE_BASE_URL_ENV] ??
+    null;
+  const runtimeStateBaseUrl =
+    rawRuntimeStateBaseUrl === null ? null : rawRuntimeStateBaseUrl.trim();
+  if (runtimeStateBaseUrl !== null && runtimeStateBaseUrl === "") {
+    io.stderr(`--runtime-state-base-url must be non-empty.\n${renderUsage()}`);
+    return MANAGER_PLAN_EXIT.usage;
+  }
 
   let envelope: PlannerContext["envelope"];
   try {
@@ -314,15 +388,95 @@ export async function runManagerPlanCli(
     return MANAGER_PLAN_EXIT.loadFailed;
   }
 
+  let inFlight: PlannerInFlight[] = [];
+  if (runtimeStateBaseUrl !== null) {
+    const loadRuntimeInFlight =
+      dependencies.loadRuntimeInFlight ?? defaultLoadRuntimeInFlight;
+    try {
+      inFlight = await loadRuntimeInFlight(runtimeStateBaseUrl);
+    } catch (error) {
+      io.stderr(
+        `Failed to load runtime in-flight issues: ${formatError(error)}\n`,
+      );
+      return MANAGER_PLAN_EXIT.loadFailed;
+    }
+  } else {
+    const loadInFlight =
+      dependencies.loadInFlight ??
+      (dependencies.loadCandidates === undefined
+        ? defaultLoadCandidates
+        : null);
+    let inFlightIssues: Issue[] = [];
+    if (loadInFlight !== null) {
+      try {
+        inFlightIssues = await loadInFlight({
+          endpoint,
+          apiKey,
+          teamKeys,
+          projectSlug,
+          initiative,
+          activeStates: options.inFlightStates,
+          pageSize: options.pageSize,
+        });
+      } catch (error) {
+        io.stderr(`Failed to load in-flight issues: ${formatError(error)}\n`);
+        return MANAGER_PLAN_EXIT.loadFailed;
+      }
+    }
+    inFlight = inFlightIssues.map((issue) => ({
+      issueIdentifier: issue.identifier,
+      stage: issue.state,
+    }));
+  }
+
   const portfolioPartition = partitionPortfolioEligibleIssues(candidates);
-  const context = assembleShadowPlannerContext({
+  let context = assembleShadowPlannerContext({
     candidates: portfolioPartition.eligible,
-    inFlight: [],
+    inFlight,
     envelope,
   });
+  const fetchIssueComments =
+    dependencies.fetchIssueComments ??
+    (dependencies.loadCandidates === undefined
+      ? defaultFetchIssueComments({
+          endpoint,
+          apiKey,
+          pageSize: options.pageSize,
+        })
+      : null);
+  if (
+    options.commentEnrichment &&
+    fetchIssueComments !== null &&
+    context.backlog.length > 0
+  ) {
+    const enriched = await enrichPlannerContextWithComments({
+      context,
+      config: {
+        enabled: true,
+        maxCandidates: DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_CANDIDATES,
+        maxCommentPages:
+          DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_COMMENT_PAGES,
+        maxComments: DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_COMMENTS,
+        maxCommentChars:
+          DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_COMMENT_CHARS,
+        maxTotalChars: DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_TOTAL_CHARS,
+      },
+      fetchIssueComments,
+    });
+    context = enriched.context;
+  }
 
   if (options.promptOnly) {
-    io.stdout(`${buildPlannerPrompt(context)}\n`);
+    const prompt = buildPlannerPrompt(context);
+    if (options.outDir !== null) {
+      try {
+        await writeManagerPlanPromptArtifact(options.outDir, prompt);
+      } catch (error) {
+        io.stderr(`Failed to write prompt artifact: ${formatError(error)}\n`);
+        return MANAGER_PLAN_EXIT.loadFailed;
+      }
+    }
+    io.stdout(`${prompt}\n`);
     return MANAGER_PLAN_EXIT.ok;
   }
 
@@ -337,7 +491,7 @@ export async function runManagerPlanCli(
     dependencies.createPlannerRunner ?? defaultCreatePlannerRunner(now);
   const runClaude = createPlannerRunner({
     model: options.model,
-    artifactDir: defaultArtifactDir(now),
+    artifactDir: options.outDir ?? defaultArtifactDir(now),
   });
 
   const result = await runTriagePlanner(context, { runClaude });
@@ -502,6 +656,88 @@ async function defaultLoadCandidates(
   });
 }
 
+async function defaultLoadRuntimeInFlight(
+  baseUrl: string,
+): Promise<PlannerInFlight[]> {
+  const response = await fetch(`${trimTrailingSlash(baseUrl)}/api/v1/state`, {
+    headers: { accept: "application/json" },
+  });
+  if (!response.ok) {
+    throw new Error(`GET /api/v1/state failed with HTTP ${response.status}`);
+  }
+  const payload = (await response.json()) as unknown;
+  return parseRuntimeInFlight(payload);
+}
+
+function parseRuntimeInFlight(payload: unknown): PlannerInFlight[] {
+  const record = recordOrNull(payload);
+  const running = record?.running;
+  if (!Array.isArray(running)) {
+    throw new Error("runtime state response missing running[]");
+  }
+  const inFlight: PlannerInFlight[] = [];
+  for (const entry of running) {
+    const row = recordOrNull(entry);
+    if (row === null) {
+      continue;
+    }
+    const issueIdentifier = readRuntimeString(row.issue_identifier);
+    if (issueIdentifier === null) {
+      continue;
+    }
+    inFlight.push({
+      issueIdentifier,
+      stage: readRuntimeString(row.state) ?? "",
+    });
+  }
+  return inFlight;
+}
+
+function recordOrNull(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function readRuntimeString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
+}
+
+function trimTrailingSlash(value: string): string {
+  return value.replace(/\/+$/, "");
+}
+
+async function writeManagerPlanPromptArtifact(
+  outDir: string,
+  prompt: string,
+): Promise<void> {
+  await mkdir(outDir, { recursive: true });
+  await writeFile(join(outDir, "manager-plan-prompt.txt"), prompt, "utf8");
+}
+
+function defaultFetchIssueComments(input: {
+  endpoint: string;
+  apiKey: string | null;
+  pageSize: number | null;
+}): (
+  issueId: string,
+  options: { maxPages?: number },
+) => Promise<LinearIssueComment[]> {
+  const client = new LinearTrackerClient({
+    endpoint: input.endpoint,
+    apiKey: input.apiKey,
+    projectSlug: null,
+    teamKeys: [],
+    activeStates: [],
+    ...(input.pageSize === null ? {} : { pageSize: input.pageSize }),
+  });
+  return (issueId, options) => client.fetchIssueComments(issueId, options);
+}
+
 function defaultCreatePlannerRunner(
   now: () => Date,
 ): CreateManagerPlanPlannerRunner {
@@ -546,6 +782,11 @@ export function renderUsage(): string {
     "  --no-canary                  Drop canary-chain from the allowed modes (no canary runners)",
     `  --model <name>               Planner model alias (default ${DEFAULT_MANAGER_PLAN_MODEL})`,
     "  --page-size <n>              Linear candidate page size",
+    "  --out-dir <path>             Directory for planner artifacts and prompt-only prompt output",
+    "  --runtime-state-base-url <url>",
+    "                               Runtime host base URL for live in-flight issues (GET /api/v1/state)",
+    "  --in-flight-state <name>     Linear fallback in-flight state (repeatable; defaults In Progress, In Review, Resume)",
+    "  --no-comment-enrichment      Disable curated comment enrichment in the planner prompt",
     "  --prompt-only                Print the assembled planner prompt and exit (no Opus pass)",
     "  --json                       Emit the plan as JSON",
     "  --help                       Show this help text",
@@ -553,6 +794,8 @@ export function renderUsage(): string {
     "Environment:",
     "  LINEAR_API_KEY               Required (reads the backlog)",
     "  LINEAR_ENDPOINT              Optional override of the Linear GraphQL endpoint",
+    `  ${MANAGER_PLAN_RUNTIME_STATE_BASE_URL_ENV}`,
+    "                               Optional runtime host base URL for live in-flight issues",
     "",
   ].join("\n");
 }
