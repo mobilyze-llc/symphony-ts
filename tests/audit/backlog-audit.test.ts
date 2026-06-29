@@ -564,6 +564,126 @@ describe("backlog audit", () => {
     expect(report.verdict.findings[0]?.cull?.marker).toBe("killed:unreachable");
   });
 
+  it("drops off-scope cull findings even when a custom runChunk bypasses runBacklogAudit", async () => {
+    const defensive = {
+      ...ISSUE,
+      id: "issue-defensive",
+      identifier: "SYMPH-958",
+      title: "Defensive Track-originated workaround",
+      labels: ["source:tracked-items"],
+    };
+    const userReported = {
+      ...ISSUE,
+      id: "issue-user",
+      identifier: "SYMPH-956",
+      title: "Real user-visible bug",
+      labels: ["source:user-report"],
+    };
+    const offScopeRunChunk = async () => ({
+      generatedAt: "2026-06-29T00:00:00.000Z",
+      issueCount: 1,
+      runtimeSources: ["/api/v1/state"],
+      verdict: {
+        summary: "Custom chunk returned an eligible and an off-scope finding.",
+        findingTypeVolume: {
+          duplicate: 0,
+          supersession: 0,
+          stale: 0,
+          thin_spec: 0,
+          review_dispatch_mismatch: 0,
+          other: 2,
+        },
+        findings: [
+          {
+            findingId: "F-eligible",
+            type: "other" as const,
+            issueIdentifiers: ["SYMPH-958"],
+            summary: "Eligible defensive finding.",
+            evidence: "In scope.",
+            confidence: "high" as const,
+            cull: {
+              classification: "kill" as const,
+              killReason: "unreachable" as const,
+              marker: "killed:unreachable",
+              rootIssueIdentifier: null,
+            },
+          },
+          {
+            findingId: "F-offscope",
+            type: "other" as const,
+            issueIdentifiers: ["SYMPH-956"],
+            summary: "Off-scope finding from a custom runChunk.",
+            evidence: "Bypasses runBacklogAudit's inner filter.",
+            confidence: "high" as const,
+            cull: {
+              classification: "kill" as const,
+              killReason: "unreachable" as const,
+              marker: "killed:unreachable",
+              rootIssueIdentifier: null,
+            },
+          },
+        ],
+      },
+    });
+
+    for (const chunkSize of [null, 1] as const) {
+      const report = await runBacklogAuditChunked({
+        mode: "off_pressure_cull",
+        config: {
+          baseUrl: "http://studio2.local:8000/v1",
+          model: "deepseek-v4-flash",
+          apiKey: null,
+          timeoutMs: 60_000,
+        },
+        issues: [defensive, userReported],
+        runtimeEvidence: RUNTIME_EVIDENCE,
+        chunkSize,
+        runChunk: offScopeRunChunk,
+      });
+
+      expect(
+        report.verdict.findings.some((finding) =>
+          finding.issueIdentifiers.includes("SYMPH-956"),
+        ),
+      ).toBe(false);
+      expect(report.verdict.findingTypeVolume.other).toBe(
+        report.verdict.findings.length,
+      );
+    }
+  });
+
+  it("normalizes a model verdict that omits findings to an empty list", async () => {
+    const fetchFn = vi.fn(async () =>
+      chatCompletionResponse(
+        JSON.stringify({
+          summary: "No findings key at all.",
+          findingTypeVolume: {
+            duplicate: 0,
+            supersession: 0,
+            stale: 0,
+            thin_spec: 0,
+            review_dispatch_mismatch: 0,
+            other: 0,
+          },
+        }),
+      ),
+    );
+
+    const report = await runBacklogAudit({
+      config: {
+        baseUrl: "http://studio2.local:8000/v1",
+        model: "deepseek-v4-flash",
+        apiKey: null,
+        timeoutMs: 60_000,
+      },
+      issues: [ISSUE],
+      runtimeEvidence: RUNTIME_EVIDENCE,
+      fetchFn: fetchFn as unknown as typeof fetch,
+    });
+
+    expect(report.verdict.findings).toEqual([]);
+  });
+
   it("wraps non-JSON local model response bodies", async () => {
     const fetchFn = vi.fn(
       async () => new Response("not json", { status: 200 }),

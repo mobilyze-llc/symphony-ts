@@ -310,9 +310,15 @@ function normalizeBacklogAuditVerdictShape(value: unknown): unknown {
   const findingTypeVolume = isPlainRecord(value.findingTypeVolume)
     ? value.findingTypeVolume
     : {};
+  // A model that omits `findings` entirely normalizes to an empty list rather
+  // than passing `undefined` through to Zod (which would reject the whole
+  // verdict). A present-but-wrong-typed `findings` still falls through so the
+  // schema surfaces the error.
   const findings = Array.isArray(value.findings)
     ? value.findings.map(normalizeBacklogAuditFindingShape)
-    : value.findings;
+    : value.findings === undefined
+      ? []
+      : value.findings;
   return {
     ...value,
     findings,
@@ -542,16 +548,22 @@ async function runBacklogAuditCullChunked(
   input: RunBacklogAuditChunkedInput,
 ): Promise<BacklogAuditReport> {
   const issues = selectOffPressureCullIssues(input.issues);
-  // Off-scope findings (those referencing a non-defensive issue) are dropped by
-  // runBacklogAudit per call, so both the single-pass and per-chunk paths here
-  // are already cull-eligible-bounded (SYMPH-966 AC#5/#6).
+  // The cull-eligible boundary is enforced here at the cull entry point, not
+  // only inside the default runBacklogAudit: a custom `runChunk` seam would
+  // otherwise bypass restrictCullReportToEligibleIssues and let an off-scope
+  // finding survive (SYMPH-966 AC#5/#6). The inner filter (default path) plus
+  // this outer filter are idempotent.
+  const eligibleIdentifiers = new Set(issues.map((issue) => issue.identifier));
   if (input.chunkSize === null || issues.length <= input.chunkSize) {
-    return (input.runChunk ?? runBacklogAudit)({
-      ...input,
-      issues,
-      contextIssues: issues,
-      findingTypes: ["other"],
-    });
+    return restrictCullReportToEligibleIssues(
+      await (input.runChunk ?? runBacklogAudit)({
+        ...input,
+        issues,
+        contextIssues: issues,
+        findingTypes: ["other"],
+      }),
+      eligibleIdentifiers,
+    );
   }
   const generatedAt = input.generatedAt ?? new Date().toISOString();
   const chunks = chunkIssues(issues, input.chunkSize);
@@ -572,11 +584,14 @@ async function runBacklogAuditCullChunked(
       }),
     );
   }
-  return mergeBacklogAuditReports({
-    reports,
-    generatedAt,
-    issueCount: issues.length,
-  });
+  return restrictCullReportToEligibleIssues(
+    mergeBacklogAuditReports({
+      reports,
+      generatedAt,
+      issueCount: issues.length,
+    }),
+    eligibleIdentifiers,
+  );
 }
 
 function restrictCullReportToEligibleIssues(
