@@ -138,8 +138,8 @@ hard_stops:
   no_progress_turns: 3
 
   # Maximum cumulative tokens before PAUSED-budget.
-  # Default: 200000
-  max_tokens_per_unit: 200000
+  # Default: 1200000
+  max_tokens_per_unit: 1200000
 
   # Maximum estimated dollar spend before PAUSED-budget.
   # Default: 50

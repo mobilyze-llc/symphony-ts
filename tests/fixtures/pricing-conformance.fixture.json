@@ -1,0 +1,84 @@
+{
+  "schema": "crucible.usage-ledger.pricing-conformance.v1",
+  "catalog_schema": "crucible.usage-ledger.pricing-catalog.v2",
+  "note": "MOB-589 shared TS<->JS(.mjs) pricing-resolver conformance cases. The shared surface every resolver must agree on is {billing_mode, usd_cost} for a given {provider, model, usage}. weighted_total/denomination/enforced are the lane resolver's weighted-budget basis (TS today; symphony hard-stops via SYMPH-955). usd_cost is null whenever the matched row carries no absolute USD rates (subscription/credit/diagnostic).",
+  "cases": [
+    {
+      "name": "anthropic opus alias resolves to the subscription row -> weighted 5x",
+      "provider": "anthropic",
+      "model": "opus",
+      "usage": { "input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 200, "cache_write_tokens": 40 },
+      "billing_mode": "subscription_included",
+      "denomination": "weighted_tokens",
+      "enforced": true,
+      "weighted_total": 420,
+      "usd_cost": null
+    },
+    {
+      "name": "anthropic fable alias -> subscription weighted 5x (ratio stable across repricing)",
+      "provider": "anthropic",
+      "model": "fable",
+      "usage": { "input_tokens": 0, "output_tokens": 100 },
+      "billing_mode": "subscription_included",
+      "denomination": "weighted_tokens",
+      "enforced": true,
+      "weighted_total": 500,
+      "usd_cost": null
+    },
+    {
+      "name": "anthropic opus wire id resolves to the api_token row -> absolute USD",
+      "provider": "anthropic",
+      "model": "claude-opus-4-8",
+      "usage": { "input_tokens": 1000000, "output_tokens": 1000000 },
+      "billing_mode": "api_token",
+      "denomination": "usd",
+      "enforced": true,
+      "weighted_total": null,
+      "usd_cost": 30
+    },
+    {
+      "name": "openai codex alias -> credit_allowance weighted 6x",
+      "provider": "openai",
+      "model": "codex",
+      "usage": { "input_tokens": 100, "output_tokens": 50, "cache_write_tokens": 40, "cache_read_tokens": 200 },
+      "billing_mode": "credit_allowance",
+      "denomination": "weighted_tokens",
+      "enforced": true,
+      "weighted_total": 470,
+      "usd_cost": null
+    },
+    {
+      "name": "openai gpt-5.5 -> api_token absolute USD (input + output + cache-read)",
+      "provider": "openai",
+      "model": "gpt-5.5",
+      "usage": { "input_tokens": 1000000, "output_tokens": 1000000, "cache_read_tokens": 1000000 },
+      "billing_mode": "api_token",
+      "denomination": "usd",
+      "enforced": true,
+      "weighted_total": null,
+      "usd_cost": 35.5
+    },
+    {
+      "name": "deepseek-chat -> api_token absolute USD",
+      "provider": "deepseek",
+      "model": "deepseek-chat",
+      "usage": { "input_tokens": 1000000, "output_tokens": 1000000 },
+      "billing_mode": "api_token",
+      "denomination": "usd",
+      "enforced": true,
+      "weighted_total": null,
+      "usd_cost": 1.37
+    },
+    {
+      "name": "deepseek-v4-pro local lane -> diagnostic_only, no enforcement",
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "usage": { "input_tokens": 100, "output_tokens": 50 },
+      "billing_mode": "diagnostic_only",
+      "denomination": "none",
+      "enforced": false,
+      "weighted_total": null,
+      "usd_cost": null
+    }
+  ]
+}

@@ -196,7 +196,7 @@ issue to "In Review" and leave a comment summarizing what you did.
 | `runner.kind` | Default implementation runner | `codex` |
 | `hard_stops.max_iterations` | Per-unit turn cap before `STALLED` | `20` |
 | `hard_stops.no_progress_turns` | Repeated unchanged turns before `STALLED`; `0` disables | `3` |
-| `hard_stops.max_tokens_per_unit` | Token ceiling before `PAUSED-budget` | `200000` |
+| `hard_stops.max_tokens_per_unit` | Weighted-token ceiling before `PAUSED-budget` | `6000000` |
 | `hard_stops.max_dollar_budget_usd` | Estimated dollar ceiling before `PAUSED-budget` | `50` |
 | `hard_stops.premium_budget_pause_ratio` | Early pause threshold as a share of dollar ceiling | `0.8` |
 | `hard_stops.estimated_cost_per_1k_tokens_usd` | Fallback cost estimate for token-only providers | `0.05` |
@@ -214,6 +214,29 @@ issue to "In Review" and leave a comment summarizing what you did.
 | `observability.dashboard_enabled` | Enable live dashboard updates when the HTTP server is running | `true` |
 | `observability.refresh_ms` | Dashboard heartbeat interval in ms for time-based refreshes | `1000` |
 | `observability.render_interval_ms` | Minimum spacing in ms between pushed dashboard renders | `16` |
+
+**SYMPH-955 weighted-budget re-baseline**
+
+`hard_stops.max_tokens_per_unit` now uses weighted cost-equivalent tokens for
+subscription and credit-backed lanes. The conservative migration maps every
+configured token ceiling to `old * 6`, so the weighted gate does not fire earlier
+than the prior billable-token gate for any OpenAI/Anthropic token mix. An
+Anthropic-only `old * 5` mapping was considered, but thresholds remain
+provider-agnostic in this change. Operator sign-off is required before merging.
+
+| File | Old | New |
+|------|-----|-----|
+| `src/config/defaults.ts` | `1000000` | `6000000` |
+| `pipeline-config/WORKFLOW.md` global | `250000` | `1500000` |
+| `pipeline-config/WORKFLOW.md` investigate | `200000` | `1200000` |
+| `pipeline-config/WORKFLOW-staged.md` global | `250000` | `1500000` |
+| `pipeline-config/WORKFLOW-staged.md` investigate | `200000` | `1200000` |
+| `pipeline-config/WORKFLOW-instrumentation.md` global | `250000` | `1500000` |
+| `pipeline-config/WORKFLOW-instrumentation.md` investigate | `200000` | `1200000` |
+| `pipeline-config/WORKFLOW-flat.md` global | `250000` | `1500000` |
+| `pipeline-config/templates/WORKFLOW-template.md` global | `250000` | `1500000` |
+| `pipeline-config/templates/WORKFLOW-template.md` investigate | `200000` | `1200000` |
+| `docs/WORKFLOW.template.md` documented example | `200000` | `1200000` |
 
 The prompt body uses **Liquid template syntax**. Available variables:
 - `{{ issue.identifier }}`, `{{ issue.title }}`, `{{ issue.description }}`

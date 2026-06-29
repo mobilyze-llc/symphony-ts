@@ -137,7 +137,7 @@ const RESOLVED_CODEX_WORKFLOW_CONFIGS = [
 const OBSERVED_CODEX_LOW_FIRST_TURN_TOKENS = 233_719;
 const EXPECTED_INVESTIGATE_HARD_STOPS = {
   maxIterations: 4,
-  maxTokensPerUnit: 200_000,
+  maxTokensPerUnit: 1_200_000,
   maxDollarBudgetUsd: 4,
   premiumBudgetPauseRatio: 0.9,
 };
@@ -537,7 +537,7 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
       throw new Error("Expected resolved workflow hard stops");
     }
 
-    expect(hardStops.maxTokensPerUnit).toBe(250_000);
+    expect(hardStops.maxTokensPerUnit).toBe(1_500_000);
     expect(hardStops.maxTokensPerUnit).toBeGreaterThan(
       OBSERVED_CODEX_LOW_FIRST_TURN_TOKENS,
     );
@@ -558,7 +558,7 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
       expect(investigateStage.hardStops).toEqual(
         EXPECTED_INVESTIGATE_HARD_STOPS,
       );
-      expect(investigateStage.hardStops?.maxTokensPerUnit).toBeLessThan(
+      expect(investigateStage.hardStops?.maxTokensPerUnit).toBeGreaterThan(
         OBSERVED_CODEX_LOW_FIRST_TURN_TOKENS,
       );
       for (const stageName of ["implement", "review", "merge"] as const) {
