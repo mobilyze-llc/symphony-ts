@@ -652,6 +652,54 @@ describe("backlog audit", () => {
     }
   });
 
+  it("strips cull actions from hygiene-mode findings (cull is off-path only)", async () => {
+    const fetchFn = vi.fn(async () =>
+      chatCompletionResponse(
+        JSON.stringify({
+          summary: "Hygiene finding that smuggles a cull action.",
+          findingTypeVolume: {
+            duplicate: 0,
+            supersession: 0,
+            stale: 1,
+            thin_spec: 0,
+            review_dispatch_mismatch: 0,
+            other: 0,
+          },
+          findings: [
+            {
+              findingId: "F-1",
+              type: "stale",
+              issueIdentifiers: ["SYMPH-123"],
+              summary: "Stale ticket.",
+              evidence: "No longer matches the plan.",
+              confidence: "high",
+              // A hygiene-mode model must not be able to authorize a cull cancel.
+              cull: {
+                classification: "kill",
+                killReason: "unreachable",
+              },
+            },
+          ],
+        }),
+      ),
+    );
+
+    const report = await runBacklogAudit({
+      config: {
+        baseUrl: "http://studio2.local:8000/v1",
+        model: "deepseek-v4-flash",
+        apiKey: null,
+        timeoutMs: 60_000,
+      },
+      issues: [ISSUE],
+      runtimeEvidence: RUNTIME_EVIDENCE,
+      fetchFn: fetchFn as unknown as typeof fetch,
+    });
+
+    // Default hygiene mode: the cull field is stripped so it cannot reach a plan.
+    expect(report.verdict.findings[0]?.cull ?? null).toBeNull();
+  });
+
   it("dedupes cull findings to one per ticket so a ticket is not proposed twice", async () => {
     const defensive = {
       ...ISSUE,

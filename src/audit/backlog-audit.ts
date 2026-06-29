@@ -221,7 +221,25 @@ export async function runBacklogAudit(
       new Set(issues.map((issue) => issue.identifier)),
     );
   }
-  return report;
+  // Cull actions are only authorized in off_pressure_cull mode. Strip any cull
+  // field a hygiene-mode model may have emitted so it cannot smuggle a kill /
+  // downgrade cancel into a hygiene decision (SYMPH-966 AC#5: off-path only).
+  return stripCullFindings(report);
+}
+
+function stripCullFindings(report: BacklogAuditReport): BacklogAuditReport {
+  if (report.verdict.findings.every((finding) => finding.cull == null)) {
+    return report;
+  }
+  return {
+    ...report,
+    verdict: {
+      ...report.verdict,
+      findings: report.verdict.findings.map((finding) =>
+        finding.cull == null ? finding : { ...finding, cull: null },
+      ),
+    },
+  };
 }
 
 async function runLocalModelJudge(input: {
