@@ -16,10 +16,12 @@ import {
   buildBacklogAuditPrompt,
   createBacklogAuditModelFetch,
   fetchBacklogAuditRuntimeEvidence,
+  isStandingDefensiveIssue,
   mergeBacklogAuditReports,
   renderBacklogAuditReport,
   runBacklogAudit,
   runBacklogAuditChunked,
+  selectOffPressureCullIssues,
 } from "../../src/audit/backlog-audit.js";
 import type { Issue } from "../../src/domain/model.js";
 
@@ -322,6 +324,474 @@ describe("backlog audit", () => {
       supersession: 0,
       thin_spec: 1,
     });
+  });
+
+  it("runs off-pressure cull only over standing defensive tickets and normalizes kill markers", async () => {
+    const defensive = {
+      ...ISSUE,
+      id: "issue-defensive",
+      identifier: "SYMPH-958",
+      title: "Defensive Track-originated workaround",
+      labels: ["source:tracked-items"],
+    };
+    const userReported = {
+      ...ISSUE,
+      id: "issue-user",
+      identifier: "SYMPH-956",
+      title: "Real user-visible bug",
+      labels: ["source:user-report"],
+    };
+    const fetchFn = vi.fn(
+      async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body));
+        const prompt = JSON.stringify(body.messages ?? body.prompt ?? "");
+        expect(prompt).toContain("Audit mode: off_pressure_cull");
+        expect(prompt).toContain("SYMPH-958");
+        expect(prompt).not.toContain("SYMPH-956");
+        return chatCompletionResponse(
+          JSON.stringify({
+            summary: "Cull found one unreachable defensive ticket.",
+            findingTypeVolume: {
+              duplicate: 0,
+              supersession: 0,
+              stale: 0,
+              thin_spec: 0,
+              review_dispatch_mismatch: 0,
+              other: 1,
+            },
+            findings: [
+              {
+                findingId: "F-1",
+                type: "other",
+                issueIdentifiers: ["SYMPH-958"],
+                summary: "Unreachable after the owning surface was removed.",
+                evidence:
+                  "Ticket is Track-originated and targets a removed path.",
+                confidence: "high",
+                cull: {
+                  classification: "kill",
+                  killReason: "unreachable",
+                },
+              },
+            ],
+          }),
+        );
+      },
+    );
+
+    const report = await runBacklogAudit({
+      mode: "off_pressure_cull",
+      config: {
+        baseUrl: "http://studio2.local:8000/v1",
+        model: "deepseek-v4-flash",
+        apiKey: null,
+        timeoutMs: 60_000,
+      },
+      issues: [defensive, userReported],
+      runtimeEvidence: RUNTIME_EVIDENCE,
+      fetchFn: fetchFn as unknown as typeof fetch,
+    });
+
+    expect(report.issueCount).toBe(1);
+    expect(report.verdict.findings[0]?.cull).toMatchObject({
+      classification: "kill",
+      killReason: "unreachable",
+      marker: "killed:unreachable",
+    });
+    expect(selectOffPressureCullIssues([defensive, userReported])).toEqual([
+      defensive,
+    ]);
+    expect(isStandingDefensiveIssue(userReported)).toBe(false);
+  });
+
+  it("does not treat untrusted prose mentioning 'defensive' as a standing defensive issue", () => {
+    // A user-reported ticket whose text merely contains the word "defensive"
+    // must not become cull-eligible (eligibility comes from labels/provenance
+    // jargon, not free text). Specific provenance jargon still matches.
+    expect(
+      isStandingDefensiveIssue({
+        ...ISSUE,
+        identifier: "SYMPH-956",
+        title: "This is not a defensive change at all",
+        description: "Plain user-reported bug that happens to say defensive.",
+        labels: ["source:user-report"],
+      }),
+    ).toBe(false);
+    expect(
+      isStandingDefensiveIssue({
+        ...ISSUE,
+        identifier: "SYMPH-958",
+        title: "Track-originated workaround",
+        description: "",
+        labels: [],
+      }),
+    ).toBe(true);
+  });
+
+  it("drops cull findings that reference a non-defensive (off-scope) issue", async () => {
+    const defensive = {
+      ...ISSUE,
+      id: "issue-defensive",
+      identifier: "SYMPH-958",
+      title: "Defensive Track-originated workaround",
+      labels: ["source:tracked-items"],
+    };
+    const userReported = {
+      ...ISSUE,
+      id: "issue-user",
+      identifier: "SYMPH-956",
+      title: "Real user-visible bug",
+      labels: ["source:user-report"],
+    };
+    const fetchFn = vi.fn(async () =>
+      chatCompletionResponse(
+        JSON.stringify({
+          summary: "Cull returned one eligible and one stray finding.",
+          findingTypeVolume: {
+            duplicate: 0,
+            supersession: 0,
+            stale: 0,
+            thin_spec: 0,
+            review_dispatch_mismatch: 0,
+            other: 2,
+          },
+          findings: [
+            {
+              findingId: "F-eligible",
+              type: "other",
+              issueIdentifiers: ["SYMPH-958"],
+              summary: "Unreachable defensive ticket.",
+              evidence: "Owning surface removed.",
+              confidence: "high",
+              cull: { classification: "kill", killReason: "unreachable" },
+            },
+            {
+              // Off-scope: SYMPH-956 is not a standing-defensive issue and was
+              // never fed to the model; a stray finding for it must be dropped.
+              findingId: "F-offscope",
+              type: "other",
+              issueIdentifiers: ["SYMPH-956"],
+              summary: "Hallucinated kill of a real user-reported bug.",
+              evidence: "Model strayed outside the cull-eligible set.",
+              confidence: "high",
+              cull: { classification: "kill", killReason: "unreachable" },
+            },
+          ],
+        }),
+      ),
+    );
+
+    const report = await runBacklogAudit({
+      mode: "off_pressure_cull",
+      config: {
+        baseUrl: "http://studio2.local:8000/v1",
+        model: "deepseek-v4-flash",
+        apiKey: null,
+        timeoutMs: 60_000,
+      },
+      issues: [defensive, userReported],
+      runtimeEvidence: RUNTIME_EVIDENCE,
+      fetchFn: fetchFn as unknown as typeof fetch,
+    });
+
+    expect(
+      report.verdict.findings.map((finding) => finding.issueIdentifiers),
+    ).toEqual([["SYMPH-958"]]);
+    expect(
+      report.verdict.findings.some((finding) =>
+        finding.issueIdentifiers.includes("SYMPH-956"),
+      ),
+    ).toBe(false);
+    // The per-type volume must track the surviving findings, not the dropped one.
+    expect(report.verdict.findingTypeVolume.other).toBe(1);
+  });
+
+  it("canonicalizes a kill/downgrade marker that conflicts with its classification", async () => {
+    const defensive = {
+      ...ISSUE,
+      id: "issue-defensive",
+      identifier: "SYMPH-958",
+      title: "Defensive Track-originated workaround",
+      labels: ["source:tracked-items"],
+    };
+    const fetchFn = vi.fn(async () =>
+      chatCompletionResponse(
+        JSON.stringify({
+          summary: "Cull with a mismatched supplied marker.",
+          findingTypeVolume: {
+            duplicate: 0,
+            supersession: 0,
+            stale: 0,
+            thin_spec: 0,
+            review_dispatch_mismatch: 0,
+            other: 1,
+          },
+          findings: [
+            {
+              findingId: "F-1",
+              type: "other",
+              issueIdentifiers: ["SYMPH-958"],
+              summary: "Unreachable defensive ticket.",
+              evidence: "Owning surface removed.",
+              confidence: "high",
+              cull: {
+                classification: "kill",
+                killReason: "unreachable",
+                // Model supplied a marker that contradicts the classification.
+                marker: "downgraded:duplicate",
+              },
+            },
+          ],
+        }),
+      ),
+    );
+
+    const report = await runBacklogAudit({
+      mode: "off_pressure_cull",
+      config: {
+        baseUrl: "http://studio2.local:8000/v1",
+        model: "deepseek-v4-flash",
+        apiKey: null,
+        timeoutMs: 60_000,
+      },
+      issues: [defensive],
+      runtimeEvidence: RUNTIME_EVIDENCE,
+      fetchFn: fetchFn as unknown as typeof fetch,
+    });
+
+    // The marker is derived from (classification, killReason), never the stray
+    // model string, so a kill can never emit a downgrade label.
+    expect(report.verdict.findings[0]?.cull?.marker).toBe("killed:unreachable");
+  });
+
+  it("drops off-scope cull findings even when a custom runChunk bypasses runBacklogAudit", async () => {
+    const defensive = {
+      ...ISSUE,
+      id: "issue-defensive",
+      identifier: "SYMPH-958",
+      title: "Defensive Track-originated workaround",
+      labels: ["source:tracked-items"],
+    };
+    const userReported = {
+      ...ISSUE,
+      id: "issue-user",
+      identifier: "SYMPH-956",
+      title: "Real user-visible bug",
+      labels: ["source:user-report"],
+    };
+    const offScopeRunChunk = async () => ({
+      generatedAt: "2026-06-29T00:00:00.000Z",
+      issueCount: 1,
+      runtimeSources: ["/api/v1/state"],
+      verdict: {
+        summary: "Custom chunk returned an eligible and an off-scope finding.",
+        findingTypeVolume: {
+          duplicate: 0,
+          supersession: 0,
+          stale: 0,
+          thin_spec: 0,
+          review_dispatch_mismatch: 0,
+          other: 2,
+        },
+        findings: [
+          {
+            findingId: "F-eligible",
+            type: "other" as const,
+            issueIdentifiers: ["SYMPH-958"],
+            summary: "Eligible defensive finding.",
+            evidence: "In scope.",
+            confidence: "high" as const,
+            cull: {
+              classification: "kill" as const,
+              killReason: "unreachable" as const,
+              marker: "killed:unreachable",
+              rootIssueIdentifier: null,
+            },
+          },
+          {
+            findingId: "F-offscope",
+            type: "other" as const,
+            issueIdentifiers: ["SYMPH-956"],
+            summary: "Off-scope finding from a custom runChunk.",
+            evidence: "Bypasses runBacklogAudit's inner filter.",
+            confidence: "high" as const,
+            cull: {
+              classification: "kill" as const,
+              killReason: "unreachable" as const,
+              marker: "killed:unreachable",
+              rootIssueIdentifier: null,
+            },
+          },
+        ],
+      },
+    });
+
+    for (const chunkSize of [null, 1] as const) {
+      const report = await runBacklogAuditChunked({
+        mode: "off_pressure_cull",
+        config: {
+          baseUrl: "http://studio2.local:8000/v1",
+          model: "deepseek-v4-flash",
+          apiKey: null,
+          timeoutMs: 60_000,
+        },
+        issues: [defensive, userReported],
+        runtimeEvidence: RUNTIME_EVIDENCE,
+        chunkSize,
+        runChunk: offScopeRunChunk,
+      });
+
+      expect(
+        report.verdict.findings.some((finding) =>
+          finding.issueIdentifiers.includes("SYMPH-956"),
+        ),
+      ).toBe(false);
+      expect(report.verdict.findingTypeVolume.other).toBe(
+        report.verdict.findings.length,
+      );
+    }
+  });
+
+  it("strips cull actions from hygiene-mode findings (cull is off-path only)", async () => {
+    const fetchFn = vi.fn(async () =>
+      chatCompletionResponse(
+        JSON.stringify({
+          summary: "Hygiene finding that smuggles a cull action.",
+          findingTypeVolume: {
+            duplicate: 0,
+            supersession: 0,
+            stale: 1,
+            thin_spec: 0,
+            review_dispatch_mismatch: 0,
+            other: 0,
+          },
+          findings: [
+            {
+              findingId: "F-1",
+              type: "stale",
+              issueIdentifiers: ["SYMPH-123"],
+              summary: "Stale ticket.",
+              evidence: "No longer matches the plan.",
+              confidence: "high",
+              // A hygiene-mode model must not be able to authorize a cull cancel.
+              cull: {
+                classification: "kill",
+                killReason: "unreachable",
+              },
+            },
+          ],
+        }),
+      ),
+    );
+
+    const report = await runBacklogAudit({
+      config: {
+        baseUrl: "http://studio2.local:8000/v1",
+        model: "deepseek-v4-flash",
+        apiKey: null,
+        timeoutMs: 60_000,
+      },
+      issues: [ISSUE],
+      runtimeEvidence: RUNTIME_EVIDENCE,
+      fetchFn: fetchFn as unknown as typeof fetch,
+    });
+
+    // Default hygiene mode: the cull field is stripped so it cannot reach a plan.
+    expect(report.verdict.findings[0]?.cull ?? null).toBeNull();
+  });
+
+  it("dedupes cull findings to one per ticket so a ticket is not proposed twice", async () => {
+    const defensive = {
+      ...ISSUE,
+      id: "issue-defensive",
+      identifier: "SYMPH-958",
+      title: "Defensive Track-originated workaround",
+      labels: ["source:tracked-items"],
+    };
+    const fetchFn = vi.fn(async () =>
+      chatCompletionResponse(
+        JSON.stringify({
+          summary: "Two findings for the same ticket.",
+          findingTypeVolume: {
+            duplicate: 0,
+            supersession: 0,
+            stale: 0,
+            thin_spec: 0,
+            review_dispatch_mismatch: 0,
+            other: 2,
+          },
+          findings: [
+            {
+              findingId: "F-1",
+              type: "other",
+              issueIdentifiers: ["SYMPH-958"],
+              summary: "First disproof of the same ticket.",
+              evidence: "Unreachable.",
+              confidence: "high",
+              cull: { classification: "kill", killReason: "unreachable" },
+            },
+            {
+              // Different findingId, same ticket — must collapse to one.
+              findingId: "F-2",
+              type: "other",
+              issueIdentifiers: ["SYMPH-958"],
+              summary: "Second disproof of the same ticket.",
+              evidence: "Duplicate of the same disproof.",
+              confidence: "high",
+              cull: { classification: "kill", killReason: "unreachable" },
+            },
+          ],
+        }),
+      ),
+    );
+
+    const report = await runBacklogAudit({
+      mode: "off_pressure_cull",
+      config: {
+        baseUrl: "http://studio2.local:8000/v1",
+        model: "deepseek-v4-flash",
+        apiKey: null,
+        timeoutMs: 60_000,
+      },
+      issues: [defensive],
+      runtimeEvidence: RUNTIME_EVIDENCE,
+      fetchFn: fetchFn as unknown as typeof fetch,
+    });
+
+    expect(report.verdict.findings).toHaveLength(1);
+    expect(report.verdict.findingTypeVolume.other).toBe(1);
+  });
+
+  it("normalizes a model verdict that omits findings to an empty list", async () => {
+    const fetchFn = vi.fn(async () =>
+      chatCompletionResponse(
+        JSON.stringify({
+          summary: "No findings key at all.",
+          findingTypeVolume: {
+            duplicate: 0,
+            supersession: 0,
+            stale: 0,
+            thin_spec: 0,
+            review_dispatch_mismatch: 0,
+            other: 0,
+          },
+        }),
+      ),
+    );
+
+    const report = await runBacklogAudit({
+      config: {
+        baseUrl: "http://studio2.local:8000/v1",
+        model: "deepseek-v4-flash",
+        apiKey: null,
+        timeoutMs: 60_000,
+      },
+      issues: [ISSUE],
+      runtimeEvidence: RUNTIME_EVIDENCE,
+      fetchFn: fetchFn as unknown as typeof fetch,
+    });
+
+    expect(report.verdict.findings).toEqual([]);
   });
 
   it("wraps non-JSON local model response bodies", async () => {

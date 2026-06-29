@@ -15,6 +15,7 @@ import {
   buildBacklogHygieneDecisionJournalEntry,
   buildBacklogHygieneProposalJournalEntry,
   buildBacklogHygieneProposals,
+  buildConservativeCullApplicationPlan,
   decideBacklogHygieneModelTier,
   runBacklogHygieneProposalLane,
   selectBacklogHygieneProposalFindings,
@@ -249,6 +250,379 @@ describe("backlog hygiene proposal lane (SYMPH-484)", () => {
         maxProposalsPerProductPerPoll: 1.5,
       }),
     ).toThrow("maxProposalsPerProductPerPoll must be an integer.");
+  });
+
+  it("keeps kill proposals propose-only until operator agree and emits the stable marker on agree", () => {
+    const [proposal] = buildBacklogHygieneProposals({
+      report: {
+        generatedAt: "2026-06-29T00:00:00.000Z",
+        issueCount: 1,
+        runtimeSources: ["/api/v1/state"],
+        verdict: {
+          summary: "Cull proposal.",
+          findingTypeVolume: {
+            duplicate: 0,
+            supersession: 0,
+            stale: 0,
+            thin_spec: 0,
+            review_dispatch_mismatch: 0,
+            other: 1,
+          },
+          findings: [
+            {
+              findingId: "F-1",
+              type: "other",
+              issueIdentifiers: ["SYMPH-958"],
+              summary: "Unreachable defensive ticket",
+              evidence: "Target state cannot occur.",
+              confidence: "high",
+              cull: {
+                classification: "kill",
+                killReason: "unreachable",
+                marker: "killed:unreachable",
+                rootIssueIdentifier: null,
+              },
+            },
+          ],
+        },
+      },
+      candidateIssues: [issue({ id: "958", identifier: "SYMPH-958" })],
+      maxProposalsPerProductPerPoll: 1,
+      modelTierDecision: decideBacklogHygieneModelTier(passingEvaluation()),
+    });
+
+    expect(proposal).toBeDefined();
+    expect(
+      buildConservativeCullApplicationPlan({
+        proposal: proposal!,
+        decision: "none",
+      }),
+    ).toMatchObject({
+      requiresOperatorAgree: true,
+      cancelIssue: false,
+      markerLabels: [],
+    });
+
+    const decisionEntry = buildBacklogHygieneDecisionJournalEntry({
+      proposal: proposal!,
+      decision: "accepted",
+      actor: { kind: "interactive-agent", host: "local", session: "s1" },
+      ownerId: null,
+      reason: "operator agreed with unreachable cull",
+      timestamp: "2026-06-29T00:01:00.000Z",
+    });
+
+    expect(decisionEntry.metadata.issue_state_mutation).toBe(true);
+    expect(decisionEntry.metadata.label_transition).toEqual({
+      remove: [BACKLOG_HYGIENE_PROPOSAL_LABELS.proposed],
+      add: [BACKLOG_HYGIENE_PROPOSAL_LABELS.accepted, "killed:unreachable"],
+    });
+  });
+
+  it("never cancels a kill that lacks a valid stable-reason marker", () => {
+    const [proposal] = buildBacklogHygieneProposals({
+      report: {
+        generatedAt: "2026-06-29T00:00:00.000Z",
+        issueCount: 1,
+        runtimeSources: ["/api/v1/state"],
+        verdict: {
+          summary: "Reasonless kill.",
+          findingTypeVolume: {
+            duplicate: 0,
+            supersession: 0,
+            stale: 0,
+            thin_spec: 0,
+            review_dispatch_mismatch: 0,
+            other: 1,
+          },
+          findings: [
+            {
+              findingId: "F-noreason",
+              type: "other",
+              issueIdentifiers: ["SYMPH-958"],
+              summary: "Kill with no kill reason",
+              evidence: "Model omitted the kill reason.",
+              confidence: "high",
+              cull: {
+                classification: "kill",
+                killReason: null,
+                marker: null,
+                rootIssueIdentifier: null,
+              },
+            },
+          ],
+        },
+      },
+      candidateIssues: [issue({ id: "958", identifier: "SYMPH-958" })],
+      maxProposalsPerProductPerPoll: 1,
+      modelTierDecision: decideBacklogHygieneModelTier(passingEvaluation()),
+    });
+
+    const plan = buildConservativeCullApplicationPlan({
+      proposal: proposal!,
+      decision: "agreed",
+    });
+    // A reasonless kill (no marker) is inert: it cannot cancel a ticket.
+    expect(plan.cancelIssue).toBe(false);
+    expect(plan.requiresOperatorAgree).toBe(false);
+    expect(plan.markerLabels).toEqual([]);
+  });
+
+  it("does not let a kill carrying a mismatched downgrade marker cancel", () => {
+    const [proposal] = buildBacklogHygieneProposals({
+      report: {
+        generatedAt: "2026-06-29T00:00:00.000Z",
+        issueCount: 1,
+        runtimeSources: ["/api/v1/state"],
+        verdict: {
+          summary: "Kill with a mismatched marker prefix.",
+          findingTypeVolume: {
+            duplicate: 0,
+            supersession: 0,
+            stale: 0,
+            thin_spec: 0,
+            review_dispatch_mismatch: 0,
+            other: 1,
+          },
+          findings: [
+            {
+              findingId: "F-mismatch",
+              type: "other",
+              issueIdentifiers: ["SYMPH-958"],
+              summary: "Kill whose marker prefix does not match the class",
+              evidence: "Stray downgrade marker on a kill.",
+              confidence: "high",
+              cull: {
+                classification: "kill",
+                killReason: null,
+                // Prefix matches a marker but not the kill classification.
+                marker: "downgraded:unreachable",
+                rootIssueIdentifier: null,
+              },
+            },
+          ],
+        },
+      },
+      candidateIssues: [issue({ id: "958", identifier: "SYMPH-958" })],
+      maxProposalsPerProductPerPoll: 1,
+      modelTierDecision: decideBacklogHygieneModelTier(passingEvaluation()),
+    });
+
+    const plan = buildConservativeCullApplicationPlan({
+      proposal: proposal!,
+      decision: "agreed",
+    });
+    expect(plan.cancelIssue).toBe(false);
+    expect(plan.requiresOperatorAgree).toBe(false);
+    expect(plan.markerLabels).toEqual([]);
+  });
+
+  it("ignores a model-supplied marker entirely and derives it from classification + reason", () => {
+    const [proposal] = buildBacklogHygieneProposals({
+      report: {
+        generatedAt: "2026-06-29T00:00:00.000Z",
+        issueCount: 1,
+        runtimeSources: ["/api/v1/state"],
+        verdict: {
+          summary: "Kill with a well-prefixed but reasonless marker.",
+          findingTypeVolume: {
+            duplicate: 0,
+            supersession: 0,
+            stale: 0,
+            thin_spec: 0,
+            review_dispatch_mismatch: 0,
+            other: 1,
+          },
+          findings: [
+            {
+              findingId: "F-garbage",
+              type: "other",
+              issueIdentifiers: ["SYMPH-958"],
+              summary: "Kill with no reason but a killed: marker string",
+              evidence: "Hand-crafted marker with an invalid reason suffix.",
+              confidence: "high",
+              cull: {
+                classification: "kill",
+                killReason: null,
+                // Valid `killed:` prefix but no real reason — must not authorize.
+                marker: "killed:not_a_stable_reason",
+                rootIssueIdentifier: null,
+              },
+            },
+          ],
+        },
+      },
+      candidateIssues: [issue({ id: "958", identifier: "SYMPH-958" })],
+      maxProposalsPerProductPerPoll: 1,
+      modelTierDecision: decideBacklogHygieneModelTier(passingEvaluation()),
+    });
+
+    const plan = buildConservativeCullApplicationPlan({
+      proposal: proposal!,
+      decision: "agreed",
+    });
+    expect(plan.cancelIssue).toBe(false);
+    expect(plan.requiresOperatorAgree).toBe(false);
+    expect(plan.markerLabels).toEqual([]);
+  });
+
+  it("drops a self-referencing blockedBy for a ticket symptomatic of itself", () => {
+    const [proposal] = buildBacklogHygieneProposals({
+      report: {
+        generatedAt: "2026-06-29T00:00:00.000Z",
+        issueCount: 1,
+        runtimeSources: ["/api/v1/state"],
+        verdict: {
+          summary: "Symptomatic of itself.",
+          findingTypeVolume: {
+            duplicate: 0,
+            supersession: 0,
+            stale: 0,
+            thin_spec: 0,
+            review_dispatch_mismatch: 0,
+            other: 1,
+          },
+          findings: [
+            {
+              findingId: "F-self",
+              type: "other",
+              issueIdentifiers: ["SYMPH-956"],
+              summary: "Hallucinated self-symptomatic finding",
+              evidence: "Root identifier equals the issue itself.",
+              confidence: "medium",
+              cull: {
+                classification: "symptomatic_of_root",
+                killReason: null,
+                marker: null,
+                rootIssueIdentifier: "SYMPH-956",
+              },
+            },
+          ],
+        },
+      },
+      candidateIssues: [issue({ id: "956", identifier: "SYMPH-956" })],
+      maxProposalsPerProductPerPoll: 1,
+      modelTierDecision: decideBacklogHygieneModelTier(passingEvaluation()),
+    });
+
+    expect(
+      buildConservativeCullApplicationPlan({
+        proposal: proposal!,
+        decision: "agreed",
+      }).blockedBy,
+    ).toEqual([]);
+  });
+
+  it("parks symptomatic survivors behind their existing root ticket via blockedBy intent", () => {
+    const [proposal] = buildBacklogHygieneProposals({
+      report: {
+        generatedAt: "2026-06-29T00:00:00.000Z",
+        issueCount: 1,
+        runtimeSources: ["/api/v1/state"],
+        verdict: {
+          summary: "Symptomatic survivor.",
+          findingTypeVolume: {
+            duplicate: 0,
+            supersession: 0,
+            stale: 0,
+            thin_spec: 0,
+            review_dispatch_mismatch: 0,
+            other: 1,
+          },
+          findings: [
+            {
+              findingId: "F-2",
+              type: "other",
+              issueIdentifiers: ["SYMPH-956"],
+              summary: "Real symptom of root ticket",
+              evidence:
+                "Existing root fix SYMPH-947 owns the underlying cause.",
+              confidence: "medium",
+              cull: {
+                classification: "symptomatic_of_root",
+                killReason: null,
+                marker: null,
+                rootIssueIdentifier: "SYMPH-947",
+              },
+            },
+          ],
+        },
+      },
+      candidateIssues: [issue({ id: "956", identifier: "SYMPH-956" })],
+      maxProposalsPerProductPerPoll: 1,
+      modelTierDecision: decideBacklogHygieneModelTier(passingEvaluation()),
+    });
+
+    const plan = buildConservativeCullApplicationPlan({
+      proposal: proposal!,
+      decision: "agreed",
+    });
+    expect(plan.cancelIssue).toBe(false);
+    expect(plan.blockedBy).toEqual([
+      { issueIdentifier: "SYMPH-956", rootIssueIdentifier: "SYMPH-947" },
+    ]);
+  });
+
+  it("never emits a marker label for a non-kill/downgrade cull carrying a stray kill marker", () => {
+    const [proposal] = buildBacklogHygieneProposals({
+      report: {
+        generatedAt: "2026-06-29T00:00:00.000Z",
+        issueCount: 1,
+        runtimeSources: ["/api/v1/state"],
+        verdict: {
+          summary: "Symptomatic survivor with a stray marker.",
+          findingTypeVolume: {
+            duplicate: 0,
+            supersession: 0,
+            stale: 0,
+            thin_spec: 0,
+            review_dispatch_mismatch: 0,
+            other: 1,
+          },
+          findings: [
+            {
+              findingId: "F-3",
+              type: "other",
+              issueIdentifiers: ["SYMPH-956"],
+              summary: "Real symptom of root ticket",
+              evidence:
+                "Existing root fix SYMPH-947 owns the underlying cause.",
+              confidence: "medium",
+              cull: {
+                classification: "symptomatic_of_root",
+                killReason: null,
+                // Stray kill marker on a non-kill classification must be ignored.
+                marker: "killed:unreachable",
+                rootIssueIdentifier: "SYMPH-947",
+              },
+            },
+          ],
+        },
+      },
+      candidateIssues: [issue({ id: "956", identifier: "SYMPH-956" })],
+      maxProposalsPerProductPerPoll: 1,
+      modelTierDecision: decideBacklogHygieneModelTier(passingEvaluation()),
+    });
+
+    expect(
+      buildConservativeCullApplicationPlan({
+        proposal: proposal!,
+        decision: "agreed",
+      }).markerLabels,
+    ).toEqual([]);
+
+    const decisionEntry = buildBacklogHygieneDecisionJournalEntry({
+      proposal: proposal!,
+      decision: "accepted",
+      actor: { kind: "interactive-agent", host: "local", session: "s1" },
+      ownerId: null,
+      reason: "operator agreed to park symptomatic survivor",
+      timestamp: "2026-06-29T00:01:00.000Z",
+    });
+    expect(decisionEntry.metadata.label_transition).toEqual({
+      remove: [BACKLOG_HYGIENE_PROPOSAL_LABELS.proposed],
+      add: [BACKLOG_HYGIENE_PROPOSAL_LABELS.accepted],
+    });
   });
 
   it("builds code-grounding input from resolved workflow config only when enabled", () => {
