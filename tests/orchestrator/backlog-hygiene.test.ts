@@ -319,6 +319,55 @@ describe("backlog hygiene proposal lane (SYMPH-484)", () => {
     });
   });
 
+  it("never cancels a kill that lacks a valid stable-reason marker", () => {
+    const [proposal] = buildBacklogHygieneProposals({
+      report: {
+        generatedAt: "2026-06-29T00:00:00.000Z",
+        issueCount: 1,
+        runtimeSources: ["/api/v1/state"],
+        verdict: {
+          summary: "Reasonless kill.",
+          findingTypeVolume: {
+            duplicate: 0,
+            supersession: 0,
+            stale: 0,
+            thin_spec: 0,
+            review_dispatch_mismatch: 0,
+            other: 1,
+          },
+          findings: [
+            {
+              findingId: "F-noreason",
+              type: "other",
+              issueIdentifiers: ["SYMPH-958"],
+              summary: "Kill with no kill reason",
+              evidence: "Model omitted the kill reason.",
+              confidence: "high",
+              cull: {
+                classification: "kill",
+                killReason: null,
+                marker: null,
+                rootIssueIdentifier: null,
+              },
+            },
+          ],
+        },
+      },
+      candidateIssues: [issue({ id: "958", identifier: "SYMPH-958" })],
+      maxProposalsPerProductPerPoll: 1,
+      modelTierDecision: decideBacklogHygieneModelTier(passingEvaluation()),
+    });
+
+    const plan = buildConservativeCullApplicationPlan({
+      proposal: proposal!,
+      decision: "agreed",
+    });
+    // A reasonless kill (no marker) is inert: it cannot cancel a ticket.
+    expect(plan.cancelIssue).toBe(false);
+    expect(plan.requiresOperatorAgree).toBe(false);
+    expect(plan.markerLabels).toEqual([]);
+  });
+
   it("parks symptomatic survivors behind their existing root ticket via blockedBy intent", () => {
     const [proposal] = buildBacklogHygieneProposals({
       report: {

@@ -518,11 +518,16 @@ export function buildConservativeCullApplicationPlan(input: {
       ? [cull.marker]
       : [];
   const rootIssueIdentifier = cull.rootIssueIdentifier;
+  // A kill may only cancel when it carries a valid stable-reason marker
+  // (SYMPH-966 AC#4): a kill normalized to killReason:null has no marker and
+  // must not cancel a ticket, or a reasonless kill could drop a real defect.
+  const killWithValidMarker =
+    cull.classification === "kill" && isCullMarkerLabel(cull.marker);
   return {
     proposalId: input.proposal.proposalId,
     classification: cull.classification,
-    requiresOperatorAgree: cull.classification === "kill",
-    cancelIssue: cull.classification === "kill" && agreed,
+    requiresOperatorAgree: killWithValidMarker,
+    cancelIssue: killWithValidMarker && agreed,
     markerLabels,
     blockedBy:
       cull.classification === "symptomatic_of_root" &&

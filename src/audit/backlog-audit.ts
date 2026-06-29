@@ -941,10 +941,13 @@ export function isStandingDefensiveIssue(issue: Issue): boolean {
   ) {
     return true;
   }
+  // Prose is untrusted: only match specific provenance jargon that does not
+  // occur in ordinary issue text. A bare "defensive" mention is NOT sufficient
+  // (it appears in normal prose, e.g. "this is not a defensive change") — the
+  // trustworthy "defensive" signal is the label checked above, not free text.
   const combined = `${issue.title}\n${issue.description ?? ""}`.toLowerCase();
   return (
     /\btrack-originated\b/.test(combined) ||
-    /\bdefensive\b/.test(combined) ||
     /\bsource:\s*tracked-items\b/.test(combined)
   );
 }

@@ -404,6 +404,30 @@ describe("backlog audit", () => {
     expect(isStandingDefensiveIssue(userReported)).toBe(false);
   });
 
+  it("does not treat untrusted prose mentioning 'defensive' as a standing defensive issue", () => {
+    // A user-reported ticket whose text merely contains the word "defensive"
+    // must not become cull-eligible (eligibility comes from labels/provenance
+    // jargon, not free text). Specific provenance jargon still matches.
+    expect(
+      isStandingDefensiveIssue({
+        ...ISSUE,
+        identifier: "SYMPH-956",
+        title: "This is not a defensive change at all",
+        description: "Plain user-reported bug that happens to say defensive.",
+        labels: ["source:user-report"],
+      }),
+    ).toBe(false);
+    expect(
+      isStandingDefensiveIssue({
+        ...ISSUE,
+        identifier: "SYMPH-958",
+        title: "Track-originated workaround",
+        description: "",
+        labels: [],
+      }),
+    ).toBe(true);
+  });
+
   it("drops cull findings that reference a non-defensive (off-scope) issue", async () => {
     const defensive = {
       ...ISSUE,
