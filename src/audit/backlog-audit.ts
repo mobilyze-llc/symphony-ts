@@ -598,18 +598,36 @@ function restrictCullReportToEligibleIssues(
   report: BacklogAuditReport,
   eligibleIdentifiers: ReadonlySet<string>,
 ): BacklogAuditReport {
-  const findings = report.verdict.findings.filter(
-    (finding) =>
-      finding.issueIdentifiers.length > 0 &&
-      finding.issueIdentifiers.every((identifier) =>
+  // Filter to cull-eligible issues AND dedupe to one finding per ticket-set:
+  // the proposal lane emits one proposal per finding with no per-ticket dedup,
+  // and the generic findingId-keyed dedup does not collapse two "other" cull
+  // findings for the same ticket. Enforcing one cull finding per ticket here
+  // upholds "one proposal per ticket" (SYMPH-966 AC#1) on both the single-pass
+  // and chunked/merged paths.
+  const seenIssueKeys = new Set<string>();
+  const findings = report.verdict.findings.filter((finding) => {
+    if (
+      finding.issueIdentifiers.length === 0 ||
+      !finding.issueIdentifiers.every((identifier) =>
         eligibleIdentifiers.has(identifier),
-      ),
-  );
+      )
+    ) {
+      return false;
+    }
+    const issueKey = [...finding.issueIdentifiers]
+      .sort((left, right) => left.localeCompare(right, "en"))
+      .join(",");
+    if (seenIssueKeys.has(issueKey)) {
+      return false;
+    }
+    seenIssueKeys.add(issueKey);
+    return true;
+  });
   if (findings.length === report.verdict.findings.length) {
     return report;
   }
   // Recompute the per-type volume so it stays consistent with the surviving
-  // findings; otherwise a dropped off-scope finding leaves an overstated count.
+  // findings; otherwise a dropped/deduped finding leaves an overstated count.
   const findingTypeVolume = Object.fromEntries(
     BACKLOG_AUDIT_FINDING_TYPES.map((type) => [
       type,

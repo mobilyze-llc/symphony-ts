@@ -652,6 +652,68 @@ describe("backlog audit", () => {
     }
   });
 
+  it("dedupes cull findings to one per ticket so a ticket is not proposed twice", async () => {
+    const defensive = {
+      ...ISSUE,
+      id: "issue-defensive",
+      identifier: "SYMPH-958",
+      title: "Defensive Track-originated workaround",
+      labels: ["source:tracked-items"],
+    };
+    const fetchFn = vi.fn(async () =>
+      chatCompletionResponse(
+        JSON.stringify({
+          summary: "Two findings for the same ticket.",
+          findingTypeVolume: {
+            duplicate: 0,
+            supersession: 0,
+            stale: 0,
+            thin_spec: 0,
+            review_dispatch_mismatch: 0,
+            other: 2,
+          },
+          findings: [
+            {
+              findingId: "F-1",
+              type: "other",
+              issueIdentifiers: ["SYMPH-958"],
+              summary: "First disproof of the same ticket.",
+              evidence: "Unreachable.",
+              confidence: "high",
+              cull: { classification: "kill", killReason: "unreachable" },
+            },
+            {
+              // Different findingId, same ticket — must collapse to one.
+              findingId: "F-2",
+              type: "other",
+              issueIdentifiers: ["SYMPH-958"],
+              summary: "Second disproof of the same ticket.",
+              evidence: "Duplicate of the same disproof.",
+              confidence: "high",
+              cull: { classification: "kill", killReason: "unreachable" },
+            },
+          ],
+        }),
+      ),
+    );
+
+    const report = await runBacklogAudit({
+      mode: "off_pressure_cull",
+      config: {
+        baseUrl: "http://studio2.local:8000/v1",
+        model: "deepseek-v4-flash",
+        apiKey: null,
+        timeoutMs: 60_000,
+      },
+      issues: [defensive],
+      runtimeEvidence: RUNTIME_EVIDENCE,
+      fetchFn: fetchFn as unknown as typeof fetch,
+    });
+
+    expect(report.verdict.findings).toHaveLength(1);
+    expect(report.verdict.findingTypeVolume.other).toBe(1);
+  });
+
   it("normalizes a model verdict that omits findings to an empty list", async () => {
     const fetchFn = vi.fn(async () =>
       chatCompletionResponse(
