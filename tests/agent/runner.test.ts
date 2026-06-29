@@ -903,8 +903,8 @@ describe("AgentRunner", () => {
             message: "live usage update",
             usage: {
               inputTokens: 0,
-              outputTokens: 35_000,
-              totalTokens: 35_000,
+              outputTokens: 38_000,
+              totalTokens: 38_000,
             },
           });
 
@@ -931,7 +931,7 @@ describe("AgentRunner", () => {
     expect(result.hardStop).toMatchObject({
       outcome: "PAUSED-budget",
       trigger: "premium_spend_near_ceiling",
-      totalTokens: 35_000,
+      totalTokens: 38_000,
     });
     expect(result.hardStop?.reason).toContain("grace ceiling");
   });
