@@ -6,11 +6,9 @@ import type {
 } from "../config/types.js";
 import type { HumanBlockOperation, RightSizingMode } from "../domain/model.js";
 import {
+  evaluateBudget,
   type UsageTokens,
   loadPricingCatalog,
-  resolveBudgetBasis,
-  usdCost,
-  weightedTotal,
 } from "./pricing.js";
 
 export type HardStopOutcome =
@@ -344,6 +342,12 @@ export function evaluateBudgetHardStop(input: {
   outputTokens: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
+  onBudgetNotEnforced?: (event: {
+    provider: string;
+    model: string;
+    note: string;
+    billingMode: string | null;
+  }) => void;
 }): HardStopDecision | null {
   // SYMPH-955: the budget trigger uses the crucible lane denomination:
   // weighted tokens for subscription/credit rows, real USD for api_token rows.
@@ -353,72 +357,95 @@ export function evaluateBudgetHardStop(input: {
     cacheReadTokens: input.cacheReadTokens ?? 0,
     config: input.config,
   });
-  const fallbackEstimatedCostUsd = costFromBillableTokens(
-    billableTokens,
-    input.config,
-  );
   const usage = normalizeUsageBreakdown(input);
-  const basis = resolveBudgetBasis(
-    input.provider,
-    input.model,
-    loadPricingCatalog(),
-  );
+  const catalog = loadPricingCatalog();
 
-  if (basis.kind === "weighted") {
-    const total = weightedTotal(usage, basis.ratios);
-    if (total >= input.config.maxTokensPerUnit) {
+  const tokenVerdict = evaluateBudget({
+    usage,
+    budget: input.config.maxTokensPerUnit,
+    provider: input.provider,
+    model: input.model,
+    catalog,
+  });
+
+  if (!tokenVerdict.enforced) {
+    input.onBudgetNotEnforced?.({
+      provider: input.provider,
+      model: input.model,
+      note: tokenVerdict.note ?? "budget_not_enforced:unknown_billing_mode",
+      billingMode: tokenVerdict.billing_mode,
+    });
+    return null;
+  }
+
+  if (tokenVerdict.denomination === "weighted_tokens") {
+    if (tokenVerdict.exceeded) {
+      const total = tokenVerdict.total ?? 0;
       return {
         outcome: "PAUSED-budget",
         trigger: "token_budget",
-        reason: `Token budget exceeded: ${formatMeasure(total)} weighted_tokens >= ${input.config.maxTokensPerUnit} for ${input.provider}/${input.model} (${basis.billing_mode}; raw ${input.totalTokens}, billable ${billableTokens}).`,
+        reason: `Weighted token budget exceeded: ${formatMeasure(total)} weighted_tokens > ${input.config.maxTokensPerUnit} for ${input.provider}/${input.model} (${tokenVerdict.billing_mode}; raw ${input.totalTokens}, legacy billable tokens for observability ${billableTokens}).`,
         turnCount: input.turnCount,
         totalTokens: input.totalTokens,
         billableTokens,
         budgetDenomination: "weighted_tokens",
         budgetTotal: total,
-        budgetLimit: input.config.maxTokensPerUnit,
-        billingMode: basis.billing_mode,
-        estimatedCostUsd: fallbackEstimatedCostUsd,
+        budgetLimit: tokenVerdict.budget,
+        billingMode: tokenVerdict.billing_mode,
+        estimatedCostUsd: costFromWeightedTokens(total, input.config),
       };
     }
 
     return null;
   }
 
-  if (basis.kind === "usd") {
-    const usd = usdCost(usage, basis.row) ?? 0;
-    if (usd >= input.config.maxDollarBudgetUsd) {
+  if (tokenVerdict.denomination === "usd") {
+    const dollarVerdict = evaluateBudget({
+      usage,
+      budget: input.config.maxDollarBudgetUsd,
+      provider: input.provider,
+      model: input.model,
+      catalog,
+    });
+    if (dollarVerdict.enforced && dollarVerdict.exceeded) {
+      const usd = dollarVerdict.total ?? 0;
       return {
         outcome: "PAUSED-budget",
         trigger: "dollar_budget",
-        reason: `Dollar budget exceeded: ${formatCost(usd)} >= ${formatCost(input.config.maxDollarBudgetUsd)} for ${input.provider}/${input.model} (${basis.billing_mode}; raw ${input.totalTokens}, billable ${billableTokens}).`,
+        reason: `Dollar budget exceeded: ${formatCost(usd)} > ${formatCost(input.config.maxDollarBudgetUsd)} for ${input.provider}/${input.model} (${dollarVerdict.billing_mode}; raw ${input.totalTokens}, legacy billable tokens for observability ${billableTokens}).`,
         turnCount: input.turnCount,
         totalTokens: input.totalTokens,
         billableTokens,
         budgetDenomination: "usd",
         budgetTotal: usd,
-        budgetLimit: input.config.maxDollarBudgetUsd,
-        billingMode: basis.billing_mode,
+        budgetLimit: dollarVerdict.budget,
+        billingMode: dollarVerdict.billing_mode,
         estimatedCostUsd: usd,
       };
     }
 
-    if (
-      usd >=
-      input.config.maxDollarBudgetUsd * input.config.premiumBudgetPauseRatio
-    ) {
+    const premiumBudget =
+      input.config.maxDollarBudgetUsd * input.config.premiumBudgetPauseRatio;
+    const premiumVerdict = evaluateBudget({
+      usage,
+      budget: premiumBudget,
+      provider: input.provider,
+      model: input.model,
+      catalog,
+    });
+    if (premiumVerdict.enforced && premiumVerdict.exceeded) {
+      const usd = premiumVerdict.total ?? 0;
       return {
         outcome: "PAUSED-budget",
         trigger: "premium_spend_near_ceiling",
-        reason: `Premium spend is near ceiling: ${formatCost(usd)} of ${formatCost(input.config.maxDollarBudgetUsd)} for ${input.provider}/${input.model} (${basis.billing_mode}).`,
+        reason: `Premium spend is near ceiling: ${formatCost(usd)} > ${formatCost(premiumBudget)} for ${input.provider}/${input.model} (${premiumVerdict.billing_mode}; ceiling ${formatCost(input.config.maxDollarBudgetUsd)}).`,
         turnCount: input.turnCount,
         totalTokens: input.totalTokens,
         billableTokens,
         budgetDenomination: "usd",
         budgetTotal: usd,
-        budgetLimit:
-          input.config.maxDollarBudgetUsd * input.config.premiumBudgetPauseRatio,
-        billingMode: basis.billing_mode,
+        budgetLimit: premiumVerdict.budget,
+        billingMode: premiumVerdict.billing_mode,
         estimatedCostUsd: usd,
       };
     }
@@ -444,8 +471,8 @@ function normalizeUsageBreakdown(input: {
   const totalTokens = nonNegativeNumber(input.totalTokens) ?? 0;
   const inputTokens = nonNegativeNumber(input.inputTokens) ?? 0;
   const outputTokens = nonNegativeNumber(input.outputTokens) ?? 0;
-  const cacheReadTokens = nonNegativeNumber(input.cacheReadTokens) ?? 0;
-  const cacheWriteTokens = nonNegativeNumber(input.cacheWriteTokens) ?? 0;
+  const cacheReadTokens = clampTokenCount(input.cacheReadTokens, totalTokens);
+  const cacheWriteTokens = clampTokenCount(input.cacheWriteTokens, totalTokens);
   const knownTokens =
     inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
   const unclassifiedTokens = Math.max(totalTokens - knownTokens, 0);
@@ -464,6 +491,11 @@ function nonNegativeNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? value
     : null;
+}
+
+function clampTokenCount(value: unknown, totalTokens: number): number {
+  const count = nonNegativeNumber(value) ?? 0;
+  return Math.min(count, totalTokens);
 }
 
 /**
@@ -608,6 +640,13 @@ function costFromBillableTokens(
   config: Pick<WorkflowHardStopsConfig, "estimatedCostPer1kTokensUsd">,
 ): number {
   return (billableTokens / 1000) * config.estimatedCostPer1kTokensUsd;
+}
+
+function costFromWeightedTokens(
+  weightedTokens: number,
+  config: Pick<WorkflowHardStopsConfig, "estimatedCostPer1kTokensUsd">,
+): number {
+  return (weightedTokens / 1000) * config.estimatedCostPer1kTokensUsd;
 }
 
 export function estimateCostUsd(input: {

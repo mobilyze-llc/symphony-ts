@@ -378,6 +378,36 @@ export class AgentRunner {
         void closeBestEffort(client, "budget_hard_stop");
       }
     };
+    const recordBudgetNotEnforced = (event: {
+      provider: string;
+      model: string;
+      note: string;
+      billingMode: string | null;
+    }): void => {
+      this.onEvent?.({
+        event: "notification",
+        timestamp: formatEasternTimestamp(new Date()),
+        codexAppServerPid: liveSession.codexAppServerPid,
+        sessionId: liveSession.sessionId,
+        threadId: liveSession.threadId,
+        turnId: liveSession.turnId,
+        message: event.note,
+        raw: {
+          provider: event.provider,
+          model: event.model,
+          budget_note: event.note,
+          budget_denomination: "none",
+          billing_mode: event.billingMode,
+        },
+        issueId: issue.id,
+        issueIdentifier: issue.identifier,
+        attempt: input.attempt,
+        workspacePath,
+        turnCount: liveSession.turnCount,
+        promptChars: currentPromptChars,
+        estimatedPromptTokens: currentEstimatedPromptTokens,
+      });
+    };
 
     try {
       abortController.throwIfAborted({
@@ -529,10 +559,11 @@ export class AgentRunner {
                 totalTokens: liveSession.totalStageTotalTokens,
                 provider: budgetProvider,
                 model: budgetModel,
-                inputTokens: liveSession.totalStageInputTokens,
+                inputTokens: selectBudgetInputTokensForHardStop(liveSession),
                 outputTokens: liveSession.totalStageOutputTokens,
                 cacheReadTokens: liveSession.totalStageCacheReadTokens,
                 cacheWriteTokens: liveSession.totalStageCacheWriteTokens,
+                onBudgetNotEnforced: recordBudgetNotEnforced,
               });
               if (liveHardStop !== null) {
                 requestLiveBudgetStop(liveHardStop);
@@ -742,10 +773,11 @@ export class AgentRunner {
           totalTokens: liveSession.totalStageTotalTokens,
           provider: budgetProvider,
           model: budgetModel,
-          inputTokens: liveSession.totalStageInputTokens,
+          inputTokens: selectBudgetInputTokensForHardStop(liveSession),
           outputTokens: liveSession.totalStageOutputTokens,
           cacheReadTokens: liveSession.totalStageCacheReadTokens,
           cacheWriteTokens: liveSession.totalStageCacheWriteTokens,
+          onBudgetNotEnforced: recordBudgetNotEnforced,
         });
         if (pendingLiveBudgetGraceStop !== null) {
           const finalDecision =
@@ -1826,6 +1858,27 @@ function canDeferLiveBudgetStopWithinGrace(
     return decision.estimatedCostUsd <= dollarGraceThreshold * graceMultiplier;
   }
   return false;
+}
+
+export function selectBudgetInputTokensForHardStop(
+  liveSession: Pick<
+    LiveSession,
+    | "codexNoCacheTokens"
+    | "totalStageInputTokens"
+    | "totalStageCacheReadTokens"
+    | "totalStageCacheWriteTokens"
+  >,
+): number {
+  if (liveSession.codexNoCacheTokens > 0) {
+    return liveSession.codexNoCacheTokens;
+  }
+
+  return Math.max(
+    liveSession.totalStageInputTokens -
+      liveSession.totalStageCacheReadTokens -
+      liveSession.totalStageCacheWriteTokens,
+    0,
+  );
 }
 
 function isBudgetHardStopTrigger(
