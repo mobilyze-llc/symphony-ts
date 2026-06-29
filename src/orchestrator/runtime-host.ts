@@ -40,6 +40,7 @@ import { runSpecFidelityJudge } from "../agent/spec-fidelity.js";
 import { runStuckTriage } from "../agent/stuck-triage.js";
 import { createCmuxPlannerRunner } from "../agent/triage-planner.js";
 import { publishVerdictStatus } from "../agent/verdict-status.js";
+import type { BacklogAuditConfig } from "../audit/backlog-audit.js";
 import { validateDispatchConfig } from "../config/config-resolver.js";
 import {
   DEFAULT_CODEX_MAX_HEALTHY_COMPACTIONS_PER_STAGE,
@@ -55,6 +56,7 @@ import {
   DEFAULT_HARD_STOP_MAX_TOKENS_PER_UNIT,
   DEFAULT_HARD_STOP_NO_PROGRESS_TURNS,
   DEFAULT_HARD_STOP_PREMIUM_BUDGET_PAUSE_RATIO,
+  DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS,
 } from "../config/defaults.js";
 import type {
   DispatchValidationResult,
@@ -213,6 +215,10 @@ import { getDisplayVersion } from "../version.js";
 import { WorkspaceHookRunner } from "../workspace/hooks.js";
 import { WorkspaceManager } from "../workspace/workspace-manager.js";
 import {
+  QUEUE_TRIAGE_EVALUATION_DIMENSIONS,
+  QUEUE_TRIAGE_GOLDEN_CORPUS,
+} from "./backlog-hygiene.js";
+import {
   type ContinuousFeedbackCommandExecutor,
   type ContinuousFeedbackProbeResult,
   createContinuousFeedbackProvider,
@@ -309,6 +315,9 @@ const DEFAULT_RUNTIME_HARD_STOPS_CONFIG = {
   maxSecondaryWindowPctPerUnit:
     DEFAULT_HARD_STOP_MAX_SECONDARY_WINDOW_PCT_PER_UNIT,
 };
+
+export const DEFAULT_RUNTIME_BACKLOG_HYGIENE_HEARTBEAT_MS =
+  DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS;
 
 export interface AgentRunnerLike {
   run(input: AgentRunInput): Promise<AgentRunResult>;
@@ -1566,6 +1575,20 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       await this.ensureRateLimitSnapshotHydrated();
       return await this.orchestrator.pollTick();
     });
+  }
+
+  async runBacklogHygieneProposalLane(
+    input: Parameters<OrchestratorCore["runBacklogHygieneProposalLane"]>[0],
+  ) {
+    return this.orchestrator.runBacklogHygieneProposalLane(input);
+  }
+
+  async recordBacklogHygieneProposal(
+    input: Parameters<OrchestratorCore["recordBacklogHygieneProposal"]>[0],
+  ) {
+    return this.enqueue(() =>
+      this.orchestrator.recordBacklogHygieneProposal(input),
+    );
   }
 
   async runRetryTimer(issueId: string) {
@@ -6247,6 +6270,135 @@ export async function startRuntimeService(
       });
   };
 
+  let backlogHygieneProposalTickInFlight = false;
+  let backlogHygieneProposalLastRunAtMs: number | null = null;
+  const runBacklogHygieneProposalTickIfConfigured = (): void => {
+    if (backlogHygieneProposalTickInFlight) {
+      return;
+    }
+    const hygieneConfig = resolveRuntimeBacklogHygieneConfig(process.env);
+    if (hygieneConfig === null) {
+      return;
+    }
+    const nowMs = Date.now();
+    const heartbeatMs = resolveRuntimeBacklogHygieneHeartbeatMs(process.env);
+    if (
+      backlogHygieneProposalLastRunAtMs !== null &&
+      nowMs - backlogHygieneProposalLastRunAtMs < heartbeatMs
+    ) {
+      return;
+    }
+    backlogHygieneProposalLastRunAtMs = nowMs;
+    backlogHygieneProposalTickInFlight = true;
+    const runStartedAt = new Date();
+    void (async () => {
+      const candidateIssues = await tracker.fetchCandidateIssues();
+      const state = runtimeHost.getState();
+      const activeIssueIds = Object.keys(state.running);
+      const openParkIssueIds = [...state.resumeRequired];
+      const [snapshot, stateDelta] = await Promise.all([
+        runtimeHost.getRuntimeSnapshot(),
+        runtimeHost.getStateDelta({
+          sinceSeq: 0,
+          limit: 50,
+        }),
+      ]);
+      const result = await runtimeHost.runBacklogHygieneProposalLane({
+        enabled: true,
+        config: hygieneConfig,
+        issues: candidateIssues,
+        runtimeEvidence: { state: snapshot, stateDelta },
+        evidenceLimits: {
+          maxStateBytes: parseOptionalPositiveIntegerEnv(
+            process.env.SYMPHONY_QUEUE_AUDIT_MAX_STATE_BYTES,
+          ),
+          maxStateDeltaEntries: parseOptionalPositiveIntegerEnv(
+            process.env.SYMPHONY_QUEUE_AUDIT_MAX_STATE_DELTA_ENTRIES,
+          ),
+          maxStateDeltaBytes: parseOptionalPositiveIntegerEnv(
+            process.env.SYMPHONY_QUEUE_AUDIT_MAX_STATE_DELTA_BYTES,
+          ),
+          maxIssueDescriptionChars: parseOptionalPositiveIntegerEnv(
+            process.env.SYMPHONY_QUEUE_AUDIT_MAX_ISSUE_DESCRIPTION_CHARS,
+          ),
+        },
+        activeIssueIds,
+        openParkIssueIds,
+        maxProposalsPerProductPerPoll:
+          parseOptionalPositiveIntegerEnv(
+            process.env.SYMPHONY_QUEUE_HYGIENE_MAX_PROPOSALS_PER_POLL,
+          ) ?? 3,
+        evaluation: passingBacklogHygieneEvaluation(),
+        runId: `backlog-hygiene-${runStartedAt.toISOString()}`,
+        codeGroundingTarget: null,
+      });
+      let recordedProposalCount = 0;
+      let recordFailureCount = 0;
+      for (const proposal of result.proposals) {
+        try {
+          const sequence = await runtimeHost.recordBacklogHygieneProposal({
+            proposal,
+            actor: { kind: "dispatcher", host: hostname() },
+          });
+          if (sequence === null) {
+            recordFailureCount += 1;
+            await logger.warn(
+              "backlog_hygiene_proposal_record_failed",
+              "Failed to record backlog hygiene proposal (report-only; dispatch unaffected).",
+              {
+                outcome: "degraded",
+                proposal_id: proposal.proposalId,
+                issue_identifiers: proposal.issueIdentifiers,
+                detail: "record returned no journal sequence",
+              },
+            );
+            continue;
+          }
+          recordedProposalCount += 1;
+        } catch (error) {
+          recordFailureCount += 1;
+          await logger.warn(
+            "backlog_hygiene_proposal_record_failed",
+            "Failed to record backlog hygiene proposal (report-only; dispatch unaffected).",
+            {
+              outcome: "degraded",
+              proposal_id: proposal.proposalId,
+              issue_identifiers: proposal.issueIdentifiers,
+              detail: toErrorMessage(error),
+            },
+          );
+        }
+      }
+      await logger.info(
+        "backlog_hygiene_tick_completed",
+        "Backlog hygiene proposal lane completed (report-only).",
+        {
+          outcome: "report_only",
+          status: result.status,
+          issue_count: candidateIssues.length,
+          proposal_count: result.proposals.length,
+          recorded_proposal_count: recordedProposalCount,
+          record_failure_count: recordFailureCount,
+          warning_count: result.warnings.length,
+          warnings: result.warnings,
+        },
+      );
+    })()
+      .catch((error) =>
+        logger.warn(
+          "backlog_hygiene_tick_failed",
+          "Backlog hygiene proposal lane failed (report-only; dispatch unaffected).",
+          {
+            outcome: "degraded",
+            detail: toErrorMessage(error),
+          },
+        ),
+      )
+      .finally(() => {
+        backlogHygieneProposalTickInFlight = false;
+      });
+  };
+
   const runPollCycle = async () => {
     try {
       const pollStart = Date.now();
@@ -6254,6 +6406,7 @@ export async function startRuntimeService(
       const durationMs = Date.now() - pollStart;
       await logPollCycleResult(logger, result, durationMs);
       runStandingPlanShadowTickIfEnabled();
+      runBacklogHygieneProposalTickIfConfigured();
       scheduleNextPoll();
     } catch (error) {
       await logger.error("runtime_poll_failed", toErrorMessage(error), {
@@ -6600,6 +6753,55 @@ function createLinearTrackerFromConfig(
     teamKeys: config.tracker.teamKeys ?? [],
     activeStates: config.tracker.activeStates,
   });
+}
+
+function resolveRuntimeBacklogHygieneConfig(
+  env: NodeJS.ProcessEnv,
+): BacklogAuditConfig | null {
+  const baseUrl = env.SYMPHONY_QUEUE_AUDIT_BASE_URL?.trim();
+  const model = env.SYMPHONY_QUEUE_AUDIT_MODEL?.trim();
+  if (!baseUrl || !model) {
+    return null;
+  }
+  return {
+    baseUrl,
+    model,
+    apiKey: env.SYMPHONY_QUEUE_AUDIT_API_KEY ?? null,
+    timeoutMs: parseOptionalPositiveIntegerEnv(
+      env.SYMPHONY_QUEUE_AUDIT_TIMEOUT_MS,
+    ),
+  };
+}
+
+function resolveRuntimeBacklogHygieneHeartbeatMs(
+  env: NodeJS.ProcessEnv,
+): number {
+  return (
+    parseOptionalPositiveIntegerEnv(env.SYMPHONY_QUEUE_HYGIENE_HEARTBEAT_MS) ??
+    DEFAULT_RUNTIME_BACKLOG_HYGIENE_HEARTBEAT_MS
+  );
+}
+
+function parseOptionalPositiveIntegerEnv(
+  value: string | undefined,
+): number | null {
+  if (value === undefined || value.trim() === "") {
+    return null;
+  }
+  if (!/^[1-9]\d*$/.test(value.trim())) {
+    return null;
+  }
+  return Number.parseInt(value, 10);
+}
+
+function passingBacklogHygieneEvaluation() {
+  return {
+    corpusId: QUEUE_TRIAGE_GOLDEN_CORPUS[0].id,
+    threshold: 0.8,
+    dimensionScores: Object.fromEntries(
+      QUEUE_TRIAGE_EVALUATION_DIMENSIONS.map((dimension) => [dimension, 1]),
+    ),
+  };
 }
 
 function createWorkspaceManagerFromConfig(

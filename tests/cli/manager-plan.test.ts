@@ -1,7 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { describe, expect, it, vi } from "vitest";
 
 import type { PlannerRunResult } from "../../src/agent/triage-planner.js";
 import {
+  DEFAULT_MANAGER_PLAN_IN_FLIGHT_STATES,
+  MANAGER_PLAN_RUNTIME_STATE_BASE_URL_ENV,
   type ManagerPlanCandidateQuery,
   ManagerPlanCliUsageError,
   parseManagerPlanCliArgs,
@@ -82,6 +88,11 @@ describe("parseManagerPlanCliArgs", () => {
     expect(opts.model).toBe("opus");
     expect(opts.promptOnly).toBe(true);
     expect(opts.json).toBe(true);
+    expect(opts.commentEnrichment).toBe(true);
+    expect(opts.outDir).toBeNull();
+    expect(opts.inFlightStates).toEqual([
+      ...DEFAULT_MANAGER_PLAN_IN_FLIGHT_STATES,
+    ]);
   });
 
   it("applies defaults and leaves modes unset when omitted", () => {
@@ -137,6 +148,45 @@ describe("parseManagerPlanCliArgs", () => {
         "--no-canary",
       ]).noCanary,
     ).toBe(true);
+  });
+
+  it("parses in-flight and comment-enrichment controls (SYMPH-961)", () => {
+    const opts = parseManagerPlanCliArgs([
+      "--team",
+      "MOB",
+      "--in-flight-state",
+      "Implementing",
+      "--in-flight-state",
+      "Review",
+      "--no-comment-enrichment",
+    ]);
+
+    expect(opts.inFlightStates).toEqual(["Implementing", "Review"]);
+    expect(opts.commentEnrichment).toBe(false);
+  });
+
+  it("parses --out-dir for controller-side prompt evidence artifacts (SYMPH-961)", () => {
+    const opts = parseManagerPlanCliArgs([
+      "--project",
+      "9c1064215e8d",
+      "--out-dir",
+      "/tmp/symphony-manager-plan-SYMPH-961-prompt-only",
+    ]);
+
+    expect(opts.outDir).toBe(
+      "/tmp/symphony-manager-plan-SYMPH-961-prompt-only",
+    );
+  });
+
+  it("parses --runtime-state-base-url for live runtime in-flight context (SYMPH-961)", () => {
+    const opts = parseManagerPlanCliArgs([
+      "--project",
+      "9c1064215e8d",
+      "--runtime-state-base-url",
+      "http://127.0.0.1:4321",
+    ]);
+
+    expect(opts.runtimeStateBaseUrl).toBe("http://127.0.0.1:4321");
   });
 
   it("parses --project and --initiative scope flags (SYMPH-858)", () => {
@@ -337,6 +387,237 @@ describe("runManagerPlanCli", () => {
     expect(out()).toContain("MOB-1");
     // The emitted prompt shows the exact canary keys (SYMPH-836).
     expect(out()).toContain("headIssueIdentifiers");
+  });
+
+  it("--prompt-only writes the assembled prompt when --out-dir is provided (SYMPH-961)", async () => {
+    const { io, out } = captureIo();
+    const outDir = await mkdtemp(join(tmpdir(), "manager-plan-test-"));
+    try {
+      const code = await runManagerPlanCli(
+        [
+          "--project",
+          "9c1064215e8d",
+          "--state",
+          "Backlog",
+          "--prompt-only",
+          "--out-dir",
+          outDir,
+        ],
+        {
+          io,
+          env: {},
+          loadCandidates: async () => [issue("u1", "SYMPH-941")],
+          createPlannerRunner: okRunner,
+        },
+      );
+
+      expect(code).toBe(0);
+      const prompt = await readFile(
+        join(outDir, "manager-plan-prompt.txt"),
+        "utf8",
+      );
+      expect(prompt).toContain("SYMPH-941");
+      expect(out()).toContain("SYMPH-941");
+    } finally {
+      await rm(outDir, { recursive: true, force: true });
+    }
+  });
+
+  it("--prompt-only includes loaded in-flight issues and curated comments (SYMPH-961)", async () => {
+    const { io, out } = captureIo();
+    const seenInFlightQueries: ManagerPlanCandidateQuery[] = [];
+    const fetchedCommentsFor: string[] = [];
+    const code = await runManagerPlanCli(
+      ["--team", "MOB", "--state", "Backlog", "--prompt-only"],
+      {
+        io,
+        env: {},
+        loadCandidates: async () => [issue("u1", "MOB-1")],
+        loadInFlight: async (input) => {
+          seenInFlightQueries.push(input);
+          return [issue("u2", "MOB-2", 1, { state: "In Progress" })];
+        },
+        fetchIssueComments: async (issueId) => {
+          fetchedCommentsFor.push(issueId);
+          return [
+            {
+              id: "comment-1",
+              body: "Parked decision: MOB-1 should wait for the relation edge.",
+              createdAt: "2026-06-28T00:00:00.000Z",
+              updatedAt: "2026-06-28T00:00:00.000Z",
+              user: {
+                kind: "user",
+                id: "user-1",
+                name: "Operator",
+                displayName: "Operator",
+                email: "operator@example.com",
+                botType: null,
+                botSubType: null,
+              },
+              botActor: null,
+            },
+          ];
+        },
+        createPlannerRunner: okRunner,
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(seenInFlightQueries[0]?.activeStates).toEqual([
+      ...DEFAULT_MANAGER_PLAN_IN_FLIGHT_STATES,
+    ]);
+    expect(fetchedCommentsFor).toEqual(["u1"]);
+    expect(out()).toContain("- MOB-2 (In Progress)");
+    expect(out()).toContain("comments:");
+    expect(out()).toContain("Parked decision");
+  });
+
+  it("prefers runtime-state in-flight over the Linear state fallback (SYMPH-961)", async () => {
+    const { io, out } = captureIo();
+    const fallbackLoadInFlight = vi.fn(async () => [
+      issue("linear", "MOB-LINEAR", 1, { state: "In Progress" }),
+    ]);
+    const runtimeLoadInFlight = vi.fn(async () => [
+      { issueIdentifier: "MOB-RUNTIME", stage: "Resume" },
+    ]);
+
+    const code = await runManagerPlanCli(
+      [
+        "--team",
+        "MOB",
+        "--state",
+        "Backlog",
+        "--runtime-state-base-url",
+        "http://127.0.0.1:4321/",
+        "--prompt-only",
+      ],
+      {
+        io,
+        env: {},
+        loadCandidates: async () => [issue("u1", "MOB-1")],
+        loadInFlight: fallbackLoadInFlight,
+        loadRuntimeInFlight: runtimeLoadInFlight,
+        createPlannerRunner: okRunner,
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(runtimeLoadInFlight).toHaveBeenCalledWith("http://127.0.0.1:4321/");
+    expect(fallbackLoadInFlight).not.toHaveBeenCalled();
+    expect(out()).toContain("- MOB-RUNTIME (Resume)");
+    expect(out()).not.toContain("MOB-LINEAR");
+  });
+
+  it("uses the runtime-state env override before the Linear state fallback (SYMPH-961)", async () => {
+    const { io, out } = captureIo();
+    const fallbackLoadInFlight = vi.fn(async () => [
+      issue("linear", "MOB-LINEAR", 1, { state: "In Progress" }),
+    ]);
+
+    const code = await runManagerPlanCli(
+      ["--team", "MOB", "--state", "Backlog", "--prompt-only"],
+      {
+        io,
+        env: {
+          [MANAGER_PLAN_RUNTIME_STATE_BASE_URL_ENV]: "http://127.0.0.1:4321",
+        },
+        loadCandidates: async () => [issue("u1", "MOB-1")],
+        loadInFlight: fallbackLoadInFlight,
+        loadRuntimeInFlight: async () => [
+          { issueIdentifier: "MOB-RUNTIME", stage: "In Review" },
+        ],
+        createPlannerRunner: okRunner,
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(fallbackLoadInFlight).not.toHaveBeenCalled();
+    expect(out()).toContain("- MOB-RUNTIME (In Review)");
+    expect(out()).not.toContain("MOB-LINEAR");
+  });
+
+  it("loads runtime-state in-flight with an abortable fetch (SYMPH-961)", async () => {
+    const { io, out } = captureIo();
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(
+      async (_input: Parameters<typeof fetch>[0], _init?: RequestInit) => {
+        return new Response(
+          JSON.stringify({
+            running: [{ issue_identifier: "MOB-RUNTIME", state: "Resume" }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    );
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    try {
+      const code = await runManagerPlanCli(
+        [
+          "--team",
+          "MOB",
+          "--state",
+          "Backlog",
+          "--runtime-state-base-url",
+          "http://127.0.0.1:4321",
+          "--prompt-only",
+        ],
+        {
+          io,
+          env: {},
+          loadCandidates: async () => [issue("u1", "MOB-1")],
+          createPlannerRunner: okRunner,
+        },
+      );
+
+      expect(code).toBe(0);
+      expect(fetchMock).toHaveBeenCalledWith(
+        "http://127.0.0.1:4321/api/v1/state",
+        expect.objectContaining({ headers: { accept: "application/json" } }),
+      );
+      const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      expect(out()).toContain("- MOB-RUNTIME (Resume)");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("--no-comment-enrichment does not fetch issue comments (SYMPH-961)", async () => {
+    const { io, out } = captureIo();
+    const fetchIssueComments = vi.fn(async () => [
+      {
+        id: "comment-1",
+        body: "This comment must not be fetched.",
+        createdAt: "2026-06-28T00:00:00.000Z",
+        updatedAt: "2026-06-28T00:00:00.000Z",
+        user: null,
+        botActor: null,
+      },
+    ]);
+
+    const code = await runManagerPlanCli(
+      [
+        "--team",
+        "MOB",
+        "--state",
+        "Backlog",
+        "--prompt-only",
+        "--no-comment-enrichment",
+      ],
+      {
+        io,
+        env: {},
+        loadCandidates: async () => [issue("u1", "MOB-1")],
+        fetchIssueComments,
+        createPlannerRunner: okRunner,
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(fetchIssueComments).not.toHaveBeenCalled();
+    expect(out()).toContain("MOB-1");
+    expect(out()).not.toContain("This comment must not be fetched.");
   });
 
   it("prints the suggested batches on a good plan and invokes the planner once", async () => {

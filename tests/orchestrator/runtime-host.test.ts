@@ -37,6 +37,7 @@ import {
   type StructuredLogEntry,
   StructuredLogger,
 } from "../../src/logging/structured-logger.js";
+import type { BacklogHygieneProposal } from "../../src/orchestrator/backlog-hygiene.js";
 import {
   SERVICE_SHUTDOWN_ABORT_REASON,
   type StopSignalDelivery,
@@ -5513,6 +5514,205 @@ describe("OrchestratorRuntimeHost", () => {
 });
 
 describe("startRuntimeService shutdown", () => {
+  it("runs the backlog hygiene proposal lane on a runtime tick when audit env is configured (SYMPH-961)", async () => {
+    vi.stubEnv("SYMPHONY_QUEUE_AUDIT_BASE_URL", "http://127.0.0.1:43210/v1");
+    vi.stubEnv("SYMPHONY_QUEUE_AUDIT_MODEL", "local-audit");
+    vi.stubEnv("SYMPHONY_QUEUE_HYGIENE_HEARTBEAT_MS", "900000");
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  summary: "No hygiene findings.",
+                  findingTypeVolume: {
+                    duplicate: 0,
+                    supersession: 0,
+                    stale: 0,
+                    thin_spec: 0,
+                    review_dispatch_mismatch: 0,
+                    other: 0,
+                  },
+                  findings: [],
+                }),
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    globalThis.fetch = fetchMock as typeof fetch;
+    const tracker = createTracker({ candidates: [] });
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const config = {
+      ...createConfig(),
+      polling: {
+        intervalMs: 5,
+      },
+    };
+
+    const service = await startRuntimeService({
+      config,
+      tracker,
+      logger,
+      workflowWatcher: null,
+      runtimeHost: new OrchestratorRuntimeHost({
+        config,
+        tracker,
+        logger,
+        agentRunner: new FakeAgentRunner(),
+        now: () => new Date("2026-03-06T00:00:05.000Z"),
+      }),
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(
+          entries.some(
+            (entry) => entry.event === "backlog_hygiene_tick_completed",
+          ),
+        ).toBe(true);
+      });
+      expect(fetchMock).toHaveBeenCalledWith(
+        "http://127.0.0.1:43210/v1/chat/completions",
+        expect.objectContaining({ method: "POST" }),
+      );
+      const completion = entries.find(
+        (entry) => entry.event === "backlog_hygiene_tick_completed",
+      );
+      expect(completion).toMatchObject({
+        outcome: "report_only",
+        status: "completed",
+        proposal_count: 0,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      await service.shutdown();
+      globalThis.fetch = originalFetch;
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("continues recording later hygiene proposals when one record fails (SYMPH-961)", async () => {
+    vi.stubEnv("SYMPHONY_QUEUE_AUDIT_BASE_URL", "http://127.0.0.1:43210/v1");
+    vi.stubEnv("SYMPHONY_QUEUE_AUDIT_MODEL", "local-audit");
+    vi.stubEnv("SYMPHONY_QUEUE_HYGIENE_HEARTBEAT_MS", "900000");
+    const tracker = createTracker({ candidates: [] });
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const config = {
+      ...createConfig(),
+      polling: {
+        intervalMs: 5,
+      },
+    };
+    const runtimeHost = new OrchestratorRuntimeHost({
+      config,
+      tracker,
+      logger,
+      agentRunner: new FakeAgentRunner(),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+    const proposals: BacklogHygieneProposal[] = [
+      {
+        proposalId: "proposal-1",
+        findingId: "finding-1",
+        findingType: "duplicate",
+        issueIds: ["1"],
+        issueIdentifiers: ["ISSUE-1"],
+        summary: "First proposal.",
+        evidence: "Evidence.",
+        confidence: "medium",
+        codeGroundingStatus: null,
+        codeGroundingEvidence: null,
+        generatedAt: "2026-03-06T00:00:05.000Z",
+        modelTier: "local_low_risk",
+      },
+      {
+        proposalId: "proposal-2",
+        findingId: "finding-2",
+        findingType: "stale",
+        issueIds: ["2"],
+        issueIdentifiers: ["ISSUE-2"],
+        summary: "Second proposal.",
+        evidence: "Evidence.",
+        confidence: "medium",
+        codeGroundingStatus: null,
+        codeGroundingEvidence: null,
+        generatedAt: "2026-03-06T00:00:05.000Z",
+        modelTier: "local_low_risk",
+      },
+    ];
+    vi.spyOn(runtimeHost, "runBacklogHygieneProposalLane").mockResolvedValue({
+      status: "completed",
+      report: null,
+      proposals,
+      warnings: [],
+    });
+    const recordCalls: string[] = [];
+    vi.spyOn(runtimeHost, "recordBacklogHygieneProposal").mockImplementation(
+      async ({ proposal }) => {
+        recordCalls.push(proposal.proposalId);
+        if (proposal.proposalId === "proposal-1") {
+          throw new Error("journal unavailable");
+        }
+        return 42;
+      },
+    );
+
+    const service = await startRuntimeService({
+      config,
+      tracker,
+      logger,
+      workflowWatcher: null,
+      runtimeHost,
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(
+          entries.some(
+            (entry) => entry.event === "backlog_hygiene_tick_completed",
+          ),
+        ).toBe(true);
+      });
+      expect(recordCalls).toEqual(["proposal-1", "proposal-2"]);
+      expect(
+        entries.some(
+          (entry) => entry.event === "backlog_hygiene_proposal_record_failed",
+        ),
+      ).toBe(true);
+      const completion = entries.find(
+        (entry) => entry.event === "backlog_hygiene_tick_completed",
+      );
+      expect(completion).toMatchObject({
+        proposal_count: 2,
+        recorded_proposal_count: 1,
+        record_failure_count: 1,
+      });
+    } finally {
+      await service.shutdown();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("aborts running workers before waiting for idle on shutdown", async () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();
