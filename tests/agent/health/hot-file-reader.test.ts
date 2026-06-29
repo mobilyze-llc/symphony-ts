@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { readHotFileGrowth } from "../../../src/agent/health/hot-file-reader.js";
+import {
+  evaluateDefensiveShareTripwire,
+  readHotFileGrowth,
+} from "../../../src/agent/health/hot-file-reader.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -222,5 +225,63 @@ describe("readHotFileGrowth", () => {
     expect(result).not.toBeNull();
     expect(result?.topFileChurnFraction).toBe(1);
     expect(result?.godFileConcentration).toBe("high");
+  });
+});
+
+describe("evaluateDefensiveShareTripwire", () => {
+  it("reports no action when neither defensive share nor hot-file share crosses threshold", () => {
+    const result = evaluateDefensiveShareTripwire({
+      defensiveShare: 0.1,
+      hotFileGrowth: {
+        topFileChurnFraction: 0.2,
+        godFileConcentration: "low",
+      },
+      config: {
+        defensiveShareThreshold: 0.3,
+        hotFileChurnFractionThreshold: 0.4,
+        reportOnly: false,
+      },
+      measuredAt: "2026-06-29T00:00:00.000Z",
+    });
+
+    expect(result.crossed).toBe(false);
+    expect(result.action).toEqual({
+      kind: "none",
+      reason: "threshold_not_crossed",
+    });
+  });
+
+  it("emits a reopen signal when the tuned threshold is crossed outside report-only mode", () => {
+    const result = evaluateDefensiveShareTripwire({
+      defensiveShare: 0.31,
+      hotFileGrowth: null,
+      config: {
+        defensiveShareThreshold: 0.3,
+        hotFileChurnFractionThreshold: 0.9,
+        reportOnly: false,
+        reopenIssueIdentifier: "SYMPH-948",
+      },
+      measuredAt: "2026-06-29T00:00:00.000Z",
+    });
+
+    expect(result.crossed).toBe(true);
+    expect(result.action).toEqual({
+      kind: "reopen_root_deferral",
+      issueIdentifier: "SYMPH-948",
+    });
+  });
+
+  it("keeps calibration report-only by default even when the initial observed share is crossed", () => {
+    const result = evaluateDefensiveShareTripwire({
+      defensiveShare: 0.27,
+      hotFileGrowth: null,
+    });
+
+    expect(result.crossed).toBe(true);
+    expect(result.reportOnly).toBe(true);
+    expect(result.action).toEqual({
+      kind: "report_only",
+      issueIdentifier: "SYMPH-948",
+    });
   });
 });

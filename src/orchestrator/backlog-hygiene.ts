@@ -1,5 +1,6 @@
 import {
   BACKLOG_AUDIT_FINDING_TYPES,
+  type BacklogAuditCullFinding,
   type BacklogAuditFinding,
   type BacklogAuditFindingType,
   type BacklogAuditReport,
@@ -24,6 +25,11 @@ export const BACKLOG_HYGIENE_PROPOSAL_LABELS = {
   proposed: "hygiene:proposed",
   accepted: "hygiene:accepted",
   rejected: "hygiene:rejected",
+} as const;
+
+export const CONSERVATIVE_CULL_LABEL_PREFIXES = {
+  killed: "killed:",
+  downgraded: "downgraded:",
 } as const;
 
 export const QUEUE_TRIAGE_EVALUATION_DIMENSIONS = [
@@ -74,6 +80,7 @@ export interface BacklogHygieneProposal {
   summary: string;
   evidence: string;
   confidence: BacklogAuditFinding["confidence"];
+  cull: BacklogAuditCullFinding | null;
   codeGroundingStatus: CodeGroundingVerificationStatus | null;
   codeGroundingEvidence: string | null;
   generatedAt: string;
@@ -121,6 +128,17 @@ export interface BuildBacklogHygieneCodeGroundingInput {
 }
 
 export type BacklogHygieneProposalDecision = "accepted" | "rejected";
+
+export type ConservativeCullOperatorDecision = "none" | "agreed" | "disagreed";
+
+export interface ConservativeCullApplicationPlan {
+  proposalId: string;
+  classification: BacklogAuditCullFinding["classification"] | null;
+  requiresOperatorAgree: boolean;
+  cancelIssue: boolean;
+  markerLabels: string[];
+  blockedBy: Array<{ issueIdentifier: string; rootIssueIdentifier: string }>;
+}
 
 const BACKLOG_HYGIENE_SCOPE_ID = "__backlog_hygiene__";
 const BACKLOG_HYGIENE_SCOPE_IDENTIFIER = "__backlog_hygiene__";
@@ -286,6 +304,7 @@ export function buildBacklogHygieneProposals(
       summary: finding.summary,
       evidence: finding.evidence,
       confidence: finding.confidence,
+      cull: finding.cull ?? null,
       codeGroundingStatus: codeGrounding?.status ?? null,
       codeGroundingEvidence:
         codeGrounding === undefined
@@ -402,6 +421,8 @@ export function buildBacklogHygieneProposalJournalEntry(input: {
       code_grounding_status: input.proposal.codeGroundingStatus,
       code_grounding_evidence: input.proposal.codeGroundingEvidence,
       model_tier: input.proposal.modelTier,
+      cull: input.proposal.cull,
+      cull_marker_label: input.proposal.cull?.marker ?? null,
       label: BACKLOG_HYGIENE_PROPOSAL_LABELS.proposed,
       actor: actorMetadata(input.actor),
     },
@@ -420,6 +441,13 @@ export function buildBacklogHygieneDecisionJournalEntry(input: {
     input.decision === "accepted"
       ? BACKLOG_HYGIENE_PROPOSAL_LABELS.accepted
       : BACKLOG_HYGIENE_PROPOSAL_LABELS.rejected;
+  const cullPlan = buildConservativeCullApplicationPlan({
+    proposal: input.proposal,
+    decision: input.decision === "accepted" ? "agreed" : "disagreed",
+  });
+  const labelTransitionAdd = [decisionLabel, ...cullPlan.markerLabels].filter(
+    (label, index, labels) => labels.indexOf(label) === index,
+  );
   return {
     idempotencyKey: `hygiene_proposal_decision:${input.proposal.proposalId}:${input.decision}:${input.actor.kind}@${input.actor.host}`,
     timestamp: input.timestamp,
@@ -441,15 +469,71 @@ export function buildBacklogHygieneDecisionJournalEntry(input: {
       finding_type: input.proposal.findingType,
       decision: input.decision,
       reason: input.reason,
-      mutation_authority: "calibration_label_only",
-      issue_state_mutation: false,
+      mutation_authority:
+        input.proposal.cull?.classification === "kill"
+          ? "operator_agree_required"
+          : "calibration_label_only",
+      issue_state_mutation: cullPlan.cancelIssue,
+      cull: input.proposal.cull,
+      cull_application: cullPlan,
       label_transition: {
         remove: [BACKLOG_HYGIENE_PROPOSAL_LABELS.proposed],
-        add: [decisionLabel],
+        add: labelTransitionAdd,
       },
+      relation_transition:
+        cullPlan.blockedBy.length === 0
+          ? null
+          : {
+              add_blocked_by: cullPlan.blockedBy,
+            },
       actor: actorMetadata(input.actor),
     },
   };
+}
+
+export function buildConservativeCullApplicationPlan(input: {
+  proposal: BacklogHygieneProposal;
+  decision: ConservativeCullOperatorDecision;
+}): ConservativeCullApplicationPlan {
+  const cull = input.proposal.cull;
+  if (cull === null) {
+    return {
+      proposalId: input.proposal.proposalId,
+      classification: null,
+      requiresOperatorAgree: false,
+      cancelIssue: false,
+      markerLabels: [],
+      blockedBy: [],
+    };
+  }
+  const agreed = input.decision === "agreed";
+  const markerLabels =
+    agreed && isCullMarkerLabel(cull.marker) ? [cull.marker] : [];
+  const rootIssueIdentifier = cull.rootIssueIdentifier;
+  return {
+    proposalId: input.proposal.proposalId,
+    classification: cull.classification,
+    requiresOperatorAgree: cull.classification === "kill",
+    cancelIssue: cull.classification === "kill" && agreed,
+    markerLabels,
+    blockedBy:
+      cull.classification === "symptomatic_of_root" &&
+      agreed &&
+      rootIssueIdentifier !== null
+        ? input.proposal.issueIdentifiers.map((issueIdentifier) => ({
+            issueIdentifier,
+            rootIssueIdentifier,
+          }))
+        : [],
+  };
+}
+
+function isCullMarkerLabel(value: string | null): value is string {
+  return (
+    value !== null &&
+    (value.startsWith(CONSERVATIVE_CULL_LABEL_PREFIXES.killed) ||
+      value.startsWith(CONSERVATIVE_CULL_LABEL_PREFIXES.downgraded))
+  );
 }
 
 function actorMetadata(actor: VerdictActor): {

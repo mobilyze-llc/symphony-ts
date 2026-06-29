@@ -27,6 +27,7 @@ describe("dispatcher decision event emission", () => {
       summary: "Duplicate queued work",
       evidence: "Issue bodies overlap",
       confidence: "medium",
+      cull: null,
       codeGroundingStatus: null,
       codeGroundingEvidence: null,
       generatedAt: "2026-03-06T00:00:00.000Z",

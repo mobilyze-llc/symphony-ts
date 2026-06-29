@@ -28,6 +28,13 @@ const HIGH_CONCENTRATION_THRESHOLD = 0.5;
 /** At/above this share → churn is notably concentrated but not extreme. */
 const MEDIUM_CONCENTRATION_THRESHOLD = 0.25;
 
+export const DEFAULT_DEFENSIVE_SHARE_TRIPWIRE_CONFIG = {
+  defensiveShareThreshold: 0.26,
+  hotFileChurnFractionThreshold: 0.28,
+  reportOnly: true,
+  reopenIssueIdentifier: "SYMPH-948",
+} as const;
+
 export interface ReadHotFileGrowthInput {
   repoPath: string;
   /** Bound the window by commit count (default 500). */
@@ -43,6 +50,38 @@ export interface ReadHotFileGrowthInput {
    * races the git spawn and is flaky.
    */
   execFileImpl?: typeof execFileAsync;
+}
+
+export interface DefensiveShareTripwireConfig {
+  /** Current defensive backlog share threshold. Initial calibration: ~26%. */
+  defensiveShareThreshold: number;
+  /** Existing SYMPH-939 hot-file share threshold. Initial calibration: ~28%. */
+  hotFileChurnFractionThreshold: number;
+  /** Calibration mode: measure and report, but do not emit a reopen action. */
+  reportOnly: boolean;
+  /** The deferred altitude-root issue to reopen/flag when actioning. */
+  reopenIssueIdentifier: string;
+}
+
+export interface DefensiveShareTripwireInput {
+  defensiveShare: number;
+  hotFileGrowth: HotFileGrowth | null;
+  config?: Partial<DefensiveShareTripwireConfig>;
+  measuredAt?: string;
+}
+
+export interface DefensiveShareTripwireResult {
+  measuredAt: string;
+  defensiveShare: number;
+  defensiveShareThreshold: number;
+  hotFileChurnFraction: number | null;
+  hotFileChurnFractionThreshold: number;
+  crossed: boolean;
+  reportOnly: boolean;
+  action:
+    | { kind: "none"; reason: "threshold_not_crossed" }
+    | { kind: "report_only"; issueIdentifier: string }
+    | { kind: "reopen_root_deferral"; issueIdentifier: string };
 }
 
 /**
@@ -161,5 +200,55 @@ export async function readHotFileGrowth(
     // Any failure — non-git dir, missing binary, non-zero exit, timeout/kill,
     // oversized buffer — degrades to null. Never throw, never log (R7).
     return null;
+  }
+}
+
+export function evaluateDefensiveShareTripwire(
+  input: DefensiveShareTripwireInput,
+): DefensiveShareTripwireResult {
+  const config = {
+    ...DEFAULT_DEFENSIVE_SHARE_TRIPWIRE_CONFIG,
+    ...input.config,
+  };
+  assertUnitInterval(input.defensiveShare, "defensiveShare");
+  assertUnitInterval(config.defensiveShareThreshold, "defensiveShareThreshold");
+  assertUnitInterval(
+    config.hotFileChurnFractionThreshold,
+    "hotFileChurnFractionThreshold",
+  );
+  const hotFileChurnFraction =
+    input.hotFileGrowth?.topFileChurnFraction ?? null;
+  if (hotFileChurnFraction !== null) {
+    assertUnitInterval(hotFileChurnFraction, "hotFileChurnFraction");
+  }
+  const crossed =
+    input.defensiveShare >= config.defensiveShareThreshold ||
+    (hotFileChurnFraction !== null &&
+      hotFileChurnFraction >= config.hotFileChurnFractionThreshold);
+  return {
+    measuredAt: input.measuredAt ?? new Date().toISOString(),
+    defensiveShare: input.defensiveShare,
+    defensiveShareThreshold: config.defensiveShareThreshold,
+    hotFileChurnFraction,
+    hotFileChurnFractionThreshold: config.hotFileChurnFractionThreshold,
+    crossed,
+    reportOnly: config.reportOnly,
+    action: crossed
+      ? config.reportOnly
+        ? {
+            kind: "report_only",
+            issueIdentifier: config.reopenIssueIdentifier,
+          }
+        : {
+            kind: "reopen_root_deferral",
+            issueIdentifier: config.reopenIssueIdentifier,
+          }
+      : { kind: "none", reason: "threshold_not_crossed" },
+  };
+}
+
+function assertUnitInterval(value: number, name: string): void {
+  if (!Number.isFinite(value) || value < 0 || value > 1) {
+    throw new Error(`${name} must be a finite number in [0, 1]`);
   }
 }

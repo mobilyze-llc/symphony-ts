@@ -16,10 +16,12 @@ import {
   buildBacklogAuditPrompt,
   createBacklogAuditModelFetch,
   fetchBacklogAuditRuntimeEvidence,
+  isStandingDefensiveIssue,
   mergeBacklogAuditReports,
   renderBacklogAuditReport,
   runBacklogAudit,
   runBacklogAuditChunked,
+  selectOffPressureCullIssues,
 } from "../../src/audit/backlog-audit.js";
 import type { Issue } from "../../src/domain/model.js";
 
@@ -322,6 +324,84 @@ describe("backlog audit", () => {
       supersession: 0,
       thin_spec: 1,
     });
+  });
+
+  it("runs off-pressure cull only over standing defensive tickets and normalizes kill markers", async () => {
+    const defensive = {
+      ...ISSUE,
+      id: "issue-defensive",
+      identifier: "SYMPH-958",
+      title: "Defensive Track-originated workaround",
+      labels: ["source:tracked-items"],
+    };
+    const userReported = {
+      ...ISSUE,
+      id: "issue-user",
+      identifier: "SYMPH-956",
+      title: "Real user-visible bug",
+      labels: ["source:user-report"],
+    };
+    const fetchFn = vi.fn(
+      async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body));
+        const prompt = JSON.stringify(body.messages ?? body.prompt ?? "");
+        expect(prompt).toContain("Audit mode: off_pressure_cull");
+        expect(prompt).toContain("SYMPH-958");
+        expect(prompt).not.toContain("SYMPH-956");
+        return chatCompletionResponse(
+          JSON.stringify({
+            summary: "Cull found one unreachable defensive ticket.",
+            findingTypeVolume: {
+              duplicate: 0,
+              supersession: 0,
+              stale: 0,
+              thin_spec: 0,
+              review_dispatch_mismatch: 0,
+              other: 1,
+            },
+            findings: [
+              {
+                findingId: "F-1",
+                type: "other",
+                issueIdentifiers: ["SYMPH-958"],
+                summary: "Unreachable after the owning surface was removed.",
+                evidence:
+                  "Ticket is Track-originated and targets a removed path.",
+                confidence: "high",
+                cull: {
+                  classification: "kill",
+                  killReason: "unreachable",
+                },
+              },
+            ],
+          }),
+        );
+      },
+    );
+
+    const report = await runBacklogAudit({
+      mode: "off_pressure_cull",
+      config: {
+        baseUrl: "http://studio2.local:8000/v1",
+        model: "deepseek-v4-flash",
+        apiKey: null,
+        timeoutMs: 60_000,
+      },
+      issues: [defensive, userReported],
+      runtimeEvidence: RUNTIME_EVIDENCE,
+      fetchFn: fetchFn as unknown as typeof fetch,
+    });
+
+    expect(report.issueCount).toBe(1);
+    expect(report.verdict.findings[0]?.cull).toMatchObject({
+      classification: "kill",
+      killReason: "unreachable",
+      marker: "killed:unreachable",
+    });
+    expect(selectOffPressureCullIssues([defensive, userReported])).toEqual([
+      defensive,
+    ]);
+    expect(isStandingDefensiveIssue(userReported)).toBe(false);
   });
 
   it("wraps non-JSON local model response bodies", async () => {
