@@ -6,6 +6,7 @@ import {
   type BacklogAuditReport,
   type RunBacklogAuditInput,
   runBacklogAudit,
+  stableCullMarker,
 } from "../audit/backlog-audit.js";
 import type { ResolvedWorkflowConfig } from "../config/types.js";
 import type {
@@ -507,29 +508,25 @@ export function buildConservativeCullApplicationPlan(input: {
     };
   }
   const agreed = input.decision === "agreed";
-  // A marker is valid only when its prefix matches the classification
-  // (SYMPH-966 AC#4): kill -> `killed:`, downgrade -> `downgraded:`. This is
-  // classification-aware, not mere prefix-presence, so a keep/symptomatic
-  // finding — or a kill carrying a stray `downgraded:` marker — can never emit
-  // a label or authorize a cancel.
-  const markerMatchesClassification =
-    (cull.classification === "kill" &&
-      typeof cull.marker === "string" &&
-      cull.marker.startsWith(CONSERVATIVE_CULL_LABEL_PREFIXES.killed)) ||
-    (cull.classification === "downgrade" &&
-      typeof cull.marker === "string" &&
-      cull.marker.startsWith(CONSERVATIVE_CULL_LABEL_PREFIXES.downgraded));
+  // The marker is derived from the authoritative (classification, killReason)
+  // via the same stableCullMarker used at normalization — never trusted from the
+  // model-supplied `cull.marker` string. A marker is non-null only for a kill or
+  // downgrade carrying a valid stable kill reason; keep/symptomatic, a reasonless
+  // kill (killReason:null), or any hand-crafted marker yields null. This makes
+  // the planner robust to malformed input regardless of upstream normalization
+  // (SYMPH-966 AC#4).
+  const canonicalMarker = stableCullMarker({
+    classification: cull.classification,
+    killReason: cull.killReason,
+  });
   const markerLabels =
-    agreed && markerMatchesClassification && cull.marker !== null
-      ? [cull.marker]
-      : [];
+    agreed && canonicalMarker !== null ? [canonicalMarker] : [];
   const rootIssueIdentifier = cull.rootIssueIdentifier;
-  // A kill may only cancel when it carries a valid, classification-matching
-  // stable-reason marker (SYMPH-966 AC#4): a kill normalized to killReason:null
-  // has no marker and must not cancel a ticket, or a reasonless kill could drop
-  // a real defect.
+  // A kill may only cancel when it has a valid stable-reason marker (SYMPH-966
+  // AC#4): a reasonless kill (killReason:null → null marker) must not cancel a
+  // ticket, or a malformed kill could silently drop a real defect.
   const killWithValidMarker =
-    cull.classification === "kill" && markerMatchesClassification;
+    cull.classification === "kill" && canonicalMarker !== null;
   return {
     proposalId: input.proposal.proposalId,
     classification: cull.classification,
@@ -540,10 +537,16 @@ export function buildConservativeCullApplicationPlan(input: {
       cull.classification === "symptomatic_of_root" &&
       agreed &&
       rootIssueIdentifier !== null
-        ? input.proposal.issueIdentifiers.map((issueIdentifier) => ({
-            issueIdentifier,
-            rootIssueIdentifier,
-          }))
+        ? input.proposal.issueIdentifiers
+            // Drop self-references: a ticket symptomatic of itself would create
+            // a circular blockedBy that leaves it permanently self-blocked.
+            .filter(
+              (issueIdentifier) => issueIdentifier !== rootIssueIdentifier,
+            )
+            .map((issueIdentifier) => ({
+              issueIdentifier,
+              rootIssueIdentifier,
+            }))
         : [],
   };
 }

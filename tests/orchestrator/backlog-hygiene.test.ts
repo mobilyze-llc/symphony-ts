@@ -417,6 +417,102 @@ describe("backlog hygiene proposal lane (SYMPH-484)", () => {
     expect(plan.markerLabels).toEqual([]);
   });
 
+  it("ignores a model-supplied marker entirely and derives it from classification + reason", () => {
+    const [proposal] = buildBacklogHygieneProposals({
+      report: {
+        generatedAt: "2026-06-29T00:00:00.000Z",
+        issueCount: 1,
+        runtimeSources: ["/api/v1/state"],
+        verdict: {
+          summary: "Kill with a well-prefixed but reasonless marker.",
+          findingTypeVolume: {
+            duplicate: 0,
+            supersession: 0,
+            stale: 0,
+            thin_spec: 0,
+            review_dispatch_mismatch: 0,
+            other: 1,
+          },
+          findings: [
+            {
+              findingId: "F-garbage",
+              type: "other",
+              issueIdentifiers: ["SYMPH-958"],
+              summary: "Kill with no reason but a killed: marker string",
+              evidence: "Hand-crafted marker with an invalid reason suffix.",
+              confidence: "high",
+              cull: {
+                classification: "kill",
+                killReason: null,
+                // Valid `killed:` prefix but no real reason — must not authorize.
+                marker: "killed:not_a_stable_reason",
+                rootIssueIdentifier: null,
+              },
+            },
+          ],
+        },
+      },
+      candidateIssues: [issue({ id: "958", identifier: "SYMPH-958" })],
+      maxProposalsPerProductPerPoll: 1,
+      modelTierDecision: decideBacklogHygieneModelTier(passingEvaluation()),
+    });
+
+    const plan = buildConservativeCullApplicationPlan({
+      proposal: proposal!,
+      decision: "agreed",
+    });
+    expect(plan.cancelIssue).toBe(false);
+    expect(plan.requiresOperatorAgree).toBe(false);
+    expect(plan.markerLabels).toEqual([]);
+  });
+
+  it("drops a self-referencing blockedBy for a ticket symptomatic of itself", () => {
+    const [proposal] = buildBacklogHygieneProposals({
+      report: {
+        generatedAt: "2026-06-29T00:00:00.000Z",
+        issueCount: 1,
+        runtimeSources: ["/api/v1/state"],
+        verdict: {
+          summary: "Symptomatic of itself.",
+          findingTypeVolume: {
+            duplicate: 0,
+            supersession: 0,
+            stale: 0,
+            thin_spec: 0,
+            review_dispatch_mismatch: 0,
+            other: 1,
+          },
+          findings: [
+            {
+              findingId: "F-self",
+              type: "other",
+              issueIdentifiers: ["SYMPH-956"],
+              summary: "Hallucinated self-symptomatic finding",
+              evidence: "Root identifier equals the issue itself.",
+              confidence: "medium",
+              cull: {
+                classification: "symptomatic_of_root",
+                killReason: null,
+                marker: null,
+                rootIssueIdentifier: "SYMPH-956",
+              },
+            },
+          ],
+        },
+      },
+      candidateIssues: [issue({ id: "956", identifier: "SYMPH-956" })],
+      maxProposalsPerProductPerPoll: 1,
+      modelTierDecision: decideBacklogHygieneModelTier(passingEvaluation()),
+    });
+
+    expect(
+      buildConservativeCullApplicationPlan({
+        proposal: proposal!,
+        decision: "agreed",
+      }).blockedBy,
+    ).toEqual([]);
+  });
+
   it("parks symptomatic survivors behind their existing root ticket via blockedBy intent", () => {
     const [proposal] = buildBacklogHygieneProposals({
       report: {
