@@ -4,6 +4,7 @@ import {
   ALTITUDE_RELIABILITY_CORPUS,
   buildAltitudeReliabilityLedgerEntry,
   runAltitudeReliabilityRetest,
+  scoreAltitudeReliability,
 } from "../../src/audit/altitude-reliability.js";
 
 describe("altitude reliability re-test protocol", () => {
@@ -67,5 +68,11 @@ describe("altitude reliability re-test protocol", () => {
         runVerdict: async () => "keep",
       }),
     ).rejects.toThrow(/corpus must be non-empty/);
+  });
+
+  it("refuses direct empty-result scoring instead of reporting perfect metrics", () => {
+    expect(() => scoreAltitudeReliability([])).toThrow(
+      /zero observations cannot measure capability/,
+    );
   });
 });
