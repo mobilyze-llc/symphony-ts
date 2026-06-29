@@ -5,6 +5,11 @@ import type {
   WorkflowHardStopsConfigOverride,
 } from "../config/types.js";
 import type { HumanBlockOperation, RightSizingMode } from "../domain/model.js";
+import {
+  type UsageTokens,
+  evaluateBudget,
+  loadPricingCatalog,
+} from "./pricing.js";
 
 export type HardStopOutcome =
   | "BLOCKED-needs-human"
@@ -28,8 +33,18 @@ export interface HardStopDecision {
   turnCount: number;
   /** Raw cumulative unit tokens, cache reads at full weight (observability). */
   totalTokens: number;
-  /** Cache-discounted tokens — the measure budget triggers gate on (SYMPH-351). */
+  /** Cache-discounted tokens kept for observability and legacy estimates. */
   billableTokens?: number;
+  /** Budget basis used by the current provider/model resolver. */
+  budgetDenomination?: "weighted_tokens" | "usd" | "none";
+  /** Weighted-token or USD total used for the budget decision. */
+  budgetTotal?: number | null;
+  /** Configured limit in the same denomination as `budgetTotal`. */
+  budgetLimit?: number;
+  /** Catalog billing mode for the active provider/model. */
+  billingMode?: string | null;
+  /** Resolver note when a configured budget is not enforceable. */
+  budgetNote?: string;
   /** Parsed operation for worker-reported human blocks; avoids re-parsing prose. */
   humanBlockOperation?: HumanBlockOperation;
   /** Structured blocker summary reported by the worker at a human boundary. */
@@ -321,68 +336,124 @@ export function evaluateBudgetHardStop(input: {
   config: WorkflowHardStopsConfig;
   turnCount: number;
   totalTokens: number;
+  provider: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
   cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  onBudgetNotEnforced?: (event: {
+    provider: string;
+    model: string;
+    note: string;
+    billingMode: string | null;
+  }) => void;
 }): HardStopDecision | null {
-  // SYMPH-351: evaluate the token trigger on the same cache-discounted
-  // measure the cost model bills. Raw totals are dominated by cached
-  // re-reads of the conversation prefix (~90% on observed long units),
-  // which consume almost none of the scarce resources the budget protects
-  // (rate-limit window share, dollars). Missing cache telemetry degrades
-  // to raw totals — the conservative direction. Computed exactly once per
-  // evaluation; the dollar estimate derives from the same value.
-  //
-  // SYMPH-348: live enforcement is cadence-bound because the runner can
-  // only interrupt on Codex usage events. Recent raw 2026-06-12..14 session
-  // artifacts showed a max 35,091 billable-token event delta and no individual
-  // session-level token-grace, dollar, or premium-ceiling breach; supplemental
-  // stage evidence paused on the premium guard at $44.22/$50. Operators should
-  // still size `maxTokensPerUnit` against billable usage plus the configured
-  // `liveBudgetGraceRatio`, while treating raw totals as observability. Source
-  // paths are recorded in SYMPH-348 comment b07e5f58-1dfd-4f47-9c8c-fb95939af503.
+  // SYMPH-955: the budget trigger uses the crucible lane denomination:
+  // weighted tokens for subscription/credit rows, real USD for api_token rows.
+  // Billable tokens remain on decisions for historical observability only.
   const billableTokens = computeBillableTokens({
     totalTokens: input.totalTokens,
     cacheReadTokens: input.cacheReadTokens ?? 0,
     config: input.config,
   });
-  const estimatedCostUsd = costFromBillableTokens(billableTokens, input.config);
+  const usage = normalizeUsageBreakdown(input);
+  const catalog = loadPricingCatalog();
 
-  if (billableTokens >= input.config.maxTokensPerUnit) {
-    return {
-      outcome: "PAUSED-budget",
-      trigger: "token_budget",
-      reason: `Token budget exceeded: ${billableTokens} billable >= ${input.config.maxTokensPerUnit} (raw ${input.totalTokens}, cached ${input.cacheReadTokens ?? 0}).`,
-      turnCount: input.turnCount,
-      totalTokens: input.totalTokens,
-      billableTokens,
-      estimatedCostUsd,
-    };
+  const tokenVerdict = evaluateBudget({
+    usage,
+    budget: input.config.maxTokensPerUnit,
+    provider: input.provider,
+    model: input.model,
+    catalog,
+  });
+
+  if (!tokenVerdict.enforced) {
+    input.onBudgetNotEnforced?.({
+      provider: input.provider,
+      model: input.model,
+      note: tokenVerdict.note ?? "budget_not_enforced:unknown_billing_mode",
+      billingMode: tokenVerdict.billing_mode,
+    });
+    return null;
   }
 
-  if (estimatedCostUsd >= input.config.maxDollarBudgetUsd) {
-    return {
-      outcome: "PAUSED-budget",
-      trigger: "dollar_budget",
-      reason: `Estimated dollar budget exceeded: ${formatCost(estimatedCostUsd)} >= ${formatCost(input.config.maxDollarBudgetUsd)}.`,
-      turnCount: input.turnCount,
-      totalTokens: input.totalTokens,
-      billableTokens,
-      estimatedCostUsd,
-    };
+  if (tokenVerdict.denomination === "weighted_tokens") {
+    if (tokenVerdict.exceeded) {
+      const total = tokenVerdict.total ?? 0;
+      return {
+        outcome: "PAUSED-budget",
+        trigger: "token_budget",
+        reason: `Weighted token budget exceeded: ${formatMeasure(total)} weighted_tokens > ${input.config.maxTokensPerUnit} for ${input.provider}/${input.model} (${tokenVerdict.billing_mode}; raw ${input.totalTokens}, legacy billable tokens for observability ${billableTokens}).`,
+        turnCount: input.turnCount,
+        totalTokens: input.totalTokens,
+        billableTokens,
+        budgetDenomination: "weighted_tokens",
+        budgetTotal: total,
+        budgetLimit: tokenVerdict.budget,
+        billingMode: tokenVerdict.billing_mode,
+        estimatedCostUsd: costFromWeightedTokens(total, input.config),
+      };
+    }
+
+    return null;
   }
 
-  if (
-    estimatedCostUsd >=
-    input.config.maxDollarBudgetUsd * input.config.premiumBudgetPauseRatio
-  ) {
-    return {
-      outcome: "PAUSED-budget",
-      trigger: "premium_spend_near_ceiling",
-      reason: `Estimated premium spend is near ceiling: ${formatCost(estimatedCostUsd)} of ${formatCost(input.config.maxDollarBudgetUsd)}.`,
-      turnCount: input.turnCount,
-      totalTokens: input.totalTokens,
-      billableTokens,
-      estimatedCostUsd,
-    };
+  // SYMPH-955 operator decision: dollar-budget, premium-spend-near-ceiling,
+  // and live grace apply only to api_token models with real USD. Subscription,
+  // credit, and uncatalogued models gate on weighted tokens alone, matching crucible.
+  if (tokenVerdict.denomination === "usd") {
+    const dollarVerdict = evaluateBudget({
+      usage,
+      budget: input.config.maxDollarBudgetUsd,
+      provider: input.provider,
+      model: input.model,
+      catalog,
+    });
+    if (dollarVerdict.enforced && dollarVerdict.exceeded) {
+      const usd = dollarVerdict.total ?? 0;
+      return {
+        outcome: "PAUSED-budget",
+        trigger: "dollar_budget",
+        reason: `Dollar budget exceeded: ${formatCost(usd)} > ${formatCost(input.config.maxDollarBudgetUsd)} for ${input.provider}/${input.model} (${dollarVerdict.billing_mode}; raw ${input.totalTokens}, legacy billable tokens for observability ${billableTokens}).`,
+        turnCount: input.turnCount,
+        totalTokens: input.totalTokens,
+        billableTokens,
+        budgetDenomination: "usd",
+        budgetTotal: usd,
+        budgetLimit: dollarVerdict.budget,
+        billingMode: dollarVerdict.billing_mode,
+        estimatedCostUsd: usd,
+      };
+    }
+
+    const premiumBudget =
+      input.config.maxDollarBudgetUsd * input.config.premiumBudgetPauseRatio;
+    const premiumVerdict = evaluateBudget({
+      usage,
+      budget: premiumBudget,
+      provider: input.provider,
+      model: input.model,
+      catalog,
+    });
+    if (premiumVerdict.enforced && premiumVerdict.exceeded) {
+      const usd = premiumVerdict.total ?? 0;
+      return {
+        outcome: "PAUSED-budget",
+        trigger: "premium_spend_near_ceiling",
+        reason: `Premium spend is near ceiling: ${formatCost(usd)} > ${formatCost(premiumBudget)} for ${input.provider}/${input.model} (${premiumVerdict.billing_mode}; ceiling ${formatCost(input.config.maxDollarBudgetUsd)}).`,
+        turnCount: input.turnCount,
+        totalTokens: input.totalTokens,
+        billableTokens,
+        budgetDenomination: "usd",
+        budgetTotal: usd,
+        budgetLimit: premiumVerdict.budget,
+        billingMode: premiumVerdict.billing_mode,
+        estimatedCostUsd: usd,
+      };
+    }
+
+    return null;
   }
 
   return null;
@@ -391,6 +462,43 @@ export function evaluateBudgetHardStop(input: {
 export interface RateLimitUsageObservations {
   primary: RateLimitWindowObservation | null;
   secondary: RateLimitWindowObservation | null;
+}
+
+function normalizeUsageBreakdown(input: {
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+}): UsageTokens {
+  const totalTokens = nonNegativeNumber(input.totalTokens) ?? 0;
+  const inputTokens = nonNegativeNumber(input.inputTokens) ?? 0;
+  const outputTokens = nonNegativeNumber(input.outputTokens) ?? 0;
+  const cacheReadTokens = clampTokenCount(input.cacheReadTokens, totalTokens);
+  const cacheWriteTokens = clampTokenCount(input.cacheWriteTokens, totalTokens);
+  const knownTokens =
+    inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
+  const unclassifiedTokens = Math.max(totalTokens - knownTokens, 0);
+
+  return {
+    input_tokens: inputTokens,
+    // Missing split telemetry fails closed by treating any raw-token remainder
+    // as output, the most expensive weighted component.
+    output_tokens: outputTokens + unclassifiedTokens,
+    cache_read_tokens: cacheReadTokens,
+    cache_write_tokens: cacheWriteTokens,
+  };
+}
+
+function nonNegativeNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : null;
+}
+
+function clampTokenCount(value: unknown, totalTokens: number): number {
+  const count = nonNegativeNumber(value) ?? 0;
+  return Math.min(count, totalTokens);
 }
 
 /**
@@ -505,8 +613,8 @@ export function evaluateNoProgressHardStop(input: {
 // Cached input tokens are re-reads of an unchanged prefix and are billed
 // at a fraction of the full rate; charging them at full weight overstated
 // spend by the cached share (~70% on observed worker turns, SYMPH-319).
-// Shared by the dollar estimate and the token trigger (SYMPH-351) so both
-// measure the same scarce resource.
+// Shared by legacy dollar estimates and observability (SYMPH-351). The budget
+// trigger now uses the provider/model catalog basis in evaluateBudgetHardStop.
 export function computeBillableTokens(input: {
   totalTokens: number;
   cacheReadTokens: number;
@@ -537,6 +645,13 @@ function costFromBillableTokens(
   return (billableTokens / 1000) * config.estimatedCostPer1kTokensUsd;
 }
 
+function costFromWeightedTokens(
+  weightedTokens: number,
+  config: Pick<WorkflowHardStopsConfig, "estimatedCostPer1kTokensUsd">,
+): number {
+  return (weightedTokens / 1000) * config.estimatedCostPer1kTokensUsd;
+}
+
 export function estimateCostUsd(input: {
   totalTokens: number;
   cacheReadTokens: number;
@@ -550,6 +665,10 @@ export function estimateCostUsd(input: {
 
 function formatCost(cost: number): string {
   return `$${cost.toFixed(2)}`;
+}
+
+function formatMeasure(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
 }
 
 function formatPct(value: number): string {

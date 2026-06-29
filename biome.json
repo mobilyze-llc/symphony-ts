@@ -11,7 +11,8 @@
       ".symphony/**",
       ".worktrees/**",
       ".claude/worktrees/**",
-      "coverage/**"
+      "coverage/**",
+      "tests/fixtures/pricing-conformance.fixture.json"
     ]
   },
   "formatter": {

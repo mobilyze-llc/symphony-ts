@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  computeBillableTokens,
   createModeScopedPermissionPolicy,
   describeModePermissionEnvelope,
   detectModePermissionAction,
@@ -11,6 +12,8 @@ import {
   evaluateRateLimitBudgetHardStop,
   resolveHardStopsConfig,
 } from "../../src/policy/hard-stops.js";
+
+type BudgetHardStopInput = Parameters<typeof evaluateBudgetHardStop>[0];
 
 const CONFIG = {
   maxIterations: 3,
@@ -24,6 +27,48 @@ const CONFIG = {
   maxPrimaryWindowPctPerUnit: null,
   maxSecondaryWindowPctPerUnit: null,
 };
+
+function evaluateCodexBudget(
+  input: Omit<
+    BudgetHardStopInput,
+    "provider" | "model" | "inputTokens" | "outputTokens"
+  > &
+    Partial<
+      Pick<
+        BudgetHardStopInput,
+        | "provider"
+        | "model"
+        | "inputTokens"
+        | "outputTokens"
+        | "cacheWriteTokens"
+      >
+    >,
+) {
+  const {
+    provider = "openai",
+    model = "codex",
+    inputTokens,
+    outputTokens = 0,
+    cacheReadTokens = 0,
+    cacheWriteTokens = 0,
+    ...rest
+  } = input;
+
+  return evaluateBudgetHardStop({
+    ...rest,
+    provider,
+    model,
+    inputTokens:
+      inputTokens ??
+      Math.max(
+        rest.totalTokens - outputTokens - cacheReadTokens - cacheWriteTokens,
+        0,
+      ),
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+  });
+}
 
 describe("hard-stop policy", () => {
   it("merges hard-stop overrides over fallback config", () => {
@@ -71,10 +116,10 @@ describe("hard-stop policy", () => {
 
   it("pauses for token and near-ceiling dollar budgets", () => {
     expect(
-      evaluateBudgetHardStop({
+      evaluateCodexBudget({
         config: CONFIG,
         turnCount: 1,
-        totalTokens: 1000,
+        totalTokens: 1001,
       }),
     ).toMatchObject({
       outcome: "PAUSED-budget",
@@ -82,13 +127,18 @@ describe("hard-stop policy", () => {
     });
 
     expect(
-      evaluateBudgetHardStop({
+      evaluateCodexBudget({
         config: {
           ...CONFIG,
           maxTokensPerUnit: 10_000,
+          maxDollarBudgetUsd: 10,
         },
         turnCount: 1,
-        totalTokens: 1600,
+        totalTokens: 1_100_000,
+        provider: "openai",
+        model: "gpt-5.5",
+        inputTokens: 1_000_000,
+        outputTokens: 100_001,
       }),
     ).toMatchObject({
       outcome: "PAUSED-budget",
@@ -216,34 +266,100 @@ describe("hard-stop policy", () => {
     // 87,657 total tokens of which 60,672 were cache reads. Full-rate
     // pricing called this $4.38 and paused the worker; cache-aware pricing
     // is $1.65 of the $4 budget.
+    expect(
+      computeBillableTokens({
+        totalTokens: 87_657,
+        cacheReadTokens: 60_672,
+        config: { cachedTokenCostRatio: 0.1 },
+      }),
+    ).toBe(33_052);
+  });
+
+  it("weights equal raw token counts differently by token family", () => {
     const config = {
       ...CONFIG,
-      maxTokensPerUnit: 240_000,
-      maxDollarBudgetUsd: 4,
-      premiumBudgetPauseRatio: 0.9,
-      liveBudgetGraceRatio: 0.1,
-      estimatedCostPer1kTokensUsd: 0.05,
-      cachedTokenCostRatio: 0.1,
+      maxTokensPerUnit: 500,
+      maxDollarBudgetUsd: 1_000_000,
     };
 
     expect(
-      evaluateBudgetHardStop({
+      evaluateCodexBudget({
         config,
         turnCount: 1,
-        totalTokens: 87_657,
-        cacheReadTokens: 60_672,
+        totalTokens: 1000,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 1000,
       }),
     ).toBeNull();
 
     expect(
-      evaluateBudgetHardStop({
+      evaluateCodexBudget({
         config,
         turnCount: 1,
-        totalTokens: 87_657,
+        totalTokens: 1000,
+        inputTokens: 0,
+        outputTokens: 1000,
       }),
     ).toMatchObject({
-      outcome: "PAUSED-budget",
-      trigger: "dollar_budget",
+      trigger: "token_budget",
+      budgetDenomination: "weighted_tokens",
+      budgetTotal: 6000,
+    });
+  });
+
+  it("charges gross cache-read input as net input plus discounted cache read", () => {
+    const decision = evaluateCodexBudget({
+      config: {
+        ...CONFIG,
+        maxTokensPerUnit: 189,
+        maxDollarBudgetUsd: 1_000_000,
+      },
+      turnCount: 1,
+      totalTokens: 1000,
+      inputTokens: 100,
+      outputTokens: 0,
+      cacheReadTokens: 900,
+    });
+
+    expect(decision).toMatchObject({
+      trigger: "token_budget",
+      budgetDenomination: "weighted_tokens",
+      budgetTotal: 190,
+    });
+  });
+
+  it("weights cache writes above cache reads for Codex credit budgets", () => {
+    const config = {
+      ...CONFIG,
+      maxTokensPerUnit: 1249,
+      maxDollarBudgetUsd: 1_000_000,
+    };
+
+    expect(
+      evaluateCodexBudget({
+        config,
+        turnCount: 1,
+        totalTokens: 1000,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 1000,
+      }),
+    ).toBeNull();
+
+    expect(
+      evaluateCodexBudget({
+        config,
+        turnCount: 1,
+        totalTokens: 1000,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheWriteTokens: 1000,
+      }),
+    ).toMatchObject({
+      trigger: "token_budget",
+      budgetDenomination: "weighted_tokens",
+      budgetTotal: 1250,
     });
   });
 
@@ -257,24 +373,25 @@ describe("hard-stop policy", () => {
       cachedTokenCostRatio: 0.1,
     };
 
-    // The token trigger now fires on billable tokens (SYMPH-351), so each
-    // case supplies enough raw volume for billable to reach the 1000 cap.
+    // The token trigger fires on weighted tokens; these cases supply enough
+    // normalized usage to exceed the 1000-token cap.
     expect(
-      evaluateBudgetHardStop({
+      evaluateCodexBudget({
         config,
         turnCount: 1,
-        totalTokens: 1540,
+        totalTokens: 1541,
         cacheReadTokens: 600,
       }),
     ).toMatchObject({
       trigger: "token_budget",
-      estimatedCostUsd: expect.closeTo(5, 10),
+      budgetTotal: 1001,
+      estimatedCostUsd: expect.closeTo(5.005, 10),
     });
 
     // cacheReadTokens above raw total clamps to the total.
     expect(
-      evaluateBudgetHardStop({
-        config,
+      evaluateCodexBudget({
+        config: { ...config, maxTokensPerUnit: 999 },
         turnCount: 1,
         totalTokens: 10_000,
         cacheReadTokens: 50_000,
@@ -286,19 +403,55 @@ describe("hard-stop policy", () => {
 
     // Negative cache telemetry clamps to zero discount.
     expect(
-      evaluateBudgetHardStop({
+      evaluateCodexBudget({
         config,
         turnCount: 1,
-        totalTokens: 1000,
+        totalTokens: 1001,
+        inputTokens: 1001,
         cacheReadTokens: -100,
       }),
     ).toMatchObject({
       trigger: "token_budget",
-      estimatedCostUsd: expect.closeTo(5, 10),
+      estimatedCostUsd: expect.closeTo(5.005, 10),
     });
   });
 
-  it("evaluates the token trigger on cache-discounted tokens (SYMPH-351)", () => {
+  it("clamps malformed cache-write telemetry in weighted usage", () => {
+    expect(
+      evaluateCodexBudget({
+        config: {
+          ...CONFIG,
+          maxTokensPerUnit: 2000,
+          maxDollarBudgetUsd: 1_000_000,
+        },
+        turnCount: 1,
+        totalTokens: 1000,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheWriteTokens: 50_000,
+      }),
+    ).toBeNull();
+
+    expect(
+      evaluateCodexBudget({
+        config: {
+          ...CONFIG,
+          maxTokensPerUnit: 5000,
+          maxDollarBudgetUsd: 1_000_000,
+        },
+        turnCount: 1,
+        totalTokens: 1000,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheWriteTokens: -100,
+      }),
+    ).toMatchObject({
+      trigger: "token_budget",
+      budgetTotal: 6000,
+    });
+  });
+
+  it("evaluates the token trigger on weighted tokens", () => {
     const config = {
       ...CONFIG,
       maxTokensPerUnit: 250_000,
@@ -307,10 +460,10 @@ describe("hard-stop policy", () => {
       cachedTokenCostRatio: 0.1,
     };
 
-    // SYMPH-330 unit 3 shape: 1.03M raw, 90% cached — billable ~203K stays
-    // under the 250K ceiling instead of pausing at 257K raw.
+    // SYMPH-330 unit 3 shape: 1.03M raw, 90% cached — weighted usage still
+    // stays under the 250K ceiling because cache-read tokens remain 0.1x.
     expect(
-      evaluateBudgetHardStop({
+      evaluateCodexBudget({
         config,
         turnCount: 30,
         totalTokens: 1_032_161,
@@ -319,28 +472,29 @@ describe("hard-stop policy", () => {
     ).toBeNull();
 
     // Genuinely uncached burn still pauses at the nominal ceiling.
-    const uncached = evaluateBudgetHardStop({
+    const uncached = evaluateCodexBudget({
       config,
       turnCount: 5,
-      totalTokens: 250_000,
+      totalTokens: 250_001,
       cacheReadTokens: 0,
     });
     expect(uncached?.trigger).toBe("token_budget");
-    expect(uncached?.reason).toContain("billable");
-    expect(uncached?.reason).toContain("raw 250000");
+    expect(uncached?.reason).toContain("weighted_tokens > 250000");
+    expect(uncached?.reason).toContain("legacy billable tokens");
+    expect(uncached?.reason).toContain("raw 250001");
 
     // Missing cache telemetry degrades to raw totals (conservative).
     expect(
-      evaluateBudgetHardStop({
+      evaluateCodexBudget({
         config,
         turnCount: 5,
-        totalTokens: 250_000,
+        totalTokens: 250_001,
       })?.trigger,
     ).toBe("token_budget");
 
     // Discounted crossing reports both measures and keeps raw totals in
     // the decision for observability.
-    const crossed = evaluateBudgetHardStop({
+    const crossed = evaluateCodexBudget({
       config,
       turnCount: 60,
       totalTokens: 1_500_000,
@@ -350,8 +504,106 @@ describe("hard-stop policy", () => {
       trigger: "token_budget",
       totalTokens: 1_500_000,
     });
-    expect(crossed?.reason).toContain("420000 billable");
+    expect(crossed?.reason).toContain("legacy billable tokens");
     expect(crossed?.billableTokens).toBe(420_000);
+    expect(crossed?.budgetTotal).toBe(420_000);
+  });
+
+  it("uses strict crucible budget boundaries for weighted stops", () => {
+    expect(
+      evaluateCodexBudget({
+        config: {
+          ...CONFIG,
+          maxTokensPerUnit: 1000,
+          maxDollarBudgetUsd: 1_000_000,
+        },
+        turnCount: 1,
+        totalTokens: 1000,
+      }),
+    ).toBeNull();
+
+    expect(
+      evaluateCodexBudget({
+        config: {
+          ...CONFIG,
+          maxTokensPerUnit: 1000,
+          maxDollarBudgetUsd: 1_000_000,
+        },
+        turnCount: 1,
+        totalTokens: 1001,
+      }),
+    ).toMatchObject({
+      trigger: "token_budget",
+      budgetTotal: 1001,
+    });
+  });
+
+  it("uses strict crucible budget boundaries for dollar stops", () => {
+    const config = {
+      ...CONFIG,
+      maxTokensPerUnit: 1_000_000_000,
+      maxDollarBudgetUsd: 5,
+      premiumBudgetPauseRatio: 1,
+    };
+
+    expect(
+      evaluateCodexBudget({
+        config,
+        turnCount: 1,
+        totalTokens: 1_000_000,
+        provider: "openai",
+        model: "gpt-5.5",
+        inputTokens: 1_000_000,
+        outputTokens: 0,
+      }),
+    ).toBeNull();
+
+    expect(
+      evaluateCodexBudget({
+        config,
+        turnCount: 1,
+        totalTokens: 1_000_001,
+        provider: "openai",
+        model: "gpt-5.5",
+        inputTokens: 1_000_001,
+        outputTokens: 0,
+      }),
+    ).toMatchObject({
+      trigger: "dollar_budget",
+      budgetDenomination: "usd",
+      budgetTotal: expect.closeTo(5.000005, 9),
+    });
+  });
+
+  it("records budget-not-enforced notes without pausing", () => {
+    const notes: Array<{
+      provider: string;
+      model: string;
+      note: string;
+      billingMode: string | null;
+    }> = [];
+
+    expect(
+      evaluateBudgetHardStop({
+        config: CONFIG,
+        turnCount: 1,
+        totalTokens: 1_000_000,
+        provider: "deepseek",
+        model: "deepseek-v4-pro",
+        inputTokens: 1_000_000,
+        outputTokens: 0,
+        onBudgetNotEnforced: (event) => notes.push(event),
+      }),
+    ).toBeNull();
+
+    expect(notes).toEqual([
+      {
+        provider: "deepseek",
+        model: "deepseek-v4-pro",
+        note: "budget_not_enforced:diagnostic_only",
+        billingMode: "diagnostic_only",
+      },
+    ]);
   });
 
   it("locks the discount clamp contract at the extremes", () => {
@@ -364,7 +616,7 @@ describe("hard-stop policy", () => {
 
     // Fully-cached unit at max discount: billable is 0 — never fires.
     expect(
-      evaluateBudgetHardStop({
+      evaluateCodexBudget({
         config: { ...config, cachedTokenCostRatio: 0 },
         turnCount: 1,
         totalTokens: 1000,
@@ -372,29 +624,23 @@ describe("hard-stop policy", () => {
       }),
     ).toBeNull();
 
-    // undefined ratio fails closed to no discount (raw totals gate).
     expect(
-      evaluateBudgetHardStop({
-        config: {
-          ...config,
-          cachedTokenCostRatio: undefined as unknown as number,
-        },
-        turnCount: 1,
+      computeBillableTokens({
         totalTokens: 1000,
         cacheReadTokens: 900,
-      })?.trigger,
-    ).toBe("token_budget");
+        config: { cachedTokenCostRatio: undefined as unknown as number },
+      }),
+    ).toBe(1000);
 
     // null ALSO fails closed: Number.isFinite does not coerce (unlike the
-    // global isFinite), so null gets no discount and raw totals gate.
+    // global isFinite), so null gets no discount in the legacy billable view.
     expect(
-      evaluateBudgetHardStop({
-        config: { ...config, cachedTokenCostRatio: null as unknown as number },
-        turnCount: 1,
+      computeBillableTokens({
         totalTokens: 1000,
         cacheReadTokens: 1000,
-      })?.trigger,
-    ).toBe("token_budget");
+        config: { cachedTokenCostRatio: null as unknown as number },
+      }),
+    ).toBe(1000);
   });
 
   it("applies the cache discount to iteration and no-progress decisions", () => {

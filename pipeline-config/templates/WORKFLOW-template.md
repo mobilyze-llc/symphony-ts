@@ -38,7 +38,7 @@ agent:
 hard_stops:
   max_iterations: 20
   no_progress_turns: 3
-  max_tokens_per_unit: 250000
+  max_tokens_per_unit: 1500000
   max_dollar_budget_usd: 12.5
   premium_budget_pause_ratio: 0.8
   estimated_cost_per_1k_tokens_usd: 0.05
@@ -388,7 +388,7 @@ stages:
       # dollar estimate (cached input discounted via cached_token_cost_ratio);
       # 80000 predated cache-aware costing and paused workers whose billable
       # volume was ~30% of the raw total (SYMPH-319).
-      max_tokens_per_unit: 200000
+      max_tokens_per_unit: 1200000
       max_dollar_budget_usd: 4
       premium_budget_pause_ratio: 0.9
     linear_state: In Progress

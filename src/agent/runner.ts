@@ -316,6 +316,16 @@ export class AgentRunner {
     const effectiveRunnerKind = (stage?.runner ??
       this.config.runner.kind) as RunnerKind;
     const effectiveModel = stage?.model ?? this.config.runner.model;
+    const budgetProvider = resolveBudgetProvider({
+      runnerKind: effectiveRunnerKind,
+      configuredProvider:
+        stage?.execution?.provider ?? this.config.runner.provider ?? null,
+      model: effectiveModel,
+    });
+    const budgetModel = resolveBudgetModel({
+      runnerKind: effectiveRunnerKind,
+      model: effectiveModel,
+    });
     const globalHardStops = resolveHardStopsConfig(
       this.config.hardStops,
       DEFAULT_HARD_STOPS_CONFIG,
@@ -367,6 +377,35 @@ export class AgentRunner {
       if (client !== null) {
         void closeBestEffort(client, "budget_hard_stop");
       }
+    };
+    const recordBudgetNotEnforced = (event: {
+      provider: string;
+      model: string;
+      note: string;
+      billingMode: string | null;
+    }): void => {
+      this.onEvent?.({
+        event: "notification",
+        timestamp: formatEasternTimestamp(new Date()),
+        codexAppServerPid: liveSession.codexAppServerPid,
+        sessionId: liveSession.sessionId,
+        threadId: liveSession.threadId,
+        turnId: liveSession.turnId,
+        message: event.note,
+        raw: {
+          provider: event.provider,
+          model: event.model,
+          budget_note: event.note,
+          budget_denomination: "none",
+          billing_mode: event.billingMode,
+        },
+        issueId: issue.id,
+        issueIdentifier: issue.identifier,
+        // biome-ignore lint/style/noNonNullAssertion: workspace is assigned before budget notifications can be emitted
+        workspacePath: workspace!.path,
+        attempt: input.attempt,
+        turnCount: liveSession.turnCount,
+      });
     };
 
     try {
@@ -517,7 +556,13 @@ export class AgentRunner {
                 config: hardStops,
                 turnCount: liveSession.turnCount,
                 totalTokens: liveSession.totalStageTotalTokens,
+                provider: budgetProvider,
+                model: budgetModel,
+                inputTokens: selectBudgetInputTokensForHardStop(liveSession),
+                outputTokens: liveSession.totalStageOutputTokens,
                 cacheReadTokens: liveSession.totalStageCacheReadTokens,
+                cacheWriteTokens: liveSession.totalStageCacheWriteTokens,
+                onBudgetNotEnforced: recordBudgetNotEnforced,
               });
               if (liveHardStop !== null) {
                 requestLiveBudgetStop(liveHardStop);
@@ -725,7 +770,13 @@ export class AgentRunner {
           config: hardStops,
           turnCount: realTurnCount,
           totalTokens: liveSession.totalStageTotalTokens,
+          provider: budgetProvider,
+          model: budgetModel,
+          inputTokens: selectBudgetInputTokensForHardStop(liveSession),
+          outputTokens: liveSession.totalStageOutputTokens,
           cacheReadTokens: liveSession.totalStageCacheReadTokens,
+          cacheWriteTokens: liveSession.totalStageCacheWriteTokens,
+          onBudgetNotEnforced: recordBudgetNotEnforced,
         });
         if (pendingLiveBudgetGraceStop !== null) {
           const finalDecision =
@@ -743,20 +794,16 @@ export class AgentRunner {
             signal: humanBlockSignal,
             turnCount: realTurnCount,
             totalTokens: liveSession.totalStageTotalTokens,
-            estimatedCostUsd:
-              postTurnBudgetStop?.estimatedCostUsd ??
-              estimateHumanBlockCostUsd(
-                liveSession.totalStageTotalTokens,
-                liveSession.totalStageCacheReadTokens,
-                hardStops,
-              ),
-            billableTokens:
-              postTurnBudgetStop?.billableTokens ??
-              computeBillableTokens({
-                totalTokens: liveSession.totalStageTotalTokens,
-                cacheReadTokens: liveSession.totalStageCacheReadTokens,
-                config: hardStops,
-              }),
+            estimatedCostUsd: estimateHumanBlockCostUsd(
+              liveSession.totalStageTotalTokens,
+              liveSession.totalStageCacheReadTokens,
+              hardStops,
+            ),
+            billableTokens: computeBillableTokens({
+              totalTokens: liveSession.totalStageTotalTokens,
+              cacheReadTokens: liveSession.totalStageCacheReadTokens,
+              config: hardStops,
+            }),
           });
           break;
         }
@@ -1465,6 +1512,44 @@ function toErrorMessage(error: unknown): string {
 const MODEL_REASONING_EFFORT_CONFIG_PATTERN =
   /--config\s+(?:"model_reasoning_effort=(?:\\"|["'])?(?:low|medium|high)(?:\\"|["'])?"|'model_reasoning_effort=(?:"|')?(?:low|medium|high)(?:"|')?'|model_reasoning_effort=(?:"(?:low|medium|high)"|'(?:low|medium|high)'|(?:low|medium|high)))/;
 
+function resolveBudgetProvider(input: {
+  runnerKind: RunnerKind;
+  configuredProvider: string | null;
+  model: string | null;
+}): string {
+  if (input.configuredProvider !== null && input.configuredProvider !== "") {
+    return input.configuredProvider;
+  }
+  if (input.model?.includes("/") === true) {
+    return input.model.slice(0, input.model.indexOf("/"));
+  }
+  switch (input.runnerKind) {
+    case "codex":
+      return "openai";
+    case "claude-code":
+      return "anthropic";
+    case "gemini":
+      return "gemini";
+  }
+}
+
+function resolveBudgetModel(input: {
+  runnerKind: RunnerKind;
+  model: string | null;
+}): string {
+  if (input.model !== null && input.model.trim() !== "") {
+    return input.model;
+  }
+  switch (input.runnerKind) {
+    case "codex":
+      return "codex";
+    case "claude-code":
+      return "sonnet";
+    case "gemini":
+      return "gemini-2.5-pro";
+  }
+}
+
 function applyReasoningEffortToCodexCommand(
   command: string,
   effort: ReasoningEffort | null,
@@ -1747,8 +1832,7 @@ function canDeferLiveBudgetStopWithinGrace(
 ): boolean {
   if (
     config.liveBudgetGraceRatio <= 0 ||
-    !isBudgetHardStopTrigger(decision.trigger) ||
-    decision.billableTokens === undefined
+    !isBudgetHardStopTrigger(decision.trigger)
   ) {
     return false;
   }
@@ -1758,9 +1842,37 @@ function canDeferLiveBudgetStopWithinGrace(
     decision.trigger === "premium_spend_near_ceiling"
       ? config.maxDollarBudgetUsd * config.premiumBudgetPauseRatio
       : config.maxDollarBudgetUsd;
-  return (
-    decision.billableTokens <= config.maxTokensPerUnit * graceMultiplier &&
-    decision.estimatedCostUsd <= dollarGraceThreshold * graceMultiplier
+  if (decision.budgetDenomination === "weighted_tokens") {
+    return (
+      decision.budgetTotal !== null &&
+      decision.budgetTotal !== undefined &&
+      decision.budgetTotal <= config.maxTokensPerUnit * graceMultiplier
+    );
+  }
+  if (decision.budgetDenomination === "usd") {
+    return decision.estimatedCostUsd <= dollarGraceThreshold * graceMultiplier;
+  }
+  return false;
+}
+
+export function selectBudgetInputTokensForHardStop(
+  liveSession: Pick<
+    LiveSession,
+    | "codexNoCacheTokens"
+    | "totalStageInputTokens"
+    | "totalStageCacheReadTokens"
+    | "totalStageCacheWriteTokens"
+  >,
+): number {
+  if (liveSession.codexNoCacheTokens > 0) {
+    return liveSession.codexNoCacheTokens;
+  }
+
+  return Math.max(
+    liveSession.totalStageInputTokens -
+      liveSession.totalStageCacheReadTokens -
+      liveSession.totalStageCacheWriteTokens,
+    0,
   );
 }
 
