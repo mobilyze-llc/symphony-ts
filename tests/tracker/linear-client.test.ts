@@ -856,7 +856,9 @@ describe("LinearTrackerClient", () => {
   it("creates a Closeout comment when no runtime-authored marker exists", async () => {
     const fetchFn = vi
       .fn<typeof fetch>()
-      .mockResolvedValueOnce(jsonResponse({ data: { viewer: { id: "user-1" } } }))
+      .mockResolvedValueOnce(
+        jsonResponse({ data: { viewer: { id: "user-1" } } }),
+      )
       .mockResolvedValueOnce(
         jsonResponse({
           data: {
@@ -900,7 +902,9 @@ describe("LinearTrackerClient", () => {
   it("updates the latest runtime-authored Closeout comment", async () => {
     const fetchFn = vi
       .fn<typeof fetch>()
-      .mockResolvedValueOnce(jsonResponse({ data: { viewer: { id: "user-1" } } }))
+      .mockResolvedValueOnce(
+        jsonResponse({ data: { viewer: { id: "user-1" } } }),
+      )
       .mockResolvedValueOnce(
         jsonResponse({
           data: {
@@ -951,7 +955,9 @@ describe("LinearTrackerClient", () => {
   it("does not update an operator-authored Closeout marker", async () => {
     const fetchFn = vi
       .fn<typeof fetch>()
-      .mockResolvedValueOnce(jsonResponse({ data: { viewer: { id: "user-1" } } }))
+      .mockResolvedValueOnce(
+        jsonResponse({ data: { viewer: { id: "user-1" } } }),
+      )
       .mockResolvedValueOnce(
         jsonResponse({
           data: {

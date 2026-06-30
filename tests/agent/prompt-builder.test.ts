@@ -430,9 +430,9 @@ describe("prompt builder", () => {
     expect(prompt).toContain("[STAGE_COMPLETE]");
     // The contract appears exactly once and before STAGE_COMPLETE (council R1
     // Pi-F6: guard against duplication or wrong-branch injection).
-    expect(prompt.split("Live-proof disposition (SYMPH-377)").length - 1).toBe(
-      1,
-    );
+    expect(
+      prompt.split("Live-proof disposition (SYMPH-377)").length - 1,
+    ).toBe(1);
     expect(prompt.indexOf("Live-proof disposition (SYMPH-377)")).toBeLessThan(
       prompt.lastIndexOf("[STAGE_COMPLETE]"),
     );
