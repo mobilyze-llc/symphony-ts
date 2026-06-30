@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { runAcGate } from "../agent/ac-gate.js";
+import { readHotFileGrowth } from "../agent/health/hot-file-reader.js";
 import { runPauseTriage } from "../agent/pause-triage.js";
 import type {
   ImplementationCommentDelta,
@@ -41,10 +42,9 @@ import {
   runSpecFidelityLane,
 } from "../agent/spec-fidelity.js";
 import { runStuckTriage } from "../agent/stuck-triage.js";
-import { readHotFileGrowth } from "../agent/health/hot-file-reader.js";
 import {
-  createCmuxPlannerRunner,
   type PlannerRunResult,
+  createCmuxPlannerRunner,
 } from "../agent/triage-planner.js";
 import type { BacklogAuditConfig } from "../audit/backlog-audit.js";
 import { validateDispatchConfig } from "../config/config-resolver.js";
@@ -6369,7 +6369,8 @@ export async function startRuntimeService(
           stage: entry.issue.state,
         })),
       createPlannerRunner: (model) =>
-        (options.createStandingPlanPlannerRunner ??
+        (
+          options.createStandingPlanPlannerRunner ??
           ((plannerModel: string) =>
             createCmuxPlannerRunner({
               workspace: process.cwd(),
@@ -6379,7 +6380,8 @@ export async function startRuntimeService(
                 "standing-plan",
               ),
               model: plannerModel,
-            })))(model),
+            }))
+        )(model),
       log: (event, message, fields) => {
         void logger.info(event, message, fields);
       },
