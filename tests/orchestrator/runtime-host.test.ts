@@ -5760,6 +5760,167 @@ describe("startRuntimeService shutdown", () => {
     }
   });
 
+  it("shares one candidate fetch across shadow planning and hygiene ticks", async () => {
+    vi.stubEnv("SYMPHONY_QUEUE_AUDIT_BASE_URL", "http://127.0.0.1:43210/v1");
+    vi.stubEnv("SYMPHONY_QUEUE_AUDIT_MODEL", "local-audit");
+    vi.stubEnv("SYMPHONY_QUEUE_HYGIENE_HEARTBEAT_MS", "900000");
+    const originalPath = process.env.PATH ?? "";
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-shared-fetch-"));
+    const fakeBin = mkdtempSync(join(tmpdir(), "symph-fake-git-"));
+    const fakeGit = join(fakeBin, "git");
+    writeFileSync(
+      fakeGit,
+      "#!/bin/sh\nprintf '10\\t5\\tsrc/a.ts\\n5\\t0\\tsrc/b.ts\\n'\n",
+    );
+    chmodSync(fakeGit, 0o755);
+    vi.stubEnv("PATH", `${fakeBin}:${originalPath}`);
+
+    const sharedIssue = createIssue({
+      id: "shared-1",
+      identifier: "SYMPH-SHARED",
+      title: "Shared candidate",
+    });
+    const tracker = createTracker({ candidates: [sharedIssue] });
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    let capturedPrompt = "";
+    let hygieneIssues: Issue[] | null = null;
+    const state = {
+      running: {},
+      resumeRequired: new Set<string>(),
+      completed: new Set<string>(),
+      failed: new Set<string>(),
+    };
+    const runtimeHost = {
+      notifier: null,
+      runContinuousFeedbackModelPreflight: vi.fn(async () => null),
+      consumeStandingPlanReplanRequest: vi.fn(() => false),
+      getState: vi.fn(() => state),
+      getRuntimeSnapshot: vi.fn(async () => ({
+        council_reviews: {
+          "review-1": {
+            rounds_per_cycle: {
+              current: 4,
+              warning_threshold: null,
+              cap: null,
+              alert_level: null,
+            },
+          },
+        },
+      })),
+      getStateDelta: vi.fn(async () => ({
+        as_of_sequence: 0,
+        count: 0,
+        entries: [],
+      })),
+      runBacklogHygieneProposalLane: vi.fn(
+        async (
+          input: Parameters<
+            OrchestratorRuntimeHost["runBacklogHygieneProposalLane"]
+          >[0],
+        ) => {
+          hygieneIssues = input.issues;
+          return {
+            status: "completed",
+            report: null,
+            proposals: [],
+            warnings: [],
+          };
+        },
+      ),
+      recordBacklogHygieneProposal: vi.fn(async () => 1),
+      requestStandingPlanReplan: vi.fn(),
+      runControlSurfaceTick: vi.fn(async () => undefined),
+      pollOnce: vi.fn(async () => ({
+        validation: { ok: true, suppressedContractViolations: [] },
+        dispatchedIssueIds: [],
+        modeDecisions: [],
+        stopRequests: [],
+        trackerFetchFailed: false,
+        reconciliationFetchFailed: false,
+        runningCount: 0,
+      })),
+      abortAllWorkers: vi.fn(() => 0),
+      waitForIdle: vi.fn(async () => undefined),
+    } as unknown as OrchestratorRuntimeHost;
+    const config = {
+      ...createConfig(),
+      polling: { intervalMs: 900_000 },
+      workspace: { root: workspaceRoot },
+      queueTriage: {
+        enabled: true,
+        shadowMode: true,
+        plannerModel: "opus",
+        heartbeatMs: 1,
+        envelope: {
+          version: 1,
+          concurrencyCeiling: 2,
+          allowedRisk: "medium",
+          allowedModes: ["parallel-isolated"],
+        },
+        autoReleaseFrontier: 1,
+        controlDoc: { enabled: false, teamId: null },
+        admissionGuardrail: { enabled: false },
+        commentEnrichment: {
+          enabled: false,
+          maxCandidates: 25,
+          maxCommentPages: 3,
+          maxComments: 6,
+          maxCommentChars: 400,
+          maxTotalChars: 1200,
+        },
+      },
+    } satisfies ResolvedWorkflowConfig;
+
+    const service = await startRuntimeService({
+      config,
+      tracker,
+      logger,
+      workflowWatcher: null,
+      runtimeHost,
+      createStandingPlanPlannerRunner: () => async (prompt: string) => {
+        capturedPrompt = prompt;
+        return {
+          status: "ok",
+          markdown:
+            '# Plan\n```json\n{"rationale":"go","batches":[{"mode":"parallel-isolated","issueIdentifiers":["SYMPH-SHARED"],"rationale":"first"}]}\n```\n',
+        };
+      },
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(hygieneIssues).not.toBeNull();
+        expect(capturedPrompt).toContain("SYMPH-SHARED");
+      });
+      expect(tracker.fetchCandidateIssues).toHaveBeenCalledTimes(1);
+      expect(hygieneIssues).toEqual([sharedIssue]);
+      expect(capturedPrompt).toContain("## Queue health");
+      expect(capturedPrompt).toContain("- Review-round depth: 4");
+      expect(tracker.fetchIssuesByStates).toHaveBeenCalledWith(["Triage"]);
+      expect(tracker.fetchIssuesByStates).toHaveBeenCalledWith([
+        "Backlog",
+        "Triage",
+      ]);
+      expect(
+        entries.some(
+          (entry) => entry.event === "backlog_hygiene_tick_completed",
+        ),
+      ).toBe(true);
+    } finally {
+      await service.shutdown();
+      vi.unstubAllEnvs();
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(fakeBin, { recursive: true, force: true });
+    }
+  });
+
   it("continues recording later hygiene proposals when one record fails (SYMPH-961)", async () => {
     vi.stubEnv("SYMPHONY_QUEUE_AUDIT_BASE_URL", "http://127.0.0.1:43210/v1");
     vi.stubEnv("SYMPHONY_QUEUE_AUDIT_MODEL", "local-audit");

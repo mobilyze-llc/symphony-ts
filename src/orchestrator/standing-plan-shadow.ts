@@ -466,8 +466,8 @@ export interface StandingPlanShadowTickDeps {
    * When wired, runStandingPlanShadowTick computes QueueHealth from them; when absent,
    * health is omitted and the prompt is byte-unchanged. Each is independently best-effort.
    *
-   * Production binding (out of scope for this PR — see runtime-host.ts:6171) wires these
-   * to fetchIssuesByStates(['Triage']) / fetchIssuesByStates(['Backlog','Triage']) / the
+   * Production binding in runtime-host.ts wires these to
+   * fetchIssuesByStates(['Triage']) / fetchIssuesByStates(['Backlog','Triage']) / the
    * persisted review journal / () => readHotFileGrowth({ repoPath: resolveRuntimeRepoRoot() }).
    */
   /** Fetch Triage-state issues for Triage-intake (depth + recent inflow). */
