@@ -202,7 +202,6 @@ function isReviewSubstrateDegradedCondition(condition: string): boolean {
     condition === "zero-reviewer-lanes" ||
     condition === "empty-diff" ||
     condition === "review-context-failed" ||
-    condition === "cmux-preflight-failed" ||
     /^(duplicate|reserved)-reviewer-lane-id:/.test(condition)
   ) {
     return false;

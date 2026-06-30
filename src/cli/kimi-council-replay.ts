@@ -1,20 +1,11 @@
 #!/usr/bin/env node
 
-import { access, readFile, readdir, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
-
-import {
-  type HeadlessCouncilGateResult,
-  type HeadlessReviewerLaneConfig,
-  type StructuredReviewParseStatus,
-  type StructuredReviewerArtifact,
-  runHeadlessCouncilGate,
-} from "../review/headless-council-gate.js";
 import { isDirectRun } from "./direct-run.js";
 
-// Internal replay tool only. SYMPH-812 removed headless-council-gate from the
-// package barrel because active review now runs through crabrunner-backed job
-// groups, but this diagnostic CLI still reuses the legacy artifact parser.
+// Internal historical parser only. SYMPH-985 retires fresh Kimi replay because
+// the only available execution path was the removed local review lane launcher.
+type StructuredReviewParseStatus = "synthesized_from_markdown" | "malformed";
+
 interface ParsedArgs {
   sourceCouncilDir: string;
   replayArtifactDir: string;
@@ -24,7 +15,6 @@ interface ParsedArgs {
   prNumber?: number;
   baseRef?: string;
   headRef?: string;
-  cmuxSpawnBin?: string;
   kimiBin?: string;
   kimiModel?: string;
 }
@@ -136,10 +126,6 @@ export function parseKimiCouncilReplayArgs(
       parsed.headRef = readValue(argv, ++index, token);
       continue;
     }
-    if (token === "--cmux-spawn-bin") {
-      parsed.cmuxSpawnBin = readValue(argv, ++index, token);
-      continue;
-    }
     if (token === "--kimi-bin") {
       parsed.kimiBin = readValue(argv, ++index, token);
       continue;
@@ -166,162 +152,10 @@ export function parseKimiCouncilReplayArgs(
 export async function runKimiCouncilReplay(
   args: ParsedArgs,
 ): Promise<KimiReplayComparisonReport> {
-  const sourceCouncilDir = resolve(args.sourceCouncilDir);
-  const replayArtifactDir = resolve(args.replayArtifactDir);
-  const diffPath = join(sourceCouncilDir, "diff.patch");
-  await assertReadableSourceDiff(diffPath);
-  const sourceLanes = await readStructuredLaneSummaries(sourceCouncilDir);
-  const kimiLane: HeadlessReviewerLaneConfig = {
-    laneId: "kimi-k27-shadow",
-    agent: "kimi",
-    role: "kimi-k27-shadow-reviewer",
-    ...(args.kimiModel === undefined ? {} : { model: args.kimiModel }),
-    ...(args.kimiBin === undefined ? {} : { binary: args.kimiBin }),
-    independentReviewer: false,
-    mergeAuthoritative: false,
-  };
-  const gateResult = await runHeadlessCouncilGate({
-    issueId: args.issueId,
-    workspace: args.workspace,
-    artifactDir: replayArtifactDir,
-    diffPath,
-    reviewerLanes: [kimiLane],
-    codexLead: false,
-    ...(args.repo === undefined ? {} : { repo: args.repo }),
-    ...(args.prNumber === undefined ? {} : { prNumber: args.prNumber }),
-    ...(args.baseRef === undefined ? {} : { baseRef: args.baseRef }),
-    ...(args.headRef === undefined ? {} : { headRef: args.headRef }),
-    ...(args.cmuxSpawnBin === undefined
-      ? {}
-      : { cmuxSpawnBin: args.cmuxSpawnBin }),
-  });
-  const kimiSummary = summarizeKimiGate(gateResult);
-  const reportPath = join(replayArtifactDir, "kimi-replay-comparison.json");
-  const markdownReportPath = join(
-    replayArtifactDir,
-    "kimi-replay-comparison.md",
+  void args;
+  throw new UsageError(
+    "symphony-kimi-council-replay has been retired; fresh Kimi replay depended on the removed local review lane launcher.",
   );
-  const report = buildComparisonReport({
-    issueId: args.issueId,
-    sourceCouncilDir,
-    replayArtifactDir,
-    sourceLanes,
-    kimiLane: kimiSummary,
-    gateResultPath: gateResult.artifactPaths.resultJson,
-    markdownReportPath,
-  });
-  await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`);
-  await writeFile(markdownReportPath, formatMarkdownReport(report));
-  return report;
-}
-
-async function assertReadableSourceDiff(diffPath: string): Promise<void> {
-  try {
-    await access(diffPath);
-  } catch {
-    throw new UsageError(
-      `Source council diff not found: ${diffPath}. Expected --source-council-dir to contain diff.patch.`,
-    );
-  }
-}
-
-async function readStructuredLaneSummaries(
-  sourceCouncilDir: string,
-): Promise<SourceLaneSummary[]> {
-  let entries: string[];
-  try {
-    entries = await readdir(sourceCouncilDir);
-  } catch (error) {
-    throw new UsageError(
-      `Source council dir is not readable: ${sourceCouncilDir}. ${formatError(error)}`,
-    );
-  }
-  const structuredPaths = entries
-    .filter((entry) => entry.endsWith(".structured.json"))
-    .map((entry) => join(sourceCouncilDir, entry))
-    .sort();
-  const summaries: SourceLaneSummary[] = [];
-  for (const artifactPath of structuredPaths) {
-    let artifact: StructuredReviewerArtifact;
-    try {
-      artifact = JSON.parse(
-        await readFile(artifactPath, "utf-8"),
-      ) as StructuredReviewerArtifact;
-    } catch (error) {
-      throw new Error(
-        `Malformed structured reviewer artifact JSON at ${artifactPath}: ${formatError(error)}`,
-      );
-    }
-    summaries.push(summarizeStructuredArtifact(artifact, artifactPath));
-  }
-  return summaries;
-}
-
-function summarizeKimiGate(
-  result: HeadlessCouncilGateResult,
-): SourceLaneSummary | null {
-  const lane = result.lanes.find((candidate) => candidate.agent === "kimi");
-  if (
-    lane?.structuredArtifact === null ||
-    lane?.structuredArtifact === undefined
-  ) {
-    return null;
-  }
-  return summarizeStructuredArtifact(
-    lane.structuredArtifact,
-    lane.structuredArtifactPath ?? lane.artifactPath ?? "unknown",
-  );
-}
-
-function summarizeStructuredArtifact(
-  artifact: StructuredReviewerArtifact,
-  artifactPath: string,
-): SourceLaneSummary {
-  const parseStatus = artifact.parseStatus;
-  const recallExclusionReason = sourceRecallExclusionReason(artifact);
-  return {
-    laneId: artifact.lane.laneId,
-    agent: artifact.lane.agent,
-    role: artifact.lane.role ?? null,
-    modelFamily: artifact.lane.modelFamily,
-    verdict: artifact.verdict,
-    parseStatus,
-    sourceRecallEligible: recallExclusionReason === null,
-    sourceRecallExclusionReason: recallExclusionReason,
-    blockingFingerprints: artifact.findings
-      .filter(
-        (finding) =>
-          (finding.severity === "P1" || finding.severity === "P2") &&
-          (finding.leadDisposition === undefined ||
-            finding.leadDisposition === "open"),
-      )
-      .map((finding) => finding.fingerprint)
-      .sort(),
-    trackFingerprints: artifact.findings
-      .filter((finding) => finding.severity === "Track")
-      .map((finding) => finding.fingerprint)
-      .sort(),
-    artifactPath,
-    reviewBundleCanonicalHash: artifact.reviewBundle?.bundleHash ?? null,
-  };
-}
-
-function sourceRecallExclusionReason(
-  artifact: StructuredReviewerArtifact,
-): SourceLaneSummary["sourceRecallExclusionReason"] {
-  if (artifact.lane.laneId === "codex-high-lead") {
-    return "lead_artifact";
-  }
-  if (artifact.lane.role === "codex-lead-triage") {
-    return "lead_artifact";
-  }
-  if (artifact.lane.mergeAuthoritative === false) {
-    return "prior_shadow_artifact";
-  }
-  if (!isOkParseStatus(artifact.parseStatus)) {
-    return "non_ok_parse_status";
-  }
-  return null;
 }
 
 export function buildComparisonReport(input: {
@@ -450,69 +284,6 @@ function summarizeFrozenReviewBundleUse(
   };
 }
 
-function formatMarkdownReport(report: KimiReplayComparisonReport): string {
-  const recall =
-    report.scoring.blockerRecallAgainstUnion === null
-      ? "n/a"
-      : report.scoring.blockerRecallAgainstUnion.toFixed(2);
-  return [
-    "# Kimi Council Replay Comparison",
-    "",
-    `Issue: ${report.issueId}`,
-    `Source council dir: ${report.sourceCouncilDir}`,
-    `Replay artifact dir: ${report.replayArtifactDir}`,
-    `Kimi artifact contract: ${report.scoring.artifactContract}`,
-    `Kimi artifact contract reason: ${report.scoring.artifactContractReason}`,
-    formatFrozenReviewBundleMarkdown(report),
-    `Blocker recall against source union: ${recall}`,
-    "",
-    "## Source Lanes",
-    "",
-    ...report.sourceLanes.map(
-      (lane) =>
-        `- ${lane.laneId} (${lane.agent}/${lane.modelFamily}): ${lane.blockingFingerprints.length} blocking, ${lane.trackFingerprints.length} track`,
-    ),
-    "",
-    "## Kimi",
-    "",
-    report.kimiLane === null
-      ? "- No structured Kimi artifact was produced."
-      : `- ${report.kimiLane.laneId}: ${report.kimiLane.blockingFingerprints.length} blocking, ${report.kimiLane.trackFingerprints.length} track, parse status ${report.kimiLane.parseStatus}`,
-    "",
-    "## Delta",
-    "",
-    `- Matched source blockers: ${report.scoring.matchedBlockingFingerprints.join(", ") || "none"}`,
-    `- Missing source blockers: ${report.scoring.missingSourceBlockingFingerprints.join(", ") || "none"}`,
-    `- Kimi-only blockers: ${report.scoring.kimiOnlyBlockingFingerprints.join(", ") || "none"}`,
-    "",
-  ].join("\n");
-}
-
-function formatFrozenReviewBundleMarkdown(
-  report: KimiReplayComparisonReport,
-): string {
-  const kimiReplayHash =
-    report.frozenReviewBundle.kimiReplayBundleHash ?? "not available";
-  if (report.frozenReviewBundle.sourceHashStatus === "divergent") {
-    return `Fresh replay input comparison: unavailable (source bundle hashes diverged: ${report.frozenReviewBundle.sourceHashes.join(", ")}; Kimi replay bundle hash: ${kimiReplayHash}; source bundle inputs not pinned)`;
-  }
-  if (report.frozenReviewBundle.sourceHashStatus === "partial") {
-    return `Fresh replay input comparison: unavailable (source bundle hashes incomplete: ${report.frozenReviewBundle.sourceHashes.join(", ") || "none"}; Kimi replay bundle hash: ${kimiReplayHash}; source bundle inputs not pinned)`;
-  }
-  if (report.frozenReviewBundle.canonicalHash === null) {
-    return `Fresh replay input comparison: unavailable (source bundle hash not available; Kimi replay bundle hash: ${kimiReplayHash}; source bundle inputs not pinned)`;
-  }
-  const match =
-    report.frozenReviewBundle.kimiReplayBundleHashMatchesSource === true
-      ? "yes"
-      : "no";
-  return `Kimi replay bundle hash match: ${match} (source: ${report.frozenReviewBundle.canonicalHash}; Kimi replay: ${kimiReplayHash}; fresh replay inputs; source bundle inputs not pinned)`;
-}
-
-function formatError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function uniqueSorted(values: readonly string[]): string[] {
   return [...new Set(values)].sort();
 }
@@ -547,9 +318,10 @@ function renderUsage(): string {
     "  --pr NUMBER              Optional PR number metadata",
     "  --base REF               Optional base ref metadata",
     "  --head REF               Optional head ref metadata",
-    "  --cmux-spawn-bin PATH    cmux-spawn executable path",
     "  --kimi-bin PATH          explicit Kimi CLI path",
     "  --kimi-model MODEL       Kimi model alias (default: Kimi CLI config)",
+    "",
+    "This diagnostic no longer executes fresh replay runs because the local review lane launcher was removed.",
     "",
   ].join("\n");
 }
@@ -573,9 +345,16 @@ export async function runKimiCouncilReplayCli(
     io.stderr(`${message}\n\n${renderUsage()}`);
     return 2;
   }
-  const report = await runKimiCouncilReplay(parsed);
-  io.stdout(`${JSON.stringify(report, null, 2)}\n`);
-  return report.scoring.artifactContract === "complete" ? 0 : 1;
+  try {
+    const report = await runKimiCouncilReplay(parsed);
+    io.stdout(`${JSON.stringify(report, null, 2)}\n`);
+    return report.scoring.artifactContract === "complete" ? 0 : 1;
+  } catch (error) {
+    io.stderr(
+      `symphony-kimi-council-replay failed: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    return 1;
+  }
 }
 
 if (isDirectRun(import.meta.url, process.argv[1])) {
