@@ -5,7 +5,12 @@
 // cannot reconstruct a boundary after one removal pass.
 const MAX_BOUNDARY_FENCE_PASSES = 20;
 
-const JUDGE_BOUNDARY_FAMILIES = ["worker", "ticket", "diff"] as const;
+const JUDGE_BOUNDARY_FAMILIES = [
+  "worker",
+  "ticket",
+  "diff",
+  "untrusted",
+] as const;
 const PAUSE_TRIAGE_BOUNDARY_FAMILIES = ["worker", "tracker"] as const;
 const STUCK_TRIAGE_BOUNDARY_FAMILIES = [
   "worker",

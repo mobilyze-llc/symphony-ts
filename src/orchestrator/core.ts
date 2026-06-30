@@ -593,15 +593,18 @@ export interface OrchestratorCoreOptions {
     completionMessage: string | null;
   }) => Promise<{ verdict: "pass" | "rework"; feedback: string } | null>;
   /**
-   * Spec-fidelity judge lane (SYMPH-343): independent local-model verdict
+   * Spec-fidelity judge lane (SYMPH-971): adjacent crabrunner Opus verdict
    * over the workspace diff vs acceptance criteria at review-stage exit.
    * Advisory — the verdict journals and comments; resolve null for "no
    * opinion" (fail open, never blocks).
    */
-  runSpecFidelityJudge?: (evidence: {
+  runSpecFidelityLane?: (evidence: {
+    issue: Issue;
     issueId: string;
     issueIdentifier: string;
     issueTitle: string;
+    attempt: number | null;
+    signal?: AbortSignal;
     /**
      * Canonical AC snapshot frozen at AC-gate pass (SYMPH-374), or null
      * when no gate passed for this issue (gate disabled / legacy issue).
@@ -878,7 +881,7 @@ export class OrchestratorCore {
 
   private readonly runAcGate?: OrchestratorCoreOptions["runAcGate"];
 
-  private readonly runSpecFidelityJudge?: OrchestratorCoreOptions["runSpecFidelityJudge"];
+  private readonly runSpecFidelityLane?: OrchestratorCoreOptions["runSpecFidelityLane"];
 
   private readonly updateIssueState?: OrchestratorCoreOptions["updateIssueState"];
 
@@ -1086,7 +1089,7 @@ export class OrchestratorCore {
     this.runPauseTriage = options.runPauseTriage;
     this.scheduleDeferred = options.scheduleDeferred;
     this.runAcGate = options.runAcGate;
-    this.runSpecFidelityJudge = options.runSpecFidelityJudge;
+    this.runSpecFidelityLane = options.runSpecFidelityLane;
     this.updateIssueState = options.updateIssueState;
     this.getMergeActuatorLiveState = options.getMergeActuatorLiveState;
     this.mergeActuatorSideEffects = options.mergeActuatorSideEffects;
@@ -4594,12 +4597,12 @@ export class OrchestratorCore {
 
     if (
       this.config.specFidelity.enabled &&
-      this.runSpecFidelityJudge !== undefined &&
+      this.runSpecFidelityLane !== undefined &&
       this.scheduleDeferred !== undefined &&
       exitedStageName !== null &&
-      exitedStageDef?.transitions.onRework != null
+      this.isReviewStageExit(exitedStageName, exitedStageDef)
     ) {
-      // Advisory judge lane (SYMPH-343): fires alongside the normal advance.
+      // Advisory judge lane (SYMPH-971): fires alongside the normal advance.
       // Fired AFTER prepareReviewCompletionForMerge so this round's merge
       // candidate already exists, letting us capture the canonical candidate's
       // reviewed head at FIRE time rather than re-resolving it at
@@ -4641,10 +4644,12 @@ export class OrchestratorCore {
           }),
         );
       } else {
-        void this.runSpecFidelityJudge({
+        void this.runSpecFidelityLane({
+          issue: runningEntry.issue,
           issueId,
           issueIdentifier: runningEntry.identifier,
           issueTitle: runningEntry.issue.title,
+          attempt: runningEntry.retryAttempt,
           acceptanceCriteria: this.state.issueAcSnapshots[issueId] ?? null,
           // Pending-signal consumption sets lastCodexMessage to the terminal
           // message before routing through the normal exit path.
@@ -4999,6 +5004,19 @@ export class OrchestratorCore {
     }
     const stage = this.config.stages.stages[exitedStageName];
     return stage?.transitions.onComplete === "merge";
+  }
+
+  private isReviewStageExit(
+    exitedStageName: string | null,
+    exitedStageDef: StageDefinition | undefined,
+  ): boolean {
+    if (exitedStageName === null || exitedStageDef === undefined) {
+      return false;
+    }
+    return (
+      exitedStageDef.transitions.onRework !== null ||
+      isReviewStageName(exitedStageName)
+    );
   }
 
   private async readAndValidateReviewGateArtifact(input: {
@@ -5409,41 +5427,23 @@ export class OrchestratorCore {
     reviewedHeadSha: string | null;
   }): Promise<void> {
     const reviewedHeadSha = input.reviewedHeadSha;
-    const postCompletionReason =
-      input.verdict.verdict === "rework"
-        ? this.specFidelityPostCompletionReason(input.issueId, reviewedHeadSha)
-        : null;
-    const metadata =
-      postCompletionReason === null
-        ? {
-            status: "completed",
-            verdict: input.verdict.verdict,
-            findings: input.verdict.findings,
-            ...(reviewedHeadSha === null
-              ? {}
-              : { reviewed_head_sha: reviewedHeadSha }),
-          }
-        : {
-            status: "completed",
-            verdict: "non_gating",
-            original_verdict: input.verdict.verdict,
-            reason: postCompletionReason,
-            findings: input.verdict.findings,
-            ...(reviewedHeadSha === null
-              ? {}
-              : { reviewed_head_sha: reviewedHeadSha }),
-          };
-    const summary =
-      postCompletionReason === null
-        ? `Spec-fidelity verdict for ${input.identifier}: ${input.verdict.verdict}.`
-        : `Spec-fidelity non-gating for ${input.identifier}: ${postCompletionReason}.`;
+    const metadata = {
+      status: "completed",
+      verdict: "non_gating",
+      original_verdict: input.verdict.verdict,
+      reason: "report_only_symph_971",
+      findings: input.verdict.findings,
+      ...(reviewedHeadSha === null
+        ? {}
+        : { reviewed_head_sha: reviewedHeadSha }),
+    };
+    const summary = `Spec-fidelity report-only verdict for ${input.identifier}: ${input.verdict.verdict}.`;
     try {
       await this.recordRunJournalEntry({
         // Include the reviewed head so distinct-head verdicts never collide and
         // the entry is correlated to the exact judged commit (SYMPH-758, council
-        // R1 P2). The timestamp is retained so a re-judged `pass` for the same
-        // head is a NEW row that supersedes an earlier `rework` (latest-wins);
-        // a head-only key would dedupe it and break supersession.
+        // R1 P2). The timestamp is retained so repeated report-only judgments
+        // for the same head remain append-only evidence instead of deduping.
         idempotencyKey: `spec_fidelity:${input.issueId}:${input.stageName}:${reviewedHeadSha ?? "no-head"}:${this.now().toISOString()}`,
         timestamp: this.now().toISOString(),
         kind: "spec_fidelity",
@@ -5464,42 +5464,17 @@ export class OrchestratorCore {
       maxLen: 6000,
     });
     try {
-      if (postCompletionReason === null) {
-        await this.postComment?.(
-          input.issueId,
-          `## Spec-fidelity verdict (independent judge): ${input.verdict.verdict}\n${sanitizedFindings}`,
-        );
-      } else {
-        await this.postComment?.(
-          input.issueId,
-          [
-            "## Spec-fidelity: non-gating post-completion",
-            `Independent judge returned \`${input.verdict.verdict}\`, but merge actuation had already completed \`tracker_done\` for reviewed head \`${reviewedHeadSha ?? "unknown"}\` before this verdict was recorded. The findings are preserved as advisory evidence, not a merge gate.`,
-            sanitizedFindings,
-          ].join("\n"),
-        );
-      }
+      await this.postComment?.(
+        input.issueId,
+        [
+          `## Spec-fidelity report-only verdict: ${input.verdict.verdict}`,
+          "Recorded as non-gating evidence for SYMPH-971 v1; no commit status or merge-blocking enforcement was emitted.",
+          sanitizedFindings,
+        ].join("\n"),
+      );
     } catch {
       // Observability only.
     }
-  }
-
-  private specFidelityPostCompletionReason(
-    issueId: string,
-    reviewedHeadSha: string | null,
-  ): string | null {
-    if (reviewedHeadSha === null) {
-      return null;
-    }
-    const candidate = this.findCanonicalMergeCandidate(issueId);
-    if (
-      candidate === null ||
-      candidate.reviewedHeadSha !== reviewedHeadSha ||
-      candidate.status !== "merged"
-    ) {
-      return null;
-    }
-    return "post_completion_tracker_done";
   }
 
   /**
@@ -14173,6 +14148,10 @@ function formatIgnoredSetupInstructionCollisionSignature(
 
 function formatUnknownError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isReviewStageName(stageName: string): boolean {
+  return /(^|[-_])review($|[-_])/.test(stageName.toLowerCase());
 }
 
 function extractReviewGateResultPath(

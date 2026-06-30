@@ -93,8 +93,8 @@ pause_triage:
 ac_gate:
   enabled: true
 
-# SYMPH-343: independent spec-fidelity judge at review exit (local model,
-# diff-vs-ACs, advisory until SYMPH-355 publishes it as a required status).
+# SYMPH-343/SYMPH-971: adjacent crabrunner spec-fidelity judge at review exit
+# (diff-vs-ACs, report-only in v1; substrate failures fail open).
 spec_fidelity:
   enabled: true
 

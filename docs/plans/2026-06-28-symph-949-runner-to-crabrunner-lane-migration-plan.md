@@ -27,7 +27,7 @@ orchestrator ── one crabrunner job per stage (GENERIC backend) ──▶ cru
 
 **Critical seam (corrected Rev 2):** route agent stages through the **generic** `CrabrunnerStageExecutionBackend.execute` via per-stage `execution.backend: "crabrunner"` → `resolveStageExecutionBackend` (`runtime-host.ts:5053`) → `backend.execute` (`runtime-host.ts:4753`). Do **NOT** generalize `resolveCrabrunnerReviewBackend` (the review job-*group* dispatcher). *Verified round 2:* `resolveCrabrunnerReviewBackend` returns null for `stageName!=="review"` (`runtime-host.ts:4860`), so a non-review stage with `execution.backend:"crabrunner"` correctly flows to the generic backend.
 
-Stays in-process (not model-stages): local-model judgment gates (`pause-triage`/`stuck-triage`/`ac-gate`/`spec-fidelity` via `local-openai-compatible.ts`); the Slack bot.
+Stays in-process (not model-stages): local-model judgment gates (`pause-triage`/`stuck-triage`/`ac-gate` via `local-openai-compatible.ts`); the Slack bot. `spec-fidelity` moved to an adjacent report-only crabrunner Opus lane under SYMPH-971 and is no longer part of the local-model/in-process bucket.
 
 ## Confirmed decisions (operator, 2026-06-28)
 

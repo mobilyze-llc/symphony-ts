@@ -36,10 +36,12 @@ import type {
   AgentRunnerEvent,
 } from "../agent/runner.js";
 import { AgentRunner } from "../agent/runner.js";
-import { runSpecFidelityJudge } from "../agent/spec-fidelity.js";
+import {
+  createSpecFidelityExecutionProfile,
+  runSpecFidelityLane,
+} from "../agent/spec-fidelity.js";
 import { runStuckTriage } from "../agent/stuck-triage.js";
 import { createCmuxPlannerRunner } from "../agent/triage-planner.js";
-import { publishVerdictStatus } from "../agent/verdict-status.js";
 import type { BacklogAuditConfig } from "../audit/backlog-audit.js";
 import { validateDispatchConfig } from "../config/config-resolver.js";
 import {
@@ -315,6 +317,8 @@ const DEFAULT_RUNTIME_HARD_STOPS_CONFIG = {
   maxSecondaryWindowPctPerUnit:
     DEFAULT_HARD_STOP_MAX_SECONDARY_WINDOW_PCT_PER_UNIT,
 };
+
+const SPEC_FIDELITY_DIFF_MAX_CHARS = 60_000;
 
 export const DEFAULT_RUNTIME_BACKLOG_HYGIENE_HEARTBEAT_MS =
   DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS;
@@ -1069,7 +1073,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           config: this.config.pauseTriage,
           evidence,
         }),
-      runSpecFidelityJudge: async (evidence) => {
+      runSpecFidelityLane: async (evidence) => {
         // Harness-measured evidence: the actual workspace diff, resolved
         // from the same sanitized path the workspace manager uses. A
         // missing/unreadable workspace yields a null diff and the judge
@@ -1080,13 +1084,64 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           ({ workspacePath } = this.workspaceManager.resolveForIssue(
             evidence.issueId,
           ));
-          diff = getDiff(workspacePath);
+          diff = getDiff(workspacePath, SPEC_FIDELITY_DIFF_MAX_CHARS);
         } catch {
           workspacePath = null;
           diff = null;
         }
-        const verdict = await runSpecFidelityJudge({
-          config: this.config.pauseTriage,
+        const backend = this.stageExecutionBackends.get("crabrunner");
+        if (backend === undefined || backend.backend !== "crabrunner") {
+          console.warn(
+            `[spec-fidelity] SpineUnavailableError: crabrunner substrate unavailable for ${evidence.issueIdentifier}`,
+          );
+          return null;
+        }
+        const auxiliaryEvidence =
+          workspacePath === null
+            ? { planNarrative: null, prBody: null, commits: null }
+            : await this.buildSpecFidelityAuxiliaryEvidence({
+                issue: evidence.issue,
+                workspacePath,
+              });
+        const model =
+          process.env.SYMPHONY_SPEC_FIDELITY_MODEL ??
+          process.env.SYMPHONY_COUNCIL_CLAUDE_MODEL ??
+          "opus";
+        const runGroupId = `${evidence.issueId}:spec-fidelity`;
+        const verdict = await runSpecFidelityLane({
+          issue: evidence.issue,
+          attempt: evidence.attempt,
+          ...(evidence.signal === undefined ? {} : { signal: evidence.signal }),
+          backend:
+            backend as StageExecutionBackendRunner<CrabrunnerStageExecutionEvidence>,
+          job: createStageExecutionJobSpec({
+            issue: evidence.issue,
+            attempt: evidence.attempt,
+            stage: null,
+            stageName: "spec-fidelity",
+            execution: createSpecFidelityExecutionProfile({
+              runGroupId,
+              model,
+            }),
+            runnerKind: "claude",
+            runnerModel: model,
+            runnerReasoningEffort: null,
+            stageTimeoutMs: null,
+            defaultRunnerKind: this.config.runner.kind,
+            defaultRunnerModel: this.config.runner.model,
+            defaultRunnerProvider: this.config.runner.provider ?? null,
+            effectiveHardStops: resolveHardStopsConfig(
+              this.config.hardStops,
+              DEFAULT_RUNTIME_HARD_STOPS_CONFIG,
+            ),
+            defaultTurnTimeoutMs: this.config.codex.turnTimeoutMs,
+            defaultStallTimeoutMs: this.config.codex.stallTimeoutMs,
+            baseRef: resolveStageExecutionBaseRef(),
+            artifactRoot: getDurableCodexSessionArtifactDirectory(
+              this.config.workspace.root,
+              evidence.issueId,
+            ),
+          }),
           evidence: {
             issueIdentifier: evidence.issueIdentifier,
             issueTitle: evidence.issueTitle,
@@ -1095,25 +1150,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
             acceptanceCriteria: evidence.acceptanceCriteria,
             diff,
             reviewMessage: evidence.reviewMessage,
+            planNarrative: auxiliaryEvidence.planNarrative,
+            prBody: auxiliaryEvidence.prBody,
+            commits: auxiliaryEvidence.commits,
           },
         });
-        if (verdict !== null && workspacePath !== null) {
-          // Out-of-band enforcement (SYMPH-355): publish the verdict as a
-          // commit status on the workspace HEAD so branch protection can
-          // require it. Fire-and-forget — the judge result never waits on
-          // GitHub, and a failed publish fails open (warn only).
-          void publishVerdictStatus({
-            workspacePath,
-            issueIdentifier: evidence.issueIdentifier,
-            context: "symphony/spec-fidelity",
-            verdict: verdict.verdict,
-            description: `${verdict.verdict}: ${verdict.findings.slice(0, 120)}`,
-          }).catch((error) => {
-            console.warn(
-              `[verdict-status] unexpected publish rejection for ${evidence.issueIdentifier}: ${error instanceof Error ? error.message : String(error)}`,
-            );
-          });
-        }
         return verdict;
       },
       onIssueDropped: ({ identifier, title, url, reason }) => {
@@ -5221,6 +5262,80 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     };
   }
 
+  private async buildSpecFidelityAuxiliaryEvidence(input: {
+    issue: Issue;
+    workspacePath: string;
+  }): Promise<{
+    planNarrative: string | null;
+    prBody: string | null;
+    commits: string | null;
+  }> {
+    const [planNarrative, prEvidence] = await Promise.all([
+      this.fetchLatestWorkpadCommentBody(input.issue),
+      this.fetchSpecFidelityPrEvidence(input.workspacePath),
+    ]);
+    return {
+      planNarrative,
+      prBody: prEvidence.prBody,
+      commits: prEvidence.commits,
+    };
+  }
+
+  private async fetchLatestWorkpadCommentBody(
+    issue: Issue,
+  ): Promise<string | null> {
+    if (!(this.tracker instanceof LinearTrackerClient)) {
+      return null;
+    }
+    try {
+      const comments = await this.tracker.fetchIssueComments(issue.id, {
+        maxPages: DEFAULT_SPEC_REVIEW_COMMENT_CONFIG.maxCommentPages,
+      });
+      return (
+        comments
+          .filter((comment) =>
+            comment.body.trimStart().startsWith("## Workpad"),
+          )
+          .sort(
+            (left, right) =>
+              Date.parse(getEffectiveCommentTimestamp(right)) -
+              Date.parse(getEffectiveCommentTimestamp(left)),
+          )[0]?.body ?? null
+      );
+    } catch (error) {
+      console.warn(
+        `[orchestrator] ${issue.identifier}: failed to fetch spec-fidelity workpad evidence: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+  }
+
+  private async fetchSpecFidelityPrEvidence(
+    workspacePath: string,
+  ): Promise<{ prBody: string | null; commits: string | null }> {
+    try {
+      const { stdout } = await execFileAsync(
+        "gh",
+        ["pr", "view", "--json", "body,commits"],
+        {
+          cwd: workspacePath,
+          timeout: 30_000,
+          maxBuffer: 2 * 1024 * 1024,
+        },
+      );
+      const parsed = parseJsonObject(stdout);
+      if (parsed === null) {
+        return { prBody: null, commits: null };
+      }
+      return {
+        prBody: nullableStringValue(parsed.body),
+        commits: formatSpecFidelityCommitEvidence(parsed.commits),
+      };
+    } catch {
+      return { prBody: null, commits: null };
+    }
+  }
+
   private async stopWorkerExecution(
     issueId: string,
     input: StopRequest,
@@ -8947,6 +9062,35 @@ function parseJsonObject(value: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+function formatSpecFidelityCommitEvidence(value: unknown): string | null {
+  const nodes = Array.isArray(value)
+    ? value
+    : typeof value === "object" &&
+        value !== null &&
+        "nodes" in value &&
+        Array.isArray(value.nodes)
+      ? value.nodes
+      : [];
+  const lines = nodes.flatMap((node) => {
+    if (typeof node !== "object" || node === null || Array.isArray(node)) {
+      return [];
+    }
+    const record = node as Record<string, unknown>;
+    const oid =
+      stringValue(record.oid) ??
+      stringValue(record.abbreviatedOid) ??
+      stringValue(record.shortOid) ??
+      "unknown";
+    const headline =
+      stringValue(record.messageHeadline) ??
+      stringValue(record.title) ??
+      stringValue(record.message) ??
+      "(no commit headline)";
+    return [`- ${oid}: ${headline}`];
+  });
+  return lines.length === 0 ? null : lines.join("\n");
 }
 
 function parsePrState(value: unknown): MergeActuatorLiveState["state"] | null {
