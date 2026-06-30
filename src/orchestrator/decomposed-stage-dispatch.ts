@@ -611,9 +611,7 @@ function hardStopForStopReason(
       total + (outcome.result?.result.liveSession.turnCount ?? 0),
     0,
   );
-  // TODO(SYMPH-853): estimatedCostUsd is a deterministic-wiring placeholder (0).
-  // Real per-sub-stage cost arrives with live crabrunner wiring; until then the
-  // module is production-inert, so a fabricated cost would be misleading.
+  const estimatedCostUsd = estimatedCostUsdOfOutcomes(decomposed.outcomes);
   if (decomposed.stopReason === "budget_exceeded") {
     return {
       outcome: "PAUSED-budget",
@@ -622,7 +620,7 @@ function hardStopForStopReason(
         "Decomposed stage paused: a sub-stage exceeded its per-sub-stage token ceiling.",
       turnCount,
       totalTokens,
-      estimatedCostUsd: 0,
+      estimatedCostUsd,
     };
   }
   // missing_required_capsule and sub_stage_failed both surface as a
@@ -637,6 +635,19 @@ function hardStopForStopReason(
         : "Decomposed stage blocked: a sub-stage failed before the sequence completed.",
     turnCount,
     totalTokens,
-    estimatedCostUsd: 0,
+    estimatedCostUsd,
   };
+}
+
+function estimatedCostUsdOfOutcomes(
+  outcomes: readonly DecomposedSubStageOutcome[],
+): number {
+  const total = outcomes.reduce((sum, outcome) => {
+    const amount =
+      outcome.result?.result.liveSession.usageMeasurement?.cost.amountUsd;
+    return typeof amount === "number" && Number.isFinite(amount) && amount >= 0
+      ? sum + amount
+      : sum;
+  }, 0);
+  return Math.round(total * 1_000_000) / 1_000_000;
 }

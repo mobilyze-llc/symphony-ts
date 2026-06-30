@@ -515,7 +515,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     const jobId = buildJobId(spec);
     const profile = resolveProfile(spec);
     const model = resolveModelSlug(spec);
-    const thinking = spec.runner.reasoningEffort ?? "medium";
+    const thinking = spec.runner.reasoningEffort ?? null;
     // Null timeouts inherit the CLI default; explicit zero/negative values are
     // rejected by delegated enforcement validation before submit.
     const timeoutSeconds = this.laneTimeoutSeconds(spec);
@@ -530,7 +530,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
       schema: CRABRUNNER_MANIFEST_SCHEMA,
       job_id: jobId,
       attempt_id: String(spec.identity.stageAttempt),
-      crabrunner_version: "dev",
+      crabrunner_version: this.crabrunnerVersion,
       created_at: this.now().toISOString(),
       host: this.host,
       // "local" for a local host, "ssh" for an SSH crabbox host.
@@ -552,7 +552,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
       closeout_policy: "disabled",
       ...(promptFile === undefined ? {} : { prompt_file: promptFile }),
       ...(model === null ? {} : { model }),
-      thinking,
+      ...(thinking === null ? {} : { thinking }),
       profile,
       timeout_seconds: timeoutSeconds,
       lane_worker_protocol: laneWorkerProtocol,
@@ -619,6 +619,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
   ): string[] {
     const timeoutSeconds = this.laneTimeoutSeconds(spec);
     const phase = spec.phase ?? "review";
+    const thinking = spec.runner.reasoningEffort ?? null;
     const args = [
       "run",
       "--host",
@@ -635,8 +636,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
       phase,
       "--profile",
       resolveProfile(spec),
-      "--thinking",
-      spec.runner.reasoningEffort ?? "medium",
+      ...(thinking === null ? [] : ["--thinking", thinking]),
       "--timeout-seconds",
       String(timeoutSeconds),
       "--lane-key",

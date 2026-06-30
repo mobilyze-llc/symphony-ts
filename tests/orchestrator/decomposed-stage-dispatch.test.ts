@@ -4,6 +4,7 @@ import type { AgentRunInput, AgentRunResult } from "../../src/agent/runner.js";
 import type { StageExecutionSubStage } from "../../src/config/types.js";
 import { createEmptyLiveSession } from "../../src/domain/model.js";
 import type { Issue, LiveSession } from "../../src/domain/model.js";
+import type { StageUsageMeasurement } from "../../src/domain/stage-usage.js";
 import type { DispatcherRunJournalEntryDraft } from "../../src/logging/run-journal.js";
 import { executeDecomposedStageDispatch } from "../../src/orchestrator/decomposed-stage-dispatch.js";
 import type {
@@ -131,6 +132,45 @@ function makeResult(issue: Issue, total: number): AgentRunResult {
     turnsCompleted: 1,
     lastTurn: null,
     rateLimits: null,
+  };
+}
+
+function makeResultWithCost(
+  issue: Issue,
+  total: number,
+  amountUsd: number,
+): AgentRunResult {
+  const result = makeResult(issue, total);
+  return {
+    ...result,
+    liveSession: {
+      ...result.liveSession,
+      usageMeasurement: usageMeasurementWithCost(amountUsd),
+    },
+  };
+}
+
+function usageMeasurementWithCost(amountUsd: number): StageUsageMeasurement {
+  return {
+    schema: "symphony.stage-usage.v1",
+    source: "crabrunner",
+    runnerKind: "crabrunner-deterministic",
+    provider: "openai",
+    model: "gpt-5.3-codex",
+    profile: "profile.costed",
+    measurementQuality: "true",
+    tokens: {
+      inputTokens: 120,
+      outputTokens: 30,
+      totalTokens: 150,
+    },
+    cost: {
+      amountUsd,
+      currency: "USD",
+      source: "provider_billing",
+      authority: "authoritative",
+      sourceDescription: "test terminal usage evidence",
+    },
   };
 }
 
@@ -376,6 +416,29 @@ describe("executeDecomposedStageDispatch", () => {
       "running",
       "failed",
     ]);
+  });
+
+  it("sets hardStop estimatedCostUsd from terminal usage measurements", async () => {
+    const subStages = [
+      createSubStageProfile("patch-plan", {
+        maxTokens: 100,
+        produce: ["plan.json"],
+      }),
+      createSubStageProfile("first-patch", {
+        consume: ["plan.json"],
+        produce: ["patch.json"],
+      }),
+    ];
+
+    const { result, backend } = runHarness({
+      subStages,
+      producedCapsuleFiles: new Set(["/tmp/artifacts/issue-1/plan.json"]),
+      resultFor: () => makeResultWithCost(createIssue(), 250, 3.2100014),
+    });
+
+    const aggregate = await result;
+    expect(backend.inputs).toHaveLength(1);
+    expect(aggregate.hardStop?.estimatedCostUsd).toBe(3.210001);
   });
 
   it("synthesizes a hardStop result without dispatching when the first required capsule is missing", async () => {
