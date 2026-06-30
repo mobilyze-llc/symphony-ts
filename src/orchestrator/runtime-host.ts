@@ -9317,7 +9317,7 @@ function capCloseoutBySections(text: string, maxLen: number): string {
   if (capped.length <= maxLen) {
     return capped.trimEnd();
   }
-  return sanitizeForLinear(capped, { maxLen }).trimEnd();
+  return sanitizeForLinear(capped, { maxLen }).trimEnd().slice(0, maxLen);
 }
 
 function hasSubstantiveCloseoutContent(text: string): boolean {
@@ -9376,6 +9376,8 @@ function parseEnvFile(body: string): Record<string, string> {
       value.length >= 2
     ) {
       value = value.slice(1, -1);
+    } else {
+      value = value.replace(/\s+#.*$/, "").trimEnd();
     }
     parsed[key] = value;
   }

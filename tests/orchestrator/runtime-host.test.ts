@@ -2359,6 +2359,81 @@ describe("OrchestratorRuntimeHost", () => {
     }
   });
 
+  it("redacts implement Closeout prose using bare secrets from env inline comments", async () => {
+    const oldLinearApiKey = process.env.LINEAR_API_KEY;
+    const oldCloseoutFlag = process.env.SYMPHONY_CLOSEOUT_COMMENT;
+    process.env.LINEAR_API_KEY = undefined;
+    process.env.SYMPHONY_CLOSEOUT_COMMENT = undefined;
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), "symph-closeout-env-comment-"),
+    );
+    const workspacePath = join(workspaceRoot, "issue-1");
+    try {
+      mkdirSync(join(workspacePath, ".symphony"), { recursive: true });
+      writeFileSync(
+        join(workspacePath, ".env"),
+        "SECRET_TOKEN=mysecret123 # staging\n",
+      );
+      writeFileSync(
+        join(workspacePath, ".symphony", "closeout.md"),
+        [
+          "## Closeout",
+          "",
+          "**What shipped:** The worker used mysecret123 during verification.",
+          "",
+          "### Evidence",
+          "- Runtime closeout redaction checked inline env comments. Evidence: src/orchestrator/runtime-host.ts:1.",
+        ].join("\n"),
+      );
+
+      const tracker = createLinearTrackerForPipelineStatus();
+      vi.spyOn(tracker, "fetchCandidateIssues").mockResolvedValue([
+        createIssue({ state: "In Progress" }),
+      ]);
+      vi.spyOn(tracker, "fetchIssuesByStates").mockResolvedValue([]);
+      vi.spyOn(tracker, "fetchIssueStatesByIds").mockResolvedValue([
+        { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+      ]);
+      const upsert = vi
+        .spyOn(tracker, "upsertCloseoutComment")
+        .mockResolvedValue({ operation: "created", commentId: "comment-1" });
+      const fakeRunner = new FakeAgentRunner();
+      const host = new OrchestratorRuntimeHost({
+        config: createImplementStagedConfig({
+          workflowPath: join(workspaceRoot, "WORKFLOW-symphony.md"),
+          workspace: { root: workspaceRoot },
+        }),
+        tracker,
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
+        },
+        now: () => new Date("2026-03-06T00:05:00.000Z"),
+      });
+
+      await host.pollOnce();
+      fakeRunner.resolve("1", createNormalResultForWorkspace(workspacePath));
+      await host.waitForIdle();
+
+      expect(upsert).toHaveBeenCalledTimes(1);
+      const body = upsert.mock.calls[0]?.[1] ?? "";
+      expect(body).toContain("[REDACTED:runtime-secret]");
+      expect(body).not.toContain("mysecret123");
+    } finally {
+      if (oldLinearApiKey === undefined) {
+        process.env.LINEAR_API_KEY = undefined;
+      } else {
+        process.env.LINEAR_API_KEY = oldLinearApiKey;
+      }
+      if (oldCloseoutFlag === undefined) {
+        process.env.SYMPHONY_CLOSEOUT_COMMENT = undefined;
+      } else {
+        process.env.SYMPHONY_CLOSEOUT_COMMENT = oldCloseoutFlag;
+      }
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
   it("skips implement Closeout posting when redaction leaves no substantive content", async () => {
     const oldLinearApiKey = process.env.LINEAR_API_KEY;
     const oldCloseoutFlag = process.env.SYMPHONY_CLOSEOUT_COMMENT;
@@ -2473,6 +2548,69 @@ describe("OrchestratorRuntimeHost", () => {
       expect(body.length).toBeLessThanOrEqual(16_000);
       expect(body).toContain("### Landmines");
       expect(body).not.toContain("### Open questions");
+    } finally {
+      if (oldCloseoutFlag === undefined) {
+        process.env.SYMPHONY_CLOSEOUT_COMMENT = undefined;
+      } else {
+        process.env.SYMPHONY_CLOSEOUT_COMMENT = oldCloseoutFlag;
+      }
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("caps implement Closeout comments when the leading section exceeds the max", async () => {
+    const oldCloseoutFlag = process.env.SYMPHONY_CLOSEOUT_COMMENT;
+    process.env.SYMPHONY_CLOSEOUT_COMMENT = undefined;
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), "symph-closeout-head-cap-"),
+    );
+    const workspacePath = join(workspaceRoot, "issue-1");
+    try {
+      mkdirSync(join(workspacePath, ".symphony"), { recursive: true });
+      writeFileSync(
+        join(workspacePath, ".symphony", "closeout.md"),
+        [
+          "## Closeout",
+          "",
+          `**What shipped:** ${"large-entry ".repeat(2000)}`,
+          "",
+          "### Evidence",
+          "- This later section should not be needed for the cap assertion. Evidence: src/orchestrator/runtime-host.ts:1.",
+        ].join("\n"),
+      );
+
+      const tracker = createLinearTrackerForPipelineStatus();
+      vi.spyOn(tracker, "fetchCandidateIssues").mockResolvedValue([
+        createIssue({ state: "In Progress" }),
+      ]);
+      vi.spyOn(tracker, "fetchIssuesByStates").mockResolvedValue([]);
+      vi.spyOn(tracker, "fetchIssueStatesByIds").mockResolvedValue([
+        { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+      ]);
+      const upsert = vi
+        .spyOn(tracker, "upsertCloseoutComment")
+        .mockResolvedValue({ operation: "updated", commentId: "comment-1" });
+      const fakeRunner = new FakeAgentRunner();
+      const host = new OrchestratorRuntimeHost({
+        config: createImplementStagedConfig({
+          workflowPath: join(workspaceRoot, "WORKFLOW-symphony.md"),
+          workspace: { root: workspaceRoot },
+        }),
+        tracker,
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
+        },
+        now: () => new Date("2026-03-06T00:05:00.000Z"),
+      });
+
+      await host.pollOnce();
+      fakeRunner.resolve("1", createNormalResultForWorkspace(workspacePath));
+      await host.waitForIdle();
+
+      expect(upsert).toHaveBeenCalledTimes(1);
+      const body = upsert.mock.calls[0]?.[1] ?? "";
+      expect(body.length).toBeLessThanOrEqual(16_000);
     } finally {
       if (oldCloseoutFlag === undefined) {
         process.env.SYMPHONY_CLOSEOUT_COMMENT = undefined;
