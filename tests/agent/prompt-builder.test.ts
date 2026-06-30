@@ -285,6 +285,36 @@ describe("prompt builder", () => {
     } satisfies Partial<PromptTemplateError>);
   });
 
+  it("renders closeout capture instructions in the actual implement Liquid template", async () => {
+    const template = await readFile(
+      "pipeline-config/prompts/implement.liquid",
+      "utf8",
+    );
+    const prompt = await renderPrompt({
+      workflow: { promptTemplate: template },
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "implement",
+    });
+
+    expect(prompt).toContain("## Closeout capture");
+    expect(prompt).toContain("Maintain `.symphony/closeout.md` as you work");
+    expect(prompt).toContain("at decision-time");
+    expect(prompt).toContain("### Design decisions");
+    expect(prompt).toContain("diverges from ticket");
+    expect(prompt).toContain(
+      "Every structured entry must cite concrete evidence",
+    );
+    expect(prompt).toContain("Empty sections are normal");
+    expect(prompt).toContain(
+      "5 sentences when possible and 7 sentences maximum",
+    );
+    expect(prompt).toContain("Do not include secrets, tokens, credentials");
+    expect(prompt).toContain(
+      "do not write closeout content to Linear yourself",
+    );
+  });
+
   it("includes investigate constraints and STAGE_COMPLETE in continuation when stageName is investigate", () => {
     const prompt = buildContinuationPrompt({
       issue: ISSUE_FIXTURE,

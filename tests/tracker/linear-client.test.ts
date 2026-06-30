@@ -11,7 +11,9 @@ import {
   LINEAR_ISSUE_STATES_BY_IDS_QUERY,
   LINEAR_OPEN_ISSUES_BY_TITLE_QUERY,
   LINEAR_TICKET_FEATURE_ISSUES_QUERY,
+  LINEAR_UPDATE_COMMENT_MUTATION,
   LINEAR_UPDATE_ISSUE_DESCRIPTION_MUTATION,
+  LINEAR_VIEWER_QUERY,
   LinearTrackerClient,
   type TrackerError,
 } from "../../src/index.js";
@@ -849,6 +851,153 @@ describe("LinearTrackerClient", () => {
       }),
     );
     expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates a Closeout comment when no runtime-authored marker exists", async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({ data: { viewer: { id: "user-1" } } }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issue: {
+              id: "issue-604",
+              comments: {
+                nodes: [],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            commentCreate: {
+              success: true,
+              comment: { id: "comment-new" },
+            },
+          },
+        }),
+      );
+    const client = createClient({ fetchFn });
+
+    await expect(
+      client.upsertCloseoutComment("issue-604", "## Closeout\n\nDone."),
+    ).resolves.toEqual({ operation: "created", commentId: "comment-new" });
+
+    expect(parseRequestBody(fetchFn.mock.calls[0]?.[1]).query).toBe(
+      LINEAR_VIEWER_QUERY,
+    );
+    const createRequest = parseRequestBody(fetchFn.mock.calls[2]?.[1]);
+    expect(createRequest.query).toContain("commentCreate");
+    expect(createRequest.variables).toEqual({
+      issueId: "issue-604",
+      body: "## Closeout\n\nDone.",
+    });
+  });
+
+  it("updates the latest runtime-authored Closeout comment", async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({ data: { viewer: { id: "user-1" } } }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issue: {
+              id: "issue-604",
+              comments: {
+                nodes: [
+                  commentNode({
+                    id: "comment-old",
+                    body: "## Closeout\n\nOld",
+                    createdAt: "2026-06-14T00:01:00.000Z",
+                    updatedAt: "2026-06-14T00:02:00.000Z",
+                    userEmail: "runtime@example.com",
+                    userId: "user-1",
+                  }),
+                  commentNode({
+                    id: "comment-newer",
+                    body: "  ## Closeout\n\nCurrent",
+                    createdAt: "2026-06-14T00:03:00.000Z",
+                    updatedAt: "2026-06-14T00:04:00.000Z",
+                    userEmail: "runtime@example.com",
+                    userId: "user-1",
+                  }),
+                ],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ data: { commentUpdate: { success: true } } }),
+      );
+    const client = createClient({ fetchFn });
+
+    await expect(
+      client.upsertCloseoutComment("issue-604", "## Closeout\n\nReplacement."),
+    ).resolves.toEqual({ operation: "updated", commentId: "comment-newer" });
+
+    const updateRequest = parseRequestBody(fetchFn.mock.calls[2]?.[1]);
+    expect(updateRequest.query).toBe(LINEAR_UPDATE_COMMENT_MUTATION);
+    expect(updateRequest.variables).toEqual({
+      commentId: "comment-newer",
+      body: "## Closeout\n\nReplacement.",
+    });
+  });
+
+  it("does not update an operator-authored Closeout marker", async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({ data: { viewer: { id: "user-1" } } }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issue: {
+              id: "issue-604",
+              comments: {
+                nodes: [
+                  commentNode({
+                    id: "comment-operator",
+                    body: "## Closeout\n\nOperator note",
+                    createdAt: "2026-06-14T00:03:00.000Z",
+                    userEmail: "operator@example.com",
+                    userId: "operator-1",
+                  }),
+                ],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            commentCreate: {
+              success: true,
+              comment: { id: "comment-runtime" },
+            },
+          },
+        }),
+      );
+    const client = createClient({ fetchFn });
+
+    await expect(
+      client.upsertCloseoutComment("issue-604", "## Closeout\n\nRuntime note"),
+    ).resolves.toEqual({ operation: "created", commentId: "comment-runtime" });
+
+    expect(parseRequestBody(fetchFn.mock.calls[2]?.[1]).query).toContain(
+      "commentCreate",
+    );
   });
 
   it("updates only issue description for durable spec-review reconciliation", async () => {
@@ -1923,6 +2072,8 @@ function commentNode(input: {
   id: string;
   body: string;
   createdAt: string;
+  updatedAt?: string;
+  userId?: string;
   userEmail?: string;
   botActor?: boolean;
 }): Record<string, unknown> {
@@ -1930,12 +2081,12 @@ function commentNode(input: {
     id: input.id,
     body: input.body,
     createdAt: input.createdAt,
-    updatedAt: input.createdAt,
+    updatedAt: input.updatedAt ?? input.createdAt,
     user:
       input.userEmail === undefined
         ? null
         : {
-            id: "user-1",
+            id: input.userId ?? "user-1",
             name: "Operator",
             displayName: "Operator",
             email: input.userEmail,

@@ -177,6 +177,7 @@ import type {
 import { createRunnerFromConfig, isAiSdkRunner } from "../runners/factory.js";
 import type { RunnerKind } from "../runners/types.js";
 import { getDurableCodexSessionArtifactDirectory } from "../shared/codex-session-artifacts.js";
+import { sanitizeForLinear } from "../shared/egress.js";
 import {
   processTreeTerminationConfirmed,
   readProcessIdentity as readProcessIdentityDefault,
@@ -327,6 +328,10 @@ const DEFAULT_RUNTIME_HARD_STOPS_CONFIG = {
 };
 
 const SPEC_FIDELITY_DIFF_MAX_CHARS = 60_000;
+const IMPLEMENT_CLOSEOUT_RELATIVE_PATH = ".symphony/closeout.md";
+const CLOSEOUT_COMMENT_MARKER = "## Closeout";
+const CLOSEOUT_COMMENT_MAX_LEN = 16_000;
+const CLOSEOUT_COMMENT_ENV_FLAG = "SYMPHONY_CLOSEOUT_COMMENT";
 
 export const DEFAULT_RUNTIME_BACKLOG_HYGIENE_HEARTBEAT_MS =
   DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS;
@@ -5289,6 +5294,100 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     };
   }
 
+  private async postImplementCloseoutBestEffort(
+    execution: WorkerExecution,
+  ): Promise<void> {
+    if (execution.stageName !== "implement") {
+      return;
+    }
+    if (!isImplementCloseoutCommentEnabled(this.config.workflowPath)) {
+      return;
+    }
+    if (!(this.tracker instanceof LinearTrackerClient)) {
+      return;
+    }
+
+    const workspacePath =
+      execution.lastResult?.workspace.path ??
+      this.resolveWorkspacePathBestEffort(execution.issueId);
+    if (workspacePath === null) {
+      return;
+    }
+
+    let rawCloseout: string;
+    try {
+      rawCloseout = await readFile(
+        join(workspacePath, IMPLEMENT_CLOSEOUT_RELATIVE_PATH),
+        "utf8",
+      );
+    } catch (error) {
+      if (isNodeErrorCode(error, "ENOENT")) {
+        return;
+      }
+      await this.logger?.warn(
+        "implement_closeout_read_failed",
+        "Failed to read implement closeout file.",
+        {
+          outcome: "degraded",
+          issue_id: execution.issueId,
+          issue_identifier: execution.issueIdentifier,
+          stage: execution.stageName,
+          workspace_path: workspacePath,
+          reason: toErrorMessage(error),
+        },
+      );
+      return;
+    }
+
+    if (rawCloseout.trim().length === 0) {
+      return;
+    }
+
+    try {
+      const secretValues = await collectRuntimeEnvSecretValues(
+        this.config.workflowPath,
+        workspacePath,
+      );
+      const body = prepareCloseoutCommentBody(rawCloseout, secretValues);
+      if (body === null) {
+        return;
+      }
+      await this.tracker.upsertCloseoutComment(execution.issueId, body);
+      await this.logger?.info(
+        "implement_closeout_posted",
+        "Posted implement closeout comment.",
+        {
+          outcome: "completed",
+          issue_id: execution.issueId,
+          issue_identifier: execution.issueIdentifier,
+          stage: execution.stageName,
+          workspace_path: workspacePath,
+        },
+      );
+    } catch (error) {
+      await this.logger?.warn(
+        "implement_closeout_post_failed",
+        "Failed to post implement closeout comment.",
+        {
+          outcome: "degraded",
+          issue_id: execution.issueId,
+          issue_identifier: execution.issueIdentifier,
+          stage: execution.stageName,
+          workspace_path: workspacePath,
+          reason: toErrorMessage(error),
+        },
+      );
+    }
+  }
+
+  private resolveWorkspacePathBestEffort(issueId: string): string | null {
+    try {
+      return this.workspaceManager.resolveForIssue(issueId).workspacePath;
+    } catch {
+      return null;
+    }
+  }
+
   private async buildSpecFidelityAuxiliaryEvidence(input: {
     issue: Issue;
     workspacePath: string;
@@ -5640,6 +5739,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         ...hardStopFields,
       },
     );
+
+    await this.postImplementCloseoutBestEffort(execution);
 
     if (execution.stopRequest?.cleanupWorkspace === true) {
       await this.workspaceManager.removeForIssue(execution.issueId);
@@ -9135,6 +9236,180 @@ export function extractProductName(workflowPath: string): string {
   const base = filename.replace(/\.md$/i, "");
   const match = /^WORKFLOW-(.+)$/i.exec(base);
   return match !== null ? (match[1] ?? base) : base;
+}
+
+function isImplementCloseoutCommentEnabled(workflowPath: string): boolean {
+  const envValue = process.env[CLOSEOUT_COMMENT_ENV_FLAG]?.trim().toLowerCase();
+  if (
+    envValue !== undefined &&
+    envValue.length > 0 &&
+    envValue !== "undefined"
+  ) {
+    return ["1", "true", "yes", "on"].includes(envValue);
+  }
+  return extractProductName(workflowPath).toLowerCase() === "symphony";
+}
+
+async function collectRuntimeEnvSecretValues(
+  workflowPath: string,
+  workspacePath: string,
+): Promise<string[]> {
+  const values = new Set<string>();
+  collectSecretValuesFromRecord(process.env, values);
+
+  const envPaths = new Set([
+    join(workspacePath, ".env"),
+    join(process.cwd(), ".env"),
+    join(dirname(workflowPath), ".env"),
+    join(dirname(dirname(workflowPath)), ".env"),
+  ]);
+  for (const envPath of envPaths) {
+    let body: string;
+    try {
+      body = await readFile(envPath, "utf8");
+    } catch {
+      continue;
+    }
+    collectSecretValuesFromRecord(parseEnvFile(body), values);
+  }
+
+  return [...values].sort((left, right) => right.length - left.length);
+}
+
+function prepareCloseoutCommentBody(
+  rawCloseout: string,
+  secretValues: readonly string[],
+): string | null {
+  const denylistRedacted = redactDenylistedSecretValues(
+    rawCloseout,
+    secretValues,
+  );
+  const sanitized = sanitizeForLinear(denylistRedacted, {
+    maxLen: Number.MAX_SAFE_INTEGER,
+  });
+  const normalized = ensureCloseoutMarker(sanitized.trim());
+  const capped = capCloseoutBySections(normalized, CLOSEOUT_COMMENT_MAX_LEN);
+  return hasSubstantiveCloseoutContent(capped) ? capped : null;
+}
+
+function redactDenylistedSecretValues(
+  text: string,
+  secretValues: readonly string[],
+): string {
+  let redacted = text;
+  for (const value of secretValues) {
+    if (value.length < 8) {
+      continue;
+    }
+    redacted = redacted.split(value).join("[REDACTED:runtime-secret]");
+  }
+  return redacted;
+}
+
+function ensureCloseoutMarker(text: string): string {
+  if (text.trimStart().startsWith(CLOSEOUT_COMMENT_MARKER)) {
+    return text;
+  }
+  return `${CLOSEOUT_COMMENT_MARKER}\n\n${text}`;
+}
+
+function capCloseoutBySections(text: string, maxLen: number): string {
+  if (text.length <= maxLen) {
+    return text;
+  }
+
+  const sections = text.split(/(?=\n### )/);
+  let capped = sections[0] ?? "";
+  for (const section of sections.slice(1)) {
+    if (capped.length + section.length > maxLen) {
+      break;
+    }
+    capped += section;
+  }
+
+  if (capped.length <= maxLen) {
+    return capped.trimEnd();
+  }
+  return sanitizeForLinear(capped, { maxLen }).trimEnd().slice(0, maxLen);
+}
+
+function hasSubstantiveCloseoutContent(text: string): boolean {
+  const meaningful = text
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("#"))
+    .filter((line) => !isRedactedSecretAssignmentLine(line))
+    .join("\n")
+    .replace(/\[REDACTED(?::[^\]]+)?\]/g, "")
+    .replace(/[*_`:[\]()=>.\-\s]/g, "")
+    .trim();
+  return meaningful.length > 0;
+}
+
+function isRedactedSecretAssignmentLine(line: string): boolean {
+  return /^\s*(?:export\s+)?[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_?KEY|PRIVATE_?KEY|AUTH|(?:^|_)KEY)[A-Z0-9_]*\s*[:=]\s*["']?\[REDACTED(?::[^\]]+)?\]["']?\s*$/i.test(
+    line,
+  );
+}
+
+function collectSecretValuesFromRecord(
+  record: Record<string, string | undefined>,
+  values: Set<string>,
+): void {
+  for (const [key, value] of Object.entries(record)) {
+    if (
+      value !== undefined &&
+      value.length >= 8 &&
+      isSecretEnvKey(key) &&
+      !/^\s+$/.test(value)
+    ) {
+      values.add(value);
+    }
+  }
+}
+
+function parseEnvFile(body: string): Record<string, string> {
+  const parsed: Record<string, string> = {};
+  for (const rawLine of body.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line.length === 0 || line.startsWith("#")) {
+      continue;
+    }
+    const match = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(
+      line,
+    );
+    if (match === null) {
+      continue;
+    }
+    const key = match[1] ?? "";
+    let value = match[2] ?? "";
+    const quote = value[0];
+    if (
+      (quote === '"' || quote === "'") &&
+      value.endsWith(quote) &&
+      value.length >= 2
+    ) {
+      value = value.slice(1, -1);
+    } else {
+      value = value.replace(/\s+#.*$/, "").trimEnd();
+    }
+    parsed[key] = value;
+  }
+  return parsed;
+}
+
+function isSecretEnvKey(key: string): boolean {
+  return /(?:TOKEN|SECRET|PASSWORD|API_?KEY|PRIVATE_?KEY|AUTH|(?:^|_)KEY$)/i.test(
+    key,
+  );
+}
+
+function isNodeErrorCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === code
+  );
 }
 
 // --- SYMPH-735 merge-actuator live-state parsing (substrate; consumed by

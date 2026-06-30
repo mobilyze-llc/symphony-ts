@@ -60,4 +60,34 @@ Labels: {{ issue.labels | join: ", " }}
 - Tests must be runnable against $BASE_URL (no localhost assumptions in committed tests).
 - E2E test file names should map to the behavior they exercise where applicable.
 
+## Closeout capture
+
+Maintain `.symphony/closeout.md` as you work. Append consequential implementation decisions at decision-time while the context is fresh: in-latitude design choices, departures from the ticket's proposed approach, deferred scope, blockers, belongs-elsewhere findings, landmines, and open questions.
+
+Use this cite-or-omit shape:
+
+```markdown
+## Closeout
+
+**What shipped:** <capability delivered in a few sentences, not a diff restatement>
+
+### Design decisions
+- **<decision>**: chose <B> over <A/alternatives>. Reason <C>. Evidence: <file:line, commit, ticket id, or specific failure>. [diverges from ticket: proposed <X>]
+
+**Assessment:** <subjective confidence, remaining risk, hindsight, or reviewer/future-implementer watchpoint>
+
+### Deferred / not done
+- **<item>**: not done - <why>. Follow-up: <ticket if filed>. Evidence: <where>.
+### Blocked / depends on
+- blockedBy <ticket> - <why>. Evidence: <what surfaced it>.
+### Belongs elsewhere
+- relates/supersedes <ticket> - <what moved>. Evidence: <where>.
+### Landmines
+- `<file/area>`: <constraint a future implementer must know>. Evidence: <file:line>.
+### Open questions
+- <unresolved question>
+```
+
+Every structured entry must cite concrete evidence or be omitted. Empty sections are normal; do not invent entries to fill the shape. Keep **What shipped** plus **Assessment** to 5 sentences when possible and 7 sentences maximum; the Design decisions list is bounded by cite-or-omit, not by sentence count. Do not include secrets, tokens, credentials, private board data, raw logs, or transcript dumps. Write only the local `.symphony/closeout.md` file; do not write closeout content to Linear yourself.
+
 {% render 'prompts/eligibility-on-ticket-rewrite.liquid' %}
