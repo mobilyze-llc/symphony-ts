@@ -3,7 +3,10 @@ import { readFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, resolve } from "node:path";
 
-import { extractAcceptanceCriteria } from "../agent/ac-gate.js";
+import {
+  extractAcceptanceCriteria,
+  normalizeAcceptanceCriteriaSnapshot,
+} from "../agent/ac-gate.js";
 import type {
   PauseTriageEvidence,
   PauseTriageVerdict,
@@ -1672,7 +1675,9 @@ export class OrchestratorCore {
         // sequence order, so the latest gate-passed snapshot wins and a
         // later terminal entry clears it via clearTerminalIssueRuntimeState.
         this.state.issueAcSnapshots[entry.issueId] =
-          entry.metadata.acceptanceCriteria;
+          normalizeAcceptanceCriteriaSnapshot(
+            entry.metadata.acceptanceCriteria,
+          );
       }
       if (entry.kind === "ac_gate" && entry.metadata.status === "completed") {
         this.acGateFailOpenStreak =

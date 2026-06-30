@@ -7103,12 +7103,24 @@ describe("orchestrator core", () => {
           verdict: "pass_open",
           acceptanceCriteria: null,
         }),
+        journalEntry(4, {
+          status: "completed",
+          verdict: "pass",
+          acceptanceCriteria:
+            "### Acceptance Criteria\n- [ ] `check: pnpm test exits 0`",
+        }),
       ],
     });
 
-    expect(orchestrator.getState().issueAcSnapshots).toEqual({
-      "1": "### Acceptance Criteria\n- [ ] `check: ok`",
-    });
+    expect(orchestrator.getState().issueAcSnapshots["1"]).toBe(
+      "### Acceptance Criteria\n- [ ] `check: ok`",
+    );
+    expect(orchestrator.getState().issueAcSnapshots["4"]).not.toContain(
+      "pnpm test",
+    );
+    expect(orchestrator.getState().issueAcSnapshots["4"]).toContain(
+      "CI check-run success on the PR head SHA",
+    );
   });
 
   it("clears a replay-rehydrated AC snapshot on fresh admission — a new run never inherits a prior run's rubric (SYMPH-374)", async () => {
