@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 import { describe, expect, it } from "vitest";
@@ -721,6 +722,17 @@ describe("CrabrunnerCliSchedulerClient.collect", () => {
     const { tmpdir } = await import("node:os");
     const { join } = await import("node:path");
     const artifactDir = await mkdtemp(join(tmpdir(), "crabrunner-remote-"));
+    const archive = createTarBuffer({
+      "attempts/01/artifact/remote-materialization-canary.usage.json":
+        JSON.stringify({
+          schema: "crucible.lane-worker.usage.v2",
+          measurement_kind: "true",
+          input_tokens: 10,
+          output_tokens: 5,
+          total_tokens: 15,
+        }),
+    });
+    const workspaceSyncContent = '{"ok":true}\n';
     const cli: CrabrunnerCli = async (args) => {
       const jobId = args[args.indexOf("--job-id") + 1]!;
       const archivePath = join(artifactDir, `${jobId}.tar`);
@@ -728,20 +740,8 @@ describe("CrabrunnerCliSchedulerClient.collect", () => {
         artifactDir,
         `${jobId}.workspace-sync.json`,
       );
-      await writeFile(
-        archivePath,
-        createTarBuffer({
-          "attempts/01/artifact/remote-materialization-canary.usage.json":
-            JSON.stringify({
-              schema: "crucible.lane-worker.usage.v2",
-              measurement_kind: "true",
-              input_tokens: 10,
-              output_tokens: 5,
-              total_tokens: 15,
-            }),
-        }),
-      );
-      await writeFile(workspaceSyncPath, '{"ok":true}\n', "utf8");
+      await writeFile(archivePath, archive);
+      await writeFile(workspaceSyncPath, workspaceSyncContent, "utf8");
       const status = statusObject({
         state: "complete",
         job_id: jobId,
@@ -755,6 +755,7 @@ describe("CrabrunnerCliSchedulerClient.collect", () => {
           job_id: jobId,
           status,
           workspaceSyncPath,
+          workspaceSyncSha256: sha256(workspaceSyncContent),
         }),
       );
     };
@@ -776,6 +777,10 @@ describe("CrabrunnerCliSchedulerClient.collect", () => {
       join(artifactDir, `${admission.jobId!}.tar`),
       join(artifactDir, `${admission.jobId!}.workspace-sync.json`),
     ]);
+    expect(evidence.artifactHashes).toEqual([
+      sha256(archive),
+      sha256(workspaceSyncContent),
+    ]);
     expect(evidence.workspacePath).toBe(
       "/Users/ericlitman/.crucible/crabrunner/materialized/job/workspace",
     );
@@ -787,6 +792,101 @@ describe("CrabrunnerCliSchedulerClient.collect", () => {
     });
     await expect(client.status(admission.jobId!)).rejects.toThrow(
       /no cached run result/,
+    );
+  });
+
+  it("fails closed when remote workspace-sync metadata does not match the downloaded file", async () => {
+    const { mkdtemp, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const artifactDir = await mkdtemp(join(tmpdir(), "crabrunner-remote-"));
+    const cli: CrabrunnerCli = async (args) => {
+      const jobId = args[args.indexOf("--job-id") + 1]!;
+      const archivePath = join(artifactDir, `${jobId}.tar`);
+      const workspaceSyncPath = join(
+        artifactDir,
+        `${jobId}.workspace-sync.json`,
+      );
+      await writeFile(
+        archivePath,
+        createTarBuffer({
+          "attempts/01/artifact/remote-materialization-canary.usage.json":
+            JSON.stringify({
+              schema: "crucible.lane-worker.usage.v2",
+              measurement_kind: "true",
+              input_tokens: 10,
+              output_tokens: 5,
+              total_tokens: 15,
+            }),
+        }),
+      );
+      await writeFile(workspaceSyncPath, '{"ok":true}\n', "utf8");
+      return cliOk(
+        runResultJson({
+          state: "complete",
+          job_id: jobId,
+          workspaceSyncPath,
+          workspaceSyncSha256: sha256("different"),
+        }),
+      );
+    };
+    const client = new CrabrunnerCliSchedulerClient({
+      crucibleRoot: CRUCIBLE_ROOT,
+      targetRepoRoot: TARGET_REPO_ROOT,
+      host: "crabbox-studio1",
+      remoteUser: "ericlitman",
+      remoteRunArtifactDir: artifactDir,
+      cli,
+    });
+
+    const admission = await client.submit(createSpec());
+    await expect(client.collect(admission.jobId!)).rejects.toThrow(
+      /workspace-sync artifact hash mismatch/,
+    );
+  });
+
+  it("fails closed when remote workspace-sync metadata is present but the downloaded file is missing", async () => {
+    const { mkdtemp, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const artifactDir = await mkdtemp(join(tmpdir(), "crabrunner-remote-"));
+    const cli: CrabrunnerCli = async (args) => {
+      const jobId = args[args.indexOf("--job-id") + 1]!;
+      const archivePath = join(artifactDir, `${jobId}.tar`);
+      await writeFile(
+        archivePath,
+        createTarBuffer({
+          "attempts/01/artifact/remote-materialization-canary.usage.json":
+            JSON.stringify({
+              schema: "crucible.lane-worker.usage.v2",
+              measurement_kind: "true",
+              input_tokens: 10,
+              output_tokens: 5,
+              total_tokens: 15,
+            }),
+        }),
+      );
+      return cliOk(
+        runResultJson({
+          state: "complete",
+          job_id: jobId,
+          workspaceSyncPath: join(artifactDir, `${jobId}.workspace-sync.json`),
+          workspaceSyncSha256: sha256("expected workspace sync"),
+        }),
+      );
+    };
+    const client = new CrabrunnerCliSchedulerClient({
+      crucibleRoot: CRUCIBLE_ROOT,
+      targetRepoRoot: TARGET_REPO_ROOT,
+      host: "crabbox-studio1",
+      remoteUser: "ericlitman",
+      remoteRunArtifactDir: artifactDir,
+      cli,
+    });
+
+    const admission = await client.submit(createSpec());
+    await expect(client.collect(admission.jobId!)).rejects.toThrow(
+      /workspace-sync artifact missing/,
     );
   });
 
@@ -884,6 +984,8 @@ describe("CrabrunnerCliSchedulerClient.collect", () => {
   });
 
   it("maps complete -> succeeded with usage and artifact refs", async () => {
+    const { writeFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
     const fixture = await writeArtifactFixtures({
       artifact: { ok: true },
       usage: {
@@ -894,6 +996,9 @@ describe("CrabrunnerCliSchedulerClient.collect", () => {
         total_tokens: 140,
       },
     });
+    const archivePath = join(fixture.dir, "archive.tgz");
+    const archiveContent = "archive bytes";
+    await writeFile(archivePath, archiveContent, "utf8");
     const client = createClient(
       staticCli({
         collect: () =>
@@ -906,9 +1011,9 @@ describe("CrabrunnerCliSchedulerClient.collect", () => {
                 collectible: true,
                 artifact_path: fixture.artifactPath,
                 usage_path: fixture.usagePath,
-                collect_archive: "/tmp/archive.tgz",
+                collect_archive: archivePath,
               }),
-              archive_path: "/tmp/archive.tgz",
+              archive_path: archivePath,
             }),
           ),
       }),
@@ -923,9 +1028,10 @@ describe("CrabrunnerCliSchedulerClient.collect", () => {
       outputTokens: 40,
       totalTokens: 140,
     });
-    expect(evidence.artifactRefs).toEqual([
-      fixture.artifactPath,
-      "/tmp/archive.tgz",
+    expect(evidence.artifactRefs).toEqual([fixture.artifactPath, archivePath]);
+    expect(evidence.artifactHashes).toEqual([
+      await hashFile(fixture.artifactPath),
+      sha256(archiveContent),
     ]);
   });
 
@@ -1632,6 +1738,7 @@ function runResultJson(fields: {
   status?: Record<string, unknown>;
   collect?: Record<string, unknown>;
   workspaceSyncPath?: string;
+  workspaceSyncSha256?: string;
 }): string {
   const status =
     fields.status ??
@@ -1662,7 +1769,7 @@ function runResultJson(fields: {
           workspace_sync_artifact: {
             schema: "crucible.crabrunner.workspace-sync-artifact-ref.v1",
             path: fields.workspaceSyncPath,
-            sha256: "sha256",
+            sha256: fields.workspaceSyncSha256 ?? "sha256",
           },
         }),
   });
@@ -1703,7 +1810,7 @@ function createTarBuffer(entries: Record<string, string>): Buffer {
 async function writeArtifactFixtures(input: {
   artifact: unknown;
   usage?: unknown;
-}): Promise<{ artifactPath: string; usagePath: string }> {
+}): Promise<{ dir: string; artifactPath: string; usagePath: string }> {
   const { mkdtemp, writeFile } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
@@ -1714,7 +1821,15 @@ async function writeArtifactFixtures(input: {
   if (input.usage !== undefined) {
     await writeFile(usagePath, JSON.stringify(input.usage), "utf8");
   }
-  return { artifactPath, usagePath };
+  return { dir, artifactPath, usagePath };
+}
+
+function sha256(content: string | Buffer): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+async function hashFile(path: string): Promise<string> {
+  return sha256(await readFile(path));
 }
 
 function cancelRequest(): CrabrunnerCancellationRequest {

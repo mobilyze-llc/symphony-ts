@@ -454,10 +454,12 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
       artifactAbsPath,
       status.collect_archive ?? collect.archive_path,
     );
+    const artifactHashes = await collectReadableArtifactHashes(artifactRefs);
 
     const evidence: CrabrunnerTerminalEvidence = {
       state: terminalState,
       ...(artifactRefs.length > 0 ? { artifactRefs } : {}),
+      ...(artifactHashes.length > 0 ? { artifactHashes } : {}),
       workspacePath: status.workspace ?? null,
       usage,
       message: status.message ?? null,
@@ -709,8 +711,10 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     }
 
     const artifactRefs: string[] = [];
+    const artifactHashes: string[] = [];
     if (archivePresent) {
       artifactRefs.push(localArchivePath);
+      artifactHashes.push(await hashFile(localArchivePath));
     }
 
     const workspaceSyncPath =
@@ -719,8 +723,25 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
         this.remoteRunArtifactDir,
         `${runResult.job_id}.workspace-sync.json`,
       );
+    const crabrunnerWorkspaceSyncHash = normalizeOptionalString(
+      runResult.workspace_sync_artifact?.sha256 ?? undefined,
+    );
     if (await this.isFilePresent(workspaceSyncPath)) {
+      const workspaceSyncHash = await hashFile(workspaceSyncPath);
+      if (
+        crabrunnerWorkspaceSyncHash !== null &&
+        crabrunnerWorkspaceSyncHash !== workspaceSyncHash
+      ) {
+        throw new Error(
+          `remote workspace-sync artifact hash mismatch for ${workspaceSyncPath}: crabrunner reported ${crabrunnerWorkspaceSyncHash} but downloaded file is ${workspaceSyncHash}`,
+        );
+      }
       artifactRefs.push(workspaceSyncPath);
+      artifactHashes.push(workspaceSyncHash);
+    } else if (crabrunnerWorkspaceSyncHash !== null) {
+      throw new Error(
+        `remote workspace-sync artifact missing for ${workspaceSyncPath}: crabrunner reported ${crabrunnerWorkspaceSyncHash}`,
+      );
     }
 
     const usage = archivePresent
@@ -733,6 +754,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     return {
       state: terminalState,
       ...(artifactRefs.length > 0 ? { artifactRefs } : {}),
+      ...(artifactHashes.length > 0 ? { artifactHashes } : {}),
       workspacePath: status.workspace ?? null,
       usage,
       message:
@@ -1230,6 +1252,28 @@ function collectArtifactRefs(
     refs.push(archivePath);
   }
   return refs;
+}
+
+async function collectReadableArtifactHashes(
+  artifactRefs: readonly string[],
+): Promise<string[]> {
+  const hashes: string[] = [];
+  for (const artifactRef of artifactRefs) {
+    try {
+      hashes.push(await hashFile(artifactRef));
+    } catch {
+      // Local collect may report host-owned refs that are not readable from this
+      // process. Stop at the first gap so the hash array remains aligned with
+      // the artifactRefs prefix it describes.
+      break;
+    }
+  }
+  return hashes;
+}
+
+async function hashFile(path: string): Promise<string> {
+  const content = await readFile(path);
+  return createHash("sha256").update(content).digest("hex");
 }
 
 type CrabrunnerProgress = NonNullable<CrabrunnerTerminalEvidence["progress"]>;
