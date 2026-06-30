@@ -15,6 +15,7 @@ import type { PlanEnvelope } from "../../src/domain/standing-plan.js";
 import {
   assembleShadowPlannerContext,
   buildQueueHealth,
+  buildShadowPlannerAuditDispositions,
   computeResidualShare,
   computeTriageIntake,
   enrichPlannerContextWithComments,
@@ -180,6 +181,109 @@ describe("assembleShadowPlannerContext", () => {
       triageHealthInput: health,
     });
     expect(context.health).toEqual(health);
+  });
+
+  it("excludes audit kill and stale identifiers from planner candidates (SYMPH-983)", () => {
+    const context = assembleShadowPlannerContext({
+      candidates: [
+        issue("u1", "SYMPH-KEEP"),
+        issue("u2", "SYMPH-KILL"),
+        issue("u3", "SYMPH-STALE"),
+      ],
+      inFlight: [],
+      envelope: ENVELOPE,
+      auditDispositions: [
+        { type: "kill", issueIdentifiers: ["SYMPH-KILL"] },
+        { type: "stale", issueIdentifiers: ["SYMPH-STALE"] },
+      ],
+    });
+    expect(context.backlog.map((c) => c.issueIdentifier)).toEqual([
+      "SYMPH-KEEP",
+    ]);
+  });
+
+  it("carries duplicate audit clusters onto surviving planner candidates (SYMPH-983)", () => {
+    const context = assembleShadowPlannerContext({
+      candidates: [
+        issue("u1", "SYMPH-A"),
+        issue("u2", "SYMPH-B"),
+        issue("u3", "SYMPH-C"),
+      ],
+      inFlight: [],
+      envelope: ENVELOPE,
+      auditDispositions: [
+        { type: "duplicate", issueIdentifiers: ["SYMPH-A", "SYMPH-B"] },
+      ],
+    });
+    expect(context.backlog[0]?.duplicateClusterIdentifiers).toEqual([
+      "SYMPH-A",
+      "SYMPH-B",
+    ]);
+    expect(context.backlog[1]?.duplicateClusterIdentifiers).toEqual([
+      "SYMPH-A",
+      "SYMPH-B",
+    ]);
+    expect(context.backlog[2]?.duplicateClusterIdentifiers).toBeUndefined();
+  });
+
+  it("derives shadow planner dispositions from hygiene proposals (SYMPH-983)", () => {
+    const dispositions = buildShadowPlannerAuditDispositions([
+      {
+        proposalId: "p1",
+        findingId: "f1",
+        findingType: "duplicate",
+        issueIds: ["a", "b"],
+        issueIdentifiers: ["SYMPH-A", "SYMPH-B"],
+        summary: "duplicates",
+        evidence: "same work",
+        confidence: "high",
+        cull: null,
+        codeGroundingStatus: null,
+        codeGroundingEvidence: null,
+        generatedAt: "2026-06-30T00:00:00.000Z",
+        modelTier: "local_low_risk",
+      },
+      {
+        proposalId: "p2",
+        findingId: "f2",
+        findingType: "stale",
+        issueIds: ["c"],
+        issueIdentifiers: ["SYMPH-C"],
+        summary: "stale",
+        evidence: "obsolete",
+        confidence: "medium",
+        cull: null,
+        codeGroundingStatus: null,
+        codeGroundingEvidence: null,
+        generatedAt: "2026-06-30T00:00:00.000Z",
+        modelTier: "local_low_risk",
+      },
+      {
+        proposalId: "p3",
+        findingId: "f3",
+        findingType: "supersession",
+        issueIds: ["d"],
+        issueIdentifiers: ["SYMPH-D"],
+        summary: "kill",
+        evidence: "replaced",
+        confidence: "medium",
+        cull: {
+          classification: "kill",
+          killReason: "duplicate",
+          marker: null,
+          rootIssueIdentifier: null,
+        },
+        codeGroundingStatus: null,
+        codeGroundingEvidence: null,
+        generatedAt: "2026-06-30T00:00:00.000Z",
+        modelTier: "local_low_risk",
+      },
+    ]);
+    expect(dispositions).toEqual([
+      { type: "duplicate", issueIdentifiers: ["SYMPH-A", "SYMPH-B"] },
+      { type: "stale", issueIdentifiers: ["SYMPH-C"] },
+      { type: "kill", issueIdentifiers: ["SYMPH-D"] },
+    ]);
   });
 });
 

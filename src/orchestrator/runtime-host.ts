@@ -221,6 +221,7 @@ import { getDisplayVersion } from "../version.js";
 import { WorkspaceHookRunner } from "../workspace/hooks.js";
 import { WorkspaceManager } from "../workspace/workspace-manager.js";
 import {
+  type BacklogHygieneProposal,
   QUEUE_TRIAGE_EVALUATION_DIMENSIONS,
   QUEUE_TRIAGE_GOLDEN_CORPUS,
 } from "./backlog-hygiene.js";
@@ -290,7 +291,10 @@ import {
   type TerminalOutcomeResult,
   resolveBatchOutcome,
 } from "./standing-plan-outcome.js";
-import { runStandingPlanShadowTick } from "./standing-plan-shadow.js";
+import {
+  buildShadowPlannerAuditDispositions,
+  runStandingPlanShadowTick,
+} from "./standing-plan-shadow.js";
 import {
   loadStandingPlan,
   recordBatchOutcome,
@@ -6344,6 +6348,7 @@ export async function startRuntimeService(
   let standingPlanShadowTickInFlight = false;
   const runStandingPlanShadowTickIfEnabled = (
     fetchSharedCandidateIssues: () => Promise<Issue[]>,
+    hygieneProposals: readonly BacklogHygieneProposal[] = [],
   ): void => {
     if (standingPlanShadowTickInFlight) {
       return;
@@ -6393,6 +6398,7 @@ export async function startRuntimeService(
         extractReviewRoundDepth(await runtimeHost.getRuntimeSnapshot()),
       getHotFileGrowth: () =>
         readHotFileGrowth({ repoPath: resolveRuntimeRepoRoot() }),
+      auditDispositions: buildShadowPlannerAuditDispositions(hygieneProposals),
       ...(linearTracker === null
         ? {}
         : {
@@ -6433,13 +6439,13 @@ export async function startRuntimeService(
   let backlogHygieneProposalLastRunAtMs: number | null = null;
   const runBacklogHygieneProposalTickIfConfigured = (
     fetchSharedCandidateIssues: () => Promise<Issue[]>,
-  ): void => {
+  ): Promise<BacklogHygieneProposal[]> => {
     if (backlogHygieneProposalTickInFlight) {
-      return;
+      return Promise.resolve([]);
     }
     const hygieneConfig = resolveRuntimeBacklogHygieneConfig(process.env);
     if (hygieneConfig === null) {
-      return;
+      return Promise.resolve([]);
     }
     const nowMs = Date.now();
     const heartbeatMs = resolveRuntimeBacklogHygieneHeartbeatMs(process.env);
@@ -6447,12 +6453,12 @@ export async function startRuntimeService(
       backlogHygieneProposalLastRunAtMs !== null &&
       nowMs - backlogHygieneProposalLastRunAtMs < heartbeatMs
     ) {
-      return;
+      return Promise.resolve([]);
     }
     backlogHygieneProposalLastRunAtMs = nowMs;
     backlogHygieneProposalTickInFlight = true;
     const runStartedAt = new Date();
-    void (async () => {
+    return (async () => {
       const candidateIssues = await fetchSharedCandidateIssues();
       const state = runtimeHost.getState();
       const activeIssueIds = Object.keys(state.running);
@@ -6544,17 +6550,19 @@ export async function startRuntimeService(
           warnings: result.warnings,
         },
       );
+      return result.proposals;
     })()
-      .catch((error) =>
-        logger.warn(
+      .catch(async (error) => {
+        await logger.warn(
           "backlog_hygiene_tick_failed",
           "Backlog hygiene proposal lane failed (report-only; dispatch unaffected).",
           {
             outcome: "degraded",
             detail: toErrorMessage(error),
           },
-        ),
-      )
+        );
+        return [];
+      })
       .finally(() => {
         backlogHygieneProposalTickInFlight = false;
       });
@@ -6567,8 +6575,30 @@ export async function startRuntimeService(
       const durationMs = Date.now() - pollStart;
       await logPollCycleResult(logger, result, durationMs);
       const fetchSharedCandidateIssues = createPollCandidateIssueFetcher();
-      runStandingPlanShadowTickIfEnabled(fetchSharedCandidateIssues);
-      runBacklogHygieneProposalTickIfConfigured(fetchSharedCandidateIssues);
+      void (async () => {
+        const hygieneProposals =
+          await runBacklogHygieneProposalTickIfConfigured(
+            fetchSharedCandidateIssues,
+          );
+        // SYMPH-983 (council P2-1): an empty hygieneProposals can mean a prior
+        // hygiene tick is still in flight (the guard short-circuits to []), not
+        // that the backlog is clean. Skip the shadow planner tick in that case so
+        // it never plans against un-pruned candidates — otherwise a fast poll could
+        // let an audit-killed identifier reach a planned batch before the audit
+        // completes.
+        if (!backlogHygieneProposalTickInFlight) {
+          runStandingPlanShadowTickIfEnabled(
+            fetchSharedCandidateIssues,
+            hygieneProposals,
+          );
+        }
+      })().catch((error) => {
+        void logger.warn(
+          "runtime_post_poll_shadow_chain_failed",
+          "Post-poll hygiene/planner shadow chain failed (dispatch unaffected).",
+          { outcome: "degraded", detail: toErrorMessage(error) },
+        );
+      });
       scheduleNextPoll();
     } catch (error) {
       await logger.error("runtime_poll_failed", toErrorMessage(error), {
