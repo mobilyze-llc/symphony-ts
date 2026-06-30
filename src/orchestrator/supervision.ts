@@ -1,4 +1,5 @@
 import type { Issue } from "../domain/model.js";
+import { formatMarkdownInlineCode } from "../shared/markdown.js";
 
 export type SupervisionFindingKind =
   | "declared_scope_overlap"
@@ -217,12 +218,12 @@ export function formatSupervisionFindingsComment(input: {
     const fileSuffix =
       finding.files.length === 0
         ? ""
-        : ` Files: ${finding.files.map((file) => `\`${file}\``).join(", ")}.`;
+        : ` Files: ${finding.files.map((file) => formatMarkdownInlineCode(file)).join(", ")}.`;
     const ignoredFileSuffix =
       finding.ignoredFiles === undefined || finding.ignoredFiles.length === 0
         ? ""
         : ` Ignored setup-only files: ${finding.ignoredFiles
-            .map((file) => `\`${file}\``)
+            .map((file) => formatMarkdownInlineCode(file))
             .join(", ")}.`;
     lines.push(
       `- ${finding.kind} -> ${finding.action}: ${finding.message}${fileSuffix}${ignoredFileSuffix}`,

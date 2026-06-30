@@ -34,6 +34,7 @@
  * signature. Resume-clearing is NOT replayed — a resumed issue is cleared by
  * the live isDispatchEligible path after recovery.
  */
+import { formatMarkdownInlineCode } from "../shared/markdown.js";
 
 import type { ErrorSignatureClass } from "../errors/signature.js";
 
@@ -653,10 +654,14 @@ export function formatWatchdogTicketBody(input: {
   const lines: string[] = [
     marker,
     "",
-    `## Watchdog: SYSTEMIC failure cluster — signature \`${signature}\``,
+    `## Watchdog: SYSTEMIC failure cluster — signature ${formatMarkdownInlineCode(
+      signature,
+    )}`,
     "",
-    `**Failure class:** \`${errorClass}\``,
-    `**Affected stage:** ${stageName !== null ? `\`${stageName}\`` : "_unknown_"}`,
+    `**Failure class:** ${formatMarkdownInlineCode(errorClass)}`,
+    `**Affected stage:** ${
+      stageName !== null ? formatMarkdownInlineCode(stageName) : "_unknown_"
+    }`,
     `**Cluster size:** ${members.length}`,
     `**First observed at:** ${observedAt}`,
     "",
@@ -687,11 +692,13 @@ export function formatWatchdogTicketBody(input: {
     "",
     "- This ticket was machine-filed by the Symphony watchdog (SYMPH-398). Do NOT auto-release.",
     "- The circuit breaker for the affected stage is open until an operator resets it via resume/re-dispatch.",
-    `- Signature hash: \`${signature}\` (stable across path/UUID variations).`,
+    `- Signature hash: ${formatMarkdownInlineCode(signature)} (stable across path/UUID variations).`,
   );
   if (journalSequence !== null) {
     lines.push(
-      `- Journal cursor: seq ${journalSequence} (fetch the exact event slice via \`GET /api/v1/state/delta?since_seq=${Math.max(0, journalSequence - 1)}\`).`,
+      `- Journal cursor: seq ${journalSequence} (fetch the exact event slice via ${formatMarkdownInlineCode(
+        `GET /api/v1/state/delta?since_seq=${Math.max(0, journalSequence - 1)}`,
+      )}).`,
     );
   }
 

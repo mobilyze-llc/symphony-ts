@@ -11,6 +11,10 @@ import type {
   RightSizingDecision,
 } from "../domain/model.js";
 import { escapeSlackControlChars, sanitizeForSlack } from "../shared/egress.js";
+import {
+  formatMarkdownCodeBlock,
+  formatMarkdownInlineCode,
+} from "../shared/markdown.js";
 import { getDisplayVersion } from "../version.js";
 
 // ---------------------------------------------------------------------------
@@ -603,7 +607,9 @@ export function formatNotification(
         const stageLines = event.executionHistory
           .map(
             (record) =>
-              `\`${record.stageName}\` ${formatDurationMs(record.durationMs)} · ${formatTokensCompact(record.totalTokens)} tokens · ${record.outcome}`,
+              `${formatMarkdownInlineCode(record.stageName)} ${formatDurationMs(
+                record.durationMs,
+              )} · ${formatTokensCompact(record.totalTokens)} tokens · ${record.outcome}`,
           )
           .join("\n");
         blocks.push({
@@ -943,7 +949,12 @@ export function formatNotification(
         event.journalSequence !== null
       ) {
         parts.push(
-          `Journal cursor: seq ${event.journalSequence} — \`GET /api/v1/state/delta?since_seq=${Math.max(0, event.journalSequence - 1)}\``,
+          `Journal cursor: seq ${event.journalSequence} — ${formatMarkdownInlineCode(
+            `GET /api/v1/state/delta?since_seq=${Math.max(
+              0,
+              event.journalSequence - 1,
+            )}`,
+          )}`,
         );
       }
       parts.push(version);
@@ -1189,15 +1200,19 @@ export function formatNotification(
     case "systemic_cluster_alert": {
       const stageLabel =
         event.stageName !== null
-          ? `stage \`${event.stageName}\``
+          ? `stage ${formatMarkdownInlineCode(event.stageName)}`
           : "unknown stage";
       const issueList =
         event.issueIdentifiers.length > 0
           ? event.issueIdentifiers.join(", ")
           : "none";
       const parts: string[] = [
-        `:rotating_light: *SYSTEMIC failure cluster* — signature \`${event.signature}\``,
-        `Class: \`${event.errorClass}\` · ${stageLabel} · ${event.clusterSize} affected issues`,
+        `:rotating_light: *SYSTEMIC failure cluster* — signature ${formatMarkdownInlineCode(
+          event.signature,
+        )}`,
+        `Class: ${formatMarkdownInlineCode(
+          event.errorClass,
+        )} · ${stageLabel} · ${event.clusterSize} affected issues`,
         `Issues: ${issueList}`,
       ];
       if (event.breakerOpened) {
@@ -1211,7 +1226,12 @@ export function formatNotification(
         event.journalSequence !== null
       ) {
         parts.push(
-          `Journal cursor: seq ${event.journalSequence} — \`GET /api/v1/state/delta?since_seq=${Math.max(0, event.journalSequence - 1)}\``,
+          `Journal cursor: seq ${event.journalSequence} — ${formatMarkdownInlineCode(
+            `GET /api/v1/state/delta?since_seq=${Math.max(
+              0,
+              event.journalSequence - 1,
+            )}`,
+          )}`,
         );
       }
       // The raw normalized error text is deliberately omitted here: it can
@@ -1237,7 +1257,12 @@ export function formatNotification(
       if (event.details !== null) {
         // details carries Linear API error bodies — sanitize like every other
         // free-text egress surface (SYMPH-421).
-        parts.push(`Details: \`${sanitizeForSlack(event.details)}\``);
+        const details = sanitizeForSlack(event.details);
+        if (details.includes("\n")) {
+          parts.push("Details:", formatMarkdownCodeBlock(details));
+        } else {
+          parts.push(`Details: ${formatMarkdownInlineCode(details)}`);
+        }
       }
       parts.push(version);
       return { text: parts.join("\n") };
@@ -1255,7 +1280,9 @@ export function formatNotification(
           ? ` (${event.issueIdentifier}, seq ${event.sequence})`
           : "";
       const parts: string[] = [
-        `${emoji} *${label}* — ${event.issueIdentifier} (\`${event.reasonCode}\`) by ${event.actor.kind}@${event.actor.host}${cursor}`,
+        `${emoji} *${label}* — ${event.issueIdentifier} (${formatMarkdownInlineCode(
+          event.reasonCode,
+        )}) by ${event.actor.kind}@${event.actor.host}${cursor}`,
       ];
       if (event.remedy !== null) {
         parts.push(`Remedy: ${event.remedy}`);

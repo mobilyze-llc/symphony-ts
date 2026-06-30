@@ -647,4 +647,27 @@ describe("formatWatchdogTicketBody — no raw error text egress", () => {
     expect(body).not.toContain("Normalized Error Pattern");
     expect(body).toContain("Do NOT auto-release");
   });
+
+  it("escapes backticks in Linear-bound signature and stage inline-code spans", () => {
+    const body = formatWatchdogTicketBody({
+      signature: "abc`1234",
+      errorClass: "permanent",
+      stageName: "impl`ement",
+      observedAt: T0.toISOString(),
+      members: [],
+      journalSequence: 42,
+    });
+
+    expect(body).toContain("signature `abc1234`");
+    expect(body).toContain("**Affected stage:** `implement`");
+    expect(body).toContain("Signature hash: `abc1234`");
+    expect(body).toContain("`GET /api/v1/state/delta?since_seq=41`");
+    // The raw signature/stage values legitimately appear in the hidden
+    // `<!-- watchdog-signature:... -->` dedup marker (HTML comments do not render
+    // and the marker must stay byte-stable for dedup). Scope the no-egress
+    // assertions to the VISIBLE body — i.e. the delimiter-safe inline-code spans.
+    const visibleBody = body.replace(/<!--[\s\S]*?-->/g, "");
+    expect(visibleBody).not.toContain("abc`1234");
+    expect(visibleBody).not.toContain("impl`ement");
+  });
 });

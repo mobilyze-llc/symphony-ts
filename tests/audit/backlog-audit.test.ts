@@ -546,6 +546,33 @@ describe("backlog audit", () => {
     ).toBe(true);
   });
 
+  it("escapes backticks in Linear-bound runtime source inline-code spans", () => {
+    const report = renderBacklogAuditReport({
+      outputPath: "/tmp/audit.md",
+      issueIdentifier: "SYMPH-100",
+      report: {
+        generatedAt: "2026-06-13T00:00:00.000Z",
+        issueCount: 1,
+        runtimeSources: ["/api/v1/`state"],
+        verdict: {
+          summary: "No findings.",
+          findingTypeVolume: {
+            duplicate: 0,
+            supersession: 0,
+            stale: 0,
+            thin_spec: 0,
+            review_dispatch_mismatch: 0,
+            other: 0,
+          },
+          findings: [],
+        },
+      },
+    });
+
+    expect(report).toContain("Runtime sources: `/api/v1/state`");
+    expect(report).not.toContain("/api/v1/`state");
+  });
+
   it("drops cull findings that reference a non-defensive (off-scope) issue", async () => {
     const defensive = {
       ...ISSUE,

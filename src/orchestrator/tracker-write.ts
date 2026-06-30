@@ -2,6 +2,7 @@ import {
   classifyPortfolioIssue,
   upsertPortfolioClassificationBlock,
 } from "../portfolio/classifier.js";
+import { formatMarkdownInlineCode } from "../shared/markdown.js";
 import type { SupervisionFinding } from "./supervision.js";
 
 export interface TrackerIssueWriteRequest {
@@ -296,7 +297,11 @@ function formatTrackerIssueDescription(input: {
 
   if (input.request.boundary.type === "explicit_finding") {
     lines.push(
-      `Dispatcher deterministic supervision surfaced a \`${input.request.boundary.finding.kind}\` finding during the \`${input.request.boundary.phase}\` phase and promoted it into bounded tracker work.`,
+      `Dispatcher deterministic supervision surfaced a ${formatMarkdownInlineCode(
+        input.request.boundary.finding.kind,
+      )} finding during the ${formatMarkdownInlineCode(
+        input.request.boundary.phase,
+      )} phase and promoted it into bounded tracker work.`,
     );
   } else {
     lines.push(
@@ -308,13 +313,15 @@ function formatTrackerIssueDescription(input: {
   if (input.request.boundary.type === "explicit_finding") {
     lines.push(
       `- Boundary: explicit finding / ${input.request.boundary.phase}`,
-      `- Finding: \`${input.request.boundary.finding.kind}\` -> \`${input.request.boundary.finding.action}\``,
+      `- Finding: ${formatMarkdownInlineCode(
+        input.request.boundary.finding.kind,
+      )} -> ${formatMarkdownInlineCode(input.request.boundary.finding.action)}`,
       `- Dispatcher note: ${input.request.boundary.finding.message}`,
     );
     if (input.request.boundary.finding.files.length > 0) {
       lines.push(
         `- Files: ${input.request.boundary.finding.files
-          .map((file) => `\`${file}\``)
+          .map((file) => formatMarkdownInlineCode(file))
           .join(", ")}`,
       );
     }
