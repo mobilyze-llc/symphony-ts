@@ -56,6 +56,12 @@ const MAX_AC_SNAPSHOT_CHARS = 8000;
  * `test` token must end the script name (followed by whitespace or
  * end-of-line) so a distinct npm script like `test:unit` / `test:e2e` — which
  * IS satisfiable locally — is never mistaken for the bare full suite.
+ *
+ * Positional package-manager arguments before `test` (for example
+ * `pnpm --filter pkg test` or `npm -w pkg test`) are intentionally outside
+ * this rewrite: the value may be a monorepo package scope, but it may also be
+ * a focused target, and swallowing arbitrary positional tokens would clobber
+ * locally satisfiable criteria.
  */
 const FULL_SUITE_COMMAND_REGEX =
   /\b(?:pnpm|npm|yarn|bun)(?:\s+-{1,2}[\w-]+)*(?:\s+run)?\s+test(?=\s|$)/i;
@@ -106,6 +112,25 @@ export function rewriteFullSuiteCheckCriteria(section: string): string {
       return `${prefix}${SYMPH_358_CHECK_REWRITE}`;
     })
     .join("\n");
+}
+
+function truncateAcSnapshotToLineBoundary(snapshot: string): string {
+  if (snapshot.length <= MAX_AC_SNAPSHOT_CHARS) {
+    return snapshot;
+  }
+  const bounded = snapshot.slice(0, MAX_AC_SNAPSHOT_CHARS);
+  const lastLineBreak = bounded.lastIndexOf("\n");
+  const firstLineBreak = bounded.indexOf("\n");
+  if (lastLineBreak === -1 || lastLineBreak === firstLineBreak) {
+    return bounded;
+  }
+  return bounded.slice(0, lastLineBreak);
+}
+
+export function normalizeAcceptanceCriteriaSnapshot(section: string): string {
+  return truncateAcSnapshotToLineBoundary(
+    rewriteFullSuiteCheckCriteria(section),
+  );
 }
 
 /**
@@ -171,9 +196,9 @@ export function extractAcceptanceCriteria(
   if (cleanedBody.trim().length === 0) {
     return null;
   }
-  return rewriteFullSuiteCheckCriteria(
+  return normalizeAcceptanceCriteriaSnapshot(
     `${headingLine.trim()}\n${cleanedBody.trim()}`,
-  ).slice(0, MAX_AC_SNAPSHOT_CHARS);
+  );
 }
 
 const VERDICT_SCHEMA = z.object({

@@ -175,6 +175,29 @@ describe("extractAcceptanceCriteria", () => {
     // Non-full-suite criteria pass through untouched.
     expect(snapshot).toContain("- [ ] `check: npx tsc --noEmit exits 0`");
   });
+
+  it("truncates rewrite-expanded snapshots only at complete line boundaries (SYMPH-426)", () => {
+    const fillerCriterion = `- [ ] \`judge: ${"x".repeat(7300)}\``;
+    const fullSuiteCriterion = "- [ ] `check: pnpm test exits 0`";
+    const tailCriterion = `- [ ] \`judge: tail-sentinel ${"y".repeat(520)}\``;
+    const section = [
+      "### Acceptance Criteria",
+      fillerCriterion,
+      fullSuiteCriterion,
+      tailCriterion,
+    ].join("\n");
+
+    expect(section.length).toBeLessThan(8000);
+
+    const snapshot = extractAcceptanceCriteria(section);
+
+    expect(snapshot).not.toBeNull();
+    expect(snapshot?.length).toBeLessThanOrEqual(8000);
+    expect(snapshot).not.toContain("tail-sentinel");
+    const finalLine = snapshot?.split("\n").at(-1);
+    expect(finalLine).toContain("CI check-run success on the PR head SHA");
+    expect(finalLine).toContain("SYMPH-358 / SYMPH-402)");
+  });
 });
 
 describe("runAcGate", () => {
@@ -259,6 +282,15 @@ describe("rewriteFullSuiteCheckCriteria", () => {
       );
       expect(rewritten).not.toContain(command);
       expect(rewritten).toContain("CI check-run success on the PR head SHA");
+    }
+  });
+
+  it("leaves positional package-manager arguments before test untouched (SYMPH-427)", () => {
+    for (const line of [
+      "- [ ] `check: pnpm --filter pkg test exits 0`",
+      "- [ ] `check: npm -w pkg test exits 0`",
+    ]) {
+      expect(rewriteFullSuiteCheckCriteria(line)).toBe(line);
     }
   });
 
