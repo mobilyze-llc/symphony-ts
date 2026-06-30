@@ -5760,7 +5760,7 @@ describe("startRuntimeService shutdown", () => {
     }
   });
 
-  it("shares one candidate fetch across shadow planning and hygiene ticks", async () => {
+  it("runs hygiene before shadow planning and applies audit dispositions to planner candidates (SYMPH-983)", async () => {
     vi.stubEnv("SYMPHONY_QUEUE_AUDIT_BASE_URL", "http://127.0.0.1:43210/v1");
     vi.stubEnv("SYMPHONY_QUEUE_AUDIT_MODEL", "local-audit");
     vi.stubEnv("SYMPHONY_QUEUE_HYGIENE_HEARTBEAT_MS", "900000");
@@ -5780,7 +5780,19 @@ describe("startRuntimeService shutdown", () => {
       identifier: "SYMPH-SHARED",
       title: "Shared candidate",
     });
-    const tracker = createTracker({ candidates: [sharedIssue] });
+    const killedIssue = createIssue({
+      id: "killed-1",
+      identifier: "SYMPH-KILLED",
+      title: "Killed candidate",
+    });
+    const duplicateIssue = createIssue({
+      id: "dup-1",
+      identifier: "SYMPH-DUP",
+      title: "Duplicate candidate",
+    });
+    const tracker = createTracker({
+      candidates: [sharedIssue, killedIssue, duplicateIssue],
+    });
     const entries: StructuredLogEntry[] = [];
     const logger = new StructuredLogger([
       {
@@ -5791,6 +5803,7 @@ describe("startRuntimeService shutdown", () => {
     ]);
     let capturedPrompt = "";
     let hygieneIssues: Issue[] | null = null;
+    const tickOrder: string[] = [];
     const state = {
       running: {},
       resumeRequired: new Set<string>(),
@@ -5825,11 +5838,51 @@ describe("startRuntimeService shutdown", () => {
             OrchestratorRuntimeHost["runBacklogHygieneProposalLane"]
           >[0],
         ) => {
+          tickOrder.push("hygiene");
           hygieneIssues = input.issues;
           return {
             status: "completed",
             report: null,
-            proposals: [],
+            proposals: [
+              {
+                proposalId: "p-kill",
+                findingId: "f-kill",
+                findingType: "supersession",
+                issueIds: [killedIssue.id],
+                issueIdentifiers: [killedIssue.identifier],
+                summary: "Kill replaced work",
+                evidence: "Audit found this work replaced.",
+                confidence: "high",
+                cull: {
+                  classification: "kill",
+                  killReason: "duplicate",
+                  marker: null,
+                  rootIssueIdentifier: null,
+                },
+                codeGroundingStatus: null,
+                codeGroundingEvidence: null,
+                generatedAt: "2026-06-30T00:00:00.000Z",
+                modelTier: "local_low_risk",
+              },
+              {
+                proposalId: "p-dup",
+                findingId: "f-dup",
+                findingType: "duplicate",
+                issueIds: [sharedIssue.id, duplicateIssue.id],
+                issueIdentifiers: [
+                  sharedIssue.identifier,
+                  duplicateIssue.identifier,
+                ],
+                summary: "Duplicate work",
+                evidence: "Audit clustered these tickets.",
+                confidence: "medium",
+                cull: null,
+                codeGroundingStatus: null,
+                codeGroundingEvidence: null,
+                generatedAt: "2026-06-30T00:00:00.000Z",
+                modelTier: "local_low_risk",
+              },
+            ],
             warnings: [],
           };
         },
@@ -5885,11 +5938,12 @@ describe("startRuntimeService shutdown", () => {
       workflowWatcher: null,
       runtimeHost,
       createStandingPlanPlannerRunner: () => async (prompt: string) => {
+        tickOrder.push("planner");
         capturedPrompt = prompt;
         return {
           status: "ok",
           markdown:
-            '# Plan\n```json\n{"rationale":"go","batches":[{"mode":"parallel-isolated","issueIdentifiers":["SYMPH-SHARED"],"rationale":"first"}]}\n```\n',
+            '# Plan\n```json\n{"rationale":"go","batches":[{"mode":"parallel-isolated","issueIdentifiers":["SYMPH-SHARED","SYMPH-KILLED"],"rationale":"first"}]}\n```\n',
         };
       },
     });
@@ -5898,9 +5952,25 @@ describe("startRuntimeService shutdown", () => {
       await vi.waitFor(() => {
         expect(hygieneIssues).not.toBeNull();
         expect(capturedPrompt).toContain("SYMPH-SHARED");
+        expect(
+          entries.some((entry) => entry.event === "queue_triage_shadow_plan"),
+        ).toBe(true);
       });
       expect(tracker.fetchCandidateIssues).toHaveBeenCalledTimes(1);
-      expect(hygieneIssues).toEqual([sharedIssue]);
+      expect(hygieneIssues).toEqual([sharedIssue, killedIssue, duplicateIssue]);
+      expect(tickOrder).toEqual(["hygiene", "planner"]);
+      expect(capturedPrompt).not.toContain("SYMPH-KILLED");
+      expect(capturedPrompt).toContain(
+        "duplicate cluster: SYMPH-SHARED, SYMPH-DUP",
+      );
+      const shadowPlan = entries.find(
+        (entry) => entry.event === "queue_triage_shadow_plan",
+      );
+      expect(shadowPlan?.batches).toEqual([
+        expect.objectContaining({
+          members: ["SYMPH-SHARED"],
+        }),
+      ]);
       expect(capturedPrompt).toContain("## Queue health");
       expect(capturedPrompt).toContain("- Review-round depth: 4");
       expect(tracker.fetchIssuesByStates).toHaveBeenCalledWith(["Triage"]);

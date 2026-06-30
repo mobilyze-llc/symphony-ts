@@ -68,6 +68,12 @@ export interface PlannerCandidate {
    */
   pathHints?: string[];
   /**
+   * Audit-discovered duplicate cluster (SYMPH-983): advisory identifiers from
+   * the hygiene lane so the shadow planner can reason about consolidation
+   * without admitting killed/stale tickets back into a batch.
+   */
+  duplicateClusterIdentifiers?: string[];
+  /**
    * Curated issue comments (SYMPH-874 Tier 3 / SYMPH-896): the richest
    * same-surface signal (file/PR refs, "overlaps with X"), fetched
    * deterministically and noise-filtered/size-capped by `curatePlannerComments`.
@@ -358,6 +364,30 @@ function renderCandidatePathHints(
   return cleaned.length === 0 ? null : cleaned.join(", ");
 }
 
+function renderCandidateDuplicateCluster(
+  duplicateClusterIdentifiers: readonly string[] | undefined,
+): string | null {
+  if (duplicateClusterIdentifiers === undefined) {
+    return null;
+  }
+  const seen = new Set<string>();
+  const cleaned: string[] = [];
+  for (const identifier of duplicateClusterIdentifiers) {
+    const normalized = normalizeTrackerText(
+      identifier,
+      PLANNER_CANDIDATE_TITLE_CHAR_LIMIT,
+    );
+    if (normalized === null || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    cleaned.push(normalized);
+  }
+  return cleaned.length === 0
+    ? null
+    : joinBoundedParts(cleaned, PLANNER_CANDIDATE_LABELS_CHAR_LIMIT);
+}
+
 /**
  * Render a candidate's curated comments as an indented sub-block, or [] when
  * there are none. Each line is one normalized comment, prefixed with a coarse
@@ -499,6 +529,12 @@ export function buildPlannerPrompt(context: PlannerContext): string {
       const pathHints = renderCandidatePathHints(candidate.pathHints);
       if (pathHints !== null) {
         lines.push(`    likely paths: ${pathHints}`);
+      }
+      const duplicateCluster = renderCandidateDuplicateCluster(
+        candidate.duplicateClusterIdentifiers,
+      );
+      if (duplicateCluster !== null) {
+        lines.push(`    duplicate cluster: ${duplicateCluster}`);
       }
       for (const commentLine of renderCandidateComments(candidate.comments)) {
         lines.push(commentLine);

@@ -158,6 +158,16 @@ describe("buildPlannerPrompt", () => {
     expect(prompt).not.toContain("likely paths:");
   });
 
+  it("renders duplicate audit cluster hints inside the candidate block (SYMPH-983)", () => {
+    const ctx = context();
+    const first = ctx.backlog[0];
+    if (first) {
+      first.duplicateClusterIdentifiers = ["SYMPH-1", "SYMPH-2"];
+    }
+    const prompt = buildPlannerPrompt(ctx);
+    expect(prompt).toContain("\n    duplicate cluster: SYMPH-1, SYMPH-2");
+  });
+
   it("renders curated comments inside the candidate block (SYMPH-896)", () => {
     const ctx = context();
     const first = ctx.backlog[0];

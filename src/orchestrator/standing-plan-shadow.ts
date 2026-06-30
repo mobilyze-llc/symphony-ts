@@ -25,6 +25,7 @@ import type {
 import type { Issue } from "../domain/model.js";
 import type { PlanEnvelope, StandingPlan } from "../domain/standing-plan.js";
 import type { LinearIssueComment } from "../tracker/linear-client.js";
+import type { BacklogHygieneProposal } from "./backlog-hygiene.js";
 import { extractGroundingPathHints } from "./code-grounding.js";
 import { loadStandingPlan, recordPlanRevision } from "./standing-plan-store.js";
 
@@ -47,6 +48,7 @@ export interface AssembleShadowPlannerContextInput {
   envelope: PlanEnvelope;
   openPrs?: PlannerPrInfo[];
   recentlyMerged?: PlannerPrInfo[];
+  auditDispositions?: readonly ShadowPlannerAuditDisposition[];
   /**
    * Pre-computed per-queue health (SYMPH-939). Computed by the async caller
    * (runStandingPlanShadowTick) from injected deps and passed into this pure,
@@ -56,14 +58,50 @@ export interface AssembleShadowPlannerContextInput {
   triageHealthInput?: QueueHealth;
 }
 
+export type ShadowPlannerAuditDispositionType = "kill" | "stale" | "duplicate";
+
+export interface ShadowPlannerAuditDisposition {
+  type: ShadowPlannerAuditDispositionType;
+  issueIdentifiers: readonly string[];
+}
+
+export function buildShadowPlannerAuditDispositions(
+  proposals: readonly BacklogHygieneProposal[],
+): ShadowPlannerAuditDisposition[] {
+  const dispositions: ShadowPlannerAuditDisposition[] = [];
+  for (const proposal of proposals) {
+    const issueIdentifiers = uniqueNonBlankIdentifiers(
+      proposal.issueIdentifiers,
+    );
+    if (issueIdentifiers.length === 0) {
+      continue;
+    }
+    if (proposal.cull?.classification === "kill") {
+      dispositions.push({ type: "kill", issueIdentifiers });
+      continue;
+    }
+    if (proposal.findingType === "stale") {
+      dispositions.push({ type: "stale", issueIdentifiers });
+      continue;
+    }
+    if (proposal.findingType === "duplicate") {
+      dispositions.push({ type: "duplicate", issueIdentifiers });
+    }
+  }
+  return dispositions;
+}
+
 export function assembleShadowPlannerContext(
   input: AssembleShadowPlannerContextInput,
 ): PlannerContext {
   const inFlightIdentifiers = new Set(
     input.inFlight.map((entry) => entry.issueIdentifier),
   );
+  const { excludedIdentifiers, duplicateClustersByIdentifier } =
+    buildAuditDispositionIndex(input.auditDispositions ?? []);
   const backlog = input.candidates
     .filter((issue) => !inFlightIdentifiers.has(issue.identifier))
+    .filter((issue) => !excludedIdentifiers.has(issue.identifier))
     .map((issue) => ({
       issueId: issue.id,
       issueIdentifier: issue.identifier,
@@ -91,6 +129,12 @@ export function assembleShadowPlannerContext(
           )
           .join("\n"),
       ),
+      ...(duplicateClustersByIdentifier.has(issue.identifier)
+        ? {
+            duplicateClusterIdentifiers:
+              duplicateClustersByIdentifier.get(issue.identifier) ?? [],
+          }
+        : {}),
     }));
   return {
     backlog,
@@ -102,6 +146,50 @@ export function assembleShadowPlannerContext(
       ? {}
       : { health: input.triageHealthInput }),
   };
+}
+
+function buildAuditDispositionIndex(
+  dispositions: readonly ShadowPlannerAuditDisposition[],
+): {
+  excludedIdentifiers: Set<string>;
+  duplicateClustersByIdentifier: Map<string, string[]>;
+} {
+  const excludedIdentifiers = new Set<string>();
+  const duplicateClustersByIdentifier = new Map<string, string[]>();
+  for (const disposition of dispositions) {
+    const identifiers = uniqueNonBlankIdentifiers(disposition.issueIdentifiers);
+    if (identifiers.length === 0) {
+      continue;
+    }
+    if (disposition.type === "kill" || disposition.type === "stale") {
+      for (const identifier of identifiers) {
+        excludedIdentifiers.add(identifier);
+      }
+      continue;
+    }
+    for (const identifier of identifiers) {
+      const existing = duplicateClustersByIdentifier.get(identifier) ?? [];
+      duplicateClustersByIdentifier.set(
+        identifier,
+        uniqueNonBlankIdentifiers([...existing, ...identifiers]),
+      );
+    }
+  }
+  return { excludedIdentifiers, duplicateClustersByIdentifier };
+}
+
+function uniqueNonBlankIdentifiers(identifiers: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const identifier of identifiers) {
+    const normalized = identifier.trim();
+    if (normalized === "" || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    unique.push(normalized);
+  }
+  return unique;
 }
 
 // ---------------------------------------------------------------------------
@@ -478,6 +566,7 @@ export interface StandingPlanShadowTickDeps {
   getReviewRoundDepth?: () => Promise<number | null>;
   /** Read hot-file growth (bound thunk over the git-churn reader); null on any read failure. */
   getHotFileGrowth?: () => Promise<HotFileGrowth | null>;
+  auditDispositions?: readonly ShadowPlannerAuditDisposition[];
   /**
    * Bypass the heartbeat cadence and re-plan now (SYMPH-787/789): a re-plan
    * trigger predicate tripped, or an operator modify_plan intent landed.
@@ -598,6 +687,9 @@ export async function runStandingPlanShadowTick(
       candidates,
       inFlight: deps.getInFlight(),
       envelope: config.envelope,
+      ...(deps.auditDispositions === undefined
+        ? {}
+        : { auditDispositions: deps.auditDispositions }),
       ...(health === undefined ? {} : { triageHealthInput: health }),
     });
     // Curated-comment enrichment (SYMPH-896): default-off; when an operator opts
