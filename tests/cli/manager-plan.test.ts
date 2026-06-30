@@ -9,6 +9,7 @@ import {
   DEFAULT_MANAGER_PLAN_IN_FLIGHT_STATES,
   MANAGER_PLAN_RUNTIME_STATE_BASE_URL_ENV,
   type ManagerPlanCandidateQuery,
+  type ManagerPlanCliDependencies,
   ManagerPlanCliUsageError,
   parseManagerPlanCliArgs,
   runManagerPlanCli,
@@ -165,6 +166,21 @@ describe("parseManagerPlanCliArgs", () => {
     expect(opts.commentEnrichment).toBe(false);
   });
 
+  it("parses gh PR context and opt-in persistence controls (SYMPH-838)", () => {
+    const opts = parseManagerPlanCliArgs([
+      "--team",
+      "MOB",
+      "--gh-pr-context",
+      "--github-repo",
+      "mobilyze-llc/symphony-ts",
+      "--persist",
+    ]);
+
+    expect(opts.ghPrContext).toBe(true);
+    expect(opts.githubRepo).toBe("mobilyze-llc/symphony-ts");
+    expect(opts.persist).toBe(true);
+  });
+
   it("parses --out-dir for controller-side prompt evidence artifacts (SYMPH-961)", () => {
     const opts = parseManagerPlanCliArgs([
       "--project",
@@ -267,6 +283,37 @@ describe("runManagerPlanCli", () => {
     expect(seen[0]?.teamKeys).toEqual([]);
     expect(seen[0]?.projectSlug).toBe("abc123");
     expect(seen[0]?.initiative).toBeNull();
+  });
+
+  it("resolves --project name-or-slug to slugId before loading candidates (SYMPH-838)", async () => {
+    const { io } = captureIo();
+    const seen: ManagerPlanCandidateQuery[] = [];
+    const code = await runManagerPlanCli(
+      [
+        "--project",
+        "Runtime Operations & Admission Safety",
+        "--state",
+        "Backlog",
+        "--prompt-only",
+      ],
+      {
+        io,
+        env: {},
+        resolveProjectSlug: async (input) => ({
+          id: "project-1",
+          name: input.project,
+          slugId: "runtime-ops",
+        }),
+        loadCandidates: async (input) => {
+          seen.push(input);
+          return [issue("u1", "MOB-1")];
+        },
+        createPlannerRunner: okRunner,
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(seen[0]?.projectSlug).toBe("runtime-ops");
   });
 
   it("accepts --initiative alone and passes it to the loader (SYMPH-858)", async () => {
@@ -472,6 +519,65 @@ describe("runManagerPlanCli", () => {
     expect(out()).toContain("Parked decision");
   });
 
+  it("--gh-pr-context includes gh-sourced open and recently merged PRs in the planner prompt (SYMPH-838)", async () => {
+    const { io, out } = captureIo();
+    const code = await runManagerPlanCli(
+      [
+        "--team",
+        "MOB",
+        "--state",
+        "Backlog",
+        "--prompt-only",
+        "--gh-pr-context",
+        "--github-repo",
+        "mobilyze-llc/symphony-ts",
+      ],
+      {
+        io,
+        env: {},
+        loadCandidates: async () => [issue("u1", "MOB-1")],
+        loadPrContext: async (query) => {
+          expect(query.repo).toBe("mobilyze-llc/symphony-ts");
+          return {
+            openPrs: [
+              { issueIdentifier: "MOB-9", prNumber: 99, title: "Open PR" },
+            ],
+            recentlyMerged: [
+              {
+                issueIdentifier: "MOB-8",
+                prNumber: 98,
+                title: "Merged PR",
+              },
+            ],
+          };
+        },
+        createPlannerRunner: okRunner,
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(out()).toContain("## Open PRs");
+    expect(out()).toContain("- MOB-9 #99 Open PR");
+    expect(out()).toContain("## Recently merged (context)");
+    expect(out()).toContain("- MOB-8 #98 Merged PR");
+  });
+
+  it("--gh-pr-context requires a repo slug from flag or environment (SYMPH-838)", async () => {
+    const { io, err } = captureIo();
+    const code = await runManagerPlanCli(
+      ["--team", "MOB", "--state", "Backlog", "--gh-pr-context"],
+      {
+        io,
+        env: {},
+        loadCandidates: async () => [issue("u1", "MOB-1")],
+        createPlannerRunner: okRunner,
+      },
+    );
+
+    expect(code).toBe(1);
+    expect(err()).toContain("--gh-pr-context requires");
+  });
+
   it("prefers runtime-state in-flight over the Linear state fallback (SYMPH-961)", async () => {
     const { io, out } = captureIo();
     const fallbackLoadInFlight = vi.fn(async () => [
@@ -639,6 +745,86 @@ describe("runManagerPlanCli", () => {
     expect(prompts).toHaveLength(1);
     expect(out()).toContain("MOB-1");
     expect(out().toLowerCase()).toContain("batch");
+  });
+
+  it("does not persist by default and persists only with --persist (SYMPH-838)", async () => {
+    const { io, out } = captureIo();
+    const outDir = await mkdtemp(join(tmpdir(), "manager-plan-persist-"));
+    const persistPlanRevision = vi.fn<
+      NonNullable<ManagerPlanCliDependencies["persistPlanRevision"]>
+    >(async (_workspaceRoot, body, options) => ({
+      recorded: true,
+      plan: {
+        planId: options.planId,
+        revision: 1,
+        contentHash: "hash",
+        envelope: body.envelope,
+        batches: body.batches,
+        options: body.options,
+        rationale: body.rationale,
+        createdAt: options.createdAt,
+        updatedAt: options.createdAt,
+      },
+    }));
+    try {
+      const previewCode = await runManagerPlanCli(
+        ["--team", "MOB", "--state", "Backlog"],
+        {
+          io,
+          env: {},
+          loadCandidates: async () => [issue("u1", "MOB-1")],
+          createPlannerRunner: okRunner,
+          persistPlanRevision,
+        },
+      );
+      expect(previewCode).toBe(0);
+      expect(persistPlanRevision).not.toHaveBeenCalled();
+
+      const persistCode = await runManagerPlanCli(
+        [
+          "--team",
+          "MOB",
+          "--state",
+          "Backlog",
+          "--out-dir",
+          outDir,
+          "--persist",
+        ],
+        {
+          io,
+          env: {},
+          loadCandidates: async () => [issue("u1", "MOB-1")],
+          createPlannerRunner: okRunner,
+          persistPlanRevision,
+          now: () => new Date("2026-06-30T13:15:03.000Z"),
+        },
+      );
+
+      expect(persistCode).toBe(0);
+      expect(persistPlanRevision).toHaveBeenCalledTimes(1);
+      expect(persistPlanRevision.mock.calls[0]?.[0]).toBe(
+        join(outDir, "manager-plan-store"),
+      );
+      expect(out()).toContain("Persisted revision 1");
+    } finally {
+      await rm(outDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects --persist with --prompt-only because no plan revision exists (SYMPH-838)", async () => {
+    const { io, err } = captureIo();
+    const code = await runManagerPlanCli(
+      ["--team", "MOB", "--prompt-only", "--persist"],
+      {
+        io,
+        env: {},
+        loadCandidates: async () => [issue("u1", "MOB-1")],
+        createPlannerRunner: okRunner,
+      },
+    );
+
+    expect(code).toBe(1);
+    expect(err()).toContain("--persist cannot be combined");
   });
 
   it("renders execution waves from the plan's dependency edges (SYMPH-843)", async () => {

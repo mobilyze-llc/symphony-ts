@@ -230,6 +230,26 @@ export const LINEAR_CANDIDATE_ISSUES_BY_SCOPE_QUERY = `
   }
 `.trim();
 
+export const LINEAR_PROJECTS_BY_NAME_OR_SLUG_QUERY = `
+  query SymphonyProjectsByNameOrSlug($reference: String!, $first: Int!) {
+    projects(
+      first: $first
+      filter: {
+        or: [
+          { slugId: { eq: $reference } }
+          { name: { eq: $reference } }
+        ]
+      }
+    ) {
+      nodes {
+        id
+        slugId
+        name
+      }
+    }
+  }
+`.trim();
+
 /** Canonical 8-4-4-4-12 UUID, case-insensitive (Linear initiative ids). */
 const INITIATIVE_UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

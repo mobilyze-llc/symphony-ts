@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 
+import { execFile } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import {
   type PlannerContext,
@@ -31,13 +33,19 @@ import {
   resolveStandingPlanEnvelope,
 } from "../domain/standing-plan.js";
 import {
+  STANDING_PLAN_ID,
   assembleShadowPlannerContext,
   enrichPlannerContextWithComments,
 } from "../orchestrator/standing-plan-shadow.js";
+import {
+  type RecordPlanRevisionResult,
+  recordPlanRevision,
+} from "../orchestrator/standing-plan-store.js";
 import type { PlanBody } from "../orchestrator/standing-plan-supersession.js";
 import { partitionPortfolioEligibleIssues } from "../portfolio/eligibility.js";
 import {
   type LinearIssueComment,
+  type LinearProjectReference,
   LinearTrackerClient,
 } from "../tracker/linear-client.js";
 
@@ -64,7 +72,11 @@ export const DEFAULT_MANAGER_PLAN_IN_FLIGHT_STATES = [
 ] as const;
 export const MANAGER_PLAN_RUNTIME_STATE_BASE_URL_ENV =
   "SYMPHONY_MANAGER_PLAN_RUNTIME_STATE_BASE_URL";
+export const MANAGER_PLAN_GITHUB_REPO_ENV = "GITHUB_REPOSITORY";
+export const MANAGER_PLAN_REPO_URL_ENV = "REPO_URL";
 const MANAGER_PLAN_RUNTIME_STATE_FETCH_TIMEOUT_MS = 10_000;
+const MANAGER_PLAN_RECENTLY_MERGED_LIMIT = 20;
+const execFileAsync = promisify(execFile);
 
 export const MANAGER_PLAN_EXIT = {
   ok: 0,
@@ -90,6 +102,9 @@ export interface ManagerPlanCliOptions {
   runtimeStateBaseUrl: string | null;
   inFlightStates: string[];
   commentEnrichment: boolean;
+  ghPrContext: boolean;
+  githubRepo: string | null;
+  persist: boolean;
   promptOnly: boolean;
   json: boolean;
   noCanary: boolean;
@@ -112,6 +127,29 @@ export interface ManagerPlanCandidateQuery {
   pageSize: number | null;
 }
 
+export interface ManagerPlanProjectResolutionQuery {
+  endpoint: string;
+  apiKey: string | null;
+  project: string;
+  pageSize: number | null;
+}
+
+export interface ManagerPlanPrContextQuery {
+  repo: string;
+  recentlyMergedLimit: number;
+}
+
+export interface ManagerPlanPrContext {
+  openPrs: PlannerContext["openPrs"];
+  recentlyMerged: PlannerContext["recentlyMerged"];
+}
+
+interface ManagerPlanPersistenceSummary {
+  workspaceRoot: string;
+  recorded: boolean;
+  revision: number;
+}
+
 export interface ManagerPlanPlannerRunnerInput {
   model: string;
   artifactDir: string;
@@ -124,6 +162,20 @@ export type CreateManagerPlanPlannerRunner = (
 export interface ManagerPlanCliDependencies {
   env?: NodeJS.ProcessEnv;
   io?: ManagerPlanCliIo;
+  /** Defaults to a standalone LinearTrackerClient; injected in tests. */
+  resolveProjectSlug?: (
+    query: ManagerPlanProjectResolutionQuery,
+  ) => Promise<LinearProjectReference>;
+  /** Defaults to GitHub CLI when --gh-pr-context is set; injected in tests. */
+  loadPrContext?: (
+    query: ManagerPlanPrContextQuery,
+  ) => Promise<ManagerPlanPrContext>;
+  /** Defaults to the standing-plan journal under the isolated artifact store. */
+  persistPlanRevision?: (
+    workspaceRoot: string,
+    body: PlanBody,
+    options: { createdAt: string; planId: string },
+  ) => Promise<RecordPlanRevisionResult>;
   /** Defaults to a standalone LinearTrackerClient; injected in tests. */
   loadCandidates?: (query: ManagerPlanCandidateQuery) => Promise<Issue[]>;
   /** Defaults to a standalone LinearTrackerClient; injected in tests. */
@@ -163,6 +215,9 @@ export function parseManagerPlanCliArgs(
   let runtimeStateBaseUrl: string | null = null;
   const inFlightStates: string[] = [];
   let commentEnrichment = true;
+  let ghPrContext = false;
+  let githubRepo: string | null = null;
+  let persist = false;
   let promptOnly = false;
   let json = false;
   let noCanary = false;
@@ -192,6 +247,14 @@ export function parseManagerPlanCliArgs(
     }
     if (token === "--no-comment-enrichment") {
       commentEnrichment = false;
+      continue;
+    }
+    if (token === "--gh-pr-context") {
+      ghPrContext = true;
+      continue;
+    }
+    if (token === "--persist") {
+      persist = true;
       continue;
     }
 
@@ -240,6 +303,9 @@ export function parseManagerPlanCliArgs(
       case "--runtime-state-base-url":
         runtimeStateBaseUrl = readValue("--runtime-state-base-url");
         break;
+      case "--github-repo":
+        githubRepo = readValue("--github-repo");
+        break;
       case "--in-flight-state":
         inFlightStates.push(readValue("--in-flight-state"));
         break;
@@ -272,6 +338,9 @@ export function parseManagerPlanCliArgs(
     runtimeStateBaseUrl,
     inFlightStates,
     commentEnrichment,
+    ghPrContext,
+    githubRepo,
+    persist,
     promptOnly,
     json,
     noCanary,
@@ -307,7 +376,7 @@ export async function runManagerPlanCli(
   // at least one is required. --team-only stays exactly as before.
   const teamKeys =
     options.team !== null && options.team.trim() !== "" ? [options.team] : [];
-  const projectSlug =
+  let projectSlug =
     options.project !== null && options.project.trim() !== ""
       ? options.project
       : null;
@@ -317,7 +386,7 @@ export async function runManagerPlanCli(
       : null;
   if (teamKeys.length === 0 && projectSlug === null && initiative === null) {
     io.stderr(
-      `Provide at least one scope: --team <KEY>, --project <slugId>, or --initiative <name|uuid>.\n${renderUsage()}`,
+      `Provide at least one scope: --team <KEY>, --project <name-or-slugId>, or --initiative <name|uuid>.\n${renderUsage()}`,
     );
     return MANAGER_PLAN_EXIT.usage;
   }
@@ -329,6 +398,16 @@ export async function runManagerPlanCli(
     io.stderr(`--out-dir must be non-empty.\n${renderUsage()}`);
     return MANAGER_PLAN_EXIT.usage;
   }
+  if (options.githubRepo !== null && options.githubRepo.trim() === "") {
+    io.stderr(`--github-repo must be non-empty.\n${renderUsage()}`);
+    return MANAGER_PLAN_EXIT.usage;
+  }
+  if (options.persist && options.promptOnly) {
+    io.stderr(
+      `--persist cannot be combined with --prompt-only.\n${renderUsage()}`,
+    );
+    return MANAGER_PLAN_EXIT.usage;
+  }
   const rawRuntimeStateBaseUrl =
     options.runtimeStateBaseUrl ??
     env[MANAGER_PLAN_RUNTIME_STATE_BASE_URL_ENV] ??
@@ -337,6 +416,15 @@ export async function runManagerPlanCli(
     rawRuntimeStateBaseUrl === null ? null : rawRuntimeStateBaseUrl.trim();
   if (runtimeStateBaseUrl !== null && runtimeStateBaseUrl === "") {
     io.stderr(`--runtime-state-base-url must be non-empty.\n${renderUsage()}`);
+    return MANAGER_PLAN_EXIT.usage;
+  }
+  const githubRepo = options.ghPrContext
+    ? resolveManagerPlanRepoSlug(options.githubRepo, env)
+    : null;
+  if (options.ghPrContext && githubRepo === null) {
+    io.stderr(
+      `--gh-pr-context requires --github-repo <OWNER/REPO> or ${MANAGER_PLAN_GITHUB_REPO_ENV}/${MANAGER_PLAN_REPO_URL_ENV}.\n${renderUsage()}`,
+    );
     return MANAGER_PLAN_EXIT.usage;
   }
 
@@ -370,6 +458,29 @@ export async function runManagerPlanCli(
       "Missing LINEAR_API_KEY in the environment (required to read the backlog).\n",
     );
     return MANAGER_PLAN_EXIT.usage;
+  }
+
+  if (projectSlug !== null) {
+    const resolveProjectSlug =
+      dependencies.resolveProjectSlug ??
+      (dependencies.loadCandidates === undefined
+        ? defaultResolveProjectSlug
+        : null);
+    if (resolveProjectSlug !== null) {
+      try {
+        projectSlug = (
+          await resolveProjectSlug({
+            endpoint,
+            apiKey,
+            project: projectSlug,
+            pageSize: options.pageSize,
+          })
+        ).slugId;
+      } catch (error) {
+        io.stderr(`Failed to resolve project: ${formatError(error)}\n`);
+        return MANAGER_PLAN_EXIT.loadFailed;
+      }
+    }
   }
 
   const loadCandidates = dependencies.loadCandidates ?? defaultLoadCandidates;
@@ -436,6 +547,32 @@ export async function runManagerPlanCli(
     inFlight,
     envelope,
   });
+
+  if (options.ghPrContext) {
+    const repo = githubRepo;
+    if (repo === null) {
+      io.stderr(
+        `--gh-pr-context requires --github-repo <OWNER/REPO> or ${MANAGER_PLAN_GITHUB_REPO_ENV}/${MANAGER_PLAN_REPO_URL_ENV}.\n${renderUsage()}`,
+      );
+      return MANAGER_PLAN_EXIT.usage;
+    }
+    const loadPrContext = dependencies.loadPrContext ?? defaultLoadPrContext;
+    try {
+      const prContext = await loadPrContext({
+        repo,
+        recentlyMergedLimit: MANAGER_PLAN_RECENTLY_MERGED_LIMIT,
+      });
+      context = {
+        ...context,
+        openPrs: prContext.openPrs,
+        recentlyMerged: prContext.recentlyMerged,
+      };
+    } catch (error) {
+      io.stderr(`Failed to load GitHub PR context: ${formatError(error)}\n`);
+      return MANAGER_PLAN_EXIT.loadFailed;
+    }
+  }
+
   const fetchIssueComments =
     dependencies.fetchIssueComments ??
     (dependencies.loadCandidates === undefined
@@ -490,9 +627,10 @@ export async function runManagerPlanCli(
 
   const createPlannerRunner =
     dependencies.createPlannerRunner ?? defaultCreatePlannerRunner(now);
+  const artifactDir = options.outDir ?? defaultArtifactDir(now);
   const runClaude = createPlannerRunner({
     model: options.model,
-    artifactDir: options.outDir ?? defaultArtifactDir(now),
+    artifactDir,
   });
 
   const result = await runTriagePlanner(context, { runClaude });
@@ -508,10 +646,31 @@ export async function runManagerPlanCli(
     return MANAGER_PLAN_EXIT.invalid;
   }
 
+  let persistence: ManagerPlanPersistenceSummary | null = null;
+  if (options.persist) {
+    const persistPlanRevision =
+      dependencies.persistPlanRevision ?? recordPlanRevision;
+    const persistRoot = join(artifactDir, "manager-plan-store");
+    try {
+      const record = await persistPlanRevision(persistRoot, result.body, {
+        createdAt: now().toISOString(),
+        planId: STANDING_PLAN_ID,
+      });
+      persistence = {
+        workspaceRoot: persistRoot,
+        recorded: record.recorded,
+        revision: record.plan.revision,
+      };
+    } catch (error) {
+      io.stderr(`Failed to persist plan revision: ${formatError(error)}\n`);
+      return MANAGER_PLAN_EXIT.loadFailed;
+    }
+  }
+
   io.stdout(
     options.json
-      ? `${renderPlanJson(options, portfolioPartition.eligible.length, result.body, portfolioPartition.held.length)}\n`
-      : `${renderPlanHuman(options, portfolioPartition.eligible.length, result.body, portfolioPartition.held.length)}\n`,
+      ? `${renderPlanJson(options, portfolioPartition.eligible.length, result.body, portfolioPartition.held.length, persistence)}\n`
+      : `${renderPlanHuman(options, portfolioPartition.eligible.length, result.body, portfolioPartition.held.length, persistence)}\n`,
   );
   return MANAGER_PLAN_EXIT.ok;
 }
@@ -536,6 +695,7 @@ function renderPlanJson(
   candidateCount: number,
   body: PlanBody,
   portfolioHeldCount = 0,
+  persistence: ManagerPlanPersistenceSummary | null = null,
 ): string {
   return JSON.stringify(
     {
@@ -556,6 +716,7 @@ function renderPlanJson(
         body.dependencyEdges,
       ),
       options: body.options,
+      persistence,
     },
     null,
     2,
@@ -567,6 +728,7 @@ function renderPlanHuman(
   candidateCount: number,
   body: PlanBody,
   portfolioHeldCount = 0,
+  persistence: ManagerPlanPersistenceSummary | null = null,
 ): string {
   const lines: string[] = [];
   lines.push(
@@ -632,7 +794,27 @@ function renderPlanHuman(
       lines.push(`  ${option.marker} ${option.label}`);
     }
   }
+  if (persistence !== null) {
+    lines.push("");
+    lines.push(
+      `Persisted revision ${persistence.revision} (${persistence.recorded ? "recorded" : "unchanged"}) to ${persistence.workspaceRoot}.`,
+    );
+  }
   return lines.join("\n");
+}
+
+async function defaultResolveProjectSlug(
+  query: ManagerPlanProjectResolutionQuery,
+): Promise<LinearProjectReference> {
+  const client = new LinearTrackerClient({
+    endpoint: query.endpoint,
+    apiKey: query.apiKey,
+    projectSlug: null,
+    teamKeys: [],
+    activeStates: [],
+    ...(query.pageSize === null ? {} : { pageSize: query.pageSize }),
+  });
+  return client.resolveProjectSlug(query.project);
 }
 
 async function defaultLoadCandidates(
@@ -669,6 +851,90 @@ async function defaultLoadRuntimeInFlight(
   }
   const payload = (await response.json()) as unknown;
   return parseRuntimeInFlight(payload);
+}
+
+async function defaultLoadPrContext(
+  query: ManagerPlanPrContextQuery,
+): Promise<ManagerPlanPrContext> {
+  const { stdout } = await execFileAsync(
+    "gh",
+    [
+      "pr",
+      "list",
+      "--repo",
+      query.repo,
+      "--json",
+      "number,title,state,mergedAt,headRefName",
+      "--limit",
+      "100",
+      "--state",
+      "all",
+    ],
+    {
+      encoding: "utf8",
+      maxBuffer: 2 * 1024 * 1024,
+      timeout: 15_000,
+    },
+  );
+  return parseGhPrContext(String(stdout), query.recentlyMergedLimit);
+}
+
+interface GhPrListItem {
+  number?: unknown;
+  title?: unknown;
+  state?: unknown;
+  mergedAt?: unknown;
+  headRefName?: unknown;
+}
+
+function parseGhPrContext(
+  stdout: string,
+  recentlyMergedLimit: number,
+): ManagerPlanPrContext {
+  const parsed = JSON.parse(stdout) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new Error("gh pr list returned a non-array JSON payload.");
+  }
+
+  const openPrs: PlannerContext["openPrs"] = [];
+  const merged: Array<
+    PlannerContext["recentlyMerged"][number] & { mergedAt: string }
+  > = [];
+  for (const item of parsed) {
+    const pr = item as GhPrListItem;
+    if (typeof pr.number !== "number" || !Number.isInteger(pr.number)) {
+      continue;
+    }
+    const title = typeof pr.title === "string" ? pr.title : "";
+    const headRefName =
+      typeof pr.headRefName === "string" ? pr.headRefName : "";
+    const issueIdentifier =
+      extractIssueIdentifier(`${title} ${headRefName}`) ?? `PR-${pr.number}`;
+    const info = {
+      issueIdentifier,
+      prNumber: pr.number,
+      title,
+    };
+    if (pr.state === "MERGED" && typeof pr.mergedAt === "string") {
+      merged.push({ ...info, mergedAt: pr.mergedAt });
+    } else if (pr.state === "OPEN") {
+      openPrs.push(info);
+    }
+  }
+
+  merged.sort((left, right) => right.mergedAt.localeCompare(left.mergedAt));
+  return {
+    openPrs,
+    recentlyMerged: merged.slice(0, recentlyMergedLimit).map((pr) => ({
+      issueIdentifier: pr.issueIdentifier,
+      prNumber: pr.prNumber,
+      title: pr.title,
+    })),
+  };
+}
+
+function extractIssueIdentifier(value: string): string | null {
+  return /\b[A-Z][A-Z0-9]+-\d+\b/.exec(value)?.[0] ?? null;
 }
 
 function parseRuntimeInFlight(payload: unknown): PlannerInFlight[] {
@@ -711,6 +977,25 @@ function readRuntimeString(value: unknown): string | null {
 
 function trimTrailingSlash(value: string): string {
   return value.replace(/\/+$/, "");
+}
+
+function resolveManagerPlanRepoSlug(
+  explicit: string | null,
+  env: NodeJS.ProcessEnv,
+): string | null {
+  const raw =
+    explicit !== null && explicit.trim() !== ""
+      ? explicit
+      : (env[MANAGER_PLAN_GITHUB_REPO_ENV] ?? env[MANAGER_PLAN_REPO_URL_ENV]);
+  if (raw === undefined || raw.trim() === "") {
+    return null;
+  }
+  const trimmed = raw.trim();
+  return trimmed
+    .replace(/^https?:\/\/github\.com\//, "")
+    .replace(/^git@github\.com:/, "")
+    .replace(/\.git$/, "")
+    .replace(/\/+$/, "");
 }
 
 async function writeManagerPlanPromptArtifact(
@@ -764,16 +1049,17 @@ function stamp(now: () => Date): string {
 
 export function renderUsage(): string {
   return [
-    "Usage: symphony-manager-plan (--team <KEY> | --project <slugId> | --initiative <name|uuid>)... [--state <name>...] [options]",
+    "Usage: symphony-manager-plan (--team <KEY> | --project <name-or-slugId> | --initiative <name|uuid>)... [--state <name>...] [options]",
     "",
     "Run the Queue Triage v2 backlog Manager (planner) ONE-SHOT against the scoped",
     "eligible backlog and print the suggested batch plan. Output-only: it spends one",
     "Opus planner pass unless --prompt-only, and writes NOTHING to Linear,",
-    "the live standing-plan store, or dispatch.",
+    "the live standing-plan store, or dispatch. --persist writes only to an isolated",
+    "manager-plan store under this run's artifact directory.",
     "",
     "Scope (provide at least one; additive — combine them to narrow):",
     "  --team <KEY>                 Linear team key whose backlog to plan (e.g. MOB)",
-    "  --project <slugId>           Linear project slugId to scope candidates to",
+    "  --project <name-or-slugId>   Linear project name or slugId to scope candidates to",
     "  --initiative <name|uuid>     Linear initiative (UUID matches by id, else by name)",
     "",
     "Options:",
@@ -789,6 +1075,9 @@ export function renderUsage(): string {
     "                               Runtime host base URL for live in-flight issues (GET /api/v1/state)",
     "  --in-flight-state <name>     Linear fallback in-flight state (repeatable; defaults In Progress, In Review, Resume)",
     "  --no-comment-enrichment      Disable curated comment enrichment in the planner prompt",
+    "  --gh-pr-context              Source open/recently merged PR context from gh",
+    "  --github-repo <OWNER/REPO>   GitHub repo for --gh-pr-context",
+    "  --persist                    Persist the plan revision to an isolated artifact store",
     "  --prompt-only                Print the assembled planner prompt and exit (no Opus pass)",
     "  --json                       Emit the plan as JSON",
     "  --help                       Show this help text",
@@ -796,6 +1085,8 @@ export function renderUsage(): string {
     "Environment:",
     "  LINEAR_API_KEY               Required (reads the backlog)",
     "  LINEAR_ENDPOINT              Optional override of the Linear GraphQL endpoint",
+    `  ${MANAGER_PLAN_GITHUB_REPO_ENV}          Optional OWNER/REPO fallback for --gh-pr-context`,
+    `  ${MANAGER_PLAN_REPO_URL_ENV}                  Optional Git remote URL fallback for --gh-pr-context`,
     `  ${MANAGER_PLAN_RUNTIME_STATE_BASE_URL_ENV}`,
     "                               Optional runtime host base URL for live in-flight issues",
     "",

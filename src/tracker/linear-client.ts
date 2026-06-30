@@ -34,6 +34,7 @@ import {
   LINEAR_OPEN_ISSUES_BY_LABELS_BY_TEAMS_QUERY,
   LINEAR_OPEN_ISSUES_BY_LABELS_QUERY,
   LINEAR_OPEN_ISSUES_BY_TITLE_QUERY,
+  LINEAR_PROJECTS_BY_NAME_OR_SLUG_QUERY,
   LINEAR_SEARCH_ISSUES_BY_TITLE_AND_TEAM_QUERY,
   LINEAR_SEARCH_ISSUES_BY_TITLE_MARKER_AND_TEAM_QUERY,
   LINEAR_TICKET_FEATURE_ISSUES_BY_TEAMS_QUERY,
@@ -148,6 +149,18 @@ export interface LinearIssueComment {
   updatedAt: string;
   user: TicketFeatureActor | null;
   botActor: TicketFeatureActor | null;
+}
+
+export interface LinearProjectReference {
+  id: string;
+  slugId: string;
+  name: string;
+}
+
+interface LinearProjectsByNameOrSlugData {
+  projects?: {
+    nodes?: unknown;
+  };
 }
 
 interface LinearIssueCreateData {
@@ -376,6 +389,69 @@ export class LinearTrackerClient implements IssueTracker {
       first: this.pageSize,
       relationFirst: this.pageSize,
     });
+  }
+
+  /**
+   * Resolve a human project reference accepted by the manual manager-plan CLI to
+   * Linear's slugId, which is what the candidate issue filter consumes. Exact
+   * slugId and exact name matches are accepted; ambiguous names fail closed.
+   */
+  async resolveProjectSlug(reference: string): Promise<LinearProjectReference> {
+    const trimmed = reference.trim();
+    if (trimmed === "") {
+      throw new TrackerError(
+        ERROR_CODES.linearUnknownPayload,
+        "Linear project reference must be non-empty.",
+      );
+    }
+
+    const response = await this.postGraphql<LinearProjectsByNameOrSlugData>(
+      LINEAR_PROJECTS_BY_NAME_OR_SLUG_QUERY,
+      {
+        reference: trimmed,
+        first: this.pageSize,
+      },
+    );
+    const nodes = response.projects?.nodes;
+    if (!Array.isArray(nodes)) {
+      throw new TrackerError(
+        ERROR_CODES.linearUnknownPayload,
+        "Linear project lookup payload was missing projects.nodes.",
+        { details: response },
+      );
+    }
+
+    const matches = nodes
+      .map(normalizeLinearProjectReference)
+      .filter((project): project is LinearProjectReference => project !== null)
+      .filter(
+        (project) => project.slugId === trimmed || project.name === trimmed,
+      );
+    if (matches.length === 0) {
+      throw new TrackerError(
+        ERROR_CODES.linearUnknownPayload,
+        `No Linear project matched "${trimmed}" by name or slugId.`,
+        { details: response },
+      );
+    }
+    const slugMatches = matches.filter((project) => project.slugId === trimmed);
+    const candidates = slugMatches.length > 0 ? slugMatches : matches;
+    if (candidates.length > 1) {
+      throw new TrackerError(
+        ERROR_CODES.linearUnknownPayload,
+        `Linear project reference "${trimmed}" matched multiple projects.`,
+        { details: candidates },
+      );
+    }
+    const [project] = candidates;
+    if (project === undefined) {
+      throw new TrackerError(
+        ERROR_CODES.linearUnknownPayload,
+        `Linear project reference "${trimmed}" resolved to no project.`,
+        { details: candidates },
+      );
+    }
+    return project;
   }
 
   async fetchIssuesByStates(stateNames: string[]): Promise<Issue[]> {
@@ -1595,6 +1671,20 @@ function normalizeLinearIssueReference(node: unknown): LinearIssueReference {
           }
         : null,
   };
+}
+
+function normalizeLinearProjectReference(
+  node: unknown,
+): LinearProjectReference | null {
+  if (!node || typeof node !== "object" || Array.isArray(node)) {
+    return null;
+  }
+  const raw = node as Record<string, unknown>;
+  return typeof raw.id === "string" &&
+    typeof raw.slugId === "string" &&
+    typeof raw.name === "string"
+    ? { id: raw.id, slugId: raw.slugId, name: raw.name }
+    : null;
 }
 
 function normalizeLinearIssueComment(node: unknown): LinearIssueComment {

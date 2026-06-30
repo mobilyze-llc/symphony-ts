@@ -20,16 +20,17 @@ One-shot, **output-only** run of the Queue Triage v2 backlog **Manager (the plan
 
 <!-- AUTOGEN:help START — managed by scripts/docs-sync.mjs; edit src/cli/manager-plan.ts renderUsage() -->
 ```text
-Usage: symphony-manager-plan (--team <KEY> | --project <slugId> | --initiative <name|uuid>)... [--state <name>...] [options]
+Usage: symphony-manager-plan (--team <KEY> | --project <name-or-slugId> | --initiative <name|uuid>)... [--state <name>...] [options]
 
 Run the Queue Triage v2 backlog Manager (planner) ONE-SHOT against the scoped
 eligible backlog and print the suggested batch plan. Output-only: it spends one
 Opus planner pass unless --prompt-only, and writes NOTHING to Linear,
-the live standing-plan store, or dispatch.
+the live standing-plan store, or dispatch. --persist writes only to an isolated
+manager-plan store under this run's artifact directory.
 
 Scope (provide at least one; additive — combine them to narrow):
   --team <KEY>                 Linear team key whose backlog to plan (e.g. MOB)
-  --project <slugId>           Linear project slugId to scope candidates to
+  --project <name-or-slugId>   Linear project name or slugId to scope candidates to
   --initiative <name|uuid>     Linear initiative (UUID matches by id, else by name)
 
 Options:
@@ -45,6 +46,9 @@ Options:
                                Runtime host base URL for live in-flight issues (GET /api/v1/state)
   --in-flight-state <name>     Linear fallback in-flight state (repeatable; defaults In Progress, In Review, Resume)
   --no-comment-enrichment      Disable curated comment enrichment in the planner prompt
+  --gh-pr-context              Source open/recently merged PR context from gh
+  --github-repo <OWNER/REPO>   GitHub repo for --gh-pr-context
+  --persist                    Persist the plan revision to an isolated artifact store
   --prompt-only                Print the assembled planner prompt and exit (no Opus pass)
   --json                       Emit the plan as JSON
   --help                       Show this help text
@@ -52,6 +56,8 @@ Options:
 Environment:
   LINEAR_API_KEY               Required (reads the backlog)
   LINEAR_ENDPOINT              Optional override of the Linear GraphQL endpoint
+  GITHUB_REPOSITORY          Optional OWNER/REPO fallback for --gh-pr-context
+  REPO_URL                  Optional Git remote URL fallback for --gh-pr-context
   SYMPHONY_MANAGER_PLAN_RUNTIME_STATE_BASE_URL
                                Optional runtime host base URL for live in-flight issues
 ```
