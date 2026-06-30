@@ -156,7 +156,10 @@ describe("CrabrunnerCliSchedulerClient.submit", () => {
           }),
         );
       },
-      { now: () => new Date("2026-06-21T10:00:00.000Z") },
+      {
+        now: () => new Date("2026-06-21T10:00:00.000Z"),
+        crabrunnerVersion: "test-version",
+      },
     );
 
     await client.submit(createSpec({ promptFile: "/tmp/render/prompt.md" }));
@@ -166,6 +169,7 @@ describe("CrabrunnerCliSchedulerClient.submit", () => {
     const manifest = JSON.parse(manifestContent!) as Record<string, unknown>;
     expect(manifest).toMatchObject({
       schema: "crucible.crabrunner.job.v1",
+      crabrunner_version: "test-version",
       lane_worker_protocol: "lane-worker.v1",
       provider: "local",
       target: "macos",
@@ -178,6 +182,7 @@ describe("CrabrunnerCliSchedulerClient.submit", () => {
       remote_repo: CRUCIBLE_ROOT,
       workspace: TARGET_REPO_ROOT,
       prompt_file: "/tmp/render/prompt.md",
+      thinking: "high",
     });
     expect(manifest.issue_ids).toEqual(["SYMPH-807"]);
     expect(typeof manifest.job_id).toBe("string");
@@ -205,6 +210,26 @@ describe("CrabrunnerCliSchedulerClient.submit", () => {
 
     const manifest = JSON.parse(manifestContent!) as Record<string, unknown>;
     expect(manifest.timeout_seconds).toBe(120);
+  });
+
+  it("omits manifest thinking when reasoning effort is unset", async () => {
+    let manifestContent: string | null = null;
+    const client = createClient(async (args) => {
+      const index = args.indexOf("--manifest-file");
+      manifestContent = await readFile(args[index + 1]!, "utf8");
+      return cliOk(
+        statusJson({
+          state: "queued",
+          job_id: "job-manifest-no-thinking",
+          collectible: false,
+        }),
+      );
+    });
+
+    await client.submit(createSpec({ reasoningEffort: null }));
+
+    const manifest = JSON.parse(manifestContent!) as Record<string, unknown>;
+    expect(manifest).not.toHaveProperty("thinking");
   });
 
   it("rejects (fail closed) when the spec carries no promptFile (SYMPH-856)", async () => {
@@ -352,7 +377,28 @@ describe("CrabrunnerCliSchedulerClient.submit", () => {
     expect(runCall.args[runCall.args.indexOf("--version") + 1]).toBe(
       "test-version",
     );
+    expect(runCall.args[runCall.args.indexOf("--thinking") + 1]).toBe("high");
     expect(runCall.opts.cwd).toBe(CRUCIBLE_ROOT);
+  });
+
+  it("omits remote --thinking when reasoning effort is unset", async () => {
+    const invocations: CrabrunnerCliInvocation[] = [];
+    const cli: CrabrunnerCli = async (args, opts) => {
+      invocations.push({ args: [...args], opts });
+      const jobId = args[args.indexOf("--job-id") + 1]!;
+      return cliOk(runResultJson({ state: "complete", job_id: jobId }));
+    };
+    const client = new CrabrunnerCliSchedulerClient({
+      crucibleRoot: CRUCIBLE_ROOT,
+      targetRepoRoot: TARGET_REPO_ROOT,
+      host: "crabbox-studio1",
+      remoteUser: "ericlitman",
+      cli,
+    });
+
+    await client.submit(createSpec({ reasoningEffort: null }));
+
+    expect(invocations[0]?.args).not.toContain("--thinking");
   });
 
   it("passes abort signals and a remote-sized subprocess timeout to crabrunner run", async () => {
@@ -1468,6 +1514,7 @@ function createClient(
     pollIntervalMs?: number;
     maxPolls?: number;
     now?: () => Date;
+    crabrunnerVersion?: string;
   } = {},
 ): CrabrunnerCliSchedulerClient {
   return new CrabrunnerCliSchedulerClient({
@@ -1479,6 +1526,9 @@ function createClient(
       ? {}
       : { maxPolls: overrides.maxPolls }),
     ...(overrides.now === undefined ? {} : { now: overrides.now }),
+    ...(overrides.crabrunnerVersion === undefined
+      ? {}
+      : { crabrunnerVersion: overrides.crabrunnerVersion }),
   });
 }
 
@@ -1677,10 +1727,26 @@ function cancelRequest(): CrabrunnerCancellationRequest {
 }
 
 function createSpec(
-  overrides: { promptFile?: string | null } = {},
+  overrides: {
+    promptFile?: string | null;
+    reasoningEffort?: StageExecutionJobSpec["runner"]["reasoningEffort"];
+  } = {},
 ): CrabrunnerJobSpec {
+  const job = createJob();
   const base = createCrabrunnerJobSpec(
-    { job: createJob(), runnerInput: createRunnerInput() },
+    {
+      job:
+        overrides.reasoningEffort === undefined
+          ? job
+          : {
+              ...job,
+              runner: {
+                ...job.runner,
+                reasoningEffort: overrides.reasoningEffort,
+              },
+            },
+      runnerInput: createRunnerInput(),
+    },
     false,
   );
   // Default to a present promptFile so submit-path tests are admitted; pass
