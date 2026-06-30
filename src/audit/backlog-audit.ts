@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { fenceBacklogAuditBoundaryTags } from "../agent/prompt-fence.js";
 import type { BlockerRef, Issue } from "../domain/model.js";
+import { formatMarkdownInlineCode } from "../shared/markdown.js";
 
 export const BACKLOG_AUDIT_FINDING_TYPES = [
   "duplicate",
@@ -1491,7 +1492,9 @@ export function renderBacklogAuditReport(input: {
     "- Model policy: local OpenAI-compatible endpoint only; no paid API calls.",
   );
   lines.push(
-    `- Runtime sources: ${input.report.runtimeSources.map((source) => `\`${source}\``).join(", ")}`,
+    `- Runtime sources: ${input.report.runtimeSources
+      .map((source) => formatMarkdownInlineCode(source))
+      .join(", ")}`,
   );
   lines.push("");
   lines.push("## Judge summary");

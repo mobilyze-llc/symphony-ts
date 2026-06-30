@@ -219,6 +219,49 @@ describe("writeTrackerIssueFromBoundary", () => {
     );
   });
 
+  it("escapes backticks in Linear-bound file inline-code spans", async () => {
+    const createIssue = vi.fn(async () => ({
+      id: "follow-up-1",
+      identifier: "SYMPH-200",
+      title:
+        "Dispatcher follow-up: actual_write_collision for ISSUE-1 + ISSUE-2",
+    }));
+    const client = createClient({ createIssue });
+    const request: TrackerIssueWriteRequest = {
+      boundary: {
+        type: "explicit_finding",
+        phase: "running",
+        finding: {
+          kind: "actual_write_collision",
+          action: "pause",
+          workerIds: ["1", "2"],
+          issueIdentifiers: ["ISSUE-1", "ISSUE-2"],
+          files: ["src/orchestrator/odd`file.ts"],
+          message: "ISSUE-1 and ISSUE-2 changed the same file set.",
+        },
+      },
+    };
+
+    await writeTrackerIssueFromBoundary({
+      client,
+      request,
+      terminalStates: ["Done", "Canceled"],
+    });
+
+    const createCalls = createIssue.mock.calls as unknown as Array<
+      [
+        {
+          description: string;
+        },
+      ]
+    >;
+    const createInput = createCalls[0]?.[0];
+    expect(createInput?.description).toContain(
+      "Files: `src/orchestrator/oddfile.ts`",
+    );
+    expect(createInput?.description).not.toContain("odd`file");
+  });
+
   it("updates an existing open promotion-boundary follow-up instead of creating a duplicate", async () => {
     const updateIssue = vi.fn(async () => ({
       id: "follow-up-2",

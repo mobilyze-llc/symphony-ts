@@ -219,6 +219,28 @@ describe("deterministic supervision", () => {
     ).toContain("Ignored setup-only files: `CLAUDE.md`.");
   });
 
+  it("escapes backticks in Linear-bound supervision file inline-code spans", () => {
+    const comment = formatSupervisionFindingsComment({
+      phase: "running",
+      findings: [
+        {
+          kind: "actual_write_collision",
+          action: "pause",
+          workerIds: ["worker-SYMPH-10", "worker-SYMPH-11"],
+          issueIdentifiers: ["SYMPH-10", "SYMPH-11"],
+          files: ["src/shared/odd`file.ts"],
+          ignoredFiles: ["AGENTS.`local.md"],
+          message: "SYMPH-10 and SYMPH-11 changed the same file set.",
+        },
+      ],
+    });
+
+    expect(comment).toContain("Files: `src/shared/oddfile.ts`.");
+    expect(comment).toContain("Ignored setup-only files: `AGENTS.local.md`.");
+    expect(comment).not.toContain("odd`file");
+    expect(comment).not.toContain("AGENTS.`local");
+  });
+
   it("catches branch divergence and branch reuse deterministically", () => {
     const findings = detectSupervisionFindings([
       createWorker({

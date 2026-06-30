@@ -14,6 +14,21 @@ import type {
   SlackBlock,
 } from "../../src/orchestrator/pipeline-notifier.js";
 
+function expectBalancedInlineCodeSpans(text: string): void {
+  let insideFence = false;
+  for (const line of text.split("\n")) {
+    if (line === "```") {
+      insideFence = !insideFence;
+      continue;
+    }
+    if (insideFence) {
+      continue;
+    }
+    const backtickCount = [...line].filter((char) => char === "`").length;
+    expect(backtickCount % 2).toBe(0);
+  }
+}
+
 describe("formatDurationMs", () => {
   it("formats seconds only", () => {
     expect(formatDurationMs(45_000)).toBe("45s");
@@ -222,6 +237,35 @@ describe("formatNotification", () => {
     expect(blocks[6]?.type).toBe("context");
   });
 
+  it("escapes stage timeline inline-code delimiters in Block Kit", () => {
+    const result = formatNotification({
+      type: "issue_completed",
+      issueIdentifier: "SYMPH-42",
+      issueTitle: "Add pagination",
+      issueUrl: null,
+      executionHistory: [
+        {
+          stageName: "invest`igate",
+          durationMs: 60_000,
+          totalTokens: 5000,
+          turns: 2,
+          outcome: "completed",
+        },
+      ],
+      reworkCount: 0,
+      totalTokens: 5000,
+      totalDurationMs: 60_000,
+    });
+
+    const stageBlock = result.blocks?.[3] as {
+      type: "section";
+      text: { text: string };
+    };
+    expect(stageBlock.text.text).toContain("`investigate` 1m");
+    expect(stageBlock.text.text).not.toContain("invest`igate");
+    expectBalancedInlineCodeSpans(stageBlock.text.text);
+  });
+
   it("formats issue_completed without rework", () => {
     const result = formatNotification({
       type: "issue_completed",
@@ -407,6 +451,22 @@ describe("formatNotification", () => {
         text: expect.stringContaining("Issue resumed after restart"),
       }),
     });
+  });
+
+  it("escapes resumed journal cursor inline-code delimiters", () => {
+    const result = formatNotification({
+      type: "resumed_existing_active",
+      issueIdentifier: "SYMPH-455",
+      issueTitle: "Notify operators",
+      issueUrl: null,
+      stageName: "implement",
+      attempt: null,
+      reworkCount: 0,
+      journalSequence: 42,
+    });
+
+    expect(result.text).toContain("`GET /api/v1/state/delta?since_seq=41`");
+    expectBalancedInlineCodeSpans(result.text);
   });
 
   it("formats issue_dropped", () => {
@@ -1035,6 +1095,28 @@ describe("formatNotification", () => {
     expect(result.text).toContain("Watchdog ticket being filed");
   });
 
+  it("escapes systemic cluster inline-code delimiters", () => {
+    const result = formatNotification({
+      type: "systemic_cluster_alert",
+      signature: "abc`1234",
+      errorClass: "permanent`class",
+      stageName: "impl`ement",
+      clusterSize: 3,
+      issueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+      breakerOpened: true,
+      watchdogTicketFiling: false,
+      journalSequence: 42,
+    });
+
+    expect(result.text).toContain("signature `abc1234`");
+    expect(result.text).toContain("Class: `permanentclass`");
+    expect(result.text).toContain("stage `implement`");
+    expect(result.text).toContain("`GET /api/v1/state/delta?since_seq=41`");
+    expect(result.text).not.toContain("abc`1234");
+    expect(result.text).not.toContain("impl`ement");
+    expectBalancedInlineCodeSpans(result.text);
+  });
+
   it("systemic_cluster_alert carries the journal cursor when available (SYMPH-407)", () => {
     const result = formatNotification({
       type: "systemic_cluster_alert",
@@ -1086,6 +1168,56 @@ describe("formatNotification", () => {
       sequence: null,
     });
     expect(withoutSeq.text).not.toContain("seq ");
+  });
+
+  it("escapes dispatch reason-code inline-code delimiters", () => {
+    const result = formatNotification({
+      type: "dispatch_verdict_alert",
+      issueIdentifier: "SYMPH-99",
+      disposition: "halt",
+      reasonCode: "circuit`breaker_open",
+      remedy: null,
+      actor: { kind: "dispatcher", host: "pro14" },
+      sequence: 17,
+    });
+
+    expect(result.text).toContain("(`circuitbreaker_open`)");
+    expect(result.text).not.toContain("circuit`breaker_open");
+    expectBalancedInlineCodeSpans(result.text);
+  });
+
+  it("renders single-line tracker failure details as delimiter-safe inline code", () => {
+    const result = formatNotification({
+      type: "tracker_write_failed",
+      followUpTitle: "Follow-up",
+      sourceIssueIds: ["issue-1"],
+      reason: "Linear rejected request",
+      httpStatus: 400,
+      details: "Linear title had `inline` delimiter",
+    });
+
+    expect(result.text).toContain(
+      "Details: `Linear title had inline delimiter`",
+    );
+    expect(result.text).not.toContain("had `inline` delimiter");
+    expectBalancedInlineCodeSpans(result.text);
+  });
+
+  it("renders multi-line tracker failure details in a fenced block", () => {
+    const result = formatNotification({
+      type: "tracker_write_failed",
+      followUpTitle: "Follow-up",
+      sourceIssueIds: ["issue-1"],
+      reason: "Linear rejected request",
+      httpStatus: 400,
+      details: "Linear title had `inline` delimiter\nsecond line",
+    });
+
+    expect(result.text).toContain(
+      "Details:\n```\nLinear title had `inline` delimiter\nsecond line\n```",
+    );
+    expect(result.text).not.toContain("Details: `Linear");
+    expectBalancedInlineCodeSpans(result.text);
   });
 
   it("systemic_cluster_alert omits breaker/watchdog lines when both false", () => {
