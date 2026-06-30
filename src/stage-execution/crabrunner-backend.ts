@@ -88,6 +88,7 @@ export interface CrabrunnerAdmissionResult {
 export interface CrabrunnerTerminalEvidence {
   state: CrabrunnerTerminalState;
   artifactRefs?: readonly string[];
+  artifactHashes?: readonly string[];
   workspacePath?: string | null;
   usage?: CrabrunnerUsage | null;
   message?: string | null;
@@ -116,6 +117,7 @@ export interface CrabrunnerStageExecutionEvidence {
   admission: CrabrunnerAdmissionResult;
   terminal: CrabrunnerTerminalEvidence | null;
   artifactRefs: readonly string[];
+  artifactHashes?: readonly string[];
   usage: CrabrunnerUsage | null;
 }
 
@@ -313,6 +315,7 @@ export class CrabrunnerStageExecutionBackend
         admission,
         terminal,
         artifactRefs: terminal.artifactRefs ?? [],
+        artifactHashes: terminal.artifactHashes ?? [],
         usage: terminal.usage ?? null,
         status,
         ...(error === undefined ? {} : { error }),
@@ -471,6 +474,7 @@ export class CrabrunnerStageExecutionBackend
         admission: mapped.admission,
         terminal: mapped.terminal,
         artifactRefs: mapped.artifactRefs,
+        artifactHashes: mapped.artifactHashes ?? [],
         usage: mapped.usage,
       },
     };

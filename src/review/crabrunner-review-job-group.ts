@@ -1019,17 +1019,14 @@ function isWellFormedReviewerSections(value: unknown): boolean {
 function collectArtifactHashes(
   evidence: CrabrunnerStageExecutionEvidence | undefined,
 ): readonly string[] {
-  const terminal = evidence?.terminal;
-  if (terminal === undefined || terminal === null) {
+  if (evidence === undefined) {
     return [];
   }
-  const usage = terminal.usage;
-  // TODO(SYMPH-862): the production review-stage dispatcher (host-owned
-  // collectArtifact reading real terminal evidence) will surface per-artifact
-  // content hashes; map them here so cross-host provenance carries integrity
-  // hashes alongside the artifact refs. Until that dispatcher exists, the
-  // artifact refs ARE the host-owned provenance and this stays an explicit
-  // empty — never a fabricated hash.
-  void usage;
-  return [];
+  if (
+    evidence.artifactHashes !== undefined &&
+    evidence.artifactHashes.length > 0
+  ) {
+    return evidence.artifactHashes;
+  }
+  return evidence.terminal?.artifactHashes ?? [];
 }

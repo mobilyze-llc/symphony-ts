@@ -21,6 +21,7 @@ describe("CrabrunnerStageExecutionBackend", () => {
       terminal: {
         state: "succeeded",
         artifactRefs: ["/tmp/artifacts/result.json"],
+        artifactHashes: ["sha256-result"],
         workspacePath: "/tmp/workspaces/SYMPH-807",
         usage: {
           status: "available",
@@ -70,6 +71,10 @@ describe("CrabrunnerStageExecutionBackend", () => {
     expect(result.evidence?.terminal?.state).toBe("succeeded");
     expect(result.evidence?.artifactRefs).toEqual([
       "/tmp/artifacts/result.json",
+    ]);
+    expect(result.evidence?.artifactHashes).toEqual(["sha256-result"]);
+    expect(result.evidence?.terminal?.artifactHashes).toEqual([
+      "sha256-result",
     ]);
     expect(result.result.liveSession.codexSessionLogs).toEqual([
       {

@@ -140,6 +140,7 @@ function fakeBackend(
             admission,
             terminal,
             artifactRefs: terminal?.artifactRefs ?? [],
+            artifactHashes: terminal?.artifactHashes ?? [],
             usage: terminal?.usage ?? null,
           },
           result: {
@@ -296,6 +297,7 @@ describe("runCrabrunnerReviewJobGroup", () => {
         terminal: {
           state: "succeeded",
           artifactRefs: ["/artifacts/codex.json"],
+          artifactHashes: ["sha256-codex"],
         },
         collectedArtifact: reviewerArtifact({
           laneId: "codex-high-lead",
@@ -305,7 +307,11 @@ describe("runCrabrunnerReviewJobGroup", () => {
         }),
       },
       "pi-deepseek": {
-        terminal: { state: "succeeded", artifactRefs: ["/artifacts/pi.json"] },
+        terminal: {
+          state: "succeeded",
+          artifactRefs: ["/artifacts/pi.json"],
+          artifactHashes: ["sha256-pi"],
+        },
         collectedArtifact: reviewerArtifact({
           laneId: "pi-deepseek",
           agent: "pi",
@@ -353,11 +359,13 @@ describe("runCrabrunnerReviewJobGroup", () => {
         runGroupId: RUN_GROUP_ID,
         jobId: "job-codex-high-lead",
         artifactRefs: ["/artifacts/codex.json"],
+        artifactHashes: ["sha256-codex"],
       }),
       expect.objectContaining({
         laneId: "pi-deepseek",
         jobId: "job-pi-deepseek",
         artifactRefs: ["/artifacts/pi.json"],
+        artifactHashes: ["sha256-pi"],
       }),
     ]);
   });
