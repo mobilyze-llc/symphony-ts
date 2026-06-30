@@ -18,6 +18,7 @@ import {
   fetchBacklogAuditRuntimeEvidence,
   isStandingDefensiveIssue,
   mergeBacklogAuditReports,
+  normalizeCullRootIssueIdentifier,
   renderBacklogAuditReport,
   runBacklogAudit,
   runBacklogAuditChunked,
@@ -355,6 +356,8 @@ describe("backlog audit", () => {
         expect(prompt).not.toContain('"rootIssueIdentifier":"SYMPH-947|null"');
         expect(prompt).not.toContain("impossible-state");
         expect(prompt).not.toContain("deprecating-surface");
+        expect(prompt).toContain('\\"classification\\":\\"kill\\"');
+        expect(prompt).toContain('\\"killReason\\":\\"unreachable\\"');
         expect(prompt).toContain("The system derives canonical marker labels");
         return chatCompletionResponse(
           JSON.stringify({
@@ -410,6 +413,21 @@ describe("backlog audit", () => {
       defensive,
     ]);
     expect(isStandingDefensiveIssue(userReported)).toBe(false);
+  });
+
+  it("normalizes cull root issue identifiers by contract", () => {
+    expect(normalizeCullRootIssueIdentifier("")).toBeNull();
+    expect(normalizeCullRootIssueIdentifier("NULL")).toBeNull();
+    expect(normalizeCullRootIssueIdentifier(" null ")).toBeNull();
+    expect(normalizeCullRootIssueIdentifier(" symph-123 ")).toBe("SYMPH-123");
+    expect(normalizeCullRootIssueIdentifier("MOB42-7")).toBe("MOB42-7");
+    expect(normalizeCullRootIssueIdentifier("SYMPH-")).toBeNull();
+    expect(normalizeCullRootIssueIdentifier("123-456")).toBeNull();
+    expect(normalizeCullRootIssueIdentifier(null)).toBeNull();
+    expect(normalizeCullRootIssueIdentifier(123456)).toBeNull();
+    expect(
+      normalizeCullRootIssueIdentifier({ identifier: "SYMPH-123" }),
+    ).toBeNull();
   });
 
   it("normalizes missing optional cull fields and literal null strings to safe nulls", async () => {
