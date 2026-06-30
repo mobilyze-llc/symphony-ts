@@ -3,6 +3,7 @@ import {
   closeSync,
   createWriteStream,
   constants as fsConstants,
+  existsSync,
   mkdirSync,
   openSync,
 } from "node:fs";
@@ -23,6 +24,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { runAcGate } from "../agent/ac-gate.js";
+import { readHotFileGrowth } from "../agent/health/hot-file-reader.js";
 import { runPauseTriage } from "../agent/pause-triage.js";
 import type {
   ImplementationCommentDelta,
@@ -573,7 +575,43 @@ const execFileAsync = promisify(execFile);
  */
 function resolveRuntimeRepoRoot(): string {
   const thisFile = fileURLToPath(import.meta.url);
-  return resolve(dirname(thisFile), "..", "..", "..");
+  const distRoot = resolve(dirname(thisFile), "..", "..", "..");
+  if (existsSync(join(distRoot, "package.json"))) {
+    return distRoot;
+  }
+  const sourceRoot = resolve(dirname(thisFile), "..", "..");
+  if (existsSync(join(sourceRoot, "package.json"))) {
+    return sourceRoot;
+  }
+  return distRoot;
+}
+
+function readNonNegativeFiniteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : null;
+}
+
+async function readLatestReviewRoundDepth(
+  workspaceRoot: string,
+): Promise<number | null> {
+  const journal = await readDispatcherRunJournal(workspaceRoot);
+  for (const entry of [...journal].reverse()) {
+    if (!SNAPSHOT_REFRESH_EXTERNAL_JOURNAL_KINDS.has(entry.kind)) {
+      continue;
+    }
+    const roundsPerCycle = readNonNegativeFiniteNumber(
+      entry.metadata.rounds_per_cycle,
+    );
+    if (roundsPerCycle !== null) {
+      return roundsPerCycle;
+    }
+    const round = readNonNegativeFiniteNumber(entry.metadata.round);
+    if (round !== null) {
+      return round;
+    }
+  }
+  return null;
 }
 
 function issueFromLinearReference(reference: LinearIssueReference): Issue {
@@ -6311,7 +6349,9 @@ export async function startRuntimeService(
   // planner runs across fast polls; the heartbeat gate inside the tick keeps it
   // to its own cadence. Inert unless `queueTriage.enabled`.
   let standingPlanShadowTickInFlight = false;
-  const runStandingPlanShadowTickIfEnabled = (): void => {
+  const runStandingPlanShadowTickIfEnabled = (input: {
+    fetchPollCandidates: () => Promise<Issue[]>;
+  }): void => {
     if (standingPlanShadowTickInFlight) {
       return;
     }
@@ -6329,12 +6369,19 @@ export async function startRuntimeService(
     void runStandingPlanShadowTick({
       config: currentConfig.queueTriage,
       workspaceRoot: workspaceManager.root,
-      fetchCandidates: () => tracker.fetchCandidateIssues(),
+      fetchCandidates: input.fetchPollCandidates,
       getInFlight: () =>
         Object.values(runtimeHost.getState().running).map((entry) => ({
           issueIdentifier: entry.issue.identifier,
           stage: entry.issue.state,
         })),
+      fetchTriageIssues: () => tracker.fetchIssuesByStates(["Triage"]),
+      fetchResidualIssues: () =>
+        tracker.fetchIssuesByStates(["Backlog", "Triage"]),
+      getReviewRoundDepth: () =>
+        readLatestReviewRoundDepth(workspaceManager.root),
+      getHotFileGrowth: () =>
+        readHotFileGrowth({ repoPath: resolveRuntimeRepoRoot() }),
       createPlannerRunner: (model) =>
         createCmuxPlannerRunner({
           workspace: process.cwd(),
@@ -6387,7 +6434,9 @@ export async function startRuntimeService(
 
   let backlogHygieneProposalTickInFlight = false;
   let backlogHygieneProposalLastRunAtMs: number | null = null;
-  const runBacklogHygieneProposalTickIfConfigured = (): void => {
+  const runBacklogHygieneProposalTickIfConfigured = (input: {
+    fetchPollCandidates: () => Promise<Issue[]>;
+  }): void => {
     if (backlogHygieneProposalTickInFlight) {
       return;
     }
@@ -6407,7 +6456,7 @@ export async function startRuntimeService(
     backlogHygieneProposalTickInFlight = true;
     const runStartedAt = new Date();
     void (async () => {
-      const candidateIssues = await tracker.fetchCandidateIssues();
+      const candidateIssues = await input.fetchPollCandidates();
       const state = runtimeHost.getState();
       const activeIssueIds = Object.keys(state.running);
       const openParkIssueIds = [...state.resumeRequired];
@@ -6520,8 +6569,13 @@ export async function startRuntimeService(
       const result = await runtimeHost.pollOnce();
       const durationMs = Date.now() - pollStart;
       await logPollCycleResult(logger, result, durationMs);
-      runStandingPlanShadowTickIfEnabled();
-      runBacklogHygieneProposalTickIfConfigured();
+      let sharedPollCandidates: Promise<Issue[]> | null = null;
+      const fetchPollCandidates = () => {
+        sharedPollCandidates ??= tracker.fetchCandidateIssues();
+        return sharedPollCandidates;
+      };
+      runStandingPlanShadowTickIfEnabled({ fetchPollCandidates });
+      runBacklogHygieneProposalTickIfConfigured({ fetchPollCandidates });
       scheduleNextPoll();
     } catch (error) {
       await logger.error("runtime_poll_failed", toErrorMessage(error), {

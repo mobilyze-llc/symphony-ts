@@ -52,13 +52,18 @@ function issue(id: string, identifier: string): Issue {
   };
 }
 
-function okPlanner(): { runClaude: () => Promise<PlannerRunResult> } {
+function okPlanner(input?: {
+  onPrompt?: (prompt: string) => void;
+}): { runClaude: (prompt: string) => Promise<PlannerRunResult> } {
   return {
-    runClaude: async () => ({
-      status: "ok",
-      markdown:
-        '# Plan\n```json\n{"rationale":"go","batches":[{"mode":"parallel-isolated","issueIdentifiers":["SYMPH-1"],"rationale":"first"}]}\n```\n',
-    }),
+    runClaude: async (prompt) => {
+      input?.onPrompt?.(prompt);
+      return {
+        status: "ok",
+        markdown:
+          '# Plan\n```json\n{"rationale":"go","batches":[{"mode":"parallel-isolated","issueIdentifiers":["SYMPH-1"],"rationale":"first"}]}\n```\n',
+      };
+    },
   };
 }
 
@@ -1075,12 +1080,19 @@ describe("SYMPH-939 health signals", () => {
   });
 
   describe("runStandingPlanShadowTick wiring (end-to-end)", () => {
-    const fullHealthDeps = (root: string) => ({
-      config: triageConfig(),
+    const fullHealthDeps = (
+      root: string,
+      input?: {
+        config?: WorkflowQueueTriageConfig;
+        onPrompt?: (prompt: string) => void;
+      },
+    ) => ({
+      config: input?.config ?? triageConfig(),
       workspaceRoot: root,
       fetchCandidates: async () => [issue("u1", "SYMPH-1")],
       getInFlight: () => [],
-      createPlannerRunner: () => okPlanner().runClaude,
+      createPlannerRunner: () =>
+        okPlanner({ onPrompt: input?.onPrompt }).runClaude,
       log: () => undefined,
       now: () => NOW,
       fetchTriageIssues: async () => [
@@ -1105,6 +1117,40 @@ describe("SYMPH-939 health signals", () => {
         const result = await runStandingPlanShadowTick(fullHealthDeps(root));
         expect(result.status).toBe("ok");
         expect((await loadStandingPlan(root))?.revision).toBe(1);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it("renders a non-empty Queue health block when health deps are wired under production config", async () => {
+      const root = mkdtempSync(join(tmpdir(), "symph-shadow-health-"));
+      let prompt = "";
+      try {
+        const result = await runStandingPlanShadowTick(
+          fullHealthDeps(root, {
+            config: {
+              ...triageConfig(),
+              enabled: true,
+              shadowMode: true,
+              plannerModel: "opus",
+            },
+            onPrompt: (next) => {
+              prompt = next;
+            },
+          }),
+        );
+        expect(result.status).toBe("ok");
+        const start = prompt.indexOf("## Queue health");
+        expect(start).toBeGreaterThanOrEqual(0);
+        const end = prompt.indexOf("## Backlog", start);
+        const block = prompt.slice(start, end);
+        expect(block.trim().length).toBeGreaterThan(0);
+        expect(block).toContain("Triage intake: depth 2, recent inflow 1");
+        expect(block).toContain("Residual share: 0.500");
+        expect(block).toContain(
+          "Hot-file growth: top-file churn fraction 0.700",
+        );
+        expect(block).toContain("Review-round depth: 3");
       } finally {
         rmSync(root, { recursive: true, force: true });
       }
