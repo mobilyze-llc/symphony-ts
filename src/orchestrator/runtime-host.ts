@@ -5323,11 +5323,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           .filter((comment) =>
             comment.body.trimStart().startsWith("## Workpad"),
           )
-          .sort(
-            (left, right) =>
-              Date.parse(getEffectiveCommentTimestamp(right)) -
-              Date.parse(getEffectiveCommentTimestamp(left)),
-          )[0]?.body ?? null
+          .sort(compareEffectiveCommentTimeDesc)[0]?.body ?? null
       );
     } catch (error) {
       console.warn(
@@ -9024,6 +9020,23 @@ function getEffectiveCommentTimestamp(comment: LinearIssueComment): string {
     return comment.createdAt;
   }
   return updated > created ? comment.updatedAt : comment.createdAt;
+}
+
+function getEffectiveCommentTime(comment: LinearIssueComment): number {
+  const parsed = Date.parse(getEffectiveCommentTimestamp(comment));
+  return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
+}
+
+function compareEffectiveCommentTimeDesc(
+  left: LinearIssueComment,
+  right: LinearIssueComment,
+): number {
+  const leftTime = getEffectiveCommentTime(left);
+  const rightTime = getEffectiveCommentTime(right);
+  if (leftTime === rightTime) {
+    return 0;
+  }
+  return rightTime > leftTime ? 1 : -1;
 }
 
 function stringMetadata(value: unknown): string | null {

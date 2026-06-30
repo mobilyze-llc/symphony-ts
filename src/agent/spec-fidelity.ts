@@ -167,7 +167,7 @@ export async function parseSpecFidelityLaneResult(
   if (dispatch.result.lastTurn?.message != null) {
     candidates.push(dispatch.result.lastTurn.message);
   }
-  if (dispatch.result.liveSession.lastCodexMessage !== null) {
+  if (dispatch.result.liveSession.lastCodexMessage != null) {
     candidates.push(dispatch.result.liveSession.lastCodexMessage);
   }
 
@@ -189,7 +189,7 @@ export function parseSpecFidelityVerdict(
     ...Array.from(trimmed.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)).map(
       (match) => match[1]?.trim() ?? "",
     ),
-    extractJsonObject(trimmed),
+    ...extractJsonObjects(trimmed),
   ].filter((candidate) => candidate.length > 0);
 
   for (const candidate of jsonCandidates) {
@@ -326,13 +326,57 @@ function truncate(text: string, maxChars: number, label: string): string {
   return `${text.slice(0, maxChars)}\n[${label} truncated at ${maxChars} chars]`;
 }
 
-function extractJsonObject(text: string): string {
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start === -1 || end === -1 || end <= start) {
-    return "";
+function extractJsonObjects(text: string): string[] {
+  const candidates: string[] = [];
+  for (
+    let start = text.indexOf("{");
+    start !== -1;
+    start = text.indexOf("{", start + 1)
+  ) {
+    const candidate = extractJsonObjectAt(text, start);
+    if (candidate !== null) {
+      candidates.push(candidate);
+    }
   }
-  return text.slice(start, end + 1);
+  return candidates;
+}
+
+function extractJsonObjectAt(text: string, start: number): string | null {
+  if (text[start] !== "{") {
+    return null;
+  }
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = inString;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) {
+      continue;
+    }
+    if (char === "{") {
+      depth += 1;
+      continue;
+    }
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return text.slice(start, index + 1);
+      }
+    }
+  }
+  return null;
 }
 
 async function defaultReadArtifact(

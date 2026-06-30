@@ -565,6 +565,41 @@ describe("OrchestratorRuntimeHost", () => {
     ).resolves.toBeNull();
   });
 
+  it("keeps unparseable spec-fidelity workpad timestamps behind parseable comments", async () => {
+    const tracker = createLinearTrackerForPipelineStatus();
+    vi.spyOn(tracker, "fetchIssueComments").mockResolvedValue([
+      {
+        id: "comment-invalid",
+        body: "## Workpad\nInvalid timestamp plan.",
+        createdAt: "not-a-date",
+        updatedAt: "also-not-a-date",
+        user: null,
+        botActor: null,
+      },
+      {
+        id: "comment-latest",
+        body: "## Workpad\nLatest parseable plan.",
+        createdAt: "2026-03-06T00:01:00.000Z",
+        updatedAt: "2026-03-06T00:02:00.000Z",
+        user: null,
+        botActor: null,
+      },
+    ]);
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      createAgentRunner: ({ onEvent }) => {
+        const runner = new FakeAgentRunner();
+        runner.onEvent = onEvent;
+        return runner;
+      },
+    });
+
+    await expect(
+      specFidelityHostAccess(host).fetchLatestWorkpadCommentBody(createIssue()),
+    ).resolves.toBe("## Workpad\nLatest parseable plan.");
+  });
+
   it("fails open for missing or unparseable gh spec-fidelity PR evidence", async () => {
     const workspacePath = mkdtempSync(join(tmpdir(), "symph-spec-pr-"));
     const missingGhPath = mkdtempSync(join(tmpdir(), "symph-no-gh-"));
