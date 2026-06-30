@@ -5346,6 +5346,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     try {
       const secretValues = await collectRuntimeEnvSecretValues(
         this.config.workflowPath,
+        workspacePath,
       );
       const body = prepareCloseoutCommentBody(rawCloseout, secretValues);
       if (body === null) {
@@ -9226,7 +9227,11 @@ export function extractProductName(workflowPath: string): string {
 
 function isImplementCloseoutCommentEnabled(workflowPath: string): boolean {
   const envValue = process.env[CLOSEOUT_COMMENT_ENV_FLAG]?.trim().toLowerCase();
-  if (envValue !== undefined && envValue.length > 0) {
+  if (
+    envValue !== undefined &&
+    envValue.length > 0 &&
+    envValue !== "undefined"
+  ) {
     return ["1", "true", "yes", "on"].includes(envValue);
   }
   return extractProductName(workflowPath).toLowerCase() === "symphony";
@@ -9234,11 +9239,13 @@ function isImplementCloseoutCommentEnabled(workflowPath: string): boolean {
 
 async function collectRuntimeEnvSecretValues(
   workflowPath: string,
+  workspacePath: string,
 ): Promise<string[]> {
   const values = new Set<string>();
   collectSecretValuesFromRecord(process.env, values);
 
   const envPaths = new Set([
+    join(workspacePath, ".env"),
     join(process.cwd(), ".env"),
     join(dirname(workflowPath), ".env"),
     join(dirname(dirname(workflowPath)), ".env"),

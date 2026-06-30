@@ -2218,7 +2218,7 @@ describe("OrchestratorRuntimeHost", () => {
     const oldLinearApiKey = process.env.LINEAR_API_KEY;
     const oldCloseoutFlag = process.env.SYMPHONY_CLOSEOUT_COMMENT;
     process.env.LINEAR_API_KEY = "linear-secret-value-123";
-    delete process.env.SYMPHONY_CLOSEOUT_COMMENT;
+    process.env.SYMPHONY_CLOSEOUT_COMMENT = undefined;
     const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-closeout-"));
     const workspacePath = join(workspaceRoot, "issue-1");
     try {
@@ -2272,12 +2272,86 @@ describe("OrchestratorRuntimeHost", () => {
       expect(body).not.toContain("linear-secret-value-123");
     } finally {
       if (oldLinearApiKey === undefined) {
-        delete process.env.LINEAR_API_KEY;
+        process.env.LINEAR_API_KEY = undefined;
       } else {
         process.env.LINEAR_API_KEY = oldLinearApiKey;
       }
       if (oldCloseoutFlag === undefined) {
-        delete process.env.SYMPHONY_CLOSEOUT_COMMENT;
+        process.env.SYMPHONY_CLOSEOUT_COMMENT = undefined;
+      } else {
+        process.env.SYMPHONY_CLOSEOUT_COMMENT = oldCloseoutFlag;
+      }
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("redacts implement Closeout prose using secrets from the run workspace env file", async () => {
+    const oldLinearApiKey = process.env.LINEAR_API_KEY;
+    const oldCloseoutFlag = process.env.SYMPHONY_CLOSEOUT_COMMENT;
+    process.env.LINEAR_API_KEY = undefined;
+    process.env.SYMPHONY_CLOSEOUT_COMMENT = undefined;
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-closeout-env-"));
+    const workspacePath = join(workspaceRoot, "issue-1");
+    try {
+      mkdirSync(join(workspacePath, ".symphony"), { recursive: true });
+      writeFileSync(
+        join(workspacePath, ".env"),
+        "RUN_WORKSPACE_ONLY_TOKEN=workspace-only-secret-789\n",
+      );
+      writeFileSync(
+        join(workspacePath, ".symphony", "closeout.md"),
+        [
+          "## Closeout",
+          "",
+          "**What shipped:** The worker used workspace-only-secret-789 during verification.",
+          "",
+          "### Evidence",
+          "- Runtime closeout redaction checked prose secrets. Evidence: src/orchestrator/runtime-host.ts:1.",
+        ].join("\n"),
+      );
+
+      const tracker = createLinearTrackerForPipelineStatus();
+      vi.spyOn(tracker, "fetchCandidateIssues").mockResolvedValue([
+        createIssue({ state: "In Progress" }),
+      ]);
+      vi.spyOn(tracker, "fetchIssuesByStates").mockResolvedValue([]);
+      vi.spyOn(tracker, "fetchIssueStatesByIds").mockResolvedValue([
+        { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+      ]);
+      const upsert = vi
+        .spyOn(tracker, "upsertCloseoutComment")
+        .mockResolvedValue({ operation: "created", commentId: "comment-1" });
+      const fakeRunner = new FakeAgentRunner();
+      const host = new OrchestratorRuntimeHost({
+        config: createImplementStagedConfig({
+          workflowPath: join(workspaceRoot, "WORKFLOW-symphony.md"),
+          workspace: { root: workspaceRoot },
+        }),
+        tracker,
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
+        },
+        now: () => new Date("2026-03-06T00:05:00.000Z"),
+      });
+
+      await host.pollOnce();
+      fakeRunner.resolve("1", createNormalResultForWorkspace(workspacePath));
+      await host.waitForIdle();
+
+      expect(upsert).toHaveBeenCalledTimes(1);
+      const body = upsert.mock.calls[0]?.[1] ?? "";
+      expect(body).toContain("[REDACTED:runtime-secret]");
+      expect(body).not.toContain("workspace-only-secret-789");
+      expect(process.env.LINEAR_API_KEY).not.toBe("workspace-only-secret-789");
+    } finally {
+      if (oldLinearApiKey === undefined) {
+        process.env.LINEAR_API_KEY = undefined;
+      } else {
+        process.env.LINEAR_API_KEY = oldLinearApiKey;
+      }
+      if (oldCloseoutFlag === undefined) {
+        process.env.SYMPHONY_CLOSEOUT_COMMENT = undefined;
       } else {
         process.env.SYMPHONY_CLOSEOUT_COMMENT = oldCloseoutFlag;
       }
@@ -2289,7 +2363,7 @@ describe("OrchestratorRuntimeHost", () => {
     const oldLinearApiKey = process.env.LINEAR_API_KEY;
     const oldCloseoutFlag = process.env.SYMPHONY_CLOSEOUT_COMMENT;
     process.env.LINEAR_API_KEY = "linear-secret-value-456";
-    delete process.env.SYMPHONY_CLOSEOUT_COMMENT;
+    process.env.SYMPHONY_CLOSEOUT_COMMENT = undefined;
     const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-closeout-empty-"));
     const workspacePath = join(workspaceRoot, "issue-1");
     try {
@@ -2331,12 +2405,12 @@ describe("OrchestratorRuntimeHost", () => {
       expect(upsert).not.toHaveBeenCalled();
     } finally {
       if (oldLinearApiKey === undefined) {
-        delete process.env.LINEAR_API_KEY;
+        process.env.LINEAR_API_KEY = undefined;
       } else {
         process.env.LINEAR_API_KEY = oldLinearApiKey;
       }
       if (oldCloseoutFlag === undefined) {
-        delete process.env.SYMPHONY_CLOSEOUT_COMMENT;
+        process.env.SYMPHONY_CLOSEOUT_COMMENT = undefined;
       } else {
         process.env.SYMPHONY_CLOSEOUT_COMMENT = oldCloseoutFlag;
       }
@@ -2346,7 +2420,7 @@ describe("OrchestratorRuntimeHost", () => {
 
   it("caps implement Closeout comments by dropping whole later sections", async () => {
     const oldCloseoutFlag = process.env.SYMPHONY_CLOSEOUT_COMMENT;
-    delete process.env.SYMPHONY_CLOSEOUT_COMMENT;
+    process.env.SYMPHONY_CLOSEOUT_COMMENT = undefined;
     const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-closeout-cap-"));
     const workspacePath = join(workspaceRoot, "issue-1");
     try {
@@ -2401,7 +2475,7 @@ describe("OrchestratorRuntimeHost", () => {
       expect(body).not.toContain("### Open questions");
     } finally {
       if (oldCloseoutFlag === undefined) {
-        delete process.env.SYMPHONY_CLOSEOUT_COMMENT;
+        process.env.SYMPHONY_CLOSEOUT_COMMENT = undefined;
       } else {
         process.env.SYMPHONY_CLOSEOUT_COMMENT = oldCloseoutFlag;
       }
@@ -2411,7 +2485,7 @@ describe("OrchestratorRuntimeHost", () => {
 
   it("does not post implement Closeout comments for non-symphony workflows by default", async () => {
     const oldCloseoutFlag = process.env.SYMPHONY_CLOSEOUT_COMMENT;
-    delete process.env.SYMPHONY_CLOSEOUT_COMMENT;
+    process.env.SYMPHONY_CLOSEOUT_COMMENT = undefined;
     const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-closeout-off-"));
     const workspacePath = join(workspaceRoot, "issue-1");
     try {
@@ -2453,7 +2527,7 @@ describe("OrchestratorRuntimeHost", () => {
       expect(upsert).not.toHaveBeenCalled();
     } finally {
       if (oldCloseoutFlag === undefined) {
-        delete process.env.SYMPHONY_CLOSEOUT_COMMENT;
+        process.env.SYMPHONY_CLOSEOUT_COMMENT = undefined;
       } else {
         process.env.SYMPHONY_CLOSEOUT_COMMENT = oldCloseoutFlag;
       }
