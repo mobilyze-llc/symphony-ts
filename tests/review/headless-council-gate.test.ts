@@ -1,12 +1,5 @@
 import { createHash } from "node:crypto";
-import {
-  chmod,
-  mkdir,
-  mkdtemp,
-  readFile,
-  utimes,
-  writeFile,
-} from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -187,7 +180,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         kimiShadow: true,
       },
       { runCommand: harness.runCommand },
@@ -237,7 +230,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         reviewerLanes: [
           opusLane(),
           {
@@ -293,7 +286,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         reviewerLanes: [
           piLane(),
           {
@@ -328,7 +321,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         reviewerLanes: [
           {
             laneId: "claude-shadow",
@@ -400,7 +393,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         codexExcavationSweep: "high-risk",
       },
       { runCommand: harness.runCommand },
@@ -456,7 +449,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         reviewerLanes: [opusLane()],
         codexLead: false,
       },
@@ -518,7 +511,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         headRef: "feature-branch",
         reviewerLanes: [opusLane()],
         codexLead: false,
@@ -553,7 +546,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         reviewerLanes: [opusLane()],
         codexLead: false,
       },
@@ -595,7 +588,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         reviewerLanes: [opusLane()],
       },
       { runCommand: harness.runCommand },
@@ -646,7 +639,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         headRef: "feature-branch",
         reviewerLanes: [opusLane()],
       },
@@ -1754,7 +1747,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         routingMode: "legacy",
         provenance: [
           humanImplementerProvenance(),
@@ -2570,7 +2563,7 @@ describe("runHeadlessCouncilGate", () => {
           workspace: harness.workspace,
           artifactDir: harness.artifactDir,
           diffPath: harness.diffPath,
-          cmuxSpawnBin: "/tmp/cmux-spawn",
+          legacyReviewSpawnBin: "/tmp/cmux-spawn",
         },
         { runCommand: harness.runCommand },
       ),
@@ -2590,7 +2583,7 @@ describe("runHeadlessCouncilGate", () => {
         artifactDir: harness.artifactDir,
         repo: "mobilyze-llc/symphony-ts",
         prNumber: 282,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         reviewerLanes: [opusLane()],
         codexLead: false,
       },
@@ -2636,7 +2629,7 @@ describe("runHeadlessCouncilGate", () => {
         artifactDir: harness.artifactDir,
         repo: "mobilyze-llc/symphony-ts",
         prNumber: 282,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
       },
       { runCommand: harness.runCommand },
     );
@@ -2662,7 +2655,7 @@ describe("runHeadlessCouncilGate", () => {
         artifactDir: harness.artifactDir,
         repo: "mobilyze-llc/symphony-ts",
         prNumber: 282,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
       },
       { runCommand: harness.runCommand },
     );
@@ -2682,7 +2675,7 @@ describe("runHeadlessCouncilGate", () => {
         artifactDir: harness.artifactDir,
         baseRef: "origin/main",
         headRef: "HEAD",
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         reviewerLanes: [opusLane()],
         codexLead: false,
       },
@@ -2723,7 +2716,7 @@ describe("runHeadlessCouncilGate", () => {
         artifactDir: harness.artifactDir,
         baseRef: "origin/main",
         headRef: "HEAD",
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
       },
       { runCommand: harness.runCommand },
     );
@@ -2749,7 +2742,7 @@ describe("runHeadlessCouncilGate", () => {
         artifactDir: harness.artifactDir,
         baseRef: "origin/main",
         headRef: "HEAD",
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
       },
       { runCommand: harness.runCommand },
     );
@@ -2841,41 +2834,6 @@ describe("runHeadlessCouncilGate", () => {
     expect(harness.commands).toEqual([]);
   });
 
-  it("fails closed on cmux preflight failure", async () => {
-    const harness = await createHarness({
-      preflight: { exitCode: 1, stdout: "{}", stderr: "cmux unavailable" },
-    });
-    const result = await runHeadlessCouncilGate(
-      {
-        issueId: "MOB-88",
-        workspace: harness.workspace,
-        artifactDir: harness.artifactDir,
-        diffPath: harness.diffPath,
-        routingMode: "legacy",
-      },
-      { runCommand: harness.runCommand },
-    );
-
-    expect(result.verdict).toBe("error");
-    expect(result.degradedConditions).toContain("cmux-preflight-failed");
-    expect(result.termination).toMatchObject({
-      status: "degraded",
-      reason: "gate_error",
-    });
-    await expect(
-      readFile(join(harness.artifactDir, "cmux-preflight.stdout"), "utf-8"),
-    ).resolves.toBe("{}");
-    await expect(
-      readFile(join(harness.artifactDir, "cmux-preflight.stderr"), "utf-8"),
-    ).resolves.toBe("cmux unavailable");
-    await expect(
-      readFile(join(harness.artifactDir, "cmux-preflight.cli.json"), "utf-8"),
-    ).resolves.toBe("{}");
-    await expect(
-      readFile(join(harness.artifactDir, "cmux-preflight.cli.stderr"), "utf-8"),
-    ).resolves.toBe("cmux unavailable");
-  });
-
   it("fails closed when cmux returns malformed lane JSON", async () => {
     const harness = await createHarness({
       laneBehavior: { "claude-opus": { stdout: "not json" } },
@@ -2899,7 +2857,7 @@ describe("runHeadlessCouncilGate", () => {
       state: "error",
       verdict: "error",
       degradedReason: "malformed_substrate_json",
-      message: "cmux-spawn returned malformed JSON.",
+      message: "Review lane launcher returned malformed JSON.",
       artifactPath: null,
       cliJsonPath: join(harness.artifactDir, "claude-opus.cli.json"),
       rawArtifactPath: null,
@@ -2999,7 +2957,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
       },
       { runCommand: harness.runCommand },
     );
@@ -3034,7 +2992,12 @@ describe("runHeadlessCouncilGate", () => {
       result.lanes.find((lane) => lane.laneId === "claude-opus"),
     ).toMatchObject({
       verdict: "error",
-      message: "Reviewer artifact mirror fallback failed: remote_mismatch.",
+      artifactPath: null,
+      message: "Reviewer artifact was missing or empty.",
+      mirrorFallback: {
+        attempted: false,
+        used: false,
+      },
     });
   });
 
@@ -3073,108 +3036,15 @@ describe("runHeadlessCouncilGate", () => {
       verdict: "error",
       artifactPath: null,
       rawArtifactPath: remoteArtifact,
-      message: "Reviewer artifact mirror fallback failed: remote_mismatch.",
+      message: "Reviewer artifact was missing or empty.",
       mirrorFallback: {
-        attempted: true,
+        attempted: false,
         used: false,
-        failureKind: "remote_mismatch",
       },
     });
     expect(await readFile(remoteArtifact, "utf-8")).not.toContain(
       "symphony-review-bundle",
     );
-  });
-
-  it("resolves remote lane artifact paths through same-stem local mirrors", async () => {
-    const harness = await createHarness({
-      laneBehavior: {
-        "claude-opus": {
-          mirrorArtifact:
-            "## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone\n",
-          json: {
-            state: "complete",
-            artifact_path: join(tmpdir(), "claude-opus.md"),
-          },
-        },
-      },
-    });
-    const mirroredArtifact = join(harness.artifactDir, "claude-opus.md");
-    const result = await runHeadlessCouncilGate(
-      {
-        issueId: "MOB-88",
-        workspace: harness.workspace,
-        artifactDir: harness.artifactDir,
-        diffPath: harness.diffPath,
-        reviewerLanes: [opusLane()],
-        codexLead: false,
-      },
-      { runCommand: harness.runCommand },
-    );
-
-    expect(result.verdict).toBe("pass");
-    const lane = result.lanes.find((entry) => entry.laneId === "claude-opus")!;
-    expect(lane).toMatchObject({
-      verdict: "pass",
-      artifactPath: mirroredArtifact,
-      rawArtifactPath: mirroredArtifact,
-      mirrorFallback: {
-        attempted: true,
-        used: true,
-        selectedMirrorPath: mirroredArtifact,
-        failureKind: null,
-      },
-    });
-    expect(lane.mirrorFallback?.remoteArtifactPath).toContain("claude-opus.md");
-  });
-
-  it("treats a mirror written during the run as fresh even when its mtime predates run start", async () => {
-    const harness = await createHarness({
-      laneBehavior: {
-        "claude-opus": {
-          mirrorArtifact:
-            "## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone\n",
-          json: {
-            state: "complete",
-            artifact_path: join(tmpdir(), "claude-opus.md"),
-          },
-          afterArtifactWrite: async (mirrorPath) => {
-            // Reproduce the CI flake deterministically: the mirror is written
-            // during the run, but filesystem mtime granularity / clock skew can
-            // leave its mtime before the captured run-start. Freshness must not
-            // depend on a wall-clock comparison.
-            const skewed = new Date(Date.now() - 60_000);
-            await utimes(mirrorPath, skewed, skewed);
-          },
-        },
-      },
-    });
-    const mirroredArtifact = join(harness.artifactDir, "claude-opus.md");
-    const result = await runHeadlessCouncilGate(
-      {
-        issueId: "MOB-88",
-        workspace: harness.workspace,
-        artifactDir: harness.artifactDir,
-        diffPath: harness.diffPath,
-        reviewerLanes: [opusLane()],
-        codexLead: false,
-      },
-      { runCommand: harness.runCommand },
-    );
-
-    expect(result.verdict).toBe("pass");
-    const lane = result.lanes.find((entry) => entry.laneId === "claude-opus")!;
-    expect(lane).toMatchObject({
-      verdict: "pass",
-      artifactPath: mirroredArtifact,
-      rawArtifactPath: mirroredArtifact,
-      mirrorFallback: {
-        attempted: true,
-        used: true,
-        selectedMirrorPath: mirroredArtifact,
-        freshnessPassed: true,
-        failureKind: null,
-      },
-    });
   });
 
   it("maps crucible CHANGES_REQUESTED findings without malformed degradation or finding drop", async () => {
@@ -3273,103 +3143,6 @@ describe("runHeadlessCouncilGate", () => {
         category: "track",
       }),
     ]);
-  });
-
-  it("rejects stale remote lane mirrors that predate lane launch", async () => {
-    const harness = await createHarness({
-      laneBehavior: {
-        "claude-opus": {
-          json: {
-            state: "complete",
-            artifact_path: join(tmpdir(), "claude-opus.md"),
-          },
-        },
-      },
-    });
-    const mirroredArtifact = join(harness.artifactDir, "claude-opus.md");
-    await mkdir(harness.artifactDir, { recursive: true });
-    await writeFile(
-      mirroredArtifact,
-      "## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone\n",
-    );
-    const staleTime = new Date(Date.now() - 60_000);
-    await utimes(mirroredArtifact, staleTime, staleTime);
-
-    const result = await runHeadlessCouncilGate(
-      {
-        issueId: "MOB-88",
-        workspace: harness.workspace,
-        artifactDir: harness.artifactDir,
-        diffPath: harness.diffPath,
-        reviewerLanes: [opusLane()],
-        codexLead: false,
-      },
-      { runCommand: harness.runCommand },
-    );
-
-    expect(result.verdict).toBe("error");
-    const lane = result.lanes.find((entry) => entry.laneId === "claude-opus")!;
-    expect(lane).toMatchObject({
-      verdict: "error",
-      message: "Reviewer artifact mirror fallback failed: absent.",
-      artifactPath: null,
-      rawArtifactPath: join(tmpdir(), "claude-opus.md"),
-      mirrorFallback: {
-        attempted: true,
-        used: false,
-        selectedMirrorPath: mirroredArtifact,
-        freshnessPassed: null,
-        failureKind: "absent",
-      },
-    });
-  });
-
-  it("removes pre-existing future-dated remote lane mirrors before launch", async () => {
-    const harness = await createHarness({
-      laneBehavior: {
-        "claude-opus": {
-          json: {
-            state: "complete",
-            artifact_path: join(tmpdir(), "claude-opus.md"),
-          },
-        },
-      },
-    });
-    const mirroredArtifact = join(harness.artifactDir, "claude-opus.md");
-    await mkdir(harness.artifactDir, { recursive: true });
-    await writeFile(
-      mirroredArtifact,
-      "## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone\n",
-    );
-    const futureTime = new Date(Date.now() + 60_000);
-    await utimes(mirroredArtifact, futureTime, futureTime);
-
-    const result = await runHeadlessCouncilGate(
-      {
-        issueId: "MOB-88",
-        workspace: harness.workspace,
-        artifactDir: harness.artifactDir,
-        diffPath: harness.diffPath,
-        reviewerLanes: [opusLane()],
-        codexLead: false,
-      },
-      { runCommand: harness.runCommand },
-    );
-
-    expect(result.verdict).toBe("error");
-    const lane = result.lanes.find((entry) => entry.laneId === "claude-opus")!;
-    expect(lane).toMatchObject({
-      verdict: "error",
-      message: "Reviewer artifact mirror fallback failed: absent.",
-      artifactPath: null,
-      rawArtifactPath: join(tmpdir(), "claude-opus.md"),
-      mirrorFallback: {
-        attempted: true,
-        used: false,
-        selectedMirrorPath: mirroredArtifact,
-        failureKind: "absent",
-      },
-    });
   });
 
   it("records footer append failures without discarding the computed verdict", async () => {
@@ -4402,7 +4175,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
       },
       { runCommand: harness.runCommand },
     );
@@ -4467,7 +4240,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
       },
       { runCommand: harness.runCommand },
     );
@@ -5160,7 +4933,7 @@ describe("runHeadlessCouncilGate", () => {
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
         reviewerLanes: [opusLane()],
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
       },
       { runCommand: harness.runCommand },
     );
@@ -5251,7 +5024,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         reviewerLanes: [piLane()],
         provenance: [],
       },
@@ -5300,7 +5073,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
       },
       { runCommand: harness.runCommand },
     );
@@ -5401,145 +5174,6 @@ describe("runHeadlessCouncilGate", () => {
     );
     const report = await readFile(result.artifactPaths.councilReport, "utf-8");
     expect(report).toContain("substrate_stall:claude-opus");
-  });
-
-  it("aborts and sweeps cleanup for a lane abandoned by the stall deadline", async () => {
-    let aborted = false;
-    const progress: string[] = [];
-    const harness = await createHarness({
-      laneBehavior: {
-        "claude-opus": {
-          hang: true,
-          onAbort: () => {
-            aborted = true;
-          },
-        },
-      },
-    });
-    const result = await runHeadlessCouncilGate(
-      {
-        issueId: "MOB-88",
-        workspace: harness.workspace,
-        artifactDir: harness.artifactDir,
-        diffPath: harness.diffPath,
-        reviewerLanes: [opusLane()],
-        codexLead: false,
-      },
-      {
-        runCommand: harness.runCommand,
-        laneStallDeadlineMs: TEST_LANE_STALL_DEADLINE_MS,
-        progress: (message) => progress.push(message),
-      },
-    );
-
-    expect(result.verdict).toBe("error");
-    expect(
-      result.lanes.find((lane) => lane.laneId === "claude-opus"),
-    ).toMatchObject({
-      state: "timed_out",
-      verdict: "error",
-      degradedReason: "substrate_stall",
-    });
-    expect(result.degradedConditions).toContain("substrate_stall:claude-opus");
-    expect(aborted).toBe(true);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(
-      harness.commands.some(
-        (command) =>
-          command.args[0] === "cleanup" && command.args[1] === "--sweep",
-      ),
-    ).toBe(true);
-    expect(progress.some((line) => line.includes("lane_started"))).toBe(true);
-    expect(
-      progress.some((line) => line.includes("lane_stalled laneId=claude-opus")),
-    ).toBe(true);
-    expect(
-      progress.some((line) =>
-        line.includes("lane_cleanup_completed laneId=claude-opus"),
-      ),
-    ).toBe(true);
-  });
-
-  it("coalesces cleanup sweeps when multiple lanes hit the stall deadline together", async () => {
-    const progress: string[] = [];
-    const harness = await createHarness({
-      cleanupDelayMs: 25,
-      laneBehavior: {
-        "claude-opus": { hang: true },
-        "pi-deepseek": { hang: true },
-      },
-    });
-    const result = await runHeadlessCouncilGate(
-      {
-        issueId: "MOB-88",
-        workspace: harness.workspace,
-        artifactDir: harness.artifactDir,
-        diffPath: harness.diffPath,
-        reviewerLanes: [opusLane(), piLane()],
-        codexLead: false,
-      },
-      {
-        runCommand: harness.runCommand,
-        laneStallDeadlineMs: TEST_LANE_STALL_DEADLINE_MS,
-        progress: (message) => progress.push(message),
-      },
-    );
-
-    expect(result.verdict).toBe("error");
-    expect(result.degradedConditions).toEqual(
-      expect.arrayContaining([
-        "substrate_stall:claude-opus",
-        "substrate_stall:pi-deepseek",
-      ]),
-    );
-    expect(
-      harness.commands.filter(
-        (command) =>
-          command.args[0] === "cleanup" && command.args[1] === "--sweep",
-      ),
-    ).toHaveLength(1);
-    expect(progress.some((line) => line.includes("lane_cleanup_joined"))).toBe(
-      true,
-    );
-  });
-
-  it("reports non-zero cleanup sweeps without blocking partial artifacts", async () => {
-    const progress: string[] = [];
-    const harness = await createHarness({
-      cleanupResult: {
-        exitCode: 1,
-        stdout: "",
-        stderr: "cleanup failed under test",
-      },
-      laneBehavior: {
-        "claude-opus": { hang: true },
-      },
-    });
-    const result = await runHeadlessCouncilGate(
-      {
-        issueId: "MOB-88",
-        workspace: harness.workspace,
-        artifactDir: harness.artifactDir,
-        diffPath: harness.diffPath,
-        reviewerLanes: [opusLane()],
-        codexLead: false,
-      },
-      {
-        runCommand: harness.runCommand,
-        laneStallDeadlineMs: TEST_LANE_STALL_DEADLINE_MS,
-        progress: (message) => progress.push(message),
-      },
-    );
-
-    expect(result.verdict).toBe("error");
-    expect(result.degradedConditions).toContain("substrate_stall:claude-opus");
-    expect(
-      progress.some(
-        (line) =>
-          line.includes("lane_cleanup_failed laneId=claude-opus") &&
-          line.includes("exitCode=1"),
-      ),
-    ).toBe(true);
   });
 
   it("ignores a non-positive lane stall deadline override and completes healthy lanes", async () => {
@@ -6779,7 +6413,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
       },
       { runCommand: harness.runCommand },
     );
@@ -6805,7 +6439,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
       },
       { runCommand: harness.runCommand },
     );
@@ -6828,7 +6462,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         timeoutSeconds: 3,
       },
       { runCommand: harness.runCommand },
@@ -6876,7 +6510,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         reviewerLanes: [opusLane()],
         codexLead: false,
         round: 2,
@@ -7697,7 +7331,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: firstHarness.workspace,
         artifactDir: firstHarness.artifactDir,
         diffPath: firstHarness.diffPath,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         reviewerLanes: [opusLane()],
       },
       { runCommand: firstHarness.runCommand },
@@ -7741,7 +7375,7 @@ describe("runHeadlessCouncilGate", () => {
         baseRef: "origin/main",
         headRef: "HEAD",
         previousReviewedHeadSha: "old-head-sha",
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         reviewerLanes: [opusLane(), piLane(), codexExcavationLane()],
         mode: "convergence",
         round: 2,
@@ -7877,7 +7511,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: firstHarness.workspace,
         artifactDir: firstHarness.artifactDir,
         diffPath: firstHarness.diffPath,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         reviewerLanes: [opusLane()],
       },
       { runCommand: firstHarness.runCommand },
@@ -7919,7 +7553,7 @@ describe("runHeadlessCouncilGate", () => {
         baseRef: "origin/main",
         headRef: "HEAD",
         previousReviewedHeadSha: "old-head-sha",
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         reviewerLanes: [opusLane(), piLane(), codexExcavationLane()],
         mode: "convergence",
         round: 2,
@@ -7990,7 +7624,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: firstHarness.workspace,
         artifactDir: firstHarness.artifactDir,
         diffPath: firstHarness.diffPath,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         reviewerLanes: [opusLane()],
       },
       { runCommand: firstHarness.runCommand },
@@ -8032,7 +7666,7 @@ describe("runHeadlessCouncilGate", () => {
         baseRef: "origin/main",
         headRef: "HEAD",
         previousReviewedHeadSha: "old-head-sha",
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         reviewerLanes: [opusLane(), piLane(), codexExcavationLane()],
         mode: "convergence",
         round: 2,
@@ -8088,7 +7722,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: firstHarness.workspace,
         artifactDir: firstHarness.artifactDir,
         diffPath: firstHarness.diffPath,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         reviewerLanes: [opusLane()],
       },
       { runCommand: firstHarness.runCommand },
@@ -8132,7 +7766,7 @@ describe("runHeadlessCouncilGate", () => {
         baseRef: "origin/main",
         headRef: "HEAD",
         previousReviewedHeadSha: "old-head-sha",
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         reviewerLanes: [opusLane(), piLane(), codexExcavationLane()],
         mode: "convergence",
         round: 2,
@@ -8194,7 +7828,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: firstHarness.workspace,
         artifactDir: firstHarness.artifactDir,
         diffPath: firstHarness.diffPath,
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         reviewerLanes: [opusLane()],
       },
       { runCommand: firstHarness.runCommand },
@@ -8247,7 +7881,7 @@ describe("runHeadlessCouncilGate", () => {
         baseRef: "origin/main",
         headRef: "HEAD",
         previousReviewedHeadSha: "old-head-sha",
-        cmuxSpawnBin: "/tmp/cmux-spawn",
+        legacyReviewSpawnBin: "/tmp/cmux-spawn",
         reviewerLanes: [opusLane(), piLane(), codexExcavationLane()],
         mode: "convergence",
         round: 2,

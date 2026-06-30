@@ -1,21 +1,8 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-const runHeadlessCouncilGateMock = vi.hoisted(() => vi.fn());
-
-vi.mock("../../src/review/headless-council-gate.js", async (importOriginal) => {
-  const actual =
-    await importOriginal<
-      typeof import("../../src/review/headless-council-gate.js")
-    >();
-  return {
-    ...actual,
-    runHeadlessCouncilGate: runHeadlessCouncilGateMock,
-  };
-});
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
   buildComparisonReport,
@@ -23,10 +10,6 @@ import {
   runKimiCouncilReplay,
   runKimiCouncilReplayCli,
 } from "../../src/cli/kimi-council-replay.js";
-
-beforeEach(() => {
-  runHeadlessCouncilGateMock.mockReset();
-});
 
 const tempRoots: string[] = [];
 
@@ -89,8 +72,6 @@ describe("parseKimiCouncilReplayArgs", () => {
           "main",
           "--head",
           "feature",
-          "--cmux-spawn-bin",
-          "/opt/cmux-spawn",
           "--kimi-bin",
           "/opt/kimi/bin/kimi",
           "--kimi-model",
@@ -107,7 +88,6 @@ describe("parseKimiCouncilReplayArgs", () => {
       prNumber: 683,
       baseRef: "main",
       headRef: "feature",
-      cmuxSpawnBin: "/opt/cmux-spawn",
       kimiBin: "/opt/kimi/bin/kimi",
       kimiModel: "kimi-test",
     });
@@ -118,6 +98,9 @@ describe("parseKimiCouncilReplayArgs", () => {
     expect(() => parseKimiCouncilReplayArgs(["--unknown"])).toThrow(
       "Unknown argument: --unknown",
     );
+    expect(() =>
+      parseKimiCouncilReplayArgs(["--cmux-spawn-bin", "/opt/cmux-spawn"]),
+    ).toThrow("Unknown argument: --cmux-spawn-bin");
     expect(() =>
       parseKimiCouncilReplayArgs([
         "--source-council-dir",
@@ -436,567 +419,15 @@ describe("buildComparisonReport", () => {
 });
 
 describe("runKimiCouncilReplay", () => {
-  it("fails with a clear usage error when the source diff is missing", async () => {
-    const sourceCouncilDir = await makeTempDir("source-council-");
-    const replayArtifactDir = await makeTempDir("kimi-replay-");
-
+  it("fails with a clear retired-tool error", async () => {
     await expect(
       runKimiCouncilReplay({
-        sourceCouncilDir,
-        replayArtifactDir,
+        sourceCouncilDir: "/tmp/source-council",
+        replayArtifactDir: "/tmp/kimi-replay",
         workspace: "/repo",
         issueId: "SYMPH-689",
       }),
-    ).rejects.toThrow("Source council diff not found");
-  });
-
-  it("names an invalid source council dir path", async () => {
-    const replayArtifactDir = await makeTempDir("kimi-replay-");
-    const sourceCouncilDir = join(replayArtifactDir, "missing-source");
-
-    await expect(
-      runKimiCouncilReplay({
-        sourceCouncilDir,
-        replayArtifactDir,
-        workspace: "/repo",
-        issueId: "SYMPH-689",
-      }),
-    ).rejects.toThrow(sourceCouncilDir);
-  });
-
-  it("names malformed source structured JSON paths", async () => {
-    const sourceCouncilDir = await makeTempDir("source-council-");
-    const replayArtifactDir = await makeTempDir("kimi-replay-");
-    const malformedPath = join(sourceCouncilDir, "opus.structured.json");
-    await writeFile(
-      join(sourceCouncilDir, "diff.patch"),
-      "diff --git a/x b/x\n",
-    );
-    await writeFile(malformedPath, "{not json");
-
-    await expect(
-      runKimiCouncilReplay({
-        sourceCouncilDir,
-        replayArtifactDir,
-        workspace: "/repo",
-        issueId: "SYMPH-689",
-      }),
-    ).rejects.toThrow(malformedPath);
-  });
-
-  it("runs a Kimi replay lane and writes comparison artifacts", async () => {
-    const sourceCouncilDir = await makeTempDir("source-council-");
-    const replayArtifactDir = await makeTempDir("kimi-replay-");
-    await writeFile(
-      join(sourceCouncilDir, "diff.patch"),
-      "diff --git a/x b/x\n",
-    );
-    await writeFile(
-      join(sourceCouncilDir, "opus.structured.json"),
-      JSON.stringify({
-        lane: {
-          laneId: "opus",
-          agent: "claude",
-          role: "legacy-reviewer",
-          modelFamily: "anthropic",
-          mergeAuthoritative: true,
-        },
-        verdict: "fail",
-        parseStatus: "synthesized_from_markdown",
-        reviewBundle: {
-          path: join(sourceCouncilDir, "review-bundle.json"),
-          hash: "b".repeat(64),
-          bundleHash: "a".repeat(64),
-          hashAlgorithm: "sha256",
-        },
-        findings: [
-          {
-            severity: "P1",
-            fingerprint: "shared-blocker",
-            leadDisposition: "open",
-          },
-          { severity: "P2", fingerprint: "opus-only", leadDisposition: "open" },
-          {
-            severity: "P1",
-            fingerprint: "closed-source",
-            leadDisposition: "refuted",
-          },
-          {
-            severity: "P1",
-            fingerprint: "dismissed-source",
-            leadDisposition: "dismissed",
-          },
-          {
-            severity: "P2",
-            fingerprint: "track-disposition-source",
-            leadDisposition: "track",
-          },
-          { severity: "Track", fingerprint: "source-track" },
-        ],
-      }),
-    );
-    await writeFile(
-      join(sourceCouncilDir, "codex-high-lead.structured.json"),
-      JSON.stringify({
-        lane: {
-          laneId: "codex-high-lead",
-          agent: "codex",
-          role: "codex-lead-triage",
-          modelFamily: "openai",
-          mergeAuthoritative: true,
-        },
-        verdict: "fail",
-        parseStatus: "synthesized_from_markdown",
-        reviewBundle: {
-          path: join(sourceCouncilDir, "review-bundle.json"),
-          hash: "b".repeat(64),
-          bundleHash: "a".repeat(64),
-          hashAlgorithm: "sha256",
-        },
-        findings: [
-          {
-            severity: "P1",
-            fingerprint: "lead-only",
-            leadDisposition: "open",
-          },
-        ],
-      }),
-    );
-    await writeFile(
-      join(sourceCouncilDir, "kimi-prior-shadow.structured.json"),
-      JSON.stringify({
-        lane: {
-          laneId: "kimi-k27-shadow",
-          agent: "kimi",
-          role: "kimi-k27-shadow-reviewer",
-          modelFamily: "moonshot-kimi",
-          mergeAuthoritative: false,
-        },
-        verdict: "fail",
-        parseStatus: "synthesized_from_markdown",
-        reviewBundle: {
-          path: join(sourceCouncilDir, "review-bundle.json"),
-          hash: "b".repeat(64),
-          bundleHash: "a".repeat(64),
-          hashAlgorithm: "sha256",
-        },
-        findings: [
-          {
-            severity: "P2",
-            fingerprint: "prior-shadow-only",
-            leadDisposition: "open",
-          },
-        ],
-      }),
-    );
-    runHeadlessCouncilGateMock.mockResolvedValue({
-      lanes: [
-        {
-          agent: "kimi",
-          structuredArtifactPath: join(
-            replayArtifactDir,
-            "kimi-k27-shadow.structured.json",
-          ),
-          structuredArtifact: {
-            lane: {
-              laneId: "kimi-k27-shadow",
-              agent: "kimi",
-              role: "kimi-k27-shadow-reviewer",
-              modelFamily: "moonshot-kimi",
-              mergeAuthoritative: false,
-            },
-            verdict: "fail",
-            parseStatus: "synthesized_from_markdown",
-            reviewBundle: {
-              path: join(replayArtifactDir, "review-bundle.json"),
-              hash: "b".repeat(64),
-              bundleHash: "a".repeat(64),
-              hashAlgorithm: "sha256",
-            },
-            findings: [
-              {
-                severity: "P1",
-                fingerprint: "shared-blocker",
-                leadDisposition: "open",
-              },
-              {
-                severity: "P2",
-                fingerprint: "kimi-only",
-                leadDisposition: "open",
-              },
-              { severity: "Track", fingerprint: "kimi-track" },
-            ],
-          },
-        },
-      ],
-      artifactPaths: {
-        resultJson: join(replayArtifactDir, "review-result.json"),
-      },
-    });
-
-    const report = await runKimiCouncilReplay({
-      sourceCouncilDir,
-      replayArtifactDir,
-      workspace: "/repo",
-      issueId: "SYMPH-689",
-      repo: "mobilyze-llc/symphony-ts",
-      prNumber: 541,
-      baseRef: "main",
-      headRef: "feature",
-      cmuxSpawnBin: "/opt/cmux-spawn",
-      kimiBin: "/opt/kimi/bin/kimi",
-      kimiModel: "kimi-test",
-    });
-
-    expect(runHeadlessCouncilGateMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        issueId: "SYMPH-689",
-        workspace: "/repo",
-        artifactDir: replayArtifactDir,
-        diffPath: join(sourceCouncilDir, "diff.patch"),
-        codexLead: false,
-        repo: "mobilyze-llc/symphony-ts",
-        prNumber: 541,
-        baseRef: "main",
-        headRef: "feature",
-        cmuxSpawnBin: "/opt/cmux-spawn",
-        reviewerLanes: [
-          {
-            laneId: "kimi-k27-shadow",
-            agent: "kimi",
-            role: "kimi-k27-shadow-reviewer",
-            model: "kimi-test",
-            binary: "/opt/kimi/bin/kimi",
-            independentReviewer: false,
-            mergeAuthoritative: false,
-          },
-        ],
-      }),
-    );
-    expect(report.scoring.artifactContract).toBe("complete");
-    expect(report.scoring.blockerRecallAgainstUnion).toBe(0.5);
-    expect(report.scoring.matchedBlockingFingerprints).toEqual([
-      "shared-blocker",
-    ]);
-    expect(report.scoring.sourceBlockingFingerprints).toEqual([
-      "opus-only",
-      "shared-blocker",
-    ]);
-    expect(report.scoring.kimiOnlyBlockingFingerprints).toEqual(["kimi-only"]);
-    expect(report.scoring.sourceBlockingFingerprints).not.toContain(
-      "lead-only",
-    );
-    expect(report.scoring.sourceBlockingFingerprints).not.toContain(
-      "prior-shadow-only",
-    );
-    expect(report.scoring.sourceBlockingFingerprints).not.toContain(
-      "closed-source",
-    );
-    expect(report.scoring.sourceBlockingFingerprints).not.toContain(
-      "dismissed-source",
-    );
-    expect(report.scoring.sourceBlockingFingerprints).not.toContain(
-      "track-disposition-source",
-    );
-    expect(
-      report.sourceLanes.find((lane) => lane.laneId === "codex-high-lead")
-        ?.sourceRecallExclusionReason,
-    ).toBe("lead_artifact");
-    expect(
-      report.sourceLanes.find((lane) => lane.laneId === "kimi-k27-shadow")
-        ?.sourceRecallExclusionReason,
-    ).toBe("prior_shadow_artifact");
-    await expect(
-      readFile(join(replayArtifactDir, "kimi-replay-comparison.json"), "utf-8"),
-    ).resolves.toContain('"artifactContract": "complete"');
-    await expect(
-      readFile(join(replayArtifactDir, "kimi-replay-comparison.md"), "utf-8"),
-    ).resolves.toContain("Kimi replay bundle hash match: yes");
-  });
-
-  it("reports non-default source bundle hash mismatches as unpinned fresh replay comparisons", async () => {
-    const sourceCouncilDir = await makeTempDir("source-council-");
-    const replayArtifactDir = await makeTempDir("kimi-replay-");
-    const sourceRoundTwoBundleHash = "a".repeat(64);
-    const freshReplayBundleHash = "b".repeat(64);
-    const sourceReviewBundlePath = join(sourceCouncilDir, "review-bundle.json");
-    await writeFile(
-      join(sourceCouncilDir, "diff.patch"),
-      "diff --git a/x b/x\n",
-    );
-    await writeFile(
-      sourceReviewBundlePath,
-      JSON.stringify({
-        schemaVersion: 1,
-        kind: "symphony-headless-council-review-bundle",
-        hashAlgorithm: "sha256",
-        target: {
-          issueId: "SYMPH-718",
-          repo: "mobilyze-llc/symphony-ts",
-          prNumber: 718,
-          mode: "standard",
-          routingMode: "targeted-convergence",
-          round: 2,
-        },
-        refs: {
-          baseRef: "main",
-          headRef: "feature",
-          baseSha: "0".repeat(40),
-          headSha: "1".repeat(40),
-          reviewedHeadSha: "1".repeat(40),
-          previousReviewedHeadSha: "2".repeat(40),
-        },
-        scope: {
-          changedPaths: ["x"],
-        },
-        targetedConvergence: null,
-        diff: {
-          path: join(sourceCouncilDir, "diff.patch"),
-          sha256: "3".repeat(64),
-          bytes: Buffer.byteLength("diff --git a/x b/x\n", "utf-8"),
-        },
-        gitStatus: "",
-        provenance: [],
-        optionalInputs: {
-          promptPaths: [],
-          evidenceDatasetPaths: [],
-          riskContractArtifactPaths: [],
-        },
-        bundleHash: sourceRoundTwoBundleHash,
-      }),
-    );
-    await writeFile(
-      join(sourceCouncilDir, "opus.structured.json"),
-      JSON.stringify({
-        lane: {
-          laneId: "opus",
-          agent: "claude",
-          role: "legacy-reviewer",
-          modelFamily: "anthropic",
-          mergeAuthoritative: true,
-        },
-        verdict: "pass",
-        parseStatus: "synthesized_from_markdown",
-        reviewBundle: {
-          path: sourceReviewBundlePath,
-          hash: "c".repeat(64),
-          bundleHash: sourceRoundTwoBundleHash,
-          hashAlgorithm: "sha256",
-        },
-        findings: [],
-      }),
-    );
-    runHeadlessCouncilGateMock.mockResolvedValue({
-      lanes: [
-        {
-          agent: "kimi",
-          structuredArtifactPath: join(
-            replayArtifactDir,
-            "kimi-k27-shadow.structured.json",
-          ),
-          structuredArtifact: {
-            lane: {
-              laneId: "kimi-k27-shadow",
-              agent: "kimi",
-              role: "kimi-k27-shadow-reviewer",
-              modelFamily: "moonshot-kimi",
-              mergeAuthoritative: false,
-            },
-            verdict: "pass",
-            parseStatus: "synthesized_from_markdown",
-            reviewBundle: {
-              path: join(replayArtifactDir, "review-bundle.json"),
-              hash: "d".repeat(64),
-              bundleHash: freshReplayBundleHash,
-              hashAlgorithm: "sha256",
-            },
-            findings: [],
-          },
-        },
-      ],
-      artifactPaths: {
-        resultJson: join(replayArtifactDir, "review-result.json"),
-      },
-    });
-
-    const report = await runKimiCouncilReplay({
-      sourceCouncilDir,
-      replayArtifactDir,
-      workspace: "/repo",
-      issueId: "SYMPH-718",
-    });
-
-    const sourceReviewBundle = JSON.parse(
-      await readFile(sourceReviewBundlePath, "utf-8"),
-    ) as {
-      target: { round: number; routingMode: string | null };
-      refs: { previousReviewedHeadSha: string | null };
-    };
-    expect(sourceReviewBundle.target.round).toBe(2);
-    expect(sourceReviewBundle.target.routingMode).toBe("targeted-convergence");
-    expect(sourceReviewBundle.refs.previousReviewedHeadSha).toBe(
-      "2".repeat(40),
-    );
-    expect(runHeadlessCouncilGateMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        diffPath: join(sourceCouncilDir, "diff.patch"),
-      }),
-    );
-    expect(report.scoring.artifactContract).toBe("complete");
-    expect(report.frozenReviewBundle).toEqual({
-      canonicalHash: sourceRoundTwoBundleHash,
-      sourceHashStatus: "consistent",
-      sourceHashes: [sourceRoundTwoBundleHash],
-      kimiReplayBundleHash: freshReplayBundleHash,
-      sourceInputsPinnedByKimiReplay: false,
-      kimiReplayBundleHashMatchesSource: false,
-      usedByKimiReplay: false,
-    });
-
-    const jsonReport = JSON.parse(
-      await readFile(
-        join(replayArtifactDir, "kimi-replay-comparison.json"),
-        "utf-8",
-      ),
-    ) as ReturnType<typeof buildComparisonReport>;
-    expect(jsonReport.frozenReviewBundle.sourceInputsPinnedByKimiReplay).toBe(
-      false,
-    );
-    expect(
-      jsonReport.frozenReviewBundle.kimiReplayBundleHashMatchesSource,
-    ).toBe(false);
-    const markdownReport = await readFile(
-      join(replayArtifactDir, "kimi-replay-comparison.md"),
-      "utf-8",
-    );
-    expect(markdownReport).toContain("Kimi replay bundle hash match: no");
-    expect(markdownReport).toContain("source bundle inputs not pinned");
-    expect(markdownReport).not.toContain(
-      "Canonical frozen review bundle hash used",
-    );
-  });
-
-  it("writes partial source bundle hash status to markdown", async () => {
-    const sourceCouncilDir = await makeTempDir("source-council-");
-    const replayArtifactDir = await makeTempDir("kimi-replay-");
-    await writeFile(
-      join(sourceCouncilDir, "diff.patch"),
-      "diff --git a/x b/x\n",
-    );
-    await writeFile(
-      join(sourceCouncilDir, "opus.structured.json"),
-      JSON.stringify({
-        lane: {
-          laneId: "opus",
-          agent: "claude",
-          role: "legacy-reviewer",
-          modelFamily: "anthropic",
-          mergeAuthoritative: true,
-        },
-        verdict: "pass",
-        parseStatus: "synthesized_from_markdown",
-        reviewBundle: {
-          path: join(sourceCouncilDir, "review-bundle.json"),
-          hash: "b".repeat(64),
-          bundleHash: "a".repeat(64),
-          hashAlgorithm: "sha256",
-        },
-        findings: [],
-      }),
-    );
-    await writeFile(
-      join(sourceCouncilDir, "gemini.structured.json"),
-      JSON.stringify({
-        lane: {
-          laneId: "gemini",
-          agent: "gemini",
-          role: "legacy-reviewer",
-          modelFamily: "google",
-          mergeAuthoritative: true,
-        },
-        verdict: "pass",
-        parseStatus: "synthesized_from_markdown",
-        reviewBundle: null,
-        findings: [],
-      }),
-    );
-    runHeadlessCouncilGateMock.mockResolvedValue({
-      lanes: [
-        {
-          agent: "kimi",
-          structuredArtifact: {
-            lane: {
-              laneId: "kimi-k27-shadow",
-              agent: "kimi",
-              role: "kimi-k27-shadow-reviewer",
-              modelFamily: "moonshot-kimi",
-              mergeAuthoritative: false,
-            },
-            verdict: "pass",
-            parseStatus: "synthesized_from_markdown",
-            reviewBundle: {
-              path: join(replayArtifactDir, "review-bundle.json"),
-              hash: "b".repeat(64),
-              bundleHash: "a".repeat(64),
-              hashAlgorithm: "sha256",
-            },
-            findings: [],
-          },
-        },
-      ],
-      artifactPaths: {
-        resultJson: join(replayArtifactDir, "review-result.json"),
-      },
-    });
-
-    const report = await runKimiCouncilReplay({
-      sourceCouncilDir,
-      replayArtifactDir,
-      workspace: "/repo",
-      issueId: "SYMPH-689",
-    });
-
-    expect(report.frozenReviewBundle.sourceHashStatus).toBe("partial");
-    await expect(
-      readFile(join(replayArtifactDir, "kimi-replay-comparison.md"), "utf-8"),
-    ).resolves.toContain("source bundle hashes incomplete");
-  });
-
-  it("keeps default Kimi CLI config when replay overrides are omitted", async () => {
-    const sourceCouncilDir = await makeTempDir("source-council-");
-    const replayArtifactDir = await makeTempDir("kimi-replay-");
-    await writeFile(
-      join(sourceCouncilDir, "diff.patch"),
-      "diff --git a/x b/x\n",
-    );
-    runHeadlessCouncilGateMock.mockResolvedValue({
-      lanes: [{ agent: "kimi", structuredArtifact: null }],
-      artifactPaths: {
-        resultJson: join(replayArtifactDir, "review-result.json"),
-      },
-    });
-
-    const report = await runKimiCouncilReplay({
-      sourceCouncilDir,
-      replayArtifactDir,
-      workspace: "/repo",
-      issueId: "SYMPH-689",
-    });
-
-    expect(runHeadlessCouncilGateMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        reviewerLanes: [
-          {
-            laneId: "kimi-k27-shadow",
-            agent: "kimi",
-            role: "kimi-k27-shadow-reviewer",
-            independentReviewer: false,
-            mergeAuthoritative: false,
-          },
-        ],
-      }),
-    );
-    expect(report.scoring.artifactContract).toBe("missing");
+    ).rejects.toThrow("symphony-kimi-council-replay has been retired");
   });
 });
 
@@ -1041,127 +472,35 @@ describe("runKimiCouncilReplayCli", () => {
       }),
     ).resolves.toBe(2);
     expect(writes.join("\n")).toContain("Usage:");
-    expect(runHeadlessCouncilGateMock).not.toHaveBeenCalled();
   });
 
-  it("returns 0 when the Kimi artifact contract is complete", async () => {
+  it("returns 1 with a retired-tool message for fresh replay execution", async () => {
     const { sourceCouncilDir, replayArtifactDir } = await writeReplaySource();
-    runHeadlessCouncilGateMock.mockResolvedValue({
-      lanes: [
+    const writes: string[] = [];
+    await expect(
+      runKimiCouncilReplayCli(
+        [
+          "--source-council-dir",
+          sourceCouncilDir,
+          "--artifact-dir",
+          replayArtifactDir,
+          "--issue-id",
+          "SYMPH-689",
+        ],
         {
-          agent: "kimi",
-          structuredArtifactPath: join(
-            replayArtifactDir,
-            "kimi-k27-shadow.structured.json",
-          ),
-          structuredArtifact: {
-            lane: {
-              laneId: "kimi-k27-shadow",
-              agent: "kimi",
-              role: "kimi-k27-shadow-reviewer",
-              modelFamily: "moonshot-kimi",
-              mergeAuthoritative: false,
-            },
-            verdict: "pass",
-            parseStatus: "synthesized_from_markdown",
-            findings: [],
+          stdout: (message) => {
+            writes.push(message);
+            return true;
           },
-        },
-      ],
-      artifactPaths: {
-        resultJson: join(replayArtifactDir, "review-result.json"),
-      },
-    });
-
-    await expect(
-      runKimiCouncilReplayCli(
-        [
-          "--source-council-dir",
-          sourceCouncilDir,
-          "--artifact-dir",
-          replayArtifactDir,
-          "--issue-id",
-          "SYMPH-689",
-        ],
-        {
-          stdout: () => true,
-          stderr: () => true,
-        },
-      ),
-    ).resolves.toBe(0);
-  });
-
-  it("returns 1 when the Kimi artifact contract is missing", async () => {
-    const { sourceCouncilDir, replayArtifactDir } = await writeReplaySource();
-    runHeadlessCouncilGateMock.mockResolvedValue({
-      lanes: [{ agent: "kimi", structuredArtifact: null }],
-      artifactPaths: {
-        resultJson: join(replayArtifactDir, "review-result.json"),
-      },
-    });
-
-    await expect(
-      runKimiCouncilReplayCli(
-        [
-          "--source-council-dir",
-          sourceCouncilDir,
-          "--artifact-dir",
-          replayArtifactDir,
-          "--issue-id",
-          "SYMPH-689",
-        ],
-        {
-          stdout: () => true,
-          stderr: () => true,
+          stderr: (message) => {
+            writes.push(message);
+            return true;
+          },
         },
       ),
     ).resolves.toBe(1);
-  });
-
-  it("returns 1 when the Kimi artifact contract is malformed", async () => {
-    const { sourceCouncilDir, replayArtifactDir } = await writeReplaySource();
-    runHeadlessCouncilGateMock.mockResolvedValue({
-      lanes: [
-        {
-          agent: "kimi",
-          structuredArtifactPath: join(
-            replayArtifactDir,
-            "kimi-k27-shadow.structured.json",
-          ),
-          structuredArtifact: {
-            lane: {
-              laneId: "kimi-k27-shadow",
-              agent: "kimi",
-              role: "kimi-k27-shadow-reviewer",
-              modelFamily: "moonshot-kimi",
-              mergeAuthoritative: false,
-            },
-            verdict: "error",
-            parseStatus: "malformed",
-            findings: [],
-          },
-        },
-      ],
-      artifactPaths: {
-        resultJson: join(replayArtifactDir, "review-result.json"),
-      },
-    });
-
-    await expect(
-      runKimiCouncilReplayCli(
-        [
-          "--source-council-dir",
-          sourceCouncilDir,
-          "--artifact-dir",
-          replayArtifactDir,
-          "--issue-id",
-          "SYMPH-689",
-        ],
-        {
-          stdout: () => true,
-          stderr: () => true,
-        },
-      ),
-    ).resolves.toBe(1);
+    expect(writes.join("\n")).toContain(
+      "symphony-kimi-council-replay has been retired",
+    );
   });
 });

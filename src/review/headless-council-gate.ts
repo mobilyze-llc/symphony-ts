@@ -4,20 +4,15 @@ import {
   mkdir,
   open,
   readFile,
+  realpath,
   rename,
   stat,
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { resolve } from "node:path";
+import { relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import {
-  type CmuxMirrorFallbackStatus,
-  type CmuxMirrorPriorState,
-  removeStaleCmuxMirror,
-  resolveCmuxArtifactPath,
-} from "../claude-runner/cmux-artifact-paths.js";
 import type { CouncilRiskPredicateResult } from "../domain/model.js";
 import { classifyCouncilRiskPaths } from "../orchestrator/council-risk-predicate.js";
 import {
@@ -59,11 +54,10 @@ import { stableJsonStringify } from "./stable-json.js";
 
 export { buildArtifactSectionHeadingKeys } from "./review-artifacts.js";
 
-const DEFAULT_CMUX_SPAWN_BIN = "cmux-spawn";
+const DEFAULT_LEGACY_REVIEW_SPAWN_BIN = "symphony-review-lane";
 const DEFAULT_TIMEOUT_SECONDS = 1_800;
 const DEFAULT_PREFLIGHT_TIMEOUT_MS = 30_000;
 const DEFAULT_COMMAND_TIMEOUT_GRACE_SECONDS = 60;
-const STALLED_LANE_CLEANUP_TIMEOUT_MS = 5_000;
 const MAX_DIFF_BYTES = 5 * 1024 * 1024;
 const MAX_COMMAND_BUFFER_BYTES = 20 * 1024 * 1024;
 const CODEX_LEAD_ROLE = "codex-lead-triage";
@@ -454,7 +448,7 @@ export interface HeadlessCouncilGateInput {
   baseRef?: string;
   headRef?: string;
   diffPath?: string;
-  cmuxSpawnBin?: string;
+  legacyReviewSpawnBin?: string;
   timeoutSeconds?: number;
   reviewerLanes?: readonly HeadlessReviewerLaneConfig[];
   codexLead?: boolean;
@@ -686,7 +680,7 @@ export interface HeadlessLaneResult {
   wallTimeMs: number | null;
   tokenUsage: HeadlessLaneTokenUsage | null;
   rawArtifactPath?: string | null;
-  mirrorFallback?: CmuxMirrorFallbackStatus | null;
+  mirrorFallback?: ReviewArtifactPathFallbackStatus | null;
   structuredArtifactPath?: string | null;
   structuredArtifact?: StructuredReviewerArtifact | null;
   workspaceIntegrity?: HeadlessWorkspaceIntegrityEvidence | null;
@@ -789,7 +783,7 @@ interface HeadlessCouncilGateDependencies {
   reviewAggregatorCapture?: GateAggregatorCapture;
 }
 
-interface CmuxRunJson {
+interface ReviewLaneRunJson {
   state?: string;
   artifact_path?: string;
   artifact_sha256?: string;
@@ -810,7 +804,7 @@ interface CmuxRunJson {
   completed_at?: unknown;
   completedAt?: unknown;
   // Optional inline status payload; lane terminal state is `state`, not this
-  // field, because some cmux-spawn variants use `status` for structured data.
+  // field, because some legacy launchers use `status` for structured data.
   status?: unknown;
 }
 
@@ -831,6 +825,22 @@ interface LaneExecutionBudget {
   remainingOverallMs: number;
 }
 
+interface ReviewArtifactPathFallbackStatus {
+  attempted: boolean;
+  used: boolean;
+  remoteArtifactPath: string | null;
+  selectedMirrorPath: string | null;
+  freshnessPassed: boolean | null;
+  failureKind: string | null;
+  validationErrors: string[];
+}
+
+interface ReviewArtifactPathResolution {
+  artifactPath: string;
+  validationErrors: string[];
+  mirrorFallback: ReviewArtifactPathFallbackStatus;
+}
+
 export async function runHeadlessCouncilGate(
   input: HeadlessCouncilGateInput,
   dependencies: HeadlessCouncilGateDependencies = {},
@@ -842,8 +852,10 @@ export async function runHeadlessCouncilGate(
   const env = input.env ?? process.env;
   const artifactDir = resolve(input.artifactDir);
   const workspace = resolve(input.workspace);
-  const cmuxSpawnBin =
-    input.cmuxSpawnBin ?? env.CMUX_SPAWN_BIN ?? DEFAULT_CMUX_SPAWN_BIN;
+  const legacyReviewSpawnBin =
+    input.legacyReviewSpawnBin ??
+    env.SYMPHONY_LEGACY_REVIEW_SPAWN_BIN ??
+    DEFAULT_LEGACY_REVIEW_SPAWN_BIN;
   const timeoutSeconds = input.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS;
   const round = normalizeReviewRound(input.round);
   const mode = input.mode ?? "full";
@@ -950,27 +962,6 @@ export async function runHeadlessCouncilGate(
       [],
       reservedLaneIds.map((laneId) => `reserved-reviewer-lane-id:${laneId}`),
       `Reviewer lane IDs cannot use reserved gate lane IDs: ${reservedLaneIds.join(", ")}`,
-    );
-  }
-
-  const preflight = await runCommand(
-    cmuxSpawnBin,
-    ["preflight", "--caffeinate", "--json"],
-    { cwd: workspace, env, timeoutMs: DEFAULT_PREFLIGHT_TIMEOUT_MS },
-  );
-  await writeFile(`${artifactDir}/cmux-preflight.stdout`, preflight.stdout);
-  await writeFile(`${artifactDir}/cmux-preflight.stderr`, preflight.stderr);
-  // Compatibility aliases: reviewer lanes persist cmux-spawn stdout/stderr as
-  // .cli.json/.cli.stderr, and preflight diagnostics should be grep-compatible.
-  await writeFile(`${artifactDir}/cmux-preflight.cli.json`, preflight.stdout);
-  await writeFile(`${artifactDir}/cmux-preflight.cli.stderr`, preflight.stderr);
-  if (preflight.exitCode !== 0) {
-    return await fail(
-      "error",
-      {},
-      [],
-      ["cmux-preflight-failed"],
-      "cmux-spawn preflight failed; review gate failed closed.",
     );
   }
 
@@ -1124,26 +1115,6 @@ export async function runHeadlessCouncilGate(
       remainingOverallMs: remainingMs,
     };
   };
-  let inFlightStalledLaneCleanup: Promise<void> | null = null;
-  const cleanupStalledLaneCoalesced = (
-    cleanupInput: Parameters<typeof cleanupStalledLane>[0],
-  ) => {
-    if (inFlightStalledLaneCleanup !== null) {
-      cleanupInput.progress(
-        formatLaneProgress("cleanup_joined", {
-          laneId: cleanupInput.laneId,
-        }),
-      );
-      return inFlightStalledLaneCleanup;
-    }
-    inFlightStalledLaneCleanup = cleanupStalledLane(cleanupInput).finally(
-      () => {
-        inFlightStalledLaneCleanup = null;
-      },
-    );
-    return inFlightStalledLaneCleanup;
-  };
-
   const runReviewerLaneWithDeadline = (lane: HeadlessReviewerLaneConfig) => {
     const laneTimeoutSeconds = timeoutSecondsForLane(lane, timeoutSeconds);
     const budget = laneBudgetFor(laneTimeoutSeconds);
@@ -1193,7 +1164,7 @@ export async function runHeadlessCouncilGate(
         context,
         artifactDir,
         workspace,
-        cmuxSpawnBin,
+        spawnBin: legacyReviewSpawnBin,
         timeoutSeconds: budget.timeoutSeconds,
         runCommand: runCommandWithSignal(runCommand, abortController.signal),
         env,
@@ -1223,7 +1194,7 @@ export async function runHeadlessCouncilGate(
         );
       },
       {
-        onStall: async () => {
+        onStall: () => {
           progress(
             formatLaneProgress("stalled", {
               laneId: lane.laneId,
@@ -1232,14 +1203,6 @@ export async function runHeadlessCouncilGate(
               deadlineMs: budget.stallDeadlineMs,
             }),
           );
-          await cleanupStalledLaneCoalesced({
-            cmuxSpawnBin,
-            workspace,
-            env,
-            runCommand,
-            laneId: lane.laneId,
-            progress,
-          });
         },
       },
     ).then((result) => {
@@ -1306,7 +1269,7 @@ export async function runHeadlessCouncilGate(
           reviewerResults: lanes,
           artifactDir,
           workspace,
-          cmuxSpawnBin,
+          spawnBin: legacyReviewSpawnBin,
           timeoutSeconds: codexLeadBudget.timeoutSeconds,
           runCommand: runCommandWithSignal(
             runCommand,
@@ -1339,7 +1302,7 @@ export async function runHeadlessCouncilGate(
           );
         },
         {
-          onStall: async () => {
+          onStall: () => {
             progress(
               formatLaneProgress("stalled", {
                 laneId: CODEX_LEAD_LANE_ID,
@@ -1348,14 +1311,6 @@ export async function runHeadlessCouncilGate(
                 deadlineMs: codexLeadBudget.stallDeadlineMs,
               }),
             );
-            await cleanupStalledLaneCoalesced({
-              cmuxSpawnBin,
-              workspace,
-              env,
-              runCommand,
-              laneId: CODEX_LEAD_LANE_ID,
-              progress,
-            });
           },
         },
       );
@@ -3915,7 +3870,7 @@ async function runReviewerLane(input: {
   context: ReviewContext;
   artifactDir: string;
   workspace: string;
-  cmuxSpawnBin: string;
+  spawnBin: string;
   timeoutSeconds: number;
   runCommand: CommandRunner;
   env: NodeJS.ProcessEnv;
@@ -3993,11 +3948,7 @@ async function runReviewerLane(input: {
     ...laneAgentArgs(input.lane, input.artifactDir),
   ];
 
-  const priorMirror = await removeStaleCmuxMirror({
-    artifactDir: input.artifactDir,
-    artifactName: input.lane.laneId,
-  });
-  const result = await input.runCommand(input.cmuxSpawnBin, args, {
+  const result = await input.runCommand(input.spawnBin, args, {
     cwd: input.workspace,
     env: input.env,
     timeoutMs: commandTimeoutMs(input.timeoutSeconds),
@@ -4023,7 +3974,6 @@ async function runReviewerLane(input: {
     mode: input.mode,
     routingMode: input.routingMode,
     round: input.round,
-    priorMirror,
     structuredArtifactPath: structuredArtifactPathFor(
       input.artifactDir,
       input.lane.laneId,
@@ -4047,7 +3997,7 @@ async function runCodexLeadLane(input: {
   reviewerResults: readonly HeadlessLaneResult[];
   artifactDir: string;
   workspace: string;
-  cmuxSpawnBin: string;
+  spawnBin: string;
   timeoutSeconds: number;
   runCommand: CommandRunner;
   env: NodeJS.ProcessEnv;
@@ -4109,12 +4059,8 @@ async function runCodexLeadLane(input: {
     });
   }
 
-  const priorMirror = await removeStaleCmuxMirror({
-    artifactDir: input.artifactDir,
-    artifactName: laneId,
-  });
   const result = await input.runCommand(
-    input.cmuxSpawnBin,
+    input.spawnBin,
     [
       "run",
       "--agent",
@@ -4164,7 +4110,6 @@ async function runCodexLeadLane(input: {
     mode: input.mode,
     routingMode: input.routingMode,
     round: input.round,
-    priorMirror,
     structuredArtifactPath: structuredArtifactPathFor(
       input.artifactDir,
       laneId,
@@ -4531,10 +4476,10 @@ async function withLaneStallDeadline(
   laneResult: Promise<HeadlessLaneResult>,
   deadlineMs: number,
   onStall: () => HeadlessLaneResult,
-  hooks: { onStall?: () => Promise<void> } = {},
+  hooks: { onStall?: () => void | Promise<void> } = {},
 ): Promise<HeadlessLaneResult> {
   // MOB-113 gate-side hardening: even the per-command timeout can fail to
-  // fire when cmux-spawn never finalizes (status.json never terminal). Race
+  // fire when the legacy launcher never finalizes (status.json never terminal). Race
   // a hard deadline so the gate always emits partial aggregate artifacts
   // naming the stalled lane instead of hanging with no review-result.json.
   let timer: NodeJS.Timeout | undefined;
@@ -4588,58 +4533,6 @@ function runCommandWithSignal(
 ): CommandRunner {
   return async (command, args, options) =>
     await runCommand(command, args, { ...options, signal });
-}
-
-async function cleanupStalledLane(input: {
-  cmuxSpawnBin: string;
-  workspace: string;
-  env: NodeJS.ProcessEnv;
-  runCommand: CommandRunner;
-  laneId: string;
-  progress: (message: string) => void;
-}): Promise<void> {
-  input.progress(
-    formatLaneProgress("cleanup_started", {
-      laneId: input.laneId,
-      timeoutMs: STALLED_LANE_CLEANUP_TIMEOUT_MS,
-    }),
-  );
-  try {
-    // Use the raw runner, not the lane's signal-wrapped runner: this cleanup
-    // is intentionally allowed to outlive the already-aborted lane command.
-    const cleanup = await input.runCommand(
-      input.cmuxSpawnBin,
-      ["cleanup", "--sweep"],
-      {
-        cwd: input.workspace,
-        env: input.env,
-        timeoutMs: STALLED_LANE_CLEANUP_TIMEOUT_MS,
-      },
-    );
-    if (cleanup.exitCode !== 0) {
-      input.progress(
-        formatLaneProgress("cleanup_failed", {
-          laneId: input.laneId,
-          exitCode: cleanup.exitCode,
-          error: cleanup.stderr || cleanup.stdout || "cleanup exited non-zero",
-        }),
-      );
-      return;
-    }
-    input.progress(
-      formatLaneProgress("cleanup_completed", {
-        laneId: input.laneId,
-        exitCode: cleanup.exitCode,
-      }),
-    );
-  } catch (error) {
-    input.progress(
-      formatLaneProgress("cleanup_failed", {
-        laneId: input.laneId,
-        error: formatError(error),
-      }),
-    );
-  }
 }
 
 function formatLaneProgress(
@@ -4756,7 +4649,6 @@ async function parseLaneResult(input: {
   mode: CouncilReviewMode;
   routingMode: CouncilRoutingMode | null;
   round: number;
-  priorMirror: CmuxMirrorPriorState;
   structuredArtifactPath: string;
   /** SYMPH-917 — parse legacy severity sections (resolved from threaded env). */
   parseLegacySections: boolean;
@@ -4771,16 +4663,16 @@ async function parseLaneResult(input: {
     structuredArtifactPath,
     ...laneIdentity
   } = input;
-  let parsed: CmuxRunJson;
+  let parsed: ReviewLaneRunJson;
   try {
-    parsed = JSON.parse(commandResult.stdout) as CmuxRunJson;
+    parsed = JSON.parse(commandResult.stdout) as ReviewLaneRunJson;
   } catch {
     return {
       ...laneIdentity,
       state: "error",
       verdict: "error",
       artifactPath: null,
-      message: "cmux-spawn returned malformed JSON.",
+      message: "Review lane launcher returned malformed JSON.",
       degradedReason: "malformed_substrate_json",
       wallTimeMs: null,
       tokenUsage: null,
@@ -4791,7 +4683,7 @@ async function parseLaneResult(input: {
   }
 
   const state = parseLaneState(parsed.state);
-  const telemetry = await laneTelemetryFromCmuxRun(parsed, state);
+  const telemetry = await laneTelemetryFromReviewLaneRun(parsed, state);
   if (commandResult.exitCode !== 0 || state !== "complete") {
     const rawArtifactPath = stringOrNull(parsed.artifact_path);
     return {
@@ -4801,7 +4693,7 @@ async function parseLaneResult(input: {
       artifactPath: null,
       message:
         parsed.message ??
-        `cmux-spawn lane ended in ${state} with exit code ${commandResult.exitCode}.`,
+        `Review lane launcher ended in ${state} with exit code ${commandResult.exitCode}.`,
       degradedReason: null,
       ...telemetry,
       rawArtifactPath,
@@ -4814,14 +4706,9 @@ async function parseLaneResult(input: {
   const artifactPathResolution =
     rawArtifactPath === null
       ? null
-      : await resolveCmuxArtifactPath({
+      : await resolveReviewArtifactPath({
           artifactDir: input.artifactDir,
-          artifactName: laneIdentity.laneId,
           candidatePath: rawArtifactPath,
-          priorMirror: input.priorMirror,
-          remoteArtifactSha256:
-            stringOrNull(parsed.remote_artifact_sha256) ??
-            stringOrNull(parsed.artifact_sha256),
         });
   const artifactPath = artifactPathResolution?.artifactPath ?? null;
   const artifactPathValidationErrors =
@@ -4908,18 +4795,63 @@ async function parseLaneResult(input: {
   };
 }
 
-async function laneTelemetryFromCmuxRun(
-  parsed: CmuxRunJson,
+async function laneTelemetryFromReviewLaneRun(
+  parsed: ReviewLaneRunJson,
   state: HeadlessLaneResult["state"],
 ): Promise<LaneTelemetry> {
-  const status = await readCmuxStatus(parsed.status_path);
+  const status = await readReviewLaneStatus(parsed.status_path);
   return {
-    wallTimeMs: wallTimeMsFromCmuxRun(parsed, status, state),
-    tokenUsage: tokenUsageFromCmuxRun(parsed.usage),
+    wallTimeMs: wallTimeMsFromReviewLaneRun(parsed, status, state),
+    tokenUsage: tokenUsageFromReviewLaneRun(parsed.usage),
   };
 }
 
-async function readCmuxStatus(
+async function resolveReviewArtifactPath(input: {
+  artifactDir: string;
+  candidatePath: string;
+}): Promise<ReviewArtifactPathResolution> {
+  const artifactPath = resolve(input.artifactDir, input.candidatePath);
+  const canonicalArtifactDir = await realpathOrSelf(resolve(input.artifactDir));
+  const canonicalArtifactPath = await realpathOrSelf(artifactPath);
+  const validationErrors = isPathInside(
+    canonicalArtifactDir,
+    canonicalArtifactPath,
+  )
+    ? []
+    : [`artifact_path resolves outside artifact dir: ${input.candidatePath}`];
+  return {
+    artifactPath,
+    validationErrors,
+    mirrorFallback: emptyReviewArtifactPathFallback(),
+  };
+}
+
+async function realpathOrSelf(path: string): Promise<string> {
+  try {
+    return await realpath(path);
+  } catch {
+    return path;
+  }
+}
+
+function isPathInside(parent: string, child: string): boolean {
+  const path = relative(parent, child);
+  return path === "" || (!path.startsWith("..") && !path.startsWith("/"));
+}
+
+function emptyReviewArtifactPathFallback(): ReviewArtifactPathFallbackStatus {
+  return {
+    attempted: false,
+    used: false,
+    remoteArtifactPath: null,
+    selectedMirrorPath: null,
+    freshnessPassed: null,
+    failureKind: null,
+    validationErrors: [],
+  };
+}
+
+async function readReviewLaneStatus(
   statusPath: string | undefined,
 ): Promise<Record<string, unknown> | null> {
   const path = stringOrNull(statusPath);
@@ -4933,8 +4865,8 @@ async function readCmuxStatus(
   }
 }
 
-function wallTimeMsFromCmuxRun(
-  parsed: CmuxRunJson,
+function wallTimeMsFromReviewLaneRun(
+  parsed: ReviewLaneRunJson,
   status: Record<string, unknown> | null,
   state: HeadlessLaneResult["state"],
 ): number | null {
@@ -4981,7 +4913,7 @@ function wallTimeMsFromCmuxRun(
   return completedMs - startedMs;
 }
 
-function tokenUsageFromCmuxRun(
+function tokenUsageFromReviewLaneRun(
   usageInput: unknown,
 ): HeadlessLaneTokenUsage | null {
   const usage = recordOrNull(usageInput);
