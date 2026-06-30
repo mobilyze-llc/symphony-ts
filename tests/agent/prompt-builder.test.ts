@@ -302,11 +302,17 @@ describe("prompt builder", () => {
     expect(prompt).toContain("at decision-time");
     expect(prompt).toContain("### Design decisions");
     expect(prompt).toContain("diverges from ticket");
-    expect(prompt).toContain("Every structured entry must cite concrete evidence");
+    expect(prompt).toContain(
+      "Every structured entry must cite concrete evidence",
+    );
     expect(prompt).toContain("Empty sections are normal");
-    expect(prompt).toContain("5 sentences when possible and 7 sentences maximum");
+    expect(prompt).toContain(
+      "5 sentences when possible and 7 sentences maximum",
+    );
     expect(prompt).toContain("Do not include secrets, tokens, credentials");
-    expect(prompt).toContain("do not write closeout content to Linear yourself");
+    expect(prompt).toContain(
+      "do not write closeout content to Linear yourself",
+    );
   });
 
   it("includes investigate constraints and STAGE_COMPLETE in continuation when stageName is investigate", () => {
@@ -430,9 +436,9 @@ describe("prompt builder", () => {
     expect(prompt).toContain("[STAGE_COMPLETE]");
     // The contract appears exactly once and before STAGE_COMPLETE (council R1
     // Pi-F6: guard against duplication or wrong-branch injection).
-    expect(
-      prompt.split("Live-proof disposition (SYMPH-377)").length - 1,
-    ).toBe(1);
+    expect(prompt.split("Live-proof disposition (SYMPH-377)").length - 1).toBe(
+      1,
+    );
     expect(prompt.indexOf("Live-proof disposition (SYMPH-377)")).toBeLessThan(
       prompt.lastIndexOf("[STAGE_COMPLETE]"),
     );
