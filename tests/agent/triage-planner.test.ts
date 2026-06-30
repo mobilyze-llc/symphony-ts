@@ -73,6 +73,38 @@ describe("buildPlannerPrompt", () => {
     expect(prompt.toLowerCase()).toContain("json");
   });
 
+  it("labels backlog ordering as newest-first with priority inline, matching Linear createdAt order (SYMPH-868)", () => {
+    const ctx = context();
+    ctx.backlog = [
+      {
+        issueId: "u-new",
+        issueIdentifier: "SYMPH-846",
+        title: "Newer lower priority",
+        priority: 4,
+        state: "Backlog",
+        blockedBy: [],
+      },
+      {
+        issueId: "u-old",
+        issueIdentifier: "SYMPH-845",
+        title: "Older higher priority",
+        priority: 1,
+        state: "Backlog",
+        blockedBy: [],
+      },
+    ];
+
+    const prompt = buildPlannerPrompt(ctx);
+
+    expect(prompt).toContain(
+      "## Backlog (eligible, newest-first upstream; priority shown inline)",
+    );
+    expect(prompt).not.toContain("priority-ordered upstream");
+    expect(prompt.indexOf("SYMPH-846 [Backlog, priority 4]")).toBeLessThan(
+      prompt.indexOf("SYMPH-845 [Backlog, priority 1]"),
+    );
+  });
+
   it("shows the exact canary object key names in the emitted example (SYMPH-836)", () => {
     const prompt = buildPlannerPrompt(context());
     // The model must be SHOWN the schema keys, not merely told "head + contingent"

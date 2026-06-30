@@ -17,6 +17,7 @@ import {
 } from "../../src/index.js";
 import {
   LINEAR_CANDIDATE_ISSUES_BY_SCOPE_QUERY,
+  LINEAR_PROJECTS_BY_NAME_OR_SLUG_QUERY,
   buildCandidateScopeFilter,
 } from "../../src/tracker/linear-queries.js";
 
@@ -201,6 +202,37 @@ describe("LinearTrackerClient", () => {
     const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
     expect(request.variables.first).toBe(7);
     expect(request.variables.relationFirst).toBe(7);
+  });
+
+  it("resolves a Linear project name or slug to slugId (SYMPH-838)", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          projects: {
+            nodes: [
+              {
+                id: "project-1",
+                slugId: "runtime-ops",
+                name: "Runtime Operations & Admission Safety",
+              },
+            ],
+          },
+        },
+      }),
+    );
+    const client = createClient({ fetchFn, pageSize: 7 });
+
+    const project = await client.resolveProjectSlug(
+      "Runtime Operations & Admission Safety",
+    );
+
+    expect(project.slugId).toBe("runtime-ops");
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(request.query).toBe(LINEAR_PROJECTS_BY_NAME_OR_SLUG_QUERY);
+    expect(request.variables).toEqual({
+      reference: "Runtime Operations & Admission Safety",
+      first: 7,
+    });
   });
 
   it("fetches candidate issues by team key (eligible backlog, no project filter) when team_keys is set (SYMPH-794)", async () => {
