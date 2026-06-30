@@ -1110,6 +1110,28 @@ describe("SYMPH-939 health signals", () => {
       }
     });
 
+    it("renders a non-empty Queue health block when production health deps are wired", async () => {
+      const root = mkdtempSync(join(tmpdir(), "symph-shadow-health-"));
+      let capturedPrompt = "";
+      try {
+        const result = await runStandingPlanShadowTick({
+          ...fullHealthDeps(root),
+          createPlannerRunner: () => async (prompt: string) => {
+            capturedPrompt = prompt;
+            return okPlanner().runClaude();
+          },
+        });
+        expect(result.status).toBe("ok");
+        expect(capturedPrompt).toContain("## Queue health");
+        expect(capturedPrompt).toContain("- Triage intake: depth 2");
+        expect(capturedPrompt).toContain("- Residual share: 0.500");
+        expect(capturedPrompt).toContain("- Hot-file growth:");
+        expect(capturedPrompt).toContain("- Review-round depth: 3");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
     it("completes (status ok) when no health deps are wired (back-compat)", async () => {
       const root = mkdtempSync(join(tmpdir(), "symph-shadow-health-"));
       try {

@@ -41,7 +41,11 @@ import {
   runSpecFidelityLane,
 } from "../agent/spec-fidelity.js";
 import { runStuckTriage } from "../agent/stuck-triage.js";
-import { createCmuxPlannerRunner } from "../agent/triage-planner.js";
+import { readHotFileGrowth } from "../agent/health/hot-file-reader.js";
+import {
+  createCmuxPlannerRunner,
+  type PlannerRunResult,
+} from "../agent/triage-planner.js";
 import type { BacklogAuditConfig } from "../audit/backlog-audit.js";
 import { validateDispatchConfig } from "../config/config-resolver.js";
 import {
@@ -494,6 +498,13 @@ export interface RuntimeServiceOptions {
   stdout?: Writable;
   shutdownTimeoutMs?: number;
   /**
+   * Test seam for the Queue Triage shadow planner runner. Production defaults
+   * to cmux/Opus; tests inject this to capture the prompt without spawning.
+   */
+  createStandingPlanPlannerRunner?: (
+    model: string,
+  ) => (prompt: string) => Promise<PlannerRunResult>;
+  /**
    * Injectable continuous-feedback runner command (SYMPH-761), forwarded to the
    * default-constructed host so the startup model-availability preflight can be
    * stubbed in tests instead of spawning the real runner. Ignored when a
@@ -574,6 +585,18 @@ const execFileAsync = promisify(execFile);
 function resolveRuntimeRepoRoot(): string {
   const thisFile = fileURLToPath(import.meta.url);
   return resolve(dirname(thisFile), "..", "..", "..");
+}
+
+function extractReviewRoundDepth(snapshot: RuntimeSnapshot): number | null {
+  let depth: number | null = null;
+  for (const review of Object.values(snapshot.council_reviews ?? {})) {
+    const current = review.rounds_per_cycle?.current ?? null;
+    if (current === null || !Number.isFinite(current)) {
+      continue;
+    }
+    depth = depth === null ? current : Math.max(depth, current);
+  }
+  return depth;
 }
 
 function issueFromLinearReference(reference: LinearIssueReference): Issue {
@@ -6295,6 +6318,14 @@ export async function startRuntimeService(
   let shuttingDown = false;
   let pendingExitCode = 0;
 
+  const createPollCandidateIssueFetcher = () => {
+    let candidateIssuesPromise: Promise<Issue[]> | null = null;
+    return () => {
+      candidateIssuesPromise ??= tracker.fetchCandidateIssues();
+      return candidateIssuesPromise;
+    };
+  };
+
   const scheduleNextPoll = () => {
     if (stopController.signal.aborted) {
       return;
@@ -6311,7 +6342,9 @@ export async function startRuntimeService(
   // planner runs across fast polls; the heartbeat gate inside the tick keeps it
   // to its own cadence. Inert unless `queueTriage.enabled`.
   let standingPlanShadowTickInFlight = false;
-  const runStandingPlanShadowTickIfEnabled = (): void => {
+  const runStandingPlanShadowTickIfEnabled = (
+    fetchSharedCandidateIssues: () => Promise<Issue[]>,
+  ): void => {
     if (standingPlanShadowTickInFlight) {
       return;
     }
@@ -6329,26 +6362,35 @@ export async function startRuntimeService(
     void runStandingPlanShadowTick({
       config: currentConfig.queueTriage,
       workspaceRoot: workspaceManager.root,
-      fetchCandidates: () => tracker.fetchCandidateIssues(),
+      fetchCandidates: fetchSharedCandidateIssues,
       getInFlight: () =>
         Object.values(runtimeHost.getState().running).map((entry) => ({
           issueIdentifier: entry.issue.identifier,
           stage: entry.issue.state,
         })),
       createPlannerRunner: (model) =>
-        createCmuxPlannerRunner({
-          workspace: process.cwd(),
-          artifactDir: join(
-            workspaceManager.root,
-            ".symphony",
-            "standing-plan",
-          ),
-          model,
-        }),
+        (options.createStandingPlanPlannerRunner ??
+          ((plannerModel: string) =>
+            createCmuxPlannerRunner({
+              workspace: process.cwd(),
+              artifactDir: join(
+                workspaceManager.root,
+                ".symphony",
+                "standing-plan",
+              ),
+              model: plannerModel,
+            })))(model),
       log: (event, message, fields) => {
         void logger.info(event, message, fields);
       },
       now: () => new Date(),
+      fetchTriageIssues: () => tracker.fetchIssuesByStates(["Triage"]),
+      fetchResidualIssues: () =>
+        tracker.fetchIssuesByStates(["Backlog", "Triage"]),
+      getReviewRoundDepth: async () =>
+        extractReviewRoundDepth(await runtimeHost.getRuntimeSnapshot()),
+      getHotFileGrowth: () =>
+        readHotFileGrowth({ repoPath: resolveRuntimeRepoRoot() }),
       ...(linearTracker === null
         ? {}
         : {
@@ -6387,7 +6429,9 @@ export async function startRuntimeService(
 
   let backlogHygieneProposalTickInFlight = false;
   let backlogHygieneProposalLastRunAtMs: number | null = null;
-  const runBacklogHygieneProposalTickIfConfigured = (): void => {
+  const runBacklogHygieneProposalTickIfConfigured = (
+    fetchSharedCandidateIssues: () => Promise<Issue[]>,
+  ): void => {
     if (backlogHygieneProposalTickInFlight) {
       return;
     }
@@ -6407,7 +6451,7 @@ export async function startRuntimeService(
     backlogHygieneProposalTickInFlight = true;
     const runStartedAt = new Date();
     void (async () => {
-      const candidateIssues = await tracker.fetchCandidateIssues();
+      const candidateIssues = await fetchSharedCandidateIssues();
       const state = runtimeHost.getState();
       const activeIssueIds = Object.keys(state.running);
       const openParkIssueIds = [...state.resumeRequired];
@@ -6520,8 +6564,9 @@ export async function startRuntimeService(
       const result = await runtimeHost.pollOnce();
       const durationMs = Date.now() - pollStart;
       await logPollCycleResult(logger, result, durationMs);
-      runStandingPlanShadowTickIfEnabled();
-      runBacklogHygieneProposalTickIfConfigured();
+      const fetchSharedCandidateIssues = createPollCandidateIssueFetcher();
+      runStandingPlanShadowTickIfEnabled(fetchSharedCandidateIssues);
+      runBacklogHygieneProposalTickIfConfigured(fetchSharedCandidateIssues);
       scheduleNextPoll();
     } catch (error) {
       await logger.error("runtime_poll_failed", toErrorMessage(error), {
