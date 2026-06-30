@@ -2214,6 +2214,253 @@ describe("OrchestratorRuntimeHost", () => {
     });
   });
 
+  it("posts a redacted implement Closeout comment from the run workspace for symphony", async () => {
+    const oldLinearApiKey = process.env.LINEAR_API_KEY;
+    const oldCloseoutFlag = process.env.SYMPHONY_CLOSEOUT_COMMENT;
+    process.env.LINEAR_API_KEY = "linear-secret-value-123";
+    delete process.env.SYMPHONY_CLOSEOUT_COMMENT;
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-closeout-"));
+    const workspacePath = join(workspaceRoot, "issue-1");
+    try {
+      mkdirSync(join(workspacePath, ".symphony"), { recursive: true });
+      writeFileSync(
+        join(workspacePath, ".symphony", "closeout.md"),
+        [
+          "## Closeout",
+          "",
+          "**What shipped:** Added closeout posting without exposing linear-secret-value-123.",
+          "",
+          "### Design decisions",
+          "- **Controller posts**: kept Linear writes out of the lane. Evidence: src/orchestrator/runtime-host.ts:1.",
+        ].join("\n"),
+      );
+
+      const tracker = createLinearTrackerForPipelineStatus();
+      vi.spyOn(tracker, "fetchCandidateIssues").mockResolvedValue([
+        createIssue({ state: "In Progress" }),
+      ]);
+      vi.spyOn(tracker, "fetchIssuesByStates").mockResolvedValue([]);
+      vi.spyOn(tracker, "fetchIssueStatesByIds").mockResolvedValue([
+        { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+      ]);
+      const upsert = vi
+        .spyOn(tracker, "upsertCloseoutComment")
+        .mockResolvedValue({ operation: "created", commentId: "comment-1" });
+      const fakeRunner = new FakeAgentRunner();
+      const host = new OrchestratorRuntimeHost({
+        config: createImplementStagedConfig({
+          workflowPath: join(workspaceRoot, "WORKFLOW-symphony.md"),
+          workspace: { root: workspaceRoot },
+        }),
+        tracker,
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
+        },
+        now: () => new Date("2026-03-06T00:05:00.000Z"),
+      });
+
+      await host.pollOnce();
+      fakeRunner.resolve("1", createNormalResultForWorkspace(workspacePath));
+      await host.waitForIdle();
+
+      expect(upsert).toHaveBeenCalledTimes(1);
+      expect(upsert.mock.calls[0]?.[0]).toBe("1");
+      const body = upsert.mock.calls[0]?.[1] ?? "";
+      expect(body).toContain("## Closeout");
+      expect(body).toContain("[REDACTED");
+      expect(body).not.toContain("linear-secret-value-123");
+    } finally {
+      if (oldLinearApiKey === undefined) {
+        delete process.env.LINEAR_API_KEY;
+      } else {
+        process.env.LINEAR_API_KEY = oldLinearApiKey;
+      }
+      if (oldCloseoutFlag === undefined) {
+        delete process.env.SYMPHONY_CLOSEOUT_COMMENT;
+      } else {
+        process.env.SYMPHONY_CLOSEOUT_COMMENT = oldCloseoutFlag;
+      }
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("skips implement Closeout posting when redaction leaves no substantive content", async () => {
+    const oldLinearApiKey = process.env.LINEAR_API_KEY;
+    const oldCloseoutFlag = process.env.SYMPHONY_CLOSEOUT_COMMENT;
+    process.env.LINEAR_API_KEY = "linear-secret-value-456";
+    delete process.env.SYMPHONY_CLOSEOUT_COMMENT;
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-closeout-empty-"));
+    const workspacePath = join(workspaceRoot, "issue-1");
+    try {
+      mkdirSync(join(workspacePath, ".symphony"), { recursive: true });
+      writeFileSync(
+        join(workspacePath, ".symphony", "closeout.md"),
+        "LINEAR_API_KEY=linear-secret-value-456\n",
+      );
+
+      const tracker = createLinearTrackerForPipelineStatus();
+      vi.spyOn(tracker, "fetchCandidateIssues").mockResolvedValue([
+        createIssue({ state: "In Progress" }),
+      ]);
+      vi.spyOn(tracker, "fetchIssuesByStates").mockResolvedValue([]);
+      vi.spyOn(tracker, "fetchIssueStatesByIds").mockResolvedValue([
+        { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+      ]);
+      const upsert = vi
+        .spyOn(tracker, "upsertCloseoutComment")
+        .mockResolvedValue({ operation: "created", commentId: "comment-1" });
+      const fakeRunner = new FakeAgentRunner();
+      const host = new OrchestratorRuntimeHost({
+        config: createImplementStagedConfig({
+          workflowPath: join(workspaceRoot, "WORKFLOW-symphony.md"),
+          workspace: { root: workspaceRoot },
+        }),
+        tracker,
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
+        },
+        now: () => new Date("2026-03-06T00:05:00.000Z"),
+      });
+
+      await host.pollOnce();
+      fakeRunner.resolve("1", createNormalResultForWorkspace(workspacePath));
+      await host.waitForIdle();
+
+      expect(upsert).not.toHaveBeenCalled();
+    } finally {
+      if (oldLinearApiKey === undefined) {
+        delete process.env.LINEAR_API_KEY;
+      } else {
+        process.env.LINEAR_API_KEY = oldLinearApiKey;
+      }
+      if (oldCloseoutFlag === undefined) {
+        delete process.env.SYMPHONY_CLOSEOUT_COMMENT;
+      } else {
+        process.env.SYMPHONY_CLOSEOUT_COMMENT = oldCloseoutFlag;
+      }
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("caps implement Closeout comments by dropping whole later sections", async () => {
+    const oldCloseoutFlag = process.env.SYMPHONY_CLOSEOUT_COMMENT;
+    delete process.env.SYMPHONY_CLOSEOUT_COMMENT;
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-closeout-cap-"));
+    const workspacePath = join(workspaceRoot, "issue-1");
+    try {
+      mkdirSync(join(workspacePath, ".symphony"), { recursive: true });
+      writeFileSync(
+        join(workspacePath, ".symphony", "closeout.md"),
+        [
+          "## Closeout",
+          "",
+          "**What shipped:** Added closeout posting.",
+          "",
+          "### Landmines",
+          "- `runtime-host`: preserve section boundaries. Evidence: src/orchestrator/runtime-host.ts:1.",
+          "",
+          "### Open questions",
+          `- ${"large-entry ".repeat(3000)}`,
+        ].join("\n"),
+      );
+
+      const tracker = createLinearTrackerForPipelineStatus();
+      vi.spyOn(tracker, "fetchCandidateIssues").mockResolvedValue([
+        createIssue({ state: "In Progress" }),
+      ]);
+      vi.spyOn(tracker, "fetchIssuesByStates").mockResolvedValue([]);
+      vi.spyOn(tracker, "fetchIssueStatesByIds").mockResolvedValue([
+        { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+      ]);
+      const upsert = vi
+        .spyOn(tracker, "upsertCloseoutComment")
+        .mockResolvedValue({ operation: "updated", commentId: "comment-1" });
+      const fakeRunner = new FakeAgentRunner();
+      const host = new OrchestratorRuntimeHost({
+        config: createImplementStagedConfig({
+          workflowPath: join(workspaceRoot, "WORKFLOW-symphony.md"),
+          workspace: { root: workspaceRoot },
+        }),
+        tracker,
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
+        },
+        now: () => new Date("2026-03-06T00:05:00.000Z"),
+      });
+
+      await host.pollOnce();
+      fakeRunner.resolve("1", createNormalResultForWorkspace(workspacePath));
+      await host.waitForIdle();
+
+      const body = upsert.mock.calls[0]?.[1] ?? "";
+      expect(body.length).toBeLessThanOrEqual(16_000);
+      expect(body).toContain("### Landmines");
+      expect(body).not.toContain("### Open questions");
+    } finally {
+      if (oldCloseoutFlag === undefined) {
+        delete process.env.SYMPHONY_CLOSEOUT_COMMENT;
+      } else {
+        process.env.SYMPHONY_CLOSEOUT_COMMENT = oldCloseoutFlag;
+      }
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("does not post implement Closeout comments for non-symphony workflows by default", async () => {
+    const oldCloseoutFlag = process.env.SYMPHONY_CLOSEOUT_COMMENT;
+    delete process.env.SYMPHONY_CLOSEOUT_COMMENT;
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-closeout-off-"));
+    const workspacePath = join(workspaceRoot, "issue-1");
+    try {
+      mkdirSync(join(workspacePath, ".symphony"), { recursive: true });
+      writeFileSync(
+        join(workspacePath, ".symphony", "closeout.md"),
+        "## Closeout\n\n**What shipped:** This should stay local.",
+      );
+
+      const tracker = createLinearTrackerForPipelineStatus();
+      vi.spyOn(tracker, "fetchCandidateIssues").mockResolvedValue([
+        createIssue({ state: "In Progress" }),
+      ]);
+      vi.spyOn(tracker, "fetchIssuesByStates").mockResolvedValue([]);
+      vi.spyOn(tracker, "fetchIssueStatesByIds").mockResolvedValue([
+        { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+      ]);
+      const upsert = vi
+        .spyOn(tracker, "upsertCloseoutComment")
+        .mockResolvedValue({ operation: "created", commentId: "comment-1" });
+      const fakeRunner = new FakeAgentRunner();
+      const host = new OrchestratorRuntimeHost({
+        config: createImplementStagedConfig({
+          workflowPath: join(workspaceRoot, "WORKFLOW-other.md"),
+          workspace: { root: workspaceRoot },
+        }),
+        tracker,
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
+        },
+        now: () => new Date("2026-03-06T00:05:00.000Z"),
+      });
+
+      await host.pollOnce();
+      fakeRunner.resolve("1", createNormalResultForWorkspace(workspacePath));
+      await host.waitForIdle();
+
+      expect(upsert).not.toHaveBeenCalled();
+    } finally {
+      if (oldCloseoutFlag === undefined) {
+        delete process.env.SYMPHONY_CLOSEOUT_COMMENT;
+      } else {
+        process.env.SYMPHONY_CLOSEOUT_COMMENT = oldCloseoutFlag;
+      }
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
   it("persists rate-limit snapshots and hydrates them into a cold host", async () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-rl-snapshot-"));
     try {
@@ -11704,6 +11951,38 @@ function createStagedConfig(
   };
 }
 
+function createImplementStagedConfig(
+  overrides?: Partial<ResolvedWorkflowConfig>,
+): ResolvedWorkflowConfig {
+  return createStagedConfig({
+    stages: {
+      initialStage: "implement",
+      fastTrack: null,
+      stages: {
+        implement: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: {
+            onComplete: null,
+            onApprove: null,
+            onRework: null,
+          },
+          linearState: null,
+        },
+      },
+    },
+    ...overrides,
+  });
+}
+
 function createNormalResult(): AgentRunResult {
   return {
     issue: createIssue({ state: "In Progress" }),
@@ -11764,6 +12043,21 @@ function createNormalResult(): AgentRunResult {
     turnsCompleted: 1,
     lastTurn: null,
     rateLimits: null,
+  };
+}
+
+function createNormalResultForWorkspace(workspacePath: string): AgentRunResult {
+  const result = createNormalResult();
+  return {
+    ...result,
+    workspace: {
+      ...result.workspace,
+      path: workspacePath,
+    },
+    runAttempt: {
+      ...result.runAttempt,
+      workspacePath,
+    },
   };
 }
 

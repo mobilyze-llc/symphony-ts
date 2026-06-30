@@ -510,6 +510,22 @@ export const LINEAR_CREATE_COMMENT_MUTATION = `
   }
 `.trim();
 
+export const LINEAR_UPDATE_COMMENT_MUTATION = `
+  mutation SymphonyUpdateComment($commentId: String!, $body: String!) {
+    commentUpdate(id: $commentId, input: { body: $body }) {
+      success
+    }
+  }
+`.trim();
+
+export const LINEAR_VIEWER_QUERY = `
+  query SymphonyViewer {
+    viewer {
+      id
+    }
+  }
+`.trim();
+
 export const LINEAR_ISSUE_COMMENTS_QUERY = `
   query SymphonyIssueComments(
     $issueId: String!

@@ -39,7 +39,9 @@ import {
   LINEAR_SEARCH_ISSUES_BY_TITLE_MARKER_AND_TEAM_QUERY,
   LINEAR_TICKET_FEATURE_ISSUES_BY_TEAMS_QUERY,
   LINEAR_TICKET_FEATURE_ISSUES_QUERY,
+  LINEAR_UPDATE_COMMENT_MUTATION,
   LINEAR_UPDATE_ISSUE_DESCRIPTION_MUTATION,
+  LINEAR_VIEWER_QUERY,
   LINEAR_WORKFLOW_STATES_QUERY,
   buildCandidateScopeFilter,
 } from "./linear-queries.js";
@@ -135,6 +137,18 @@ interface LinearCommentCreateData {
   };
 }
 
+interface LinearCommentUpdateData {
+  commentUpdate?: {
+    success?: boolean;
+  };
+}
+
+interface LinearViewerData {
+  viewer?: {
+    id?: string;
+  } | null;
+}
+
 interface LinearIssueCommentsData {
   issue?: {
     id?: string;
@@ -149,6 +163,11 @@ export interface LinearIssueComment {
   updatedAt: string;
   user: TicketFeatureActor | null;
   botActor: TicketFeatureActor | null;
+}
+
+export interface LinearCommentUpsertResult {
+  operation: "created" | "updated";
+  commentId: string | null;
 }
 
 export interface LinearProjectReference {
@@ -665,6 +684,60 @@ export class LinearTrackerClient implements IssueTracker {
         { details: response },
       );
     }
+  }
+
+  async upsertCloseoutComment(
+    issueId: string,
+    body: string,
+  ): Promise<LinearCommentUpsertResult> {
+    const viewerId = await this.fetchViewerId();
+    const comments = await this.fetchIssueComments(issueId, { maxPages: 10 });
+    const existing = comments
+      .filter(
+        (comment) =>
+          comment.body.trimStart().startsWith("## Closeout") &&
+          comment.user?.id === viewerId,
+      )
+      .sort(
+        (left, right) =>
+          Date.parse(getCommentEffectiveTimestamp(right)) -
+          Date.parse(getCommentEffectiveTimestamp(left)),
+      )[0];
+
+    if (existing !== undefined) {
+      const response = await this.postGraphql<LinearCommentUpdateData>(
+        LINEAR_UPDATE_COMMENT_MUTATION,
+        { commentId: existing.id, body },
+      );
+
+      if (response.commentUpdate?.success !== true) {
+        throw new TrackerError(
+          ERROR_CODES.linearGraphqlErrors,
+          "Linear commentUpdate mutation did not return success.",
+          { details: response },
+        );
+      }
+
+      return { operation: "updated", commentId: existing.id };
+    }
+
+    const response = await this.postGraphql<LinearCommentCreateData>(
+      LINEAR_CREATE_COMMENT_MUTATION,
+      { issueId, body },
+    );
+
+    if (response.commentCreate?.success !== true) {
+      throw new TrackerError(
+        ERROR_CODES.linearGraphqlErrors,
+        "Linear commentCreate mutation did not return success.",
+        { details: response },
+      );
+    }
+
+    return {
+      operation: "created",
+      commentId: response.commentCreate.comment?.id ?? null,
+    };
   }
 
   async fetchIssueComments(
@@ -1580,6 +1653,22 @@ export class LinearTrackerClient implements IssueTracker {
     return this.apiKey;
   }
 
+  private async fetchViewerId(): Promise<string> {
+    const response = await this.postGraphql<LinearViewerData>(
+      LINEAR_VIEWER_QUERY,
+      {},
+    );
+    const viewerId = response.viewer?.id;
+    if (typeof viewerId !== "string" || viewerId.trim() === "") {
+      throw new TrackerError(
+        ERROR_CODES.linearUnknownPayload,
+        "Linear viewer query returned no viewer id.",
+        { details: response },
+      );
+    }
+    return viewerId;
+  }
+
   private requireProjectSlug(): string {
     if (!this.projectSlug || this.projectSlug.trim() === "") {
       throw new TrackerError(
@@ -1747,6 +1836,10 @@ function compareLinearIssueComments(
     `${right.createdAt}\0${right.id}`,
     "en",
   );
+}
+
+function getCommentEffectiveTimestamp(comment: LinearIssueComment): string {
+  return comment.updatedAt || comment.createdAt;
 }
 
 function buildGraphqlDiagnosticContext(
