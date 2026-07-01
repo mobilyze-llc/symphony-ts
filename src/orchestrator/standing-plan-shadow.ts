@@ -9,6 +9,7 @@ import {
 } from "../agent/planner-comment-curation.js";
 import type {
   HotFileGrowth,
+  PlannerCandidateGroundingEvidence,
   PlannerContext,
   PlannerInFlight,
   PlannerPrInfo,
@@ -57,6 +58,9 @@ export interface AssembleShadowPlannerContextInput {
    * `health` omitted (back-compat).
    */
   triageHealthInput?: QueueHealth;
+  groundingEvidenceByIssueId?:
+    | ReadonlyMap<string, PlannerCandidateGroundingEvidence>
+    | Readonly<Record<string, PlannerCandidateGroundingEvidence>>;
 }
 
 export type ShadowPlannerAuditDispositionType = "kill" | "stale" | "duplicate";
@@ -103,40 +107,47 @@ export function assembleShadowPlannerContext(
   const backlog = input.candidates
     .filter((issue) => !inFlightIdentifiers.has(issue.identifier))
     .filter((issue) => !excludedIdentifiers.has(issue.identifier))
-    .map((issue) => ({
-      issueId: issue.id,
-      issueIdentifier: issue.identifier,
-      title: issue.title,
-      priority: issue.priority,
-      state: issue.state,
-      // SYMPH-841: carry the recorded blocker identifiers through to the planner
-      // so its dependency reasoning is grounded in the real graph, not just titles.
-      blockedBy: issue.blockedBy
-        .map((ref) => ref.identifier)
-        .filter((identifier): identifier is string => identifier !== null),
-      // SYMPH-874: carry the body + labels so the Manager reasons over real
-      // ticket content (surface / area / intent), not just one-line titles.
-      description: issue.description,
-      labels: issue.labels,
-      // SYMPH-874 Tier 2 / SYMPH-895: the strongest same-surface signal —
-      // concrete file overlap. Deterministically extract the repo-relative
-      // paths the ticket itself cites (title + body) via the code-grounding
-      // path vocabulary. Absent/blank/no-path → [] → rendered as nothing.
-      pathHints: extractGroundingPathHints(
-        [issue.title, issue.description]
-          .filter(
-            (value): value is string =>
-              typeof value === "string" && value.trim() !== "",
-          )
-          .join("\n"),
-      ),
-      ...(duplicateClustersByIdentifier.has(issue.identifier)
-        ? {
-            duplicateClusterIdentifiers:
-              duplicateClustersByIdentifier.get(issue.identifier) ?? [],
-          }
-        : {}),
-    }));
+    .map((issue) => {
+      const groundingEvidence = readGroundingEvidence(
+        input.groundingEvidenceByIssueId,
+        issue,
+      );
+      return {
+        issueId: issue.id,
+        issueIdentifier: issue.identifier,
+        title: issue.title,
+        priority: issue.priority,
+        state: issue.state,
+        // SYMPH-841: carry the recorded blocker identifiers through to the planner
+        // so its dependency reasoning is grounded in the real graph, not just titles.
+        blockedBy: issue.blockedBy
+          .map((ref) => ref.identifier)
+          .filter((identifier): identifier is string => identifier !== null),
+        // SYMPH-874: carry the body + labels so the Manager reasons over real
+        // ticket content (surface / area / intent), not just one-line titles.
+        description: issue.description,
+        labels: issue.labels,
+        ...(groundingEvidence === undefined ? {} : { groundingEvidence }),
+        // SYMPH-874 Tier 2 / SYMPH-895: the strongest same-surface signal —
+        // concrete file overlap. Deterministically extract the repo-relative
+        // paths the ticket itself cites (title + body) via the code-grounding
+        // path vocabulary. Absent/blank/no-path → [] → rendered as nothing.
+        pathHints: extractGroundingPathHints(
+          [issue.title, issue.description]
+            .filter(
+              (value): value is string =>
+                typeof value === "string" && value.trim() !== "",
+            )
+            .join("\n"),
+        ),
+        ...(duplicateClustersByIdentifier.has(issue.identifier)
+          ? {
+              duplicateClusterIdentifiers:
+                duplicateClustersByIdentifier.get(issue.identifier) ?? [],
+            }
+          : {}),
+      };
+    });
   return {
     backlog,
     inFlight: input.inFlight,
@@ -147,6 +158,30 @@ export function assembleShadowPlannerContext(
       ? {}
       : { health: input.triageHealthInput }),
   };
+}
+
+function readGroundingEvidence(
+  evidence:
+    | ReadonlyMap<string, PlannerCandidateGroundingEvidence>
+    | Readonly<Record<string, PlannerCandidateGroundingEvidence>>
+    | undefined,
+  issue: Issue,
+): PlannerCandidateGroundingEvidence | undefined {
+  if (evidence === undefined) {
+    return undefined;
+  }
+  if (isGroundingEvidenceMap(evidence)) {
+    return evidence.get(issue.id) ?? evidence.get(issue.identifier);
+  }
+  return evidence[issue.id] ?? evidence[issue.identifier];
+}
+
+function isGroundingEvidenceMap(
+  evidence:
+    | ReadonlyMap<string, PlannerCandidateGroundingEvidence>
+    | Readonly<Record<string, PlannerCandidateGroundingEvidence>>,
+): evidence is ReadonlyMap<string, PlannerCandidateGroundingEvidence> {
+  return typeof (evidence as { get?: unknown }).get === "function";
 }
 
 function buildAuditDispositionIndex(

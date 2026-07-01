@@ -23,6 +23,7 @@ export interface FollowedGroundingDoc {
   title: string | null;
   depth: number;
   contentHash: string;
+  content: string;
 }
 
 export interface FollowGroundingDocsInput {
@@ -125,6 +126,7 @@ export async function followGroundingDocs(
       title: ref.title,
       depth: ref.depth,
       contentHash,
+      content: resolved.content,
     });
     for (const child of extraction.refs) {
       if (queue.length + followedDocs.length >= maxDocuments) {

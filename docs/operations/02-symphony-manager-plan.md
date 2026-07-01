@@ -48,6 +48,13 @@ Options:
   --no-comment-enrichment      Disable curated comment enrichment in the planner prompt
   --gh-pr-context              Source open/recently merged PR context from gh
   --github-repo <OWNER/REPO>   GitHub repo for --gh-pr-context
+  --planner-grounding          Add report-only code grounding evidence to the planner prompt
+  --planner-grounding-repo-url <url>
+                               Repository URL for planner grounding (defaults env/git remote)
+  --planner-grounding-commit <sha>
+                               Commit SHA for planner grounding (defaults env/git HEAD)
+  --planner-grounding-repo-scope <symphony|non_symphony>
+                               Explicit grounding repo scope (defaults inferred from repo URL)
   --persist                    Persist the plan revision to an isolated artifact store
   --prompt-only                Print the assembled planner prompt and exit (no Opus pass)
   --json                       Emit the plan as JSON
@@ -58,6 +65,12 @@ Environment:
   LINEAR_ENDPOINT              Optional override of the Linear GraphQL endpoint
   GITHUB_REPOSITORY          Optional OWNER/REPO fallback for --gh-pr-context
   REPO_URL                  Optional Git remote URL fallback for --gh-pr-context
+  SYMPHONY_MANAGER_PLAN_GROUNDING_REPO_URL
+                               Optional repo URL fallback for --planner-grounding
+  SYMPHONY_MANAGER_PLAN_GROUNDING_COMMIT
+                               Optional commit SHA fallback for --planner-grounding
+  SYMPHONY_MANAGER_PLAN_GROUNDING_REPO_SCOPE
+                               Optional symphony/non_symphony scope for --planner-grounding
   SYMPHONY_MANAGER_PLAN_RUNTIME_STATE_BASE_URL
                                Optional runtime host base URL for live in-flight issues
 ```

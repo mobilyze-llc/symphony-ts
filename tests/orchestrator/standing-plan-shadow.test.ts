@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import type {
   HotFileGrowth,
+  PlannerCandidateGroundingEvidence,
   PlannerRunResult,
   QueueHealth,
 } from "../../src/agent/triage-planner.js";
@@ -60,6 +61,19 @@ function okPlanner(): { runClaude: () => Promise<PlannerRunResult> } {
       markdown:
         '# Plan\n```json\n{"rationale":"go","batches":[{"mode":"parallel-isolated","issueIdentifiers":["SYMPH-1"],"rationale":"first"}]}\n```\n',
     }),
+  };
+}
+
+function groundingEvidence(): PlannerCandidateGroundingEvidence {
+  return {
+    status: "grounded",
+    reason: null,
+    digest: { text: "digest", status: "unverified", truncated: false },
+    claims: [],
+    units: [],
+    warnings: [],
+    extractorCallCount: 1,
+    wallClockMs: 10,
   };
 }
 
@@ -144,6 +158,17 @@ describe("assembleShadowPlannerContext", () => {
       "src/orchestrator/core.ts",
       "src/agent/triage-planner.ts",
     ]);
+  });
+
+  it("threads supplied grounded evidence onto planner candidates (SYMPH-1017 U4)", () => {
+    const evidence = groundingEvidence();
+    const context = assembleShadowPlannerContext({
+      candidates: [issue("u1", "SYMPH-1")],
+      inFlight: [],
+      envelope: ENVELOPE,
+      groundingEvidenceByIssueId: new Map([["u1", evidence]]),
+    });
+    expect(context.backlog[0]?.groundingEvidence).toBe(evidence);
   });
 
   it("yields empty path hints when the body cites no paths (SYMPH-895)", () => {
