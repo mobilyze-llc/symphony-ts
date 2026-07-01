@@ -57,6 +57,38 @@ function artifact(jsonBody: unknown): string {
   )}\n\`\`\`\n`;
 }
 
+function validPlannerBatch(overrides: Record<string, unknown> = {}) {
+  return {
+    mode: "parallel-isolated",
+    issueIdentifiers: ["SYMPH-1"],
+    rationale: "valid batch",
+    ...overrides,
+  };
+}
+
+const malformedNonCanaryBatchCases: Array<[string, unknown]> = [
+  [
+    "typoed mode",
+    validPlannerBatch({ mode: "isolated", issueIdentifiers: ["SYMPH-2"] }),
+  ],
+  [
+    "non-array issueIdentifiers",
+    {
+      mode: "parallel-isolated",
+      issueIdentifiers: "SYMPH-2",
+      rationale: "bad identifiers",
+    },
+  ],
+  ["empty issueIdentifiers", validPlannerBatch({ issueIdentifiers: [] })],
+  [
+    "missing rationale",
+    {
+      mode: "parallel-isolated",
+      issueIdentifiers: ["SYMPH-2"],
+    },
+  ],
+];
+
 describe("buildPlannerPrompt", () => {
   it("includes backlog, envelope constraints, context, and the JSON output contract", () => {
     const prompt = buildPlannerPrompt(context());
@@ -724,6 +756,61 @@ describe("parsePlannerOutput", () => {
     expect(result.ok).toBe(false);
   });
 
+  it.each(malformedNonCanaryBatchCases)(
+    "drops a single malformed non-canary batch field without voiding the plan: %s (SYMPH-839)",
+    (_name, malformedBatch) => {
+      const result = parsePlannerOutput(
+        artifact({
+          rationale: "one batch is malformed",
+          batches: [
+            validPlannerBatch({
+              issueIdentifiers: ["SYMPH-1"],
+              rationale: "valid survives",
+            }),
+            malformedBatch,
+          ],
+        }),
+      );
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.droppedMalformedBatchCount).toBe(1);
+        expect(result.value.batches).toEqual([
+          validPlannerBatch({
+            issueIdentifiers: ["SYMPH-1"],
+            rationale: "valid survives",
+            canary: null,
+          }),
+        ]);
+      }
+    },
+  );
+
+  it("returns invalid when every emitted batch is malformed, while a genuinely empty plan stays valid (SYMPH-839)", () => {
+    const allMalformed = parsePlannerOutput(
+      artifact({
+        rationale: "all malformed",
+        batches: malformedNonCanaryBatchCases.map(([, batch]) => batch),
+      }),
+    );
+    expect(allMalformed.ok).toBe(false);
+    if (!allMalformed.ok) {
+      expect(allMalformed.reason).toContain("no valid batches");
+    }
+
+    const empty = parsePlannerOutput(
+      artifact({
+        rationale: "empty by choice",
+        batches: [],
+      }),
+    );
+    expect(empty.ok).toBe(true);
+    if (empty.ok) {
+      expect(empty.droppedMalformedBatchCount).toBe(0);
+      expect(empty.value.batches).toEqual([]);
+    }
+  });
+
   it("preserves a top-level dependencies field (SYMPH-843)", () => {
     const result = parsePlannerOutput(
       artifact({
@@ -1254,6 +1341,61 @@ describe("runTriagePlanner", () => {
       );
       expect(downgraded?.mode).toBe("parallel-isolated");
       expect(downgraded?.canary).toBeNull();
+    }
+  });
+
+  it.each(malformedNonCanaryBatchCases)(
+    "drops a single malformed non-canary batch at the planner boundary: %s (SYMPH-839)",
+    async (_name, malformedBatch) => {
+      const deps = {
+        runClaude: async (): Promise<PlannerRunResult> => ({
+          status: "ok",
+          markdown: artifact({
+            rationale: "two batches; one malformed",
+            batches: [
+              validPlannerBatch({
+                issueIdentifiers: ["SYMPH-1"],
+                rationale: "valid survives",
+              }),
+              malformedBatch,
+            ],
+          }),
+        }),
+      };
+
+      const result = await runTriagePlanner(context(), deps);
+      expect(result.status).toBe("ok");
+      if (result.status === "ok") {
+        expect(result.droppedMalformedBatchCount).toBe(1);
+        expect(result.body.batches).toHaveLength(1);
+        expect(result.body.batches[0]?.members).toEqual([
+          { issueId: "u-1", issueIdentifier: "SYMPH-1" },
+        ]);
+      }
+    },
+  );
+
+  it("reports invalid when every emitted planner batch is malformed (SYMPH-839)", async () => {
+    let calls = 0;
+    const deps = {
+      runClaude: async (): Promise<PlannerRunResult> => {
+        calls += 1;
+        return {
+          status: "ok",
+          markdown: artifact({
+            rationale: "all malformed",
+            batches: malformedNonCanaryBatchCases.map(([, batch]) => batch),
+          }),
+        };
+      },
+    };
+
+    const result = await runTriagePlanner(context(), deps);
+    expect(calls).toBe(2);
+    expect(result.status).toBe("invalid");
+    if (result.status === "invalid") {
+      expect(result.detail).toContain("no valid batches");
+      expect(result.attempts).toBe(2);
     }
   });
 
