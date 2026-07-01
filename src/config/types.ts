@@ -238,6 +238,10 @@ export interface WorkflowCodeGroundingConfig {
   materializationTimeoutMs?: number;
 }
 
+export interface WorkflowPlannerGroundingConfig {
+  enabled: boolean;
+}
+
 /**
  * Operator anchor ingestion (SYMPH-486). The allowlist gates Linear
  * field-edit ingestion; service account edits are explicitly inert so
@@ -669,6 +673,8 @@ export interface ResolvedWorkflowConfig {
   mergeActuator?: WorkflowMergeActuatorConfig;
   /** Optional so older hand-built fixtures keep compiling; resolveWorkflowConfig always sets it. */
   codeGrounding?: WorkflowCodeGroundingConfig;
+  /** Optional so older hand-built fixtures keep compiling; resolveWorkflowConfig always sets it. */
+  plannerGrounding?: WorkflowPlannerGroundingConfig;
   operatorAnchors?: WorkflowOperatorAnchorsConfig;
   watchdog: WorkflowWatchdogConfig;
   /** Optional so existing fixtures keep compiling; consumers default to 10. */

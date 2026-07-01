@@ -87,6 +87,9 @@ describe("LinearTrackerClient", () => {
     expect(firstRequest.query).toMatch(
       /inverseRelations\(first: \$relationFirst\)[\s\S]*pageInfo[\s\S]*hasNextPage/,
     );
+    expect(firstRequest.query).toMatch(
+      /attachments\s*\{\s*nodes\s*\{\s*title\s*url\s*\}/,
+    );
     expect(firstRequest.variables).toEqual({
       projectSlug: "ENG",
       activeStates: ["Todo", "In Progress"],
@@ -103,6 +106,49 @@ describe("LinearTrackerClient", () => {
       relationFirst: 50,
       after: "cursor-1",
     });
+  });
+
+  it("normalizes Linear document attachments and ignores non-doc attachments", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          issues: {
+            nodes: [
+              issueNode({
+                id: "1",
+                identifier: "ENG-1",
+                title: "First",
+                createdAt: "2026-03-01T00:00:00.000Z",
+                attachments: {
+                  nodes: [
+                    {
+                      title: "Plan",
+                      url: "https://linear.app/acme/document/plan-doc-abc123",
+                    },
+                    {
+                      title: "Screenshot",
+                      url: "https://example.com/image.png",
+                    },
+                  ],
+                },
+              }),
+            ],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      }),
+    );
+
+    const client = createClient({ fetchFn });
+    const issues = await client.fetchCandidateIssues();
+
+    expect(issues[0]?.documentAttachments).toEqual([
+      {
+        title: "Plan",
+        url: "https://linear.app/acme/document/plan-doc-abc123",
+        documentId: "plan-doc-abc123",
+      },
+    ]);
   });
 
   it("fetchCandidateIssuesByScope sends the composed additive filter and paginates (SYMPH-858)", async () => {
@@ -2044,6 +2090,7 @@ function issueNode(input: {
   identifier: string;
   title: string;
   createdAt: string;
+  attachments?: Record<string, unknown>;
 }): Record<string, unknown> {
   return {
     id: input.id,
@@ -2061,6 +2108,9 @@ function issueNode(input: {
     },
     labels: {
       nodes: [{ name: "Backend" }],
+    },
+    attachments: input.attachments ?? {
+      nodes: [],
     },
     inverseRelations: {
       nodes: [],

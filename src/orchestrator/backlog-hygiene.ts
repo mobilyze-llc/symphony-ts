@@ -15,13 +15,13 @@ import type {
   Issue,
   VerdictActor,
 } from "../domain/model.js";
-import {
-  type CodeGroundingReport,
-  type CodeGroundingTarget,
-  type CodeGroundingVerificationStatus,
-  type RunCodeGroundingInput,
-  runManagedCodeGrounding,
+import type {
+  CodeGroundingReport,
+  CodeGroundingTarget,
+  CodeGroundingVerificationStatus,
+  RunCodeGroundingInput,
 } from "./code-grounding.js";
+import { runSharedCodeGrounding } from "./grounding-service.js";
 
 export const BACKLOG_HYGIENE_PROPOSAL_LABELS = {
   proposed: "hygiene:proposed",
@@ -599,8 +599,9 @@ async function runCodeGroundingForProposalLane(
     return { report: null, warnings: [] };
   }
   try {
-    const groundingReport = await runManagedCodeGrounding({
+    const groundingReport = await runSharedCodeGrounding({
       ...input.codeGrounding,
+      consumer: "backlog_hygiene",
       findings,
     });
     return {

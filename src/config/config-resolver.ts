@@ -70,6 +70,7 @@ import {
   DEFAULT_OBSERVABILITY_REFRESH_MS,
   DEFAULT_OBSERVABILITY_RENDER_INTERVAL_MS,
   DEFAULT_PAUSE_TRIAGE_MAX_RESUMES,
+  DEFAULT_PLANNER_GROUNDING_ENABLED,
   DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_PRE_REVIEW_VERIFY_BUILD_COMMAND,
   DEFAULT_PRE_REVIEW_VERIFY_ENABLED,
@@ -164,6 +165,7 @@ export function resolveWorkflowConfig(
   const preReviewVerify = asRecord(reviewExecution.pre_review_verify);
   const admissionCard = asRecord(config.admission_card);
   const codeGrounding = asRecord(config.code_grounding);
+  const plannerGrounding = asRecord(config.planner_grounding);
   const operatorAnchors = asRecord(config.operator_anchors);
   const watchdog = asRecord(config.watchdog);
   const verdicts = asRecord(config.verdicts);
@@ -380,6 +382,11 @@ export function resolveWorkflowConfig(
       materializationTimeoutMs:
         readPositiveInteger(codeGrounding.materialization_timeout_ms) ??
         DEFAULT_CODE_GROUNDING_MATERIALIZATION_TIMEOUT_MS,
+    },
+    plannerGrounding: {
+      enabled:
+        readExactBoolean(plannerGrounding.enabled) ??
+        DEFAULT_PLANNER_GROUNDING_ENABLED,
     },
     operatorAnchors: {
       operatorAllowlist: readStringList(
@@ -838,6 +845,10 @@ function readBoolean(value: unknown): boolean | null {
   }
 
   return null;
+}
+
+function readExactBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
 }
 
 function readPositiveInteger(value: unknown): number | null {

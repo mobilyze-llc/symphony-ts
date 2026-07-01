@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   createLinearDocument,
   fetchLinearDocumentComments,
+  fetchLinearDocumentContent,
   updateLinearDocument,
 } from "../../src/tracker/linear-documents.js";
 
@@ -117,6 +118,45 @@ describe("linear documents client", () => {
       quotedText: null,
       authorEmail: null,
     });
+  });
+
+  it("fetchLinearDocumentContent reads markdown content without mutation", async () => {
+    let sent: unknown;
+    const fetchFn = fakeFetch(
+      {
+        data: {
+          document: {
+            id: "doc-1",
+            slugId: "plan-doc",
+            url: "https://linear.app/acme/document/plan-doc",
+            content: "# Plan\n\nSee `src/foo.ts`.",
+          },
+        },
+      },
+      (b) => {
+        sent = b;
+      },
+    );
+
+    const document = await fetchLinearDocumentContent(DEPS(fetchFn), {
+      documentId: "doc-1",
+    });
+
+    expect(document).toEqual({
+      id: "doc-1",
+      slugId: "plan-doc",
+      url: "https://linear.app/acme/document/plan-doc",
+      content: "# Plan\n\nSee `src/foo.ts`.",
+    });
+    expect(JSON.stringify(sent)).toContain("document(id: $id)");
+    expect(JSON.stringify(sent)).not.toContain("documentUpdate");
+  });
+
+  it("fetchLinearDocumentContent returns null when the document is absent", async () => {
+    const fetchFn = fakeFetch({ data: { document: null } });
+    await expect(
+      fetchLinearDocumentContent(DEPS(fetchFn), { documentId: "missing" }),
+    ).resolves.toBeNull();
   });
 
   it("throws on a GraphQL error payload", async () => {

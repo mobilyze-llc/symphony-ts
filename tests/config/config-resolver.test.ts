@@ -47,6 +47,7 @@ import {
   DEFAULT_OBSERVABILITY_ENABLED,
   DEFAULT_OBSERVABILITY_REFRESH_MS,
   DEFAULT_OBSERVABILITY_RENDER_INTERVAL_MS,
+  DEFAULT_PLANNER_GROUNDING_ENABLED,
   DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_READ_TIMEOUT_MS,
   DEFAULT_RISK_PREDICATE_REASONING_EFFORT,
@@ -159,6 +160,9 @@ describe("config-resolver", () => {
       maxCheckoutsPerRepo: DEFAULT_CODE_GROUNDING_MAX_CHECKOUTS_PER_REPO,
       materializationTimeoutMs:
         DEFAULT_CODE_GROUNDING_MATERIALIZATION_TIMEOUT_MS,
+    });
+    expect(resolved.plannerGrounding).toEqual({
+      enabled: DEFAULT_PLANNER_GROUNDING_ENABLED,
     });
     expect(DEFAULT_CODE_GROUNDING_BASE_DIR).toBe(".symphony/code-grounding");
     expect(resolved.mergeActuator).toEqual({
@@ -369,6 +373,29 @@ describe("config-resolver", () => {
       maxCheckoutsPerRepo: 2,
       materializationTimeoutMs: 180_000,
     });
+  });
+
+  it("resolves planner grounding as an independent default-closed gate", () => {
+    const absent = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {},
+    });
+    expect(absent.plannerGrounding).toEqual({ enabled: false });
+
+    const enabled = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: { planner_grounding: { enabled: true } },
+    });
+    expect(enabled.plannerGrounding).toEqual({ enabled: true });
+
+    const malformed = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: { planner_grounding: { enabled: "true" } },
+    });
+    expect(malformed.plannerGrounding).toEqual({ enabled: false });
   });
 
   it("resolves operator anchor ingestion config with normalized account emails", () => {

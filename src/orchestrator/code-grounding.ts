@@ -23,6 +23,7 @@ export const CODE_GROUNDING_VERIFICATION_STATUSES = [
   "not_found",
   "contaminated",
   "not_attempted",
+  "ungrounded",
 ] as const;
 
 export type CodeGroundingVerificationStatus =
@@ -136,6 +137,8 @@ export interface RunCodeGroundingInput {
     checkoutId: string;
   }) => Promise<void> | void;
 }
+
+export type CodeGroundingClaim = BacklogAuditFinding;
 
 export type CodeGroundingCommandRunner = (
   command: string,
@@ -619,7 +622,7 @@ async function verifyFinding(
   scanIndex: ScanIndex,
   finding: BacklogAuditFinding,
 ): Promise<CodeGroundingEvidenceEntry> {
-  const candidates = extractEvidenceCandidates(
+  const candidates = extractGroundingEvidenceCandidates(
     `${finding.summary}\n${finding.evidence}`,
   );
   const citations: EvidenceCitation[] = [];
@@ -725,19 +728,21 @@ async function readPathCandidateCitation(
   }
 }
 
-interface PathEvidenceCandidate {
+export interface PathEvidenceCandidate {
   raw: string;
   path: string;
   lineRange?: [number, number];
 }
 
-interface EvidenceCandidates {
+export interface EvidenceCandidates {
   paths: PathEvidenceCandidate[];
   invalidPaths: string[];
   symbols: string[];
 }
 
-function extractEvidenceCandidates(text: string): EvidenceCandidates {
+export function extractGroundingEvidenceCandidates(
+  text: string,
+): EvidenceCandidates {
   const paths = new Map<string, PathEvidenceCandidate>();
   const invalidPaths = new Set<string>();
   const symbols = new Set<string>();
