@@ -30,8 +30,8 @@ function comment(over: Partial<PlannerCommentInput> = {}): PlannerCommentInput {
   };
 }
 
-describe("curatePlannerComments (SYMPH-896)", () => {
-  it("drops bot/service-account/automation/blank comments and keeps human signal", () => {
+describe("curatePlannerComments (SYMPH-896 / SYMPH-1017)", () => {
+  it("keeps agent summaries and drops service-account/automation/blank noise", () => {
     const result = curatePlannerComments(
       [
         comment({
@@ -41,7 +41,12 @@ describe("curatePlannerComments (SYMPH-896)", () => {
         }),
         comment({
           id: "bot",
-          body: "Linear automation",
+          body: [
+            "Design summary: central extractor should verify",
+            "src/orchestrator/grounding-extractor.ts and keep behavioral",
+            "digest claims unverified.",
+          ].join(" "),
+          createdAt: "2026-06-21T00:00:00.000Z",
           actor: actor({ kind: "bot" }),
         }),
         comment({
@@ -67,9 +72,83 @@ describe("curatePlannerComments (SYMPH-896)", () => {
         },
       },
     );
-    expect(result.comments.map((entry) => entry.id)).toEqual(["human"]);
-    expect(result.droppedNoiseCount).toBe(4);
+    expect(result.comments.map((entry) => entry.id)).toEqual(["bot", "human"]);
+    expect(result.droppedNoiseCount).toBe(2);
+    expect(result.droppedLowRelevanceCount).toBe(1);
+    expect(result.baselineDroppedActorCount).toBe(2);
+    expect(result.relevanceKeptActorDroppedCount).toBe(1);
     expect(result.consideredCount).toBe(5);
+  });
+
+  it("drops automation status dumps by low relevance instead of actor class", () => {
+    const result = curatePlannerComments([
+      comment({
+        id: "status-dump",
+        body: "moved to In Progress",
+        actor: actor({ kind: "bot" }),
+      }),
+      comment({
+        id: "design",
+        body: "Closeout summary: implemented the grounding service adapter and verified pnpm test.",
+        actor: actor({ kind: "bot" }),
+      }),
+    ]);
+
+    expect(result.comments.map((entry) => entry.id)).toEqual(["design"]);
+    expect(result.droppedNoiseCount).toBe(0);
+    expect(result.droppedLowRelevanceCount).toBe(1);
+    expect(result.baselineDroppedActorCount).toBe(2);
+    expect(result.relevanceKeptActorDroppedCount).toBe(1);
+  });
+
+  it("keeps substantive moved-to prose that is not a status transition", () => {
+    const result = curatePlannerComments([
+      comment({
+        id: "human-design",
+        body: [
+          "Design note: this should be moved to the orchestrator because",
+          "the implementation belongs with the grounding extractor.",
+        ].join(" "),
+        actor: actor({ email: "dev@example.com" }),
+      }),
+      comment({
+        id: "status-dump",
+        body: "moved to In Progress",
+        actor: actor({ kind: "bot" }),
+      }),
+    ]);
+
+    expect(result.comments.map((entry) => entry.id)).toEqual(["human-design"]);
+    expect(result.comments[0]?.relevanceRationale).toBe(
+      "decision-bearing design or execution summary",
+    );
+    expect(result.droppedNoiseCount).toBe(0);
+    expect(result.droppedLowRelevanceCount).toBe(1);
+  });
+
+  it("honors the operator allowlist as a relevance override", () => {
+    const result = curatePlannerComments(
+      [
+        comment({
+          id: "operator-status",
+          body: "moved to In Progress",
+          actor: actor({ email: "operator@example.com" }),
+        }),
+      ],
+      {
+        operatorConfig: {
+          operatorAllowlist: ["operator@example.com"],
+          serviceAccounts: [],
+        },
+      },
+    );
+
+    expect(result.comments.map((entry) => entry.id)).toEqual([
+      "operator-status",
+    ]);
+    expect(result.comments[0]?.relevanceRationale).toBe(
+      "operator allowlist override",
+    );
   });
 
   it("keeps the newest comments up to maxComments (newest-first)", () => {
@@ -95,6 +174,33 @@ describe("curatePlannerComments (SYMPH-896)", () => {
     );
     expect(result.comments.map((entry) => entry.id)).toEqual(["new", "mid"]);
     expect(result.droppedForBudgetCount).toBe(1);
+  });
+
+  it("counts relevance-kept actor drops only after budget trimming", () => {
+    const result = curatePlannerComments(
+      [
+        comment({
+          id: "old-bot-summary",
+          body: "Closeout summary: implemented the extractor and verified tests.",
+          createdAt: "2026-06-18T00:00:00.000Z",
+          actor: actor({ kind: "bot" }),
+        }),
+        comment({
+          id: "new-human-design",
+          body: "Design summary: keep the relevance scoring path.",
+          createdAt: "2026-06-20T00:00:00.000Z",
+          actor: actor({ email: "dev@example.com" }),
+        }),
+      ],
+      { config: { maxComments: 1, maxCommentChars: 400, maxTotalChars: 1200 } },
+    );
+
+    expect(result.comments.map((entry) => entry.id)).toEqual([
+      "new-human-design",
+    ]);
+    expect(result.droppedForBudgetCount).toBe(1);
+    expect(result.baselineDroppedActorCount).toBe(1);
+    expect(result.relevanceKeptActorDroppedCount).toBe(0);
   });
 
   it("truncates an over-long comment body to maxCommentChars", () => {
@@ -154,7 +260,11 @@ describe("measurePlannerCommentEnrichment (SYMPH-896)", () => {
     const a = curatePlannerComments([comment({ id: "a", body: "hello" })]);
     const b = curatePlannerComments([
       comment({ id: "b", body: "world!!" }),
-      comment({ id: "bot", actor: actor({ kind: "bot" }) }),
+      comment({
+        id: "bot",
+        body: "moved to In Progress",
+        actor: actor({ kind: "bot" }),
+      }),
     ]);
     const measurement = measurePlannerCommentEnrichment({
       candidatesConsidered: 5,
@@ -174,7 +284,10 @@ describe("measurePlannerCommentEnrichment (SYMPH-896)", () => {
     ).toBe(measurement.candidatesConsidered);
     expect(measurement.totalCommentsFetched).toBe(3); // 1 + 2
     expect(measurement.totalCommentsKept).toBe(2); // a:hello, b:world!!
-    expect(measurement.totalDroppedNoise).toBe(1); // bot in b
+    expect(measurement.totalDroppedNoise).toBe(0);
+    expect(measurement.totalDroppedLowRelevance).toBe(1);
+    expect(measurement.baselineDroppedActorCount).toBe(1);
+    expect(measurement.relevanceKeptActorDroppedCount).toBe(0);
     expect(measurement.totalCuratedChars).toBe(12); // hello(5)+world!!(7)
     expect(measurement.estimatedAddedTokens).toBe(3); // ceil(12/4)
   });
