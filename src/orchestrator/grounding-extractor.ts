@@ -200,14 +200,16 @@ const STATUS_TRANSITION_PATTERN = new RegExp(
   ].join(""),
   "i",
 );
+const BARE_STATUS_TRANSITION_PATTERN = new RegExp(
+  `^${STATUS_TRANSITION_TARGET_PATTERN}$`,
+  "i",
+);
 
 export function isGroundingCommentStatusUpdate(body: string): boolean {
   const normalizedBody = body.replace(/\s+/g, " ").trim();
   return (
     STATUS_TRANSITION_PATTERN.test(normalizedBody) ||
-    new RegExp(`\\b${STATUS_TRANSITION_TARGET_PATTERN}\\s*$`, "i").test(
-      normalizedBody,
-    )
+    BARE_STATUS_TRANSITION_PATTERN.test(normalizedBody)
   );
 }
 

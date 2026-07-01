@@ -9,7 +9,9 @@ import {
   type GroundingExtractorModelRunner,
   createPiGroundingExtractorModelRunner,
   extractGroundingEvidence,
+  isGroundingCommentStatusUpdate,
   resolveGroundingExtractorModelRuntime,
+  scoreGroundingCommentRelevance,
 } from "../../src/orchestrator/grounding-extractor.js";
 import type { GROUNDING_EXTRACTOR_ROUTE } from "../../src/orchestrator/grounding-extractor.js";
 
@@ -29,6 +31,24 @@ describe("grounding extractor", () => {
       model: "deepseek/deepseek-v4-pro",
       apiKey: "local-key",
       timeoutMs: 3000,
+    });
+  });
+
+  it("distinguishes bare status updates from prose ending in a status word", () => {
+    expect(isGroundingCommentStatusUpdate("moved to In Progress")).toBe(true);
+    expect(isGroundingCommentStatusUpdate("Done")).toBe(true);
+    expect(
+      isGroundingCommentStatusUpdate("The upstream issue was closed"),
+    ).toBe(false);
+
+    expect(
+      scoreGroundingCommentRelevance({
+        body: "The upstream issue was closed",
+        automationNoise: false,
+      }),
+    ).toMatchObject({
+      score: 0.5,
+      rationale: "general issue discussion",
     });
   });
 
