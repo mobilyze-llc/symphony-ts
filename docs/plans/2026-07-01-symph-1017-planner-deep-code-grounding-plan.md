@@ -99,8 +99,8 @@ flowchart TB
 
 **Extraction**
 - R9. Explicit path/symbol citations are extracted deterministically and format-independently.
-- R10. Prose-described units and the doc digest are produced by a local-LLM extractor using local inference only (no paid API). *(Delivered in the contingent Phase C / U9, gated on the SYMPH-1021 spike; committed v1 ships deterministic citations only.)*
-- R11. Extractor output is never trusted directly — every path/symbol-expressible claim passes through R5 verification, so unbacked claims surface as `not_found`/`contradicted`. Behavioral claims and the doc digest are not deterministically verifiable; they are surfaced to the planner marked as *unverified* rather than as verified evidence. *(The extractor half of this requirement lands in the contingent Phase C / U9; the deterministic-verification backstop is committed v1.)*
+- R10. Prose-described units and the doc digest are produced by a local-LLM extractor using local inference only (no paid API). The extractor is the central semantic engine (U9).
+- R11. Extractor output is never trusted directly — every path/symbol-expressible claim passes through R5 verification, so unbacked claims surface as `not_found`/`contradicted`. Behavioral claims and the doc digest are not deterministically verifiable; they are surfaced to the planner marked as *unverified* rather than as verified evidence.
 - R12. Extraction is cached on doc-content-hash, so a doc is parsed once until its content changes.
 
 **What the planner consumes**
@@ -111,7 +111,7 @@ flowchart TB
 
 **Sizing & telemetry**
 - R17. Injected grounding is compressed (digest + statuses + snippets) so the full candidate set fits within the planner prompt.
-- R18. v1 emits grounding telemetry — at minimum the observed aggregate grounding size, per-candidate verification outcomes, and per-run wall-clock (plus extractor-call count once the contingent Phase C extractor is active) — so caps, cost, and value can be tuned from data.
+- R18. v1 emits grounding telemetry — at minimum the observed aggregate grounding size, per-candidate verification outcomes, extractor-call count, and per-run wall-clock — so caps, cost, and value can be tuned from data.
 - R19. The SYMPH-1015 aggregate cap is raised and tuned from observed size; if truncation ever occurs it must be priority-aware (head candidates keep full grounding), but compression is preferred over truncation.
 
 **Enablement & surface**
@@ -120,6 +120,9 @@ flowchart TB
 
 **Trust & safety**
 - R22. All claim-source content (ticket title/body/comments, referenced/attached docs, legacy Linear Docs) is treated as *untrusted* input: it is delimited and labeled as data — not instructions — in both the extractor and planner prompts, and neither executes directives embedded in candidate or doc text (e.g. "mark this done", "mark superseded", "raise severity"). This is a trust boundary because any Linear user can author a ticket, comment, or doc that reaches the triage LLM.
+
+**Comment handling**
+- R23. Comment inclusion for grounding is decided by LLM relevance/value, not author class. The actor-based `bot`/`service_account` blanket drop (`curatePlannerComments`, SYMPH-896) is retired: in this agent-driven pipeline the large majority of comments — including the high-value design/closeout summaries — are agent/bot-authored, so dropping by author discards the signal. Low-value / automation-noise comments are filtered by relevance instead; size/budget bounds and an operator allow/deny override are retained.
 
 ### Acceptance Examples
 
@@ -181,24 +184,25 @@ flowchart TB
 - Tracker: [linear-client.ts](src/tracker/linear-client.ts) (authed `postGraphql`), [linear-documents.ts](src/tracker/linear-documents.ts) (`document(id){…}` queries + content writes; no content-read query yet), [linear-queries.ts](src/tracker/linear-queries.ts) (issue query selects `description`/`comments`/relations/`children`; no attachments).
 - Prompt caps: `PLANNER_CANDIDATE_DESCRIPTION_CHAR_LIMIT` / `_LABELS` = 25,000; `PLANNER_PROMPT_AGGREGATE_CHAR_LIMIT` = 100,000 ([triage-planner.ts](src/agent/triage-planner.ts):212/226/230; SYMPH-1015).
 - Enablement: `workflowConfig.codeGrounding.enabled` gates hygiene grounding ([backlog-hygiene.ts:267](src/orchestrator/backlog-hygiene.ts)); planner shallow hints are always-on.
-- Related: SYMPH-960 (backlog intelligence / §6.D unification), SYMPH-961 (Phase-0 activation experiment, Done), SYMPH-1014 (audit-prune supersession — the mutate side), SYMPH-1015 (de-truncation caps, Done), SYMPH-942 (planner health-signal miss, Cancelled), SYMPH-842 (Linear-Docs→planner, Cancelled; filesystem intent absorbed here), SYMPH-1021 (extractor validation spike — gates the extractor staging decision).
+- Related: SYMPH-960 (backlog intelligence / §6.D unification), SYMPH-961 (Phase-0 activation experiment, Done), SYMPH-1014 (audit-prune supersession — the mutate side), SYMPH-1015 (de-truncation caps, Done), SYMPH-942 (planner health-signal miss, Cancelled), SYMPH-842 (Linear-Docs→planner, Cancelled; filesystem intent absorbed here), SYMPH-1021 (extractor calibration spike — tunes the central extractor's recall/FP + operating thresholds).
 - The load-bearing code claims above were independently verified against current source during this brainstorm and the subsequent review (including the `repoScope === "symphony"` restriction).
 
 ---
 
 ## Planning Contract
 
-**Product Contract preservation:** changed — R10, R11, and R18 annotated to mark the local-LLM extractor's delivery in the contingent Phase C (per the SYMPH-1021 staging decision); no product scope removed. All other Product Contract content (R1–R22, A1–A6, F1–F3, AE1–AE9) preserved as written. This enrichment adds the Planning Contract, Implementation Units, Verification Contract, and Definition of Done.
+**Product Contract preservation:** changed — R23 added (LLM comment-relevance replaces the actor-based comment drop); no product scope removed. All other Product Contract content (R1–R23, A1–A6, F1–F3, AE1–AE9) preserved as written. This enrichment adds the Planning Contract, Implementation Units, Verification Contract, and Definition of Done. The local-LLM extractor is a **central, committed** component — not contingent; SYMPH-1021 calibrates its quality, it does not gate its existence.
 
 ### Key Technical Decisions
 
 - **KTD1. Reuse `runManagedCodeGrounding` behind a thin shared service; do not fork the verifier.** The clone + checkout + deterministic-verify core exists and is proven ([code-grounding.ts:229](src/orchestrator/code-grounding.ts)). The new work is a service wrapper that adds a `(claim-set, code-SHA)` result cache and routes both the planner and the existing hygiene call site ([backlog-hygiene.ts:602](src/orchestrator/backlog-hygiene.ts)) through it (realizes R8 / §6.D).
 - **KTD2. Generalize the claim shape from `BacklogAuditFinding`; adapt candidates into it.** The verifier consumes `findings: BacklogAuditFinding[]`; the planner adapter maps a candidate (title + body + comments + explicit citations) into that shape so one verifier serves both consumers. Comments become a first-class claim source (R1).
 - **KTD3. The Symphony-repo bound is surfaced as an explicit `ungrounded` status, not empty evidence.** `runManagedCodeGrounding` returns `not_attempted` for `repoScope !== "symphony"` ([code-grounding.ts:235](src/orchestrator/code-grounding.ts)); the adapter maps that to a visible "grounding skipped (out-of-scope repo)" state so the LLM never reads absence-of-evidence as evidence-of-absence (finding #1).
-- **KTD4. Deterministic-first; the LLM extractor is a contingent Phase C.** Committed v1 extracts and verifies *explicit* path/symbol citations only (regex, [code-grounding.ts:846](src/orchestrator/code-grounding.ts)). The local-LLM prose/digest extractor is gated on the SYMPH-1021 spike's measured lift (finding #3).
+- **KTD4. The local-LLM extractor is the central semantic engine; deterministic verification is its backstop.** The extractor maps prose — ticket bodies, comments, and referenced/attached plan docs — into checkable claims, a decision-bearing digest, and a plan's unit→claim/wave structure (for per-unit completion). Deterministic citation extraction (`extractGroundingPathHints`, [code-grounding.ts:846](src/orchestrator/code-grounding.ts)) is a fast path and, with `runManagedCodeGrounding`, the verification *backstop* — every extracted claim is checked against the checkout so the LLM never gets the last word. SYMPH-1021 **calibrates** the extractor (its job, recall, false-positive rate) on real data and sets operating thresholds; it does not gate whether the extractor ships.
 - **KTD5. Grounding is a single pre-LLM pass per run.** The service grounds the candidate set before the one-shot planner call; results render into the prompt. No agentic/iterative grounding loop in v1.
 - **KTD6. "Already-done/superseded" stays an LLM conclusion over verified evidence.** The service emits `verified`/`contradicted`/`not_found` + current snippets; the planner LLM concludes completion state, weighing stub-vs-complete because presence ≠ completeness (findings #4/#5).
 - **KTD7. Claim-source content is untrusted; delimit as data, not instructions** in both the extractor and planner prompts (finding #6).
+- **KTD8. Comment inclusion is decided by LLM relevance, not author class.** The current curation ([planner-comment-curation.ts:113](src/agent/planner-comment-curation.ts), SYMPH-896) blanket-drops `bot`/`service_account` authors — but in this agent-driven pipeline ~all comments (including the high-value design/closeout summaries agents write) are bot/service-account, so the actor rule discards the signal, not the noise. Replace the actor-based drop with LLM relevance/value scoring (the same central extractor); keep a comment by what it *says*, not who wrote it.
 
 ### High-Level Technical Design
 
@@ -212,34 +216,36 @@ flowchart TB
     PL[Planner adapter<br/>standing-plan-shadow / manager-plan]
     HY[Hygiene adapter<br/>existing call site]
   end
-  TC --> PL
-  DFR --> PL
-  PL --> SVC[Shared grounding service<br/>cache: claim-set x code-SHA]
+  TC --> EX[Central LLM extractor<br/>prose -> claims + digest + unit/wave]
+  DFR --> EX
+  EX --> SVC[Shared grounding service<br/>cache: claim-set x code-SHA]
+  PL --> SVC
   HY --> SVC
-  SVC --> CORE[runManagedCodeGrounding<br/>clone + deterministic verify<br/>repoScope = symphony only]
+  SVC --> CORE[runManagedCodeGrounding<br/>verify every claim vs checkout<br/>repoScope = symphony only]
   CORE --> CO[(per-SHA checkout cache)]
-  SVC --> PQ[Planner prompt:<br/>statuses + cited snippets]
-  EX[Phase C: local-LLM extractor<br/>prose units + digest] -. gated on SYMPH-1021 .-> SVC
+  SVC --> PQ[Planner prompt:<br/>digest + verified statuses + snippets]
+  CAL[SYMPH-1021 calibration<br/>recall / false-positive / thresholds] -. tunes .-> EX
 ```
 
 ### Assumptions
 
 - The candidate's comments are available at grounding time (planner comment resolution exists — `standing-plan-comment-resolve`); if the assembled context does not carry them, U1 adds the fetch.
 - `Document.content` is queryable via the existing authed GraphQL client (Linear schema exposes it; Symphony writes it) — U7 exercises the read path for the first time in-repo.
-- Local-LLM inference is available for Phase C (judgment-lane rule; no paid API).
+- Local-LLM inference is available for the extractor (central component; judgment-lane rule, no paid API).
 - v1 is operator-run out-of-band and latency-tolerant.
 
 ### Sequencing & Dependencies
 
-- **Phase A (committed):** U1 → U2 → {U3, U4} → {U5, U6}. The deterministic spine; land first.
-- **Phase B (committed):** U7 → U8, extending claim sources; depends on U1 (claim model) + U2 (service).
-- **Phase C (contingent):** U9, gated on SYMPH-1021; depends on U2 (backstop) + U8 (doc content).
+- **Backstop + access first:** U1 → U2 → U3 (shared verification service + config); U7 → U8 (doc read + follower). These give the extractor its inputs and its checkout backstop.
+- **Central extractor next:** U9 (prose → claims + digest + unit/wave), then U10 (LLM comment relevance) — both backstopped by U2's verification; depend on U1, U2, U8.
+- **Planner wiring last:** U4 (render digest + verified statuses; depends U2, U3, U9) → U5 (sizing/telemetry), U6 (untrusted content).
+- **SYMPH-1021 calibrates** U9/U10 on ≥25 real examples (recall, false-positive rate, operating thresholds) — it runs alongside and tunes the extractor; it is **not** a go/no-go gate on shipping it.
 
 ---
 
 ## Implementation Units
 
-### Phase A — Deterministic grounding core, planner-wired (committed v1)
+### Phase A — Verification backstop, shared service, and planner wiring
 
 ### U1. Shared claim model + candidate→claims adapter
 - **Goal:** Define the checkable-claim shape both consumers share, and adapt a planner candidate (title + body + comments + explicit path/symbol citations) into it.
@@ -273,9 +279,9 @@ flowchart TB
 - **Verification:** planner grounding runs only when enabled.
 
 ### U4. Wire grounded evidence into the planner context + prompt rendering
-- **Goal:** Replace/augment shallow `pathHints` with grounded evidence (verified statuses + cited-line snippets) per candidate in the shadow context and the CLI; render bounded in the prompt; present already-done/superseded as an LLM conclusion (presence ≠ completeness).
+- **Goal:** Replace shallow `pathHints` with grounded evidence per candidate — the extractor's decision-bearing digest + verified claim statuses + cited-line snippets — in the shadow context and the CLI; render bounded in the prompt; present already-done/superseded as an LLM conclusion (presence ≠ completeness).
 - **Requirements:** R13, R14, R16.
-- **Dependencies:** U2, U3.
+- **Dependencies:** U2, U3, U9 (renders the extractor's digest + verified claims; lands after the extractor).
 - **Files:** `src/orchestrator/standing-plan-shadow.ts` (`assembleShadowPlannerContext`, ~94/124), `src/cli/manager-plan.ts` (~545), `src/agent/triage-planner.ts` (rendering ~354/544), `tests/orchestrator/standing-plan-shadow.test.ts`, `tests/cli/manager-plan.test.ts`, `tests/agent/triage-planner.test.ts`.
 - **Approach:** thread grounded evidence into the candidate block; render statuses + snippets (bounded), not raw files; frame already-done as LLM-concluded with stub-vs-complete guidance (KTD6); emit no mutation (R16). When grounding is disabled (R21) fall back to the existing shallow `pathHints` line; for an `ungrounded` (non-symphony) candidate render a labeled "grounding skipped", never an empty block.
 - **Patterns to follow:** `renderCandidatePathHints` ([triage-planner.ts:354](src/agent/triage-planner.ts)); `pathHints` assembly ([standing-plan-shadow.ts:124](src/orchestrator/standing-plan-shadow.ts)).
@@ -321,17 +327,25 @@ flowchart TB
 - **Test scenarios:** a prose `docs/plans/foo.md` ref is resolved and its citations extracted (Covers R2, AE3); a Linear-doc URL is resolved read-only (Covers R4, AE4); a transitive ref one hop deeper is followed within the cap (Covers R3); a cycle A→B→A terminates; depth and breadth caps are enforced; a `../../`-escaping path is rejected; doc-content-hash cache hit.
 - **Verification:** followed docs contribute verified citations; traversal is bounded and path-safe.
 
-### Phase C — Semantic extractor (contingent on SYMPH-1021)
+### Phase C — Central LLM extractor + comment relevance (calibrated by SYMPH-1021)
 
-### U9. Local-LLM claim/digest extractor — CONTINGENT
-- **Goal:** Add the local-LLM extractor for prose-described units + the decision-bearing digest, backstopped by deterministic verification, and inject the bounded digest.
-- **Contingent:** gated on the [SYMPH-1021](https://linear.app/mobilyze-llc/issue/SYMPH-1021) spike. Build only if the spike shows deterministic regex-only extraction misses a material share of prose-described claims. Until then, this unit is defined but not implemented — committed v1 injects statuses + snippets, no prose digest.
-- **Requirements:** R10, R11 (semantic portion), R13 (digest portion).
-- **Dependencies:** U2 (backstop), U8 (doc content); **gated** on the SYMPH-1021 spike outcome — a go/no-go result, not a parallel dependency; build only on a positive-lift finding.
-- **Files:** `src/orchestrator/grounding-extractor.ts` (new), `tests/orchestrator/grounding-extractor.test.ts` (defined post-spike).
-- **Approach:** local inference (no paid API) maps prose units → checkable claims + a bounded decision-bearing digest; every extracted claim passes through U2's verifier (R11); behavioral/digest claims are flagged unverified (KTD6). The extractor's exact job — including whether it maps a plan's unit→claim/wave structure for per-unit completion — is set by SYMPH-1021.
-- **Test scenarios (post-spike):** prose unit → checkable claim verified against the checkout; hallucinated claim → `not_found` (Covers AE6); digest bounded; behavioral claim flagged unverified.
-- **Verification:** deferred to the SYMPH-1021 outcome; extractor lift is measured before this lands.
+### U9. Local-LLM claim/digest extractor (central semantic engine)
+- **Goal:** The central extractor — map prose (ticket bodies, comments, referenced/attached plan docs) into checkable claims + a bounded decision-bearing digest + a plan's unit→claim/wave structure (for per-unit completion); every extracted claim is backstopped by U2's deterministic verification.
+- **Requirements:** R10, R11 (semantic portion), R13 (digest).
+- **Dependencies:** U1 (claim shape), U2 (verification backstop), U8 (doc content). Calibrated — not gated — by SYMPH-1021.
+- **Files:** `src/orchestrator/grounding-extractor.ts` (new), `tests/orchestrator/grounding-extractor.test.ts`.
+- **Approach:** local inference (no paid API) maps prose → checkable claims + a bounded digest + unit→claim/wave mapping; every extracted claim passes through U2's verifier (R11); citation-inexpressible behavioral/digest claims are flagged *unverified* (KTD6), not dropped. SYMPH-1021 sets the operating thresholds (recall / false-positive) and confirms the prompt/model — it tunes this unit, it does not gate it.
+- **Test scenarios:** prose unit → checkable claim verified against the checkout; a multi-unit wave-spanning plan → per-unit completion states; hallucinated claim → `not_found` (Covers AE6); digest bounded; behavioral claim flagged unverified.
+- **Verification:** the extractor produces verified claims + a bounded digest on real candidates and meets the SYMPH-1021-calibrated thresholds — iterate the prompt/model to reach them; the extractor is not dropped if the first cut underperforms.
+
+### U10. LLM comment relevance — retire the actor-based drop
+- **Goal:** Replace `curatePlannerComments`'s blanket `bot`/`service_account` drop with LLM relevance/value scoring, so agent-authored high-value comments (design/closeout summaries) reach grounding while genuine automation-noise is filtered by content.
+- **Requirements:** R23.
+- **Dependencies:** U9 (uses the extractor/LLM).
+- **Files:** `src/agent/planner-comment-curation.ts` (relevance path replacing the actor-class drop at ~:113), `src/orchestrator/standing-plan-shadow.ts` (~368), `tests/agent/planner-comment-curation.test.ts`.
+- **Approach:** keep the size/budget bounds, the blank-body drop, and the automation-noise markers, but replace the actor-class drop with an LLM relevance/value score; retain the operator allow/deny sets as an override, not the primary filter. Report-only measurement of what changes vs the actor-based baseline (how many agent comments are now kept).
+- **Test scenarios:** an agent-authored design-summary comment is KEPT (not dropped as bot); an automation status-dump ("moved to In Progress") is dropped by low relevance; operator-allowlist override honored; size/budget bounds still enforced.
+- **Verification:** the SYMPH-1017 closeout comment (agent-authored) would now reach grounding; automation dumps still filtered.
 
 ---
 
@@ -339,10 +353,10 @@ flowchart TB
 
 | Gate | Command | Applies to |
 |------|---------|-----------|
-| Tests | `pnpm test` (or `pnpm exec vitest run` in a worktree) | all committed units |
-| Types | `pnpm typecheck` | all committed units |
-| Build | `pnpm build` | all committed units |
-| Lint | `pnpm lint` | all committed units |
+| Tests | `pnpm test` (or `pnpm exec vitest run` in a worktree) | all units |
+| Types | `pnpm typecheck` | all units |
+| Build | `pnpm build` | all units |
+| Lint | `pnpm lint` | all units |
 
 Each unit's Test scenarios must be covered by tests in its cited test file. Grounding is report-only — verify no dispatch or state change occurs (R16).
 
@@ -350,9 +364,9 @@ Each unit's Test scenarios must be covered by tests in its cited test file. Grou
 
 ## Definition of Done
 
-- Phase A + B land: the planner (via `manager-plan`) grounds Symphony-repo candidates with verified statuses + cited snippets, follows referenced/attached docs (deterministic citations), and emits grounding telemetry — all report-only, no mutation.
+- The planner (via `manager-plan`) grounds Symphony-repo candidates with the extractor's digest + verified claim statuses + cited snippets, follows referenced/attached docs, applies LLM comment-relevance, and emits grounding telemetry — all report-only, no mutation.
+- The central LLM extractor (U9) and comment relevance (U10) are implemented and meet the SYMPH-1021-calibrated quality thresholds.
 - Non-symphony candidates surface as `ungrounded`, never silently empty.
 - Untrusted-content directives are inert (AE9).
-- All Verification Contract gates pass; each committed feature unit's test scenarios are covered.
-- Phase C (U9) remains contingent — not required for DoD; gated on SYMPH-1021.
+- All Verification Contract gates pass; each feature unit's test scenarios are covered.
 - Exit-shadow (moving grounded output into a dispatch/prune decision) is explicitly **out** of this plan's DoD: it requires the exit-shadow success criterion (grounded detection matching operator judgment within a bounded false-positive rate) and lives upstream (SYMPH-1014).
