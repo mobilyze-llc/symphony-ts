@@ -64,6 +64,18 @@ describe("grounding extractor", () => {
     });
   });
 
+  it("scores supersede-family wording as decision-bearing", () => {
+    expect(
+      scoreGroundingCommentRelevance({
+        body: "This superseded the earlier migration plan.",
+        automationNoise: false,
+      }),
+    ).toMatchObject({
+      score: 0.82,
+      rationale: "decision-bearing design or execution summary",
+    });
+  });
+
   it("uses the committed Pi DeepSeek route and verifies prose path claims", async () => {
     let routeSeen: typeof GROUNDING_EXTRACTOR_ROUTE | null = null;
     const modelRunner: GroundingExtractorModelRunner = async (input) => {
@@ -272,6 +284,44 @@ describe("grounding extractor", () => {
         alreadyDone: false,
       }),
     ]);
+  });
+
+  it("links units to claims after sanitizing model claim ids", async () => {
+    const result = await extractGroundingEvidence({
+      candidateId: "issue-sanitized-links",
+      sources: [
+        {
+          id: "plan",
+          kind: "document",
+          label: "plan",
+          text: "Unit refers to a model claim id with spaces.",
+        },
+      ],
+      modelRunner: async () => ({
+        claims: [{ id: "claim u9", kind: "path_symbol", text: "src/u9.ts" }],
+        units: [
+          {
+            unitId: "U9",
+            title: "Extractor",
+            claimIds: ["claim u9"],
+          },
+        ],
+      }),
+      grounding: {
+        ...groundingInput("not_found"),
+        runGrounding: async (input) =>
+          reportFor(input, (findingId) =>
+            findingId === "claim-u9" ? "verified" : "not_found",
+          ),
+      },
+    });
+
+    expect(result.claims[0]?.id).toBe("claim-u9");
+    expect(result.units[0]).toMatchObject({
+      claimIds: ["claim-u9"],
+      completionState: "verified_presence",
+      alreadyDone: false,
+    });
   });
 
   it("bounds the digest and flags behavioral claims unverified", async () => {

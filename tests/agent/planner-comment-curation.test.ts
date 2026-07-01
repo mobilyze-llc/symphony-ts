@@ -176,6 +176,33 @@ describe("curatePlannerComments (SYMPH-896 / SYMPH-1017)", () => {
     expect(result.droppedForBudgetCount).toBe(1);
   });
 
+  it("counts relevance-kept actor drops only after budget trimming", () => {
+    const result = curatePlannerComments(
+      [
+        comment({
+          id: "old-bot-summary",
+          body: "Closeout summary: implemented the extractor and verified tests.",
+          createdAt: "2026-06-18T00:00:00.000Z",
+          actor: actor({ kind: "bot" }),
+        }),
+        comment({
+          id: "new-human-design",
+          body: "Design summary: keep the relevance scoring path.",
+          createdAt: "2026-06-20T00:00:00.000Z",
+          actor: actor({ email: "dev@example.com" }),
+        }),
+      ],
+      { config: { maxComments: 1, maxCommentChars: 400, maxTotalChars: 1200 } },
+    );
+
+    expect(result.comments.map((entry) => entry.id)).toEqual([
+      "new-human-design",
+    ]);
+    expect(result.droppedForBudgetCount).toBe(1);
+    expect(result.baselineDroppedActorCount).toBe(1);
+    expect(result.relevanceKeptActorDroppedCount).toBe(0);
+  });
+
   it("truncates an over-long comment body to maxCommentChars", () => {
     const result = curatePlannerComments(
       [comment({ id: "long", body: `HEAD ${"x".repeat(5000)} TAIL` })],

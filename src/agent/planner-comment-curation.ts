@@ -84,6 +84,10 @@ export type PlannerCommentRelevanceScorer = (input: {
   automationNoise: boolean;
 }) => GroundingCommentRelevanceDecision;
 
+type PlannerCommentSurvivor = CuratedPlannerComment & {
+  baselineActorDropped: boolean;
+};
+
 /**
  * Automation / council-dump body markers. These are relevance features rather
  * than an actor-class blanket drop: agent-authored design summaries are common
@@ -137,8 +141,7 @@ export function curatePlannerComments(
   let droppedNoiseCount = 0;
   let droppedLowRelevanceCount = 0;
   let baselineDroppedActorCount = 0;
-  let relevanceKeptActorDroppedCount = 0;
-  const survivors: CuratedPlannerComment[] = [];
+  const survivors: PlannerCommentSurvivor[] = [];
   for (const comment of comments) {
     const authorClass = classifyActor(comment.actor, accountSets);
     const normalizedBody = normalizeCommentBody(comment.body);
@@ -172,13 +175,11 @@ export function curatePlannerComments(
       droppedLowRelevanceCount += 1;
       continue;
     }
-    if (baselineActorDropped) {
-      relevanceKeptActorDroppedCount += 1;
-    }
     survivors.push({
       id: comment.id,
       authorClass,
       createdAt: comment.createdAt,
+      baselineActorDropped,
       // Hard per-comment cap: the ellipsis counts toward maxCommentChars, so a
       // truncated body is exactly maxCommentChars chars, never +1 (council Track).
       body:
@@ -212,8 +213,15 @@ export function curatePlannerComments(
     droppedForBudgetCount += 1;
   }
 
+  const relevanceKeptActorDroppedCount = kept.filter(
+    (comment) => comment.baselineActorDropped,
+  ).length;
+  const keptComments = kept.map(
+    ({ baselineActorDropped, ...comment }) => comment,
+  );
+
   return {
-    comments: kept,
+    comments: keptComments,
     consideredCount: comments.length,
     droppedNoiseCount,
     droppedLowRelevanceCount,

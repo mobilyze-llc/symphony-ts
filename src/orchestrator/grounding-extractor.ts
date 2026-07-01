@@ -241,7 +241,7 @@ export function scoreGroundingCommentRelevance(input: {
   const decisionBearingPattern = new RegExp(
     [
       "\\b(?:design|plan|implementation|closeout|summary|root cause",
-      "acceptance criteria|overlap|supersed|already done|stub|migration",
+      "acceptance criteria|overlap|supersed(?:e[sd]?|ing)?|already done|stub|migration",
       "follow-up)\\b",
     ].join("|"),
     "i",
@@ -635,7 +635,9 @@ function normalizeUnits(
 ): GroundingExtractedUnit[] {
   const claimsById = new Map(claims.map((claim) => [claim.id, claim]));
   return units.map((unit, index) => {
-    const claimIds = (unit.claimIds ?? []).filter((id) => claimsById.has(id));
+    const claimIds = Array.from(
+      new Set((unit.claimIds ?? []).map((id) => sanitizeId(id))),
+    ).filter((id) => claimsById.has(id));
     const unitClaims = claimIds
       .map((id) => claimsById.get(id))
       .filter(isDefined);
