@@ -140,35 +140,41 @@ export interface PlannerContext {
   health?: QueueHealth;
 }
 
+const PLANNER_BATCH_SCHEMA = z.object({
+  mode: z.enum(PLAN_BATCH_MODES),
+  issueIdentifiers: z.array(z.string()).min(1),
+  rationale: z.string(),
+  canary: z
+    .object({
+      // A canary-chain must have a head to gate on; an empty head is a
+      // permanent deadlock for the consumer (council R1, Pi P1).
+      headIssueIdentifiers: z.array(z.string()).min(1),
+      contingentIssueIdentifiers: z.array(z.string()),
+    })
+    .nullable()
+    .optional(),
+});
+
+const PLANNER_DEPENDENCIES_SCHEMA = z.array(
+  z.object({
+    issueIdentifier: z.string(),
+    dependsOn: z.array(z.string()),
+  }),
+);
+
 export const PLANNER_OUTPUT_SCHEMA = z.object({
   rationale: z.string(),
-  batches: z.array(
-    z.object({
-      mode: z.enum(PLAN_BATCH_MODES),
-      issueIdentifiers: z.array(z.string()).min(1),
-      rationale: z.string(),
-      canary: z
-        .object({
-          // A canary-chain must have a head to gate on; an empty head is a
-          // permanent deadlock for the consumer (council R1, Pi P1).
-          headIssueIdentifiers: z.array(z.string()).min(1),
-          contingentIssueIdentifiers: z.array(z.string()),
-        })
-        .nullable()
-        .optional(),
-    }),
-  ),
+  batches: z.array(PLANNER_BATCH_SCHEMA),
   // Intelligence-driven cross-batch execution order (SYMPH-843): the model lists
   // an issue and the planned issues that must complete before it. Optional and
   // backward-compatible; resolved/validated in buildPlanBody.
-  dependencies: z
-    .array(
-      z.object({
-        issueIdentifier: z.string(),
-        dependsOn: z.array(z.string()),
-      }),
-    )
-    .optional(),
+  dependencies: PLANNER_DEPENDENCIES_SCHEMA.optional(),
+});
+
+const PLANNER_OUTPUT_ENVELOPE_SCHEMA = z.object({
+  rationale: z.string(),
+  batches: z.array(z.unknown()),
+  dependencies: PLANNER_DEPENDENCIES_SCHEMA.optional(),
 });
 
 export type RawPlan = z.infer<typeof PLANNER_OUTPUT_SCHEMA>;
@@ -186,7 +192,12 @@ export type PlannerResult =
   // `attempts` is the number of model invocations this cycle made (0 when the
   // backlog was empty and no model was called, 1 normally, 2 when a bounded
   // retry was needed — SYMPH-918). Surfaced so the retry rate stays observable.
-  | { status: "ok"; body: PlanBody; attempts: number }
+  | {
+      status: "ok";
+      body: PlanBody;
+      attempts: number;
+      droppedMalformedBatchCount: number;
+    }
   // The model/cmux is down → caller degrades gracefully to the comparator.
   | { status: "unavailable"; detail: string; attempts: number }
   // The model produced output we could not parse/validate.
@@ -585,7 +596,9 @@ export function buildPlannerPrompt(context: PlannerContext): string {
 
 export function parsePlannerOutput(
   markdown: string,
-): { ok: true; value: RawPlan } | { ok: false; reason: string } {
+):
+  | { ok: true; value: RawPlan; droppedMalformedBatchCount: number }
+  | { ok: false; reason: string } {
   const json = extractPlannerJson(markdown);
   if (json === null) {
     return { ok: false, reason: "no JSON plan object found" };
@@ -599,16 +612,38 @@ export function parsePlannerOutput(
       reason: `plan JSON did not parse: ${(error as Error).message}`,
     };
   }
-  const validated = PLANNER_OUTPUT_SCHEMA.safeParse(
-    normalizeRawPlanCanaries(parsed),
-  );
-  if (!validated.success) {
+  const normalized = normalizeRawPlanCanaries(parsed);
+  const envelope = PLANNER_OUTPUT_ENVELOPE_SCHEMA.safeParse(normalized);
+  if (!envelope.success) {
     return {
       ok: false,
-      reason: `plan JSON failed schema validation: ${validated.error.message}`,
+      reason: `plan JSON failed schema validation: ${envelope.error.message}`,
     };
   }
-  return { ok: true, value: validated.data };
+  const batches: RawPlan["batches"] = [];
+  let droppedMalformedBatchCount = 0;
+  for (const batch of envelope.data.batches) {
+    const validatedBatch = PLANNER_BATCH_SCHEMA.safeParse(batch);
+    if (validatedBatch.success) {
+      batches.push(validatedBatch.data);
+    } else {
+      droppedMalformedBatchCount += 1;
+    }
+  }
+  if (envelope.data.batches.length > 0 && batches.length === 0) {
+    return {
+      ok: false,
+      reason: `plan JSON had ${droppedMalformedBatchCount} malformed batch(es) and no valid batches`,
+    };
+  }
+  const value: RawPlan = {
+    rationale: envelope.data.rationale,
+    batches,
+  };
+  if (envelope.data.dependencies !== undefined) {
+    value.dependencies = envelope.data.dependencies;
+  }
+  return { ok: true, value, droppedMalformedBatchCount };
 }
 
 /**
@@ -828,6 +863,7 @@ export async function runTriagePlanner(
     return {
       status: "ok",
       attempts: 0,
+      droppedMalformedBatchCount: 0,
       body: {
         batches: [],
         options: [],
@@ -860,6 +896,7 @@ export async function runTriagePlanner(
       return {
         status: "ok",
         attempts,
+        droppedMalformedBatchCount: parsed.droppedMalformedBatchCount,
         body: buildPlanBody(parsed.value, context),
       };
     }
