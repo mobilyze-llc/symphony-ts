@@ -204,16 +204,16 @@ export type PlannerResult =
   | { status: "invalid"; detail: string; attempts: number };
 
 /**
- * Per-candidate field budgets in the planner prompt (SYMPH-874/897/904). Bound
- * each untrusted tracker field so a few long or oddly-formatted ticket fields
- * cannot blow up or reshape the Opus prompt; tune from measured context size (the
+ * Per-candidate field budgets in the planner prompt (SYMPH-874/897/904/1015).
+ * Bound each untrusted tracker field so a few long or oddly-formatted ticket
+ * fields cannot reshape the Opus prompt; tune from measured context size (the
  * design's measure-first stance). These are prompt-hygiene bounds, not cost caps.
  */
-const PLANNER_CANDIDATE_DESCRIPTION_CHAR_LIMIT = 600;
+const PLANNER_CANDIDATE_DESCRIPTION_CHAR_LIMIT = 25_000;
 // Despite the "TITLE" name this is the general per-FIELD single-line bound, applied
 // to every short tracker field: titles, identifiers, workflow state, in-flight
 // stage, and individual blocker refs (SYMPH-904 council: one shared field bound).
-const PLANNER_CANDIDATE_TITLE_CHAR_LIMIT = 300;
+const PLANNER_CANDIDATE_TITLE_CHAR_LIMIT = 25_000;
 // Two-level label bound: each label is capped first (one pathological label can't
 // dominate the row), then the comma-joined set is capped (many labels can't blow up
 // the prompt). The per-label cap is deliberately well below the joined cap, so each
@@ -223,7 +223,11 @@ const PLANNER_CANDIDATE_TITLE_CHAR_LIMIT = 300;
 // fallback (SYMPH-904 council). LABELS_CHAR_LIMIT is the general JOINED-SET cap (the
 // labels set and the blocked-by set).
 const PLANNER_CANDIDATE_SINGLE_LABEL_CHAR_LIMIT = 80;
-const PLANNER_CANDIDATE_LABELS_CHAR_LIMIT = 300;
+const PLANNER_CANDIDATE_LABELS_CHAR_LIMIT = 25_000;
+// A large aggregate fuse for pathological assembled prompts (SYMPH-1015). The
+// normal planner should stay well under this; when it trips, preserve the trusted
+// instructions/output schema and truncate only the fenced tracker-content block.
+const PLANNER_PROMPT_AGGREGATE_CHAR_LIMIT = 100_000;
 
 /**
  * Collapse an untrusted tracker string to a single bounded line: whitespace
@@ -591,7 +595,61 @@ export function buildPlannerPrompt(context: PlannerContext): string {
     "- For `canary-chain`, set `canary` to an object with exactly these keys: `headIssueIdentifiers` (the gating head, at least one identifier) and `contingentIssueIdentifiers` (the tail, released only once the head validates) — both arrays of backlog identifiers. For every other mode set `canary` to null.",
     "- In `dependencies`, capture the cross-batch execution order you infer: an issue that must complete before another (e.g. a shared-surface foundation before its dependents). One entry per dependent issue, with its prerequisites in `dependsOn`; use only backlog identifiers. The `(blocked by: …)` relations shown in the backlog are HARD constraints — never order an issue ahead of one it is blocked by.",
   );
-  return lines.join("\n");
+  return applyPlannerPromptAggregateBackstop(lines.join("\n"), {
+    openingFence: `<${untrustedFence}>`,
+    closingFence: `</${untrustedFence}>`,
+  });
+}
+
+function applyPlannerPromptAggregateBackstop(
+  prompt: string,
+  boundaries: { openingFence: string; closingFence: string },
+): string {
+  if (prompt.length <= PLANNER_PROMPT_AGGREGATE_CHAR_LIMIT) {
+    return prompt;
+  }
+
+  console.warn(
+    `[triage-planner] planner prompt aggregate backstop hit: ${prompt.length} chars exceeds ${PLANNER_PROMPT_AGGREGATE_CHAR_LIMIT}; truncating fenced tracker content`,
+  );
+
+  const openingIndex = prompt.indexOf(boundaries.openingFence);
+  const closingIndex = prompt.indexOf(boundaries.closingFence);
+  if (openingIndex < 0 || closingIndex < 0 || closingIndex <= openingIndex) {
+    return prompt.slice(0, PLANNER_PROMPT_AGGREGATE_CHAR_LIMIT);
+  }
+
+  const trackerContentStart = openingIndex + boundaries.openingFence.length;
+  const prefix = prompt.slice(0, trackerContentStart);
+  const trackerContent = prompt.slice(trackerContentStart, closingIndex);
+  const suffix = prompt.slice(closingIndex);
+  const marker = `\n- (tracker content truncated by planner prompt aggregate backstop: original prompt ${prompt.length} chars exceeded ${PLANNER_PROMPT_AGGREGATE_CHAR_LIMIT})\n`;
+  const availableForTracker =
+    PLANNER_PROMPT_AGGREGATE_CHAR_LIMIT -
+    prefix.length -
+    marker.length -
+    suffix.length;
+
+  if (availableForTracker <= 0) {
+    console.warn(
+      `[triage-planner] planner prompt fixed instructions exceed ${PLANNER_PROMPT_AGGREGATE_CHAR_LIMIT} chars; preserving prompt schema over the aggregate fuse`,
+    );
+    return `${prefix}${marker}${suffix}`;
+  }
+
+  return `${prefix}${truncateAtLineBoundary(
+    trackerContent,
+    availableForTracker,
+  )}${marker}${suffix}`;
+}
+
+function truncateAtLineBoundary(value: string, maxChars: number): string {
+  if (value.length <= maxChars) {
+    return value;
+  }
+  const slice = value.slice(0, maxChars);
+  const lastNewline = slice.lastIndexOf("\n");
+  return lastNewline >= 0 ? slice.slice(0, lastNewline) : slice;
 }
 
 export function parsePlannerOutput(

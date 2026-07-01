@@ -54,8 +54,8 @@ describe("config-resolver queue triage (SYMPH-784)", () => {
       maxCandidates: 25,
       maxCommentPages: 3,
       maxComments: 6,
-      maxCommentChars: 400,
-      maxTotalChars: 1200,
+      maxCommentChars: 25_000,
+      maxTotalChars: 25_000,
     });
   });
 
