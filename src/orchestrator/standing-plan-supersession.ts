@@ -67,6 +67,12 @@ export function rotateRevision(
       !isCommittedBatchStatus(batch.status) && !committedIds.has(batch.batchId),
   );
   const batches = [...committed, ...lookahead];
+  const dependencyEdges = resolveRevisionDependencyEdges({
+    prior,
+    committed,
+    batches,
+    proposedEdges: body.dependencyEdges,
+  });
 
   // Keep only options that target a surviving lookahead batch (or carry no
   // batch-scoped intent). Dropping a proposed batch that collided with a
@@ -86,6 +92,7 @@ export function rotateRevision(
   const contentHash = computePlanContentHash({
     planId,
     batches,
+    dependencyEdges,
     options: optionsForLookahead,
     envelope: body.envelope,
     rationale: body.rationale,
@@ -100,10 +107,90 @@ export function rotateRevision(
     createdAt: options.createdAt,
     envelope: body.envelope,
     batches,
+    dependencyEdges,
     options: optionsForLookahead,
     rationale: body.rationale,
     source: body.source,
   };
+}
+
+function resolveRevisionDependencyEdges(input: {
+  prior: StandingPlan | null;
+  committed: readonly PlanBatch[];
+  batches: readonly PlanBatch[];
+  proposedEdges: readonly PlanDependencyEdge[];
+}): PlanDependencyEdge[] {
+  const memberIdentifiers = new Set(
+    input.batches.flatMap((batch) =>
+      batch.members.map((member) => member.issueIdentifier),
+    ),
+  );
+  const committedMemberIdentifiers = new Set(
+    input.committed.flatMap((batch) =>
+      batch.members.map((member) => member.issueIdentifier),
+    ),
+  );
+  const edges: PlanDependencyEdge[] = [];
+  const seen = new Set<string>();
+  const addEdge = (edge: PlanDependencyEdge): void => {
+    if (
+      edge.issueIdentifier === edge.dependsOn ||
+      !memberIdentifiers.has(edge.issueIdentifier) ||
+      !memberIdentifiers.has(edge.dependsOn)
+    ) {
+      return;
+    }
+    const key = JSON.stringify([edge.issueIdentifier, edge.dependsOn]);
+    if (seen.has(key)) {
+      return;
+    }
+    if (dependsReaches(edges, edge.dependsOn, edge.issueIdentifier)) {
+      return;
+    }
+    seen.add(key);
+    edges.push({
+      issueIdentifier: edge.issueIdentifier,
+      dependsOn: edge.dependsOn,
+    });
+  };
+
+  for (const edge of input.prior?.dependencyEdges ?? []) {
+    if (
+      committedMemberIdentifiers.has(edge.issueIdentifier) &&
+      committedMemberIdentifiers.has(edge.dependsOn)
+    ) {
+      addEdge(edge);
+    }
+  }
+  for (const edge of input.proposedEdges) {
+    addEdge(edge);
+  }
+  return edges;
+}
+
+function dependsReaches(
+  edges: readonly PlanDependencyEdge[],
+  from: string,
+  to: string,
+): boolean {
+  const stack = [from];
+  const visited = new Set<string>();
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (node === undefined || visited.has(node)) {
+      continue;
+    }
+    if (node === to) {
+      return true;
+    }
+    visited.add(node);
+    for (const edge of edges) {
+      if (edge.issueIdentifier === node) {
+        stack.push(edge.dependsOn);
+      }
+    }
+  }
+  return false;
 }
 
 /**

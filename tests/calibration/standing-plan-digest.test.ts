@@ -69,6 +69,7 @@ function revision(
         canary: null,
       },
     ],
+    dependencyEdges: [],
     options: [],
     rationale: "r",
     source: "planner",

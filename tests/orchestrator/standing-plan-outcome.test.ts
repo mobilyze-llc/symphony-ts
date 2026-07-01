@@ -27,6 +27,7 @@ function plan(): StandingPlan {
         canary: null,
       },
     ],
+    dependencyEdges: [],
     options: [],
     rationale: "r",
     createdAt: "2026-06-19T00:00:00.000Z",

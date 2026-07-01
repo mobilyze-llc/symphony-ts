@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type {
   PlanBatch,
   PlanDecision,
+  PlanDependencyEdge,
   PlanEnvelope,
   StandingPlan,
 } from "../../src/domain/standing-plan.js";
@@ -34,14 +35,17 @@ function inFlightBatch(id: string, identifier: string): PlanBatch {
   return { ...lookaheadBatch(id, identifier), status: "in_flight" };
 }
 
-function body(batches: PlanBatch[]): PlanBody {
+function body(
+  batches: PlanBatch[],
+  dependencyEdges: PlanDependencyEdge[] = [],
+): PlanBody {
   return {
     batches,
     options: [],
     envelope: ENVELOPE,
     rationale: "rationale",
     source: "planner",
-    dependencyEdges: [],
+    dependencyEdges,
   };
 }
 
@@ -52,6 +56,7 @@ function planFrom(revision: number, batches: PlanBatch[]): StandingPlan {
     contentHash: `hash-${revision}`,
     envelope: ENVELOPE,
     batches,
+    dependencyEdges: [],
     options: [],
     rationale: "r",
     createdAt: "2026-06-18T00:00:00.000Z",
@@ -133,6 +138,56 @@ describe("rotateRevision", () => {
       { createdAt: "2026-06-18T00:05:00.000Z" },
     );
     expect(second.contentHash).toBe(first.contentHash);
+  });
+
+  it("records dependency edges on the revision and hash", () => {
+    const first = rotateRevision(
+      null,
+      body(
+        [lookaheadBatch("b1", "SYMPH-1"), lookaheadBatch("b2", "SYMPH-2")],
+        [{ issueIdentifier: "SYMPH-2", dependsOn: "SYMPH-1" }],
+      ),
+      {
+        planId: "plan-1",
+        createdAt: "2026-06-18T00:00:00.000Z",
+      },
+    );
+    const changed = rotateRevision(
+      planFrom(1, first.batches),
+      body(
+        [lookaheadBatch("b1", "SYMPH-1"), lookaheadBatch("b2", "SYMPH-2")],
+        [{ issueIdentifier: "SYMPH-1", dependsOn: "SYMPH-2" }],
+      ),
+      { createdAt: "2026-06-18T00:05:00.000Z" },
+    );
+
+    expect(first.dependencyEdges).toEqual([
+      { issueIdentifier: "SYMPH-2", dependsOn: "SYMPH-1" },
+    ]);
+    expect(changed.contentHash).not.toBe(first.contentHash);
+  });
+
+  it("carries prior dependency edges for immutable committed members", () => {
+    const prior = {
+      ...planFrom(1, [
+        inFlightBatch("b1", "SYMPH-1"),
+        inFlightBatch("b2", "SYMPH-2"),
+        lookaheadBatch("b9", "SYMPH-9"),
+      ]),
+      dependencyEdges: [
+        { issueIdentifier: "SYMPH-2", dependsOn: "SYMPH-1" },
+        { issueIdentifier: "SYMPH-9", dependsOn: "SYMPH-1" },
+      ],
+    };
+    const next = rotateRevision(
+      prior,
+      body([lookaheadBatch("b3", "SYMPH-3")]),
+      { createdAt: "2026-06-18T00:05:00.000Z" },
+    );
+
+    expect(next.dependencyEdges).toEqual([
+      { issueIdentifier: "SYMPH-2", dependsOn: "SYMPH-1" },
+    ]);
   });
 });
 

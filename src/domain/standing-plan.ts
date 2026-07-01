@@ -155,7 +155,7 @@ export interface PlanRevision {
   revision: number;
   /** Stable identity of the living plan across revisions. */
   planId: string;
-  /** sha256 over the normalized batches+options+envelope (idempotency/dedup). */
+  /** sha256 over the normalized batches+DAG+options+envelope. */
   contentHash: string;
   /** The prior revision this one replaces (null for the first). */
   supersedes: number | null;
@@ -163,6 +163,8 @@ export interface PlanRevision {
   envelope: PlanEnvelope;
   /** Ordered: committed (immutable) batches first, then the lookahead tail. */
   batches: PlanBatch[];
+  /** Persisted execution-dependency DAG over planned issue identifiers. */
+  dependencyEdges: PlanDependencyEdge[];
   options: PlanOptionLine[];
   rationale: string;
   source: PlanRevisionSource;
@@ -222,6 +224,7 @@ export interface StandingPlan {
   contentHash: string;
   envelope: PlanEnvelope;
   batches: PlanBatch[];
+  dependencyEdges: PlanDependencyEdge[];
   options: PlanOptionLine[];
   rationale: string;
   createdAt: string;
@@ -288,14 +291,20 @@ export type StandingPlanJournalEntryDraft = DistributiveOmit<
 
 /**
  * Stable content hash of the meaningful structural plan body (batches +
- * options + envelope + source). Excludes rationale, revision, createdAt, and
- * contentHash so an
+ * dependency edges + options + envelope + source). Excludes rationale,
+ * revision, createdAt, and contentHash so an
  * unchanged plan re-proposed later hashes identically (idempotency: no churn).
  */
 export function computePlanContentHash(
   body: Pick<
     PlanRevision,
-    "planId" | "batches" | "options" | "envelope" | "rationale" | "source"
+    | "planId"
+    | "batches"
+    | "dependencyEdges"
+    | "options"
+    | "envelope"
+    | "rationale"
+    | "source"
   >,
 ): string {
   const normalized = {
@@ -303,9 +312,28 @@ export function computePlanContentHash(
     source: body.source,
     envelope: normalizeEnvelopeForHash(body.envelope),
     batches: body.batches.map(normalizeBatchForHash),
+    dependencyEdges: normalizeDependencyEdgesForHash(body.dependencyEdges),
     options: body.options.map(normalizeOptionForHash),
   };
   return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
+}
+
+function normalizeDependencyEdgesForHash(
+  edges: readonly PlanDependencyEdge[],
+): unknown {
+  return edges
+    .map((edge) => ({
+      issueIdentifier: edge.issueIdentifier,
+      dependsOn: edge.dependsOn,
+    }))
+    .sort((left, right) => {
+      const issueOrder = left.issueIdentifier.localeCompare(
+        right.issueIdentifier,
+      );
+      return issueOrder === 0
+        ? left.dependsOn.localeCompare(right.dependsOn)
+        : issueOrder;
+    });
 }
 
 function normalizeEnvelopeForHash(envelope: PlanEnvelope): unknown {
@@ -467,10 +495,29 @@ function isPlanRevision(value: unknown): value is PlanRevision {
     isPlanEnvelope(value.envelope) &&
     Array.isArray(value.batches) &&
     value.batches.every(isValidPlanBatch) &&
+    // Legacy plan_revision rows before SYMPH-843 did not persist the DAG. They
+    // remain readable and project as an empty edge set in the store.
+    (value.dependencyEdges === undefined ||
+      isPlanDependencyEdges(value.dependencyEdges)) &&
     Array.isArray(value.options) &&
     value.options.every(isPlanOptionLine) &&
     typeof value.rationale === "string" &&
     PLAN_REVISION_SOURCES.includes(value.source as PlanRevisionSource)
+  );
+}
+
+function isPlanDependencyEdges(value: unknown): value is PlanDependencyEdge[] {
+  return Array.isArray(value) && value.every(isPlanDependencyEdge);
+}
+
+function isPlanDependencyEdge(value: unknown): value is PlanDependencyEdge {
+  return (
+    isRecord(value) &&
+    typeof value.issueIdentifier === "string" &&
+    value.issueIdentifier.trim().length > 0 &&
+    typeof value.dependsOn === "string" &&
+    value.dependsOn.trim().length > 0 &&
+    value.issueIdentifier !== value.dependsOn
   );
 }
 
