@@ -47,8 +47,8 @@ export interface PlannerCommentCurationConfig {
 export const DEFAULT_PLANNER_COMMENT_CURATION_CONFIG: PlannerCommentCurationConfig =
   {
     maxComments: 6,
-    maxCommentChars: 400,
-    maxTotalChars: 1200,
+    maxCommentChars: 25_000,
+    maxTotalChars: 25_000,
   };
 
 export interface PlannerCommentCurationResult {

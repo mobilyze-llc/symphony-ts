@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   type PlannerContext,
@@ -180,11 +180,28 @@ describe("buildPlannerPrompt", () => {
     const ctx = context();
     const first = ctx.backlog[0];
     if (first) {
-      first.description = `HEAD ${"x".repeat(5000)} TAILMARKER`;
+      first.description = `HEAD ${"x".repeat(30_000)} TAILMARKER`;
     }
     const prompt = buildPlannerPrompt(ctx);
     expect(prompt).toContain("HEAD "); // the beginning of the body is rendered
     expect(prompt).not.toContain("TAILMARKER"); // content past the cap is dropped
+  });
+
+  it("keeps rich tracker content below the SYMPH-1015 field cap", () => {
+    const ctx = context();
+    const first = ctx.backlog[0];
+    if (first) {
+      first.title = `TITLEHEAD ${"t".repeat(20_000)} TITLETAIL`;
+      first.description = `DESCHEAD ${"d".repeat(20_000)} DESCTAIL`;
+      first.labels = Array.from(
+        { length: 120 },
+        (_unused, index) => `area:rich-${index}`,
+      );
+    }
+    const prompt = buildPlannerPrompt(ctx);
+    expect(prompt).toContain("TITLETAIL");
+    expect(prompt).toContain("DESCTAIL");
+    expect(prompt).toContain("area:rich-119");
   });
 
   it("omits the labels/description adornments when a candidate has neither (SYMPH-874)", () => {
@@ -445,8 +462,8 @@ describe("buildPlannerPrompt", () => {
       // each label is short (under the per-label cap) but together they exceed the
       // joined cap, so the trailing label is dropped by the joined cap.
       first.labels = Array.from(
-        { length: 15 },
-        (_, i) => `area:label-${i}-zzzzzzzzzzzzzzzzzzzz`,
+        { length: 1_500 },
+        (_, i) => `area:label-${i}-zzzz`,
       );
       first.labels.push("FINALLABELMARKER");
     }
@@ -473,7 +490,7 @@ describe("buildPlannerPrompt", () => {
     const ctx = context();
     const first = ctx.backlog[0];
     if (first) {
-      first.title = `TITLEHEAD ${"x".repeat(5000)} TITLETAILMARKER`;
+      first.title = `TITLEHEAD ${"x".repeat(30_000)} TITLETAILMARKER`;
     }
     const prompt = buildPlannerPrompt(ctx);
     expect(prompt).toContain("TITLEHEAD "); // the start of the title renders
@@ -513,7 +530,7 @@ describe("buildPlannerPrompt", () => {
       {
         issueIdentifier: "SYMPH-9",
         prNumber: 42,
-        title: `PRHEAD ${"z".repeat(5000)} PRTAILMARKER`,
+        title: `PRHEAD ${"z".repeat(30_000)} PRTAILMARKER`,
       },
     ];
     const prompt = buildPlannerPrompt(ctx);
@@ -566,10 +583,10 @@ describe("buildPlannerPrompt", () => {
     const ctx = context();
     const first = ctx.backlog[0];
     if (first) {
-      // ~43-char labels so the joined cap lands mid-label; truncation must fall
-      // back to the last complete ", " boundary (no spliced partial label).
+      // ~43-char labels so the 25K joined cap lands mid-label; truncation must
+      // fall back to the last complete ", " boundary (no spliced partial label).
       first.labels = Array.from(
-        { length: 12 },
+        { length: 650 },
         (_, i) => `area:lbl${i}-${"q".repeat(33)}`,
       );
     }
@@ -641,10 +658,10 @@ describe("buildPlannerPrompt", () => {
     const ctx = context();
     const first = ctx.backlog[0];
     // Each label contains a literal ", " (free-text labels can), so a naive
-    // lastIndexOf(", ") boundary search could land INSIDE a label. 5 × 74-char
-    // labels push the joined set over the 300 cap.
+    // lastIndexOf(", ") boundary search could land INSIDE a label. Hundreds of
+    // 74-char labels push the joined set over the 25K cap.
     const labels = Array.from(
-      { length: 5 },
+      { length: 400 },
       (_, i) => `g${i}, ${"z".repeat(70)}`,
     );
     if (first) {
@@ -667,7 +684,7 @@ describe("buildPlannerPrompt", () => {
     const first = ctx.backlog[0];
     if (first) {
       first.blockedBy = [
-        ...Array.from({ length: 40 }, (_, i) => `SYMPH-${1000 + i}`),
+        ...Array.from({ length: 3_000 }, (_, i) => `SYMPH-${1000 + i}`),
         "BLOCKERTAILMARKER",
       ];
     }
@@ -681,7 +698,7 @@ describe("buildPlannerPrompt", () => {
     ctx.inFlight = [
       {
         issueIdentifier: "SYMPH-7",
-        stage: `STAGEHEAD ${"s".repeat(5000)} STAGETAILMARKER`,
+        stage: `STAGEHEAD ${"s".repeat(30_000)} STAGETAILMARKER`,
       },
     ];
     const prompt = buildPlannerPrompt(ctx);
@@ -697,6 +714,58 @@ describe("buildPlannerPrompt", () => {
     }
     const prompt = buildPlannerPrompt(ctx);
     expect(prompt).toContain("] First\n- SYMPH-2"); // no description line inserted
+  });
+
+  it("caps pathological assembled prompts while preserving trusted instructions and schema (SYMPH-1015)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const ctx = context();
+      ctx.backlog = Array.from({ length: 8 }, (_unused, index) => ({
+        issueId: `u-${index}`,
+        issueIdentifier: `SYMPH-${1000 + index}`,
+        title: `Large ticket ${index}`,
+        priority: index,
+        state: "Backlog",
+        blockedBy: [],
+        description: `DESC-${index} ${"x".repeat(30_000)} TAIL-${index}`,
+      }));
+
+      const prompt = buildPlannerPrompt(ctx);
+
+      expect(prompt.length).toBeLessThanOrEqual(100_000);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("planner prompt aggregate backstop hit"),
+      );
+      expect(prompt).toContain("tracker content truncated by planner prompt");
+      expect(prompt).toMatch(/<\/SYMPHONY_UNTRUSTED_CANDIDATES_[0-9a-f-]+>/);
+      expect(prompt).toContain("## Plan");
+      expect(prompt).toContain('"dependencies"');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("preserves the schema if trusted instructions alone exceed the aggregate fuse", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const ctx = context();
+      ctx.envelope = {
+        ...ctx.envelope,
+        allowedModes: Array.from({ length: 6_000 }, () => "parallel-isolated"),
+      } as PlanEnvelope;
+
+      const prompt = buildPlannerPrompt(ctx);
+
+      expect(prompt.length).toBeGreaterThan(100_000);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("fixed instructions exceed"),
+      );
+      expect(prompt).toMatch(/<\/SYMPHONY_UNTRUSTED_CANDIDATES_[0-9a-f-]+>/);
+      expect(prompt).toContain("## Plan");
+      expect(prompt).toContain('"dependencies"');
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 

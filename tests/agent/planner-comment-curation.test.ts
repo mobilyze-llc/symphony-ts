@@ -109,6 +109,16 @@ describe("curatePlannerComments (SYMPH-896)", () => {
     expect(kept?.body.length).toBe(20);
   });
 
+  it("keeps large comments under the default SYMPH-1015 budgets", () => {
+    const result = curatePlannerComments([
+      comment({ id: "rich", body: `HEAD ${"x".repeat(20_000)} TAIL` }),
+    ]);
+    const kept = result.comments[0];
+    expect(kept?.body).toContain("HEAD ");
+    expect(kept?.body).toContain("TAIL");
+    expect(result.droppedForBudgetCount).toBe(0);
+  });
+
   it("enforces the per-issue total-char budget by dropping the oldest kept", () => {
     const result = curatePlannerComments(
       [
