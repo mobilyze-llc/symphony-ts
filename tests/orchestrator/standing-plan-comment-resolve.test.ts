@@ -20,6 +20,7 @@ function plan(): StandingPlan {
     contentHash: "h",
     envelope: ENVELOPE,
     batches: [],
+    dependencyEdges: [],
     options: [
       {
         marker: "[opt-1]",

@@ -8,6 +8,7 @@ import { computeStandingPlanCalibration } from "../../src/calibration/standing-p
 import type {
   PlanBatch,
   PlanDecision,
+  PlanDependencyEdge,
   PlanEnvelope,
 } from "../../src/domain/standing-plan.js";
 import { appendStandingPlanJournalEntriesWithLock } from "../../src/logging/standing-plan-journal.js";
@@ -41,14 +42,17 @@ function lookahead(id: string, identifier: string): PlanBatch {
   };
 }
 
-function body(batches: PlanBatch[]): PlanBody {
+function body(
+  batches: PlanBatch[],
+  dependencyEdges: PlanDependencyEdge[] = [],
+): PlanBody {
   return {
     batches,
     options: [{ marker: "[opt-1]", label: "Release", intent: null }],
     envelope: ENVELOPE,
     rationale: "rationale",
     source: "planner",
-    dependencyEdges: [],
+    dependencyEdges,
   };
 }
 
@@ -101,6 +105,51 @@ describe("standing-plan store", () => {
       );
       expect(again.recorded).toBe(false);
       expect(again.plan.revision).toBe(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("round-trips dependency edges through record and load", async () => {
+    const root = tmpRoot();
+    try {
+      const edges: PlanDependencyEdge[] = [
+        { issueIdentifier: "SYMPH-2", dependsOn: "SYMPH-1" },
+      ];
+      const result = await recordPlanRevision(
+        root,
+        body([lookahead("b1", "SYMPH-1"), lookahead("b2", "SYMPH-2")], edges),
+        { planId: "plan-1", createdAt: "2026-06-18T00:00:00.000Z" },
+      );
+
+      expect(result.recorded).toBe(true);
+      expect(result.plan.dependencyEdges).toEqual(edges);
+      expect((await loadStandingPlan(root))?.dependencyEdges).toEqual(edges);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rotates the revision when only dependency edges change", async () => {
+    const root = tmpRoot();
+    try {
+      const batches = [lookahead("b1", "SYMPH-1"), lookahead("b2", "SYMPH-2")];
+      await recordPlanRevision(root, body(batches), {
+        planId: "plan-1",
+        createdAt: "2026-06-18T00:00:00.000Z",
+      });
+
+      const changed = await recordPlanRevision(
+        root,
+        body(batches, [{ issueIdentifier: "SYMPH-2", dependsOn: "SYMPH-1" }]),
+        { createdAt: "2026-06-18T00:10:00.000Z" },
+      );
+
+      expect(changed.recorded).toBe(true);
+      expect(changed.plan.revision).toBe(2);
+      expect(changed.plan.dependencyEdges).toEqual([
+        { issueIdentifier: "SYMPH-2", dependsOn: "SYMPH-1" },
+      ]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -356,6 +405,7 @@ describe("standing-plan store", () => {
             createdAt: "2026-06-18T00:00:00.000Z",
             envelope: ENVELOPE,
             batches: [inFlight, lookahead("old", "SYMPH-9")],
+            dependencyEdges: [],
             options: [],
             rationale: "seed",
             source: "planner",
@@ -447,6 +497,7 @@ describe("standing-plan store", () => {
         createdAt: "2026-06-18T00:00:00.000Z",
         envelope: ENVELOPE,
         batches: [lookahead(`b${revision}`, identifier)],
+        dependencyEdges: [],
         options: [],
         rationale: "r",
         source: "planner" as const,

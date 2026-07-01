@@ -74,6 +74,7 @@ export function projectStandingPlan(
     contentHash: revision.contentHash,
     envelope: revision.envelope,
     batches: revision.batches,
+    dependencyEdges: revision.dependencyEdges ?? [],
     options: revision.options,
     rationale: revision.rationale,
     createdAt: revision.createdAt,

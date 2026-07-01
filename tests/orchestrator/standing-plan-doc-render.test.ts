@@ -37,6 +37,7 @@ function plan(): StandingPlan {
         canary: null,
       },
     ],
+    dependencyEdges: [],
     options: [
       {
         marker: "[opt-1]",
@@ -125,6 +126,21 @@ describe("renderStandingPlanControlDoc", () => {
     expect(md.toLowerCase()).toContain("head");
     expect(md).toContain("SYMPH-1");
   });
+
+  it("renders execution waves from persisted dependency edges", () => {
+    const p = plan();
+    p.dependencyEdges = [{ issueIdentifier: "SYMPH-2", dependsOn: "SYMPH-1" }];
+    const md = renderStandingPlanControlDoc({
+      plan: p,
+      recentlyShipped: [],
+      inFlight: [],
+      changelog: [],
+    });
+
+    expect(md).toContain("Execution waves");
+    expect(md).toContain("Wave 1: SYMPH-1");
+    expect(md).toContain("Wave 2: SYMPH-2 (waits on SYMPH-1)");
+  });
 });
 
 describe("computeRecentlyShipped (SYMPH-803)", () => {
@@ -193,6 +209,7 @@ describe("renderStandingPlanControlDoc — recently shipped (SYMPH-803)", () => 
         contentHash: "h",
         envelope: ENVELOPE,
         batches: [],
+        dependencyEdges: [],
         options: [],
         rationale: "r",
         createdAt: "2026-06-19T00:00:00.000Z",

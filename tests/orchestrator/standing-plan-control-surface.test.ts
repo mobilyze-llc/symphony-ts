@@ -33,6 +33,7 @@ function plan(): StandingPlan {
         canary: null,
       },
     ],
+    dependencyEdges: [],
     options: [
       {
         marker: "[opt-1]",

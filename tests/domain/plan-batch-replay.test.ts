@@ -58,6 +58,7 @@ function standingPlanFromRevision(row: RevisionFixture): StandingPlan {
     contentHash: row.revision.contentHash,
     envelope: row.revision.envelope,
     batches: row.revision.batches,
+    dependencyEdges: row.revision.dependencyEdges ?? [],
     options: row.revision.options,
     rationale: row.revision.rationale,
     createdAt: row.revision.createdAt,

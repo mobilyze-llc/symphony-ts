@@ -45,6 +45,7 @@ function createRevision(revision: number): PlanRevision {
         canary: null,
       },
     ],
+    dependencyEdges: [],
     options: [{ marker: "[opt-1]", label: "Release batch", intent: null }],
     rationale: "plan rationale",
     source: "planner",

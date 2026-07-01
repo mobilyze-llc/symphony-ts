@@ -1,8 +1,10 @@
 import type {
   PlanBatch,
+  PlanDependencyEdge,
   StandingPlan,
   StandingPlanJournal,
 } from "../domain/standing-plan.js";
+import { computeDependencyWaves } from "../domain/standing-plan.js";
 
 // ---------------------------------------------------------------------------
 // 6a — Living control doc render (SYMPH-790)
@@ -99,6 +101,10 @@ export function renderStandingPlanControlDoc(
     }
   }
 
+  lines.push("", "## Execution waves");
+  const waveLines = renderExecutionWaves(plan);
+  lines.push(waveLines.length === 0 ? "- (none)" : waveLines.join("\n"));
+
   lines.push("", "## Options");
   lines.push(
     `_Comment on an option line below to act (operator-gated; bound to revision ${plan.revision})._`,
@@ -128,6 +134,34 @@ export function renderStandingPlanControlDoc(
   );
 
   return lines.join("\n");
+}
+
+function renderExecutionWaves(plan: StandingPlan): string[] {
+  const memberIdentifiers = plan.batches.flatMap((batch) =>
+    batch.members.map((member) => member.issueIdentifier),
+  );
+  const waves = computeDependencyWaves(memberIdentifiers, plan.dependencyEdges);
+  const prerequisitesOf = (issueIdentifier: string): string[] =>
+    plan.dependencyEdges
+      .filter((edge) => edge.issueIdentifier === issueIdentifier)
+      .map((edge) => edge.dependsOn);
+  return waves.map((wave, index) => {
+    const rendered = wave
+      .map((issueIdentifier) =>
+        renderWaveMember(issueIdentifier, prerequisitesOf(issueIdentifier)),
+      )
+      .join(", ");
+    return `- Wave ${index + 1}: ${rendered}`;
+  });
+}
+
+function renderWaveMember(
+  issueIdentifier: string,
+  prerequisites: readonly PlanDependencyEdge["dependsOn"][],
+): string {
+  return prerequisites.length === 0
+    ? issueIdentifier
+    : `${issueIdentifier} (waits on ${prerequisites.join(", ")})`;
 }
 
 function renderCanaryLine(batch: PlanBatch): string | null {

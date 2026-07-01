@@ -760,6 +760,7 @@ describe("runManagerPlanCli", () => {
         contentHash: "hash",
         envelope: body.envelope,
         batches: body.batches,
+        dependencyEdges: body.dependencyEdges,
         options: body.options,
         rationale: body.rationale,
         createdAt: options.createdAt,
