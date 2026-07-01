@@ -9,7 +9,7 @@ import {
   type PlanBatchMember,
   type PlanBatchMode,
   type PlanCanaryStructure,
-} from "./standing-plan.js";
+} from "./plan-batch-contract.js";
 
 export const PlanBatchSchema = z
   .object({
@@ -88,9 +88,14 @@ export type NormalizePlanBatchResult =
   | { ok: true; batch: PlanBatch }
   | { ok: false; rejection: string };
 
+export interface NormalizePlanBatchOptions {
+  allowedModes?: readonly PlanBatchMode[];
+}
+
 export function normalizePlanBatch(
   rawBatch: RawPlanBatchForNormalization,
   members: readonly PlanBatchMember[],
+  options: NormalizePlanBatchOptions = {},
 ): NormalizePlanBatchResult {
   if (typeof rawBatch.rationale !== "string") {
     return { ok: false, rejection: "invalid batch rationale" };
@@ -98,8 +103,22 @@ export function normalizePlanBatch(
   if (!PLAN_BATCH_MODES.includes(rawBatch.mode)) {
     return { ok: false, rejection: "invalid batch mode" };
   }
+  const allowedModes = options.allowedModes ?? PLAN_BATCH_MODES;
+  if (!allowedModes.includes(rawBatch.mode)) {
+    return { ok: false, rejection: "batch mode outside envelope" };
+  }
   if (!members.every(isPlanBatchMember)) {
     return { ok: false, rejection: "invalid batch member" };
+  }
+  if (members.length === 0) {
+    return { ok: false, rejection: "empty batch members" };
+  }
+  if (
+    rawBatch.canary !== undefined &&
+    rawBatch.canary !== null &&
+    !isPlanCanaryStructure(rawBatch.canary)
+  ) {
+    return { ok: false, rejection: "invalid canary" };
   }
 
   const canary = normalizeCanary(rawBatch.canary ?? null, members);
@@ -107,6 +126,9 @@ export function normalizePlanBatch(
     rawBatch.mode === "canary-chain" && canary === null
       ? "parallel-isolated"
       : rawBatch.mode;
+  if (!allowedModes.includes(mode)) {
+    return { ok: false, rejection: "batch mode outside envelope" };
+  }
   const batch: PlanBatch = {
     batchId: contentBatchId(mode, members, canary),
     mode,
@@ -182,5 +204,22 @@ function isPlanBatchMember(value: unknown): value is PlanBatchMember {
     !Array.isArray(value) &&
     typeof (value as Partial<PlanBatchMember>).issueId === "string" &&
     typeof (value as Partial<PlanBatchMember>).issueIdentifier === "string"
+  );
+}
+
+function isPlanCanaryStructure(value: unknown): value is PlanCanaryStructure {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const canary = value as Partial<PlanCanaryStructure>;
+  return (
+    Array.isArray(canary.headIssueIdentifiers) &&
+    canary.headIssueIdentifiers.every(
+      (identifier) => typeof identifier === "string",
+    ) &&
+    Array.isArray(canary.contingentIssueIdentifiers) &&
+    canary.contingentIssueIdentifiers.every(
+      (identifier) => typeof identifier === "string",
+    )
   );
 }
