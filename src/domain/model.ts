@@ -51,6 +51,12 @@ export interface BlockerRef {
   state: string | null;
 }
 
+export interface IssueDocumentAttachment {
+  title: string | null;
+  url: string;
+  documentId: string;
+}
+
 export interface Issue {
   id: string;
   identifier: string;
@@ -65,6 +71,7 @@ export interface Issue {
   branchName: string | null;
   url: string | null;
   labels: string[];
+  documentAttachments?: IssueDocumentAttachment[];
   blockedBy: BlockerRef[];
   blockedByRelationTruncated?: boolean;
   createdAt: string | null;

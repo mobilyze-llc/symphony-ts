@@ -61,6 +61,7 @@ describe("linear-normalize", () => {
       branchName: "eng-123",
       url: "https://linear.app/eng/issue/ENG-123",
       labels: ["backend", "tracker"],
+      documentAttachments: [],
       blockedBy: [
         {
           id: "issue-0",

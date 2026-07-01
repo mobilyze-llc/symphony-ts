@@ -150,6 +150,7 @@ export const DEFAULT_CODE_GROUNDING_BASE_DIR = ".symphony/code-grounding";
 export const DEFAULT_CODE_GROUNDING_TTL_MS = 86_400_000;
 export const DEFAULT_CODE_GROUNDING_MAX_CHECKOUTS_PER_REPO = 5;
 export const DEFAULT_CODE_GROUNDING_MATERIALIZATION_TIMEOUT_MS = 600_000;
+export const DEFAULT_PLANNER_GROUNDING_ENABLED = false;
 
 // Merge actuator defaults (SYMPH-735). Default-disabled: the live merge-stage
 // dispatch barrier keeps parking candidates (merge_actuator_unwired) until a
@@ -275,6 +276,9 @@ export const SPEC_DEFAULTS = Object.freeze({
     ttlMs: DEFAULT_CODE_GROUNDING_TTL_MS,
     maxCheckoutsPerRepo: DEFAULT_CODE_GROUNDING_MAX_CHECKOUTS_PER_REPO,
     materializationTimeoutMs: DEFAULT_CODE_GROUNDING_MATERIALIZATION_TIMEOUT_MS,
+  },
+  plannerGrounding: {
+    enabled: DEFAULT_PLANNER_GROUNDING_ENABLED,
   },
   runner: {
     kind: DEFAULT_RUNNER_KIND,

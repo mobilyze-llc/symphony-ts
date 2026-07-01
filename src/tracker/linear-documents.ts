@@ -42,6 +42,13 @@ export interface LinearDocumentComment {
   botActorId: string | null;
 }
 
+export interface LinearDocumentContent {
+  id: string;
+  slugId: string | null;
+  url: string | null;
+  content: string;
+}
+
 const DOCUMENT_CREATE_MUTATION = `mutation SymphonyDocumentCreate($input: DocumentCreateInput!) {
   documentCreate(input: $input) {
     success
@@ -62,6 +69,15 @@ const DOCUMENT_COMMENTS_QUERY = `query SymphonyDocumentComments($id: String!, $f
     comments(first: $first) {
       nodes { id body quotedText createdAt user { email } botActor { id } }
     }
+  }
+}`;
+
+const DOCUMENT_CONTENT_QUERY = `query SymphonyDocumentContent($id: String!) {
+  document(id: $id) {
+    id
+    slugId
+    url
+    content
   }
 }`;
 
@@ -131,6 +147,31 @@ export async function fetchLinearDocumentComments(
     authorEmail: node.user?.email?.trim().toLowerCase() ?? null,
     botActorId: node.botActor?.id ?? null,
   }));
+}
+
+export async function fetchLinearDocumentContent(
+  deps: LinearDocumentClientDeps,
+  input: { documentId: string },
+): Promise<LinearDocumentContent | null> {
+  const data = await postGraphql<{
+    document: {
+      id: string;
+      slugId: string | null;
+      url: string | null;
+      content: string | null;
+    } | null;
+  }>(deps, DOCUMENT_CONTENT_QUERY, {
+    id: input.documentId,
+  });
+  if (data.document === null) {
+    return null;
+  }
+  return {
+    id: data.document.id,
+    slugId: data.document.slugId,
+    url: data.document.url,
+    content: data.document.content ?? "",
+  };
 }
 
 async function postGraphql<TData>(

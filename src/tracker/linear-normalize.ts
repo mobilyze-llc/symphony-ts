@@ -1,4 +1,8 @@
-import type { BlockerRef, Issue } from "../domain/model.js";
+import type {
+  BlockerRef,
+  Issue,
+  IssueDocumentAttachment,
+} from "../domain/model.js";
 import { ERROR_CODES } from "../errors/codes.js";
 import { TrackerError } from "./errors.js";
 import type { IssueStateSnapshot } from "./tracker.js";
@@ -33,6 +37,10 @@ interface LinearIssueNode {
   } | null;
   labels?: LinearConnection<{
     name?: unknown;
+  }> | null;
+  attachments?: LinearConnection<{
+    title?: unknown;
+    url?: unknown;
   }> | null;
   inverseRelations?: LinearConnection<{
     type?: unknown;
@@ -89,6 +97,7 @@ export function normalizeLinearIssue(node: unknown): Issue {
     branchName: optionalString(issue.branchName),
     url: optionalString(issue.url),
     labels: normalizeLabels(issue.labels),
+    documentAttachments: normalizeLinearDocumentAttachments(issue.attachments),
     blockedBy: normalizeBlockedBy(issue.inverseRelations),
     ...(hasNextPage(issue.inverseRelations)
       ? { blockedByRelationTruncated: true }
@@ -96,6 +105,63 @@ export function normalizeLinearIssue(node: unknown): Issue {
     createdAt: normalizeTimestamp(issue.createdAt),
     updatedAt: normalizeTimestamp(issue.updatedAt),
   };
+}
+
+export function normalizeLinearDocumentAttachments(
+  attachments: unknown,
+): IssueDocumentAttachment[] {
+  const nodes =
+    attachments !== null &&
+    typeof attachments === "object" &&
+    !Array.isArray(attachments)
+      ? (attachments as LinearConnection<{ title?: unknown; url?: unknown }>)
+          .nodes
+      : undefined;
+  if (!Array.isArray(nodes)) {
+    return [];
+  }
+  return nodes.flatMap((attachment) => {
+    const url = optionalString(attachment?.url);
+    if (url === null) {
+      return [];
+    }
+    const documentId = extractLinearDocumentIdFromUrl(url);
+    if (documentId === null) {
+      return [];
+    }
+    return [
+      {
+        title: optionalString(attachment?.title),
+        url,
+        documentId,
+      },
+    ];
+  });
+}
+
+export function extractLinearDocumentIdFromUrl(url: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (!/(^|\.)linear\.app$/i.test(parsed.hostname)) {
+    return null;
+  }
+  const segments = parsed.pathname
+    .split("/")
+    .filter((segment) => segment !== "");
+  const documentIndex = segments.indexOf("document");
+  const documentId = segments[documentIndex + 1];
+  if (
+    documentIndex < 0 ||
+    documentId === undefined ||
+    documentId.trim() === ""
+  ) {
+    return null;
+  }
+  return decodeURIComponent(documentId);
 }
 
 export function normalizeLinearIssueState(node: unknown): IssueStateSnapshot {

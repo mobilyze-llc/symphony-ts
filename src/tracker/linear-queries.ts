@@ -24,6 +24,12 @@ const ISSUE_FIELDS = `
       name
     }
   }
+  attachments {
+    nodes {
+      title
+      url
+    }
+  }
   inverseRelations(first: $relationFirst) {
     nodes {
       type
