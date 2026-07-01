@@ -46,6 +46,8 @@ describe("grounding claims", () => {
           authorClass: "operator",
           createdAt: "2026-07-01T00:00:00.000Z",
           body: "The overlap is in `src/orchestrator/backlog-hygiene.ts`.",
+          relevanceScore: 1,
+          relevanceRationale: "operator allowlist override",
         },
       ],
     });

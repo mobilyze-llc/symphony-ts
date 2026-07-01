@@ -3,6 +3,7 @@ import {
   type PlannerCommentCurationConfig,
   type PlannerCommentCurationResult,
   type PlannerCommentEnrichmentMeasurement,
+  type PlannerCommentRelevanceScorer,
   curatePlannerComments,
   measurePlannerCommentEnrichment,
 } from "../agent/planner-comment-curation.js";
@@ -329,6 +330,7 @@ export interface EnrichPlannerContextWithCommentsDeps {
     WorkflowOperatorAnchorsConfig,
     "operatorAllowlist" | "serviceAccounts"
   >;
+  commentRelevanceScorer?: PlannerCommentRelevanceScorer;
 }
 
 export interface EnrichPlannerContextWithCommentsResult {
@@ -374,6 +376,9 @@ export async function enrichPlannerContextWithComments(
         })),
         {
           config: curationConfig,
+          ...(deps.commentRelevanceScorer === undefined
+            ? {}
+            : { relevanceScorer: deps.commentRelevanceScorer }),
           ...(deps.operatorConfig === undefined
             ? {}
             : { operatorConfig: deps.operatorConfig }),
