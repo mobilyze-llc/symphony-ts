@@ -1,6 +1,7 @@
 import { promises as fs, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gunzipSync } from "node:zlib";
 
 import { describe, expect, it } from "vitest";
 
@@ -13,6 +14,13 @@ import {
   getStandingPlanJournalPath,
   readStandingPlanJournal,
 } from "../../src/logging/standing-plan-journal.js";
+
+const FROZEN_JOURNAL_FIXTURE = join(
+  process.cwd(),
+  "tests/fixtures/standing-plan-journal.jsonl.gz",
+);
+const FROZEN_JOURNAL_REVISION_COUNT = 135;
+const FROZEN_JOURNAL_BATCH_COUNT = 327;
 
 function createRevision(revision: number): PlanRevision {
   return {
@@ -256,6 +264,34 @@ describe("standing-plan journal", () => {
 
       const journal = await readStandingPlanJournal(root);
       expect(journal).toHaveLength(1); // poison row dropped on read
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reads the frozen standing-plan journal fixture through the wired batch validator", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-standing-plan-"));
+    try {
+      await fs.mkdir(join(root, ".symphony", "run-journals"), {
+        recursive: true,
+      });
+      await fs.writeFile(
+        getStandingPlanJournalPath(root),
+        gunzipSync(await fs.readFile(FROZEN_JOURNAL_FIXTURE)),
+      );
+
+      const journal = await readStandingPlanJournal(root);
+      const revisions = journal.filter(
+        (entry) => entry.kind === "plan_revision",
+      );
+      const batchCount = revisions.reduce(
+        (count, entry) => count + entry.revision.batches.length,
+        0,
+      );
+
+      expect(journal).toHaveLength(FROZEN_JOURNAL_REVISION_COUNT);
+      expect(revisions).toHaveLength(FROZEN_JOURNAL_REVISION_COUNT);
+      expect(batchCount).toBe(FROZEN_JOURNAL_BATCH_COUNT);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

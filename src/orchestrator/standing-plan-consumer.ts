@@ -1,4 +1,5 @@
 import type { WorkflowQueueTriageConfig } from "../config/types.js";
+import { isValidPlanBatch } from "../domain/plan-batch.js";
 import type {
   PlanDecision,
   PlanEnvelope,
@@ -59,6 +60,8 @@ export interface ConsumerSelection {
 export function selectDispatchableBatchMembers(
   input: ConsumerInput,
 ): ConsumerSelection {
+  assertProjectedPlanValid(input.plan);
+
   const allowedModes = new Set(input.envelope.allowedModes);
   const approvedBatchIds = new Set(
     input.honoredApprovals
@@ -92,14 +95,6 @@ export function selectDispatchableBatchMembers(
     }
     // An operator hold, or a mode outside the envelope, always holds the batch.
     if (heldByOperator.has(batch.batchId) || !allowedModes.has(batch.mode)) {
-      heldBatchIds.push(batch.batchId);
-      continue;
-    }
-    // A canary-chain batch with no canary structure can't honor contingent-
-    // release — HOLD it rather than fall through and dispatch the whole batch
-    // (which would bypass the head/tail gate). Defense-in-depth: buildPlanBody
-    // downgrades these to parallel-isolated at the source (council R1, Codex P1).
-    if (batch.mode === "canary-chain" && batch.canary === null) {
       heldBatchIds.push(batch.batchId);
       continue;
     }
@@ -156,6 +151,26 @@ export function selectDispatchableBatchMembers(
     releasedBatchIds,
     heldBatchIds,
   };
+}
+
+export function assertProjectedPlanValid(plan: StandingPlan): void {
+  for (const [index, batch] of plan.batches.entries()) {
+    if (!isValidPlanBatch(batch as unknown)) {
+      throw new Error(
+        `standing-plan consumer: projected plan ${plan.planId}@${plan.revision} contains invalid batch ${formatBatchDiagnostic(batch, index)}`,
+      );
+    }
+  }
+}
+
+function formatBatchDiagnostic(batch: unknown, index: number): string {
+  if (typeof batch === "object" && batch !== null && !Array.isArray(batch)) {
+    const batchId = (batch as { batchId?: unknown }).batchId;
+    if (typeof batchId === "string" && batchId.length > 0) {
+      return batchId;
+    }
+  }
+  return `at index ${index}`;
 }
 
 /**

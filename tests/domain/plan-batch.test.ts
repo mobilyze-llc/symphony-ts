@@ -9,12 +9,12 @@ import {
   isValidPlanBatch,
   normalizePlanBatch,
 } from "../../src/domain/plan-batch.js";
-import {
-  type PlanBatch,
-  type PlanBatchMember,
-  type PlanEnvelope,
-  isPlanBatch,
+import type {
+  PlanBatch,
+  PlanBatchMember,
+  PlanEnvelope,
 } from "../../src/domain/standing-plan.js";
+import { legacyIsPlanBatch } from "../helpers/plan-batch-legacy.js";
 
 const ENVELOPE: PlanEnvelope = {
   version: 1,
@@ -157,7 +157,7 @@ describe("PlanBatchSchema", () => {
     ];
 
     for (const { name, row } of rows) {
-      expect(isValidPlanBatch(row), name).toBe(isPlanBatch(row));
+      expect(isValidPlanBatch(row), name).toBe(legacyIsPlanBatch(row));
     }
   });
 
@@ -251,7 +251,7 @@ describe("PlanBatchSchema", () => {
 
     for (const row of rows) {
       expect(isValidPlanBatch(row), JSON.stringify(row) ?? String(row)).toBe(
-        isPlanBatch(row),
+        legacyIsPlanBatch(row),
       );
     }
   });
@@ -346,6 +346,56 @@ describe("normalizePlanBatch", () => {
         expect(normalized.batch.batchId).toMatch(/^b-[0-9a-f]{12}$/);
         expect(isValidPlanBatch(normalized.batch)).toBe(true);
       }
+    }
+  });
+
+  it("drops zero-member and post-downgrade out-of-envelope batches", () => {
+    const empty = normalizePlanBatch(
+      { mode: "parallel-isolated", rationale: "empty" },
+      [],
+      { allowedModes: ["parallel-isolated"] },
+    );
+    expect(empty).toEqual({ ok: false, rejection: "empty batch members" });
+
+    const downgradedOutsideEnvelope = normalizePlanBatch(
+      {
+        mode: "canary-chain",
+        rationale: "downgrades outside envelope",
+        canary: {
+          headIssueIdentifiers: ["SYMPH-404"],
+          contingentIssueIdentifiers: ["SYMPH-1"],
+        },
+      },
+      resolvedMembers(["SYMPH-1"]),
+      { allowedModes: ["canary-chain"] },
+    );
+    expect(downgradedOutsideEnvelope).toEqual({
+      ok: false,
+      rejection: "batch mode outside envelope",
+    });
+  });
+
+  it("rejects malformed direct canary input without throwing", () => {
+    const malformedCanaries: unknown[] = [
+      "not-a-canary",
+      7,
+      [],
+      { headIssueIdentifiers: "SYMPH-1", contingentIssueIdentifiers: [] },
+      { headIssueIdentifiers: ["SYMPH-1"], contingentIssueIdentifiers: [7] },
+    ];
+
+    for (const canary of malformedCanaries) {
+      const rawBatch = {
+        mode: "canary-chain",
+        rationale: "malformed direct canary",
+        canary,
+      } as unknown as RawPlanBatchForNormalization;
+      expect(() =>
+        normalizePlanBatch(rawBatch, resolvedMembers(["SYMPH-1"])),
+      ).not.toThrow();
+      expect(
+        normalizePlanBatch(rawBatch, resolvedMembers(["SYMPH-1"])),
+      ).toEqual({ ok: false, rejection: "invalid canary" });
     }
   });
 });

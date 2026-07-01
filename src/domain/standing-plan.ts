@@ -16,61 +16,25 @@
 
 import { createHash } from "node:crypto";
 
-/**
- * Batch modes (design "Core objects"). A batch is the new first-class unit the
- * Manager commits; its mode tells the runner how to execute it.
- */
-export const PLAN_BATCH_MODES = [
-  // N independent tickets → N worktrees / N PRs (today's max_concurrent_agents).
-  "parallel-isolated",
-  // M same-surface tickets → one branch / one PR (token + wall-clock win).
-  "shared-surface",
-  // Ordered + contingent: run the head; if it validates, release the tail.
-  "canary-chain",
-] as const;
-
-export type PlanBatchMode = (typeof PLAN_BATCH_MODES)[number];
-
-/**
- * Batch lifecycle within the standing plan. Only `lookahead` batches are the
- * speculative, freely-superseded tail; everything past `released` is committed
- * and immutable to a re-plan (SYMPH-788).
- */
-export const PLAN_BATCH_STATUSES = [
-  "lookahead", // undispatched, speculative — a re-plan may rewrite/drop it
-  "released", // operator-approved for dispatch (posture-B frontier, SYMPH-789)
-  "in_flight", // dispatched / committed — immutable to a re-plan
-  "completed", // terminal
-  "superseded", // dropped by a re-plan (journaled)
-] as const;
-
-export type PlanBatchStatus = (typeof PLAN_BATCH_STATUSES)[number];
-
-/** A batch member is a reference to a tracker issue. */
-export interface PlanBatchMember {
-  issueId: string;
-  issueIdentifier: string;
-}
-
-/**
- * Canary-chain structure: the head member(s) gate the contingent tail. The
- * consumer (SYMPH-787) only releases the contingent members once the head
- * validates.
- */
-export interface PlanCanaryStructure {
-  headIssueIdentifiers: string[];
-  contingentIssueIdentifiers: string[];
-}
-
-export interface PlanBatch {
-  /** Stable id within a plan (carried across revisions for committed batches). */
-  batchId: string;
-  mode: PlanBatchMode;
-  status: PlanBatchStatus;
-  members: PlanBatchMember[];
-  rationale: string;
-  canary: PlanCanaryStructure | null;
-}
+import { isValidPlanBatch } from "./plan-batch.js";
+export {
+  PLAN_BATCH_MODES,
+  PLAN_BATCH_STATUSES,
+} from "./plan-batch-contract.js";
+export type {
+  PlanBatch,
+  PlanBatchMember,
+  PlanBatchMode,
+  PlanBatchStatus,
+  PlanCanaryStructure,
+} from "./plan-batch-contract.js";
+import {
+  PLAN_BATCH_MODES,
+  PLAN_BATCH_STATUSES,
+  type PlanBatch,
+  type PlanBatchMode,
+  type PlanBatchStatus,
+} from "./plan-batch-contract.js";
 
 /**
  * A resolved, directed execution-dependency edge (SYMPH-843): `issueIdentifier`
@@ -502,7 +466,7 @@ function isPlanRevision(value: unknown): value is PlanRevision {
     typeof value.createdAt === "string" &&
     isPlanEnvelope(value.envelope) &&
     Array.isArray(value.batches) &&
-    value.batches.every(isPlanBatch) &&
+    value.batches.every(isValidPlanBatch) &&
     Array.isArray(value.options) &&
     value.options.every(isPlanOptionLine) &&
     typeof value.rationale === "string" &&
@@ -527,63 +491,7 @@ function isPlanEnvelope(value: unknown): value is PlanEnvelope {
 }
 
 export function isPlanBatch(value: unknown): value is PlanBatch {
-  if (
-    !isRecord(value) ||
-    typeof value.batchId !== "string" ||
-    !PLAN_BATCH_MODES.includes(value.mode as PlanBatchMode) ||
-    !PLAN_BATCH_STATUSES.includes(value.status as PlanBatchStatus) ||
-    typeof value.rationale !== "string" ||
-    !Array.isArray(value.members) ||
-    !value.members.every(isPlanBatchMember)
-  ) {
-    return false;
-  }
-  if (value.canary === null) {
-    // A canary-chain batch with no canary structure is unexecutable — the
-    // planner downgrades these to parallel-isolated at WRITE, so a null canary on
-    // a canary-chain row is a corrupt/hand-edited entry; drop it on READ so it
-    // never becomes store truth (council R2, Pi P2). Other modes may be null.
-    return value.mode !== "canary-chain";
-  }
-  if (!isPlanCanaryStructure(value.canary)) {
-    return false;
-  }
-  // Canary invariant on READ, mirroring the planner's normalizeCanary: a
-  // non-empty head whose head+contingent refs are all batch members. A
-  // corrupt/hand-edited row that violates it is dropped, so a deadlocking
-  // canary can never become store truth (council R2, Codex+Pi P2).
-  const memberIdentifiers = new Set(
-    (value.members as PlanBatchMember[]).map(
-      (member) => member.issueIdentifier,
-    ),
-  );
-  return (
-    value.canary.headIssueIdentifiers.length > 0 &&
-    value.canary.headIssueIdentifiers.every((id) =>
-      memberIdentifiers.has(id),
-    ) &&
-    value.canary.contingentIssueIdentifiers.every((id) =>
-      memberIdentifiers.has(id),
-    )
-  );
-}
-
-function isPlanBatchMember(value: unknown): value is PlanBatchMember {
-  return (
-    isRecord(value) &&
-    typeof value.issueId === "string" &&
-    typeof value.issueIdentifier === "string"
-  );
-}
-
-function isPlanCanaryStructure(value: unknown): value is PlanCanaryStructure {
-  return (
-    isRecord(value) &&
-    Array.isArray(value.headIssueIdentifiers) &&
-    value.headIssueIdentifiers.every((id) => typeof id === "string") &&
-    Array.isArray(value.contingentIssueIdentifiers) &&
-    value.contingentIssueIdentifiers.every((id) => typeof id === "string")
-  );
+  return isValidPlanBatch(value);
 }
 
 function isPlanOptionLine(value: unknown): value is PlanOptionLine {

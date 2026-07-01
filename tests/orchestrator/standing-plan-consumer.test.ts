@@ -179,20 +179,40 @@ describe("selectDispatchableBatchMembers (posture-B)", () => {
     expect(result.dispatchIssueIdentifiers).toEqual(["SYMPH-2"]);
   });
 
-  it("holds a canary-chain batch with no canary structure (defensive, SYMPH-800)", () => {
+  it("throws on a projected canary-chain batch with no canary structure", () => {
     const malformed = batch("b1", ["SYMPH-1", "SYMPH-2"], {
       mode: "canary-chain",
-      canary: null, // would otherwise fall through and dispatch the whole batch
+      canary: null,
     });
-    const result = selectDispatchableBatchMembers({
-      plan: plan([malformed]),
-      honoredApprovals: [],
-      runningIssueIdentifiers: new Set(),
-      autoReleaseFrontier: 1,
-      envelope: ENVELOPE,
-    });
-    expect(result.dispatchIssueIdentifiers).toEqual([]);
-    expect(result.heldBatchIds).toEqual(["b1"]);
+    expect(() =>
+      selectDispatchableBatchMembers({
+        plan: plan([malformed]),
+        honoredApprovals: [],
+        runningIssueIdentifiers: new Set(),
+        autoReleaseFrontier: 1,
+        envelope: ENVELOPE,
+      }),
+    ).toThrow(
+      "standing-plan consumer: projected plan plan-1@1 contains invalid batch b1",
+    );
+  });
+
+  it("identifies an invalid projected batch by index when batchId is missing", () => {
+    const malformed = {
+      ...batch("b1", ["SYMPH-1"]),
+      batchId: undefined,
+    } as unknown as PlanBatch;
+    expect(() =>
+      selectDispatchableBatchMembers({
+        plan: plan([malformed]),
+        honoredApprovals: [],
+        runningIssueIdentifiers: new Set(),
+        autoReleaseFrontier: 1,
+        envelope: ENVELOPE,
+      }),
+    ).toThrow(
+      "standing-plan consumer: projected plan plan-1@1 contains invalid batch at index 0",
+    );
   });
 
   it("does not re-dispatch an already-merged member of a parallel batch", () => {

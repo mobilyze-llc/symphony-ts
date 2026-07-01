@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { promises as nodeFs } from "node:fs";
 import { join } from "node:path";
 
@@ -9,12 +9,10 @@ import {
   type ClaudeRunnerResult,
   runClaudeCmux,
 } from "../claude-runner/cmux-claude-runner.js";
+import { normalizePlanBatch } from "../domain/plan-batch.js";
 import {
   PLAN_BATCH_MODES,
   type PlanBatch,
-  type PlanBatchMember,
-  type PlanBatchMode,
-  type PlanCanaryStructure,
   type PlanDependencyEdge,
   type PlanEnvelope,
   type PlanOptionLine,
@@ -677,15 +675,11 @@ export function buildPlanBody(raw: RawPlan, context: PlannerContext): PlanBody {
   const byIdentifier = new Map(
     context.backlog.map((candidate) => [candidate.issueIdentifier, candidate]),
   );
-  const allowedModes = new Set(context.envelope.allowedModes);
 
   const batches: PlanBatch[] = [];
   const options: PlanOptionLine[] = [];
 
   for (const rawBatch of raw.batches) {
-    if (!allowedModes.has(rawBatch.mode)) {
-      continue; // out-of-envelope mode — drop, never propose an unexecutable batch
-    }
     const members = rawBatch.issueIdentifiers
       .map((identifier) => byIdentifier.get(identifier))
       .filter(
@@ -695,47 +689,26 @@ export function buildPlanBody(raw: RawPlan, context: PlannerContext): PlanBody {
         issueId: candidate.issueId,
         issueIdentifier: candidate.issueIdentifier,
       }));
-    if (members.length === 0) {
-      continue; // every identifier was unknown — drop the empty batch
-    }
-    // Canary head/contingent must reference this batch's resolved members;
-    // drop out-of-backlog refs, and drop the whole canary if no valid head
-    // survives (council R1, Codex P2 + Pi P1/P2).
-    const canary = normalizeCanary(rawBatch.canary ?? null, members);
-    // A canary-chain batch with no valid canary structure can't honor
-    // contingent-release; downgrade it to parallel-isolated so its members still
-    // dispatch — never persist an unexecutable canary that would bypass the
-    // head/tail gate (council R2, Codex P1).
-    const mode: PlanBatchMode =
-      rawBatch.mode === "canary-chain" && canary === null
-        ? "parallel-isolated"
-        : rawBatch.mode;
-    // The downgrade can land on a mode the envelope forbids (e.g. a
-    // canary-chain-only envelope downgrading to parallel-isolated). Re-check the
-    // FINAL mode and drop the batch rather than emit one outside the envelope —
-    // the early check only saw the pre-downgrade mode (council R1, Codex).
-    if (!allowedModes.has(mode)) {
+    const normalized = normalizePlanBatch(
+      {
+        mode: rawBatch.mode,
+        rationale: rawBatch.rationale,
+        canary: rawBatch.canary ?? null,
+      },
+      members,
+      { allowedModes: context.envelope.allowedModes },
+    );
+    if (!normalized.ok) {
       continue;
     }
-    // Content-derived id: stable for identical content (preserves content-hash
-    // idempotency across revisions) and unique for different content (so a new
-    // lookahead batch never collides with a committed batch unless it IS the
-    // same batch, in which case dedup is correct) — council R1, Codex P1.
-    const batchId = contentBatchId(mode, members, canary);
-    batches.push({
-      batchId,
-      mode,
-      status: "lookahead",
-      members,
-      rationale: rawBatch.rationale,
-      canary,
-    });
+    const { batch } = normalized;
+    batches.push(batch);
     options.push({
       marker: `[opt-${batches.length}]`,
-      label: `Release ${batchId} (${mode}): ${members
+      label: `Release ${batch.batchId} (${batch.mode}): ${batch.members
         .map((member) => member.issueIdentifier)
         .join(", ")}`,
-      intent: { verb: "release_batch", batchId },
+      intent: { verb: "release_batch", batchId: batch.batchId },
     });
   }
 
@@ -978,62 +951,6 @@ function isParseableJson(candidate: string): boolean {
   } catch {
     return false;
   }
-}
-
-/**
- * Restrict canary head/contingent identifiers to the batch's resolved members.
- * Returns null when no valid head survives — a canary without a head is not a
- * valid chain and must not be persisted.
- */
-function normalizeCanary(
-  canary: PlanCanaryStructure | null,
-  members: readonly PlanBatchMember[],
-): PlanCanaryStructure | null {
-  if (canary === null) {
-    return null;
-  }
-  const memberIdentifiers = new Set(
-    members.map((member) => member.issueIdentifier),
-  );
-  const headIssueIdentifiers = canary.headIssueIdentifiers.filter((id) =>
-    memberIdentifiers.has(id),
-  );
-  if (headIssueIdentifiers.length === 0) {
-    return null;
-  }
-  const contingentIssueIdentifiers = canary.contingentIssueIdentifiers.filter(
-    (id) => memberIdentifiers.has(id),
-  );
-  return { headIssueIdentifiers, contingentIssueIdentifiers };
-}
-
-/**
- * Content-derived, collision-free batch id. Deterministic in the batch's
- * meaningful content (mode + members + canary), so identical proposals hash
- * identically (idempotency) and distinct proposals never collide.
- */
-function contentBatchId(
-  mode: string,
-  members: readonly PlanBatchMember[],
-  canary: PlanCanaryStructure | null,
-): string {
-  const memberKey = members
-    .map((member) => member.issueIdentifier)
-    .slice()
-    .sort()
-    .join(",");
-  const canaryKey =
-    canary === null
-      ? ""
-      : `${[...canary.headIssueIdentifiers].sort().join(",")}>${[
-          ...canary.contingentIssueIdentifiers,
-        ]
-          .sort()
-          .join(",")}`;
-  const digest = createHash("sha256")
-    .update(`${mode}\n${memberKey}\n${canaryKey}`)
-    .digest("hex");
-  return `b-${digest.slice(0, 12)}`;
 }
 
 // ---------------------------------------------------------------------------
