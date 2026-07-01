@@ -250,7 +250,11 @@ export function scoreGroundingCommentRelevance(input: {
     score = Math.max(score, 0.82);
     reasons.push("decision-bearing design or execution summary");
   }
-  if (/\b(?:build|test|typecheck|lint|pr|pull request|merged)\b/i.test(lower)) {
+  if (
+    /\b(?:builds?|building|built|tests?|tested|testing|typechecks?|typechecked|typechecking|lints?|linted|linting|pr|pull request|merged)\b/i.test(
+      lower,
+    )
+  ) {
     score = Math.max(score, 0.68);
     reasons.push("implementation or verification signal");
   }

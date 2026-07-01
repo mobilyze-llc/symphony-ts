@@ -52,6 +52,18 @@ describe("grounding extractor", () => {
     });
   });
 
+  it("scores plural verification phrasing as implementation signal", () => {
+    expect(
+      scoreGroundingCommentRelevance({
+        body: "Ready once tests are passing in CI.",
+        automationNoise: false,
+      }),
+    ).toMatchObject({
+      score: 0.68,
+      rationale: "implementation or verification signal",
+    });
+  });
+
   it("uses the committed Pi DeepSeek route and verifies prose path claims", async () => {
     let routeSeen: typeof GROUNDING_EXTRACTOR_ROUTE | null = null;
     const modelRunner: GroundingExtractorModelRunner = async (input) => {

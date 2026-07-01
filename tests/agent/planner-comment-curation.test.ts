@@ -73,7 +73,8 @@ describe("curatePlannerComments (SYMPH-896 / SYMPH-1017)", () => {
       },
     );
     expect(result.comments.map((entry) => entry.id)).toEqual(["bot", "human"]);
-    expect(result.droppedNoiseCount).toBe(3);
+    expect(result.droppedNoiseCount).toBe(2);
+    expect(result.droppedLowRelevanceCount).toBe(1);
     expect(result.baselineDroppedActorCount).toBe(2);
     expect(result.relevanceKeptActorDroppedCount).toBe(1);
     expect(result.consideredCount).toBe(5);
@@ -94,6 +95,7 @@ describe("curatePlannerComments (SYMPH-896 / SYMPH-1017)", () => {
     ]);
 
     expect(result.comments.map((entry) => entry.id)).toEqual(["design"]);
+    expect(result.droppedNoiseCount).toBe(0);
     expect(result.droppedLowRelevanceCount).toBe(1);
     expect(result.baselineDroppedActorCount).toBe(2);
     expect(result.relevanceKeptActorDroppedCount).toBe(1);
@@ -120,6 +122,7 @@ describe("curatePlannerComments (SYMPH-896 / SYMPH-1017)", () => {
     expect(result.comments[0]?.relevanceRationale).toBe(
       "decision-bearing design or execution summary",
     );
+    expect(result.droppedNoiseCount).toBe(0);
     expect(result.droppedLowRelevanceCount).toBe(1);
   });
 
@@ -254,7 +257,7 @@ describe("measurePlannerCommentEnrichment (SYMPH-896)", () => {
     ).toBe(measurement.candidatesConsidered);
     expect(measurement.totalCommentsFetched).toBe(3); // 1 + 2
     expect(measurement.totalCommentsKept).toBe(2); // a:hello, b:world!!
-    expect(measurement.totalDroppedNoise).toBe(1); // bot in b
+    expect(measurement.totalDroppedNoise).toBe(0);
     expect(measurement.totalDroppedLowRelevance).toBe(1);
     expect(measurement.baselineDroppedActorCount).toBe(1);
     expect(measurement.relevanceKeptActorDroppedCount).toBe(0);

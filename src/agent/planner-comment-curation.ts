@@ -65,7 +65,7 @@ export interface PlannerCommentCurationResult {
   comments: CuratedPlannerComment[];
   /** Comments considered (input length). */
   consideredCount: number;
-  /** Dropped as noise (bot / service-account / automation dump / empty). */
+  /** Dropped as hard noise (service-account / empty). Disjoint from low relevance. */
   droppedNoiseCount: number;
   /** Dropped because the relevance/value score was below threshold. */
   droppedLowRelevanceCount: number;
@@ -170,7 +170,6 @@ export function curatePlannerComments(
         });
     if (!allowOverride && relevance.score < relevanceThreshold) {
       droppedLowRelevanceCount += 1;
-      droppedNoiseCount += 1;
       continue;
     }
     if (baselineActorDropped) {
