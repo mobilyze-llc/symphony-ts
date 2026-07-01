@@ -99,6 +99,30 @@ describe("curatePlannerComments (SYMPH-896 / SYMPH-1017)", () => {
     expect(result.relevanceKeptActorDroppedCount).toBe(1);
   });
 
+  it("keeps substantive moved-to prose that is not a status transition", () => {
+    const result = curatePlannerComments([
+      comment({
+        id: "human-design",
+        body: [
+          "Design note: this should be moved to the orchestrator because",
+          "the implementation belongs with the grounding extractor.",
+        ].join(" "),
+        actor: actor({ email: "dev@example.com" }),
+      }),
+      comment({
+        id: "status-dump",
+        body: "moved to In Progress",
+        actor: actor({ kind: "bot" }),
+      }),
+    ]);
+
+    expect(result.comments.map((entry) => entry.id)).toEqual(["human-design"]);
+    expect(result.comments[0]?.relevanceRationale).toBe(
+      "decision-bearing design or execution summary",
+    );
+    expect(result.droppedLowRelevanceCount).toBe(1);
+  });
+
   it("honors the operator allowlist as a relevance override", () => {
     const result = curatePlannerComments(
       [

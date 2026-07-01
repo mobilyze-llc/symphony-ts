@@ -2,6 +2,7 @@ import type { WorkflowOperatorAnchorsConfig } from "../config/types.js";
 import {
   DEFAULT_GROUNDING_EXTRACTOR_CONFIG,
   type GroundingCommentRelevanceDecision,
+  isGroundingCommentStatusUpdate,
   scoreGroundingCommentRelevance,
 } from "../orchestrator/grounding-extractor.js";
 import {
@@ -95,11 +96,13 @@ const AUTOMATION_NOISE_PATTERNS: readonly RegExp[] = [
   /\bcrabbox-council\b/i,
   /^\s*##?\s*council\b/im,
   /^\s*🚦/m,
-  /\b(?:moved|marked|changed|set)\s+(?:to|state|status)\b/i,
 ];
 
 function isAutomationNoise(body: string): boolean {
-  return AUTOMATION_NOISE_PATTERNS.some((pattern) => pattern.test(body));
+  return (
+    AUTOMATION_NOISE_PATTERNS.some((pattern) => pattern.test(body)) ||
+    isGroundingCommentStatusUpdate(body)
+  );
 }
 
 function normalizeCommentBody(body: string): string {

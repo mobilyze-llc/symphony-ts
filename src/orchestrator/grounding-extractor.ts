@@ -189,6 +189,28 @@ type GroundingExtractorModelOutputFromSchema = z.infer<
   typeof EXTRACTOR_MODEL_OUTPUT_SCHEMA
 >;
 
+const STATUS_TRANSITION_TARGET_PATTERN =
+  "(?:in progress|done|canceled|cancelled|triage|backlog|todo|in review|review|closed|blocked)";
+const STATUS_TRANSITION_PATTERN = new RegExp(
+  [
+    "\\b(?:moved|marked|changed|set)\\s+(?:to|as)\\s+",
+    STATUS_TRANSITION_TARGET_PATTERN,
+    "\\b",
+    "|\\b(?:marked|changed|set)\\s+(?:state|status)\\b",
+  ].join(""),
+  "i",
+);
+
+export function isGroundingCommentStatusUpdate(body: string): boolean {
+  const normalizedBody = body.replace(/\s+/g, " ").trim();
+  return (
+    STATUS_TRANSITION_PATTERN.test(normalizedBody) ||
+    new RegExp(`\\b${STATUS_TRANSITION_TARGET_PATTERN}\\s*$`, "i").test(
+      normalizedBody,
+    )
+  );
+}
+
 export function scoreGroundingCommentRelevance(input: {
   body: string;
   automationNoise: boolean;
@@ -205,11 +227,7 @@ export function scoreGroundingCommentRelevance(input: {
       modelRoute: GROUNDING_EXTRACTOR_ROUTE,
     };
   }
-  if (
-    input.automationNoise ||
-    /\b(?:moved|marked|changed|set)\s+(?:to|state|status)\b/i.test(body) ||
-    /\b(?:in progress|done|canceled|cancelled|triage)\s*$/i.test(body)
-  ) {
+  if (input.automationNoise || isGroundingCommentStatusUpdate(body)) {
     score = 0.1;
     reasons.push("automation/status-update shape");
   }
@@ -405,9 +423,6 @@ export function createPiGroundingExtractorModelRunner(
 async function runGrounding(
   input: RunGroundingServiceInput,
 ): Promise<CodeGroundingReport> {
-  if (input.runGrounding !== undefined) {
-    return runSharedCodeGrounding(input);
-  }
   return runSharedCodeGrounding(input);
 }
 
