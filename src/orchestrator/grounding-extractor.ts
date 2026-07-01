@@ -26,6 +26,7 @@ export const GROUNDING_EXTRACTOR_ROUTE = {
 export const DEFAULT_GROUNDING_EXTRACTOR_BASE_URL =
   "http://studio2.local:8000/v1";
 export const DEFAULT_GROUNDING_EXTRACTOR_TIMEOUT_MS = 120_000;
+const MAX_SANITIZED_ID_LENGTH = 80;
 
 export interface GroundingExtractorConfig {
   digestCharLimit: number;
@@ -189,6 +190,13 @@ type GroundingExtractorModelOutputFromSchema = z.infer<
   typeof EXTRACTOR_MODEL_OUTPUT_SCHEMA
 >;
 
+interface NormalizedModelClaimsResult {
+  claims: Array<
+    Omit<GroundingVerifiedClaim, "status" | "citations" | "missing">
+  >;
+  claimIdAliases: Map<string, string>;
+}
+
 const STATUS_TRANSITION_TARGET_PATTERN =
   "(?:in progress|done|canceled|cancelled|triage|backlog|todo|in review|review|closed|blocked)";
 const STATUS_TRANSITION_PATTERN = new RegExp(
@@ -302,7 +310,7 @@ export async function extractGroundingEvidence(
     }
   }
 
-  const extractedClaims = normalizeModelClaims(
+  const { claims: extractedClaims, claimIdAliases } = normalizeModelClaims(
     modelOutput,
     normalizedSources,
     config.maxClaims,
@@ -365,7 +373,7 @@ export async function extractGroundingEvidence(
       status: "unverified",
     },
     claims,
-    units: normalizeUnits(modelOutput.units ?? [], claims),
+    units: normalizeUnits(modelOutput.units ?? [], claims, claimIdAliases),
     groundingReport,
     extractorCallCount,
     warnings,
@@ -564,11 +572,13 @@ function normalizeModelClaims(
   output: GroundingExtractorModelOutput,
   sources: readonly GroundingExtractorSource[],
   maxClaims: number,
-): Array<Omit<GroundingVerifiedClaim, "status" | "citations" | "missing">> {
+): NormalizedModelClaimsResult {
   const sourceIds = new Set(sources.map((source) => source.id));
   const claims: Array<
     Omit<GroundingVerifiedClaim, "status" | "citations" | "missing">
   > = [];
+  const usedClaimIds = new Set<string>();
+  const claimIdAliases = new Map<string, string>();
   const seen = new Set<string>();
   const add = (claim: GroundingExtractorModelClaim): void => {
     const text = normalizeText(claim.text);
@@ -581,8 +591,12 @@ function normalizeModelClaims(
       claim.kind === "behavioral" && explicit.length === 0
         ? "behavioral"
         : "path_symbol";
+    const rawId = normalizeText(claim.id) || `claim-${claims.length + 1}`;
+    const id = allocateUniqueSanitizedId(rawId, usedClaimIds);
+    claimIdAliases.set(rawId, id);
+    claimIdAliases.set(id, id);
     claims.push({
-      id: sanitizeId(claim.id ?? `claim-${claims.length + 1}`),
+      id,
       sourceId:
         claim.sourceId !== undefined && sourceIds.has(claim.sourceId)
           ? claim.sourceId
@@ -606,7 +620,7 @@ function normalizeModelClaims(
       });
     }
   }
-  return claims;
+  return { claims, claimIdAliases };
 }
 
 function toCodeGroundingClaim(input: {
@@ -632,11 +646,16 @@ function toCodeGroundingClaim(input: {
 function normalizeUnits(
   units: readonly GroundingExtractorModelUnit[],
   claims: readonly GroundingVerifiedClaim[],
+  claimIdAliases: ReadonlyMap<string, string>,
 ): GroundingExtractedUnit[] {
   const claimsById = new Map(claims.map((claim) => [claim.id, claim]));
   return units.map((unit, index) => {
     const claimIds = Array.from(
-      new Set((unit.claimIds ?? []).map((id) => sanitizeId(id))),
+      new Set(
+        (unit.claimIds ?? []).map(
+          (id) => claimIdAliases.get(normalizeText(id)) ?? sanitizeId(id),
+        ),
+      ),
     ).filter((id) => claimsById.has(id));
     const unitClaims = claimIds
       .map((id) => claimsById.get(id))
@@ -730,9 +749,33 @@ function normalizeRuntimeTimeout(
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+function allocateUniqueSanitizedId(
+  value: string,
+  usedIds: Set<string>,
+): string {
+  const base = sanitizeId(value);
+  if (!usedIds.has(base)) {
+    usedIds.add(base);
+    return base;
+  }
+  for (let suffix = 2; ; suffix += 1) {
+    const suffixText = `-${suffix}`;
+    const candidate = `${base.slice(
+      0,
+      Math.max(1, MAX_SANITIZED_ID_LENGTH - suffixText.length),
+    )}${suffixText}`;
+    if (!usedIds.has(candidate)) {
+      usedIds.add(candidate);
+      return candidate;
+    }
+  }
+}
+
 function sanitizeId(value: string): string {
   const sanitized = value.trim().replace(/[^A-Za-z0-9_.:-]+/g, "-");
-  return sanitized === "" ? "claim" : sanitized.slice(0, 80);
+  return sanitized === ""
+    ? "claim"
+    : sanitized.slice(0, MAX_SANITIZED_ID_LENGTH);
 }
 
 function isDefined<T>(value: T | undefined): value is T {

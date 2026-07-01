@@ -324,6 +324,54 @@ describe("grounding extractor", () => {
     });
   });
 
+  it("keeps colliding sanitized claim ids unique for unit grounding", async () => {
+    const result = await extractGroundingEvidence({
+      candidateId: "issue-colliding-ids",
+      sources: [
+        {
+          id: "plan",
+          kind: "document",
+          label: "plan",
+          text: "Two model claim ids normalize to the same slug.",
+        },
+      ],
+      modelRunner: async () => ({
+        claims: [
+          { id: "claim u9", kind: "path_symbol", text: "src/u9.ts" },
+          { id: "claim/u9", kind: "path_symbol", text: "src/u10.ts" },
+        ],
+        units: [
+          { unitId: "U9", title: "Extractor", claimIds: ["claim u9"] },
+          { unitId: "U10", title: "Comment relevance", claimIds: ["claim/u9"] },
+        ],
+      }),
+      grounding: {
+        ...groundingInput("not_found"),
+        runGrounding: async (input) =>
+          reportFor(input, (findingId) =>
+            findingId === "claim-u9" ? "verified" : "not_found",
+          ),
+      },
+    });
+
+    expect(result.claims.map((claim) => claim.id)).toEqual([
+      "claim-u9",
+      "claim-u9-2",
+    ]);
+    expect(result.units).toEqual([
+      expect.objectContaining({
+        unitId: "U9",
+        claimIds: ["claim-u9"],
+        completionState: "verified_presence",
+      }),
+      expect.objectContaining({
+        unitId: "U10",
+        claimIds: ["claim-u9-2"],
+        completionState: "not_found",
+      }),
+    ]);
+  });
+
   it("bounds the digest and flags behavioral claims unverified", async () => {
     const result = await extractGroundingEvidence({
       candidateId: "issue-4",
