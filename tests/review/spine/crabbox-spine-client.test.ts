@@ -94,6 +94,101 @@ describe("CrabboxSpineClient", () => {
     );
   });
 
+  it("coalesces wording-only same-location escalations while preserving reviewer provenance", async () => {
+    const { runner } = capturingRunner(
+      ok({
+        ...TRIAGE_PASS,
+        summary: { ...TRIAGE_PASS.summary, lanes: 2, escalate: 2 },
+        escalate: [
+          {
+            severity: "P1",
+            location: "src/parser.ts:42",
+            summary: "Parser drops findings from the crucible section.",
+            evidence: "",
+            failure: "same location with one wording.",
+            test: "fixture documents fingerprint wording sensitivity.",
+            fp: "src/parser.ts::9609936f74",
+            reviewer: "codex",
+          },
+          {
+            severity: "P1",
+            location: "src/parser.ts:42",
+            summary: "Crucible findings section is ignored by the parser.",
+            evidence: "",
+            failure: "same location with different wording.",
+            test: "fixture documents fingerprint wording sensitivity.",
+            fp: "src/parser.ts::4ad7ac701c",
+            reviewer: "cursor",
+          },
+        ],
+      }),
+    );
+    const client = new CrabboxSpineClient({ runCommand: runner });
+
+    const result = await client.councilTriage({
+      reviews: [
+        { file: "a.md", reviewer: "codex" },
+        { file: "b.md", reviewer: "cursor" },
+      ],
+    });
+
+    expect(result.summary.escalate).toBe(1);
+    expect(result.escalate).toHaveLength(1);
+    expect(result.escalate[0]?.fp).toBe("src/parser.ts::9609936f74");
+    expect((result.escalate[0] as { reviewers?: string[] }).reviewers).toEqual([
+      "codex",
+      "cursor",
+    ]);
+    expect(
+      (result.escalate[0] as { coalesced_fps?: string[] }).coalesced_fps,
+    ).toEqual(["src/parser.ts::9609936f74", "src/parser.ts::4ad7ac701c"]);
+  });
+
+  it("preserves low-overlap same-location escalations as distinct contracts", async () => {
+    const { runner } = capturingRunner(
+      ok({
+        ...TRIAGE_PASS,
+        summary: { ...TRIAGE_PASS.summary, lanes: 2, escalate: 2 },
+        escalate: [
+          {
+            severity: "P1",
+            location: "src/auth.ts:42",
+            summary: "Missing null check on token.",
+            evidence: "",
+            failure: "token may be absent.",
+            test: "unit covers nullable token.",
+            fp: "src/auth.ts::token",
+            reviewer: "codex",
+          },
+          {
+            severity: "P1",
+            location: "src/auth.ts:42",
+            summary: "Audit logger writes secrets to disk.",
+            evidence: "",
+            failure: "secret leakage.",
+            test: "unit covers logging redaction.",
+            fp: "src/auth.ts::logger",
+            reviewer: "cursor",
+          },
+        ],
+      }),
+    );
+    const client = new CrabboxSpineClient({ runCommand: runner });
+
+    const result = await client.councilTriage({
+      reviews: [
+        { file: "a.md", reviewer: "codex" },
+        { file: "b.md", reviewer: "cursor" },
+      ],
+    });
+
+    expect(result.summary.escalate).toBe(2);
+    expect(result.escalate.map((finding) => finding.fp)).toEqual([
+      "src/auth.ts::token",
+      "src/auth.ts::logger",
+    ]);
+  });
+
   it("omits unknown optional flags from cross-exam-select argv (no literal null)", async () => {
     const { runner, calls } = capturingRunner(ok(CROSS_EXAM_NOT_REQUIRED));
     const client = new CrabboxSpineClient({ runCommand: runner });

@@ -1,10 +1,15 @@
+import { createHash } from "node:crypto";
+
 import type {
   PlanDecision,
   PlanDecisionKind,
+  PlanPremiseRecord,
   PlanRevision,
+  PlanRevisionJournalEntry,
   StandingPlan,
   StandingPlanJournal,
 } from "../domain/standing-plan.js";
+import type { PlanReviewFinding } from "../domain/standing-plan.js";
 import {
   appendStandingPlanJournalEntriesWithLock,
   appendStandingPlanJournalEntry,
@@ -47,27 +52,11 @@ export function projectStandingPlan(
   // numerically-largest revision id. The journal is the truth and "current"
   // means last-written — defense-in-depth against out-of-order or manually
   // edited rows (council R1, Pi P2).
-  let latest: {
-    revision: PlanRevision;
-    updatedAt: string;
-    sequence: number;
-  } | null = null;
-  for (const entry of journal) {
-    if (entry.kind !== "plan_revision") {
-      continue;
-    }
-    if (latest === null || entry.sequence >= latest.sequence) {
-      latest = {
-        revision: entry.revision,
-        updatedAt: entry.timestamp,
-        sequence: entry.sequence,
-      };
-    }
-  }
+  const latest = latestPlanRevisionEntry(journal);
   if (latest === null) {
     return null;
   }
-  const { revision, updatedAt } = latest;
+  const { revision } = latest;
   return {
     planId: revision.planId,
     revision: revision.revision,
@@ -77,8 +66,10 @@ export function projectStandingPlan(
     dependencyEdges: revision.dependencyEdges ?? [],
     options: revision.options,
     rationale: revision.rationale,
+    premises: revision.premises ?? [],
+    findings: revision.findings ?? [],
     createdAt: revision.createdAt,
-    updatedAt,
+    updatedAt: latest.timestamp,
   };
 }
 
@@ -110,6 +101,29 @@ export async function recordPlanRevision(
     const candidate = rotateRevision(current, body, options);
 
     if (current !== null && candidate.contentHash === current.contentHash) {
+      const reportUpdate = refreshedReportRevision(journal, body, options);
+      if (reportUpdate !== null) {
+        const appended = appendStandingPlanJournalEntry(journal, {
+          kind: "plan_revision",
+          idempotencyKey: `${reportUpdate.planId}:rev:${reportUpdate.revision}:report:${planReportHash(reportUpdate)}`,
+          timestamp: options.createdAt,
+          planId: reportUpdate.planId,
+          revision: reportUpdate,
+        });
+        if (appended.appended) {
+          await appendStandingPlanJournalEntryToDisk(
+            workspaceRoot,
+            appended.entry,
+          );
+        }
+        const plan = projectStandingPlan(appended.journal);
+        if (plan === null) {
+          throw new Error(
+            "standing-plan store: projection empty after report update",
+          );
+        }
+        return { recorded: appended.appended, plan };
+      }
       return { recorded: false, plan: current };
     }
 
@@ -131,6 +145,59 @@ export async function recordPlanRevision(
     }
     return { recorded: appended.appended, plan };
   });
+}
+
+function latestPlanRevisionEntry(
+  journal: StandingPlanJournal,
+): PlanRevisionJournalEntry | null {
+  let latest: PlanRevisionJournalEntry | null = null;
+  for (const entry of journal) {
+    if (entry.kind !== "plan_revision") {
+      continue;
+    }
+    if (latest === null || entry.sequence >= latest.sequence) {
+      latest = entry;
+    }
+  }
+  return latest;
+}
+
+function refreshedReportRevision(
+  journal: StandingPlanJournal,
+  body: PlanBody,
+  options: RotateRevisionOptions,
+): PlanRevision | null {
+  const latest = latestPlanRevisionEntry(journal);
+  if (latest === null) {
+    return null;
+  }
+  const premises = body.premises ?? [];
+  const findings = options.findings ?? [];
+  if (
+    planReportHash(latest.revision) ===
+    planReportHash({ ...latest.revision, premises, findings })
+  ) {
+    return null;
+  }
+  return {
+    ...latest.revision,
+    premises,
+    findings,
+  };
+}
+
+function planReportHash(input: {
+  premises?: readonly PlanPremiseRecord[];
+  findings?: readonly PlanReviewFinding[];
+}): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        premises: input.premises ?? [],
+        findings: input.findings ?? [],
+      }),
+    )
+    .digest("hex");
 }
 
 /**

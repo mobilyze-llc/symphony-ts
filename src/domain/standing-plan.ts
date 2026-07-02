@@ -17,10 +17,18 @@
 import { createHash } from "node:crypto";
 
 import { isValidPlanBatch } from "./plan-batch.js";
+import {
+  type PlanReviewFinding,
+  isPlanReviewFinding,
+} from "./plan-review-finding.js";
 export {
   PLAN_BATCH_MODES,
   PLAN_BATCH_STATUSES,
 } from "./plan-batch-contract.js";
+export type {
+  PlanReviewFinding,
+  PlanReviewFindingSeverity,
+} from "./plan-review-finding.js";
 export type {
   PlanBatch,
   PlanBatchMember,
@@ -138,6 +146,16 @@ export interface PlanOptionIntent {
   batchId: string | null;
 }
 
+export const PLAN_PREMISE_KINDS = ["verifiable", "judgment"] as const;
+
+export type PlanPremiseKind = (typeof PLAN_PREMISE_KINDS)[number];
+
+export interface PlanPremiseRecord {
+  decisionAnchor: string;
+  kind: PlanPremiseKind;
+  statement: string;
+}
+
 export const PLAN_REVISION_SOURCES = [
   "planner", // produced by the Opus@max planner (SYMPH-786)
   "supersession", // produced by a supersession rotation (SYMPH-788)
@@ -167,6 +185,8 @@ export interface PlanRevision {
   dependencyEdges: PlanDependencyEdge[];
   options: PlanOptionLine[];
   rationale: string;
+  premises?: PlanPremiseRecord[];
+  findings?: PlanReviewFinding[];
   source: PlanRevisionSource;
 }
 
@@ -227,6 +247,8 @@ export interface StandingPlan {
   dependencyEdges: PlanDependencyEdge[];
   options: PlanOptionLine[];
   rationale: string;
+  premises?: PlanPremiseRecord[];
+  findings?: PlanReviewFinding[];
   createdAt: string;
   updatedAt: string;
 }
@@ -292,7 +314,7 @@ export type StandingPlanJournalEntryDraft = DistributiveOmit<
 /**
  * Stable content hash of the meaningful structural plan body (batches +
  * dependency edges + options + envelope + source). Excludes rationale,
- * revision, createdAt, and contentHash so an
+ * premises, findings, revision, createdAt, and contentHash so an
  * unchanged plan re-proposed later hashes identically (idempotency: no churn).
  */
 export function computePlanContentHash(
@@ -502,7 +524,26 @@ function isPlanRevision(value: unknown): value is PlanRevision {
     Array.isArray(value.options) &&
     value.options.every(isPlanOptionLine) &&
     typeof value.rationale === "string" &&
+    (value.premises === undefined || isPlanPremiseRecords(value.premises)) &&
+    (value.findings === undefined ||
+      (Array.isArray(value.findings) &&
+        value.findings.every(isPlanReviewFinding))) &&
     PLAN_REVISION_SOURCES.includes(value.source as PlanRevisionSource)
+  );
+}
+
+function isPlanPremiseRecords(value: unknown): value is PlanPremiseRecord[] {
+  return Array.isArray(value) && value.every(isPlanPremiseRecord);
+}
+
+function isPlanPremiseRecord(value: unknown): value is PlanPremiseRecord {
+  return (
+    isRecord(value) &&
+    typeof value.decisionAnchor === "string" &&
+    value.decisionAnchor.trim().length > 0 &&
+    PLAN_PREMISE_KINDS.includes(value.kind as PlanPremiseKind) &&
+    typeof value.statement === "string" &&
+    value.statement.trim().length > 0
   );
 }
 

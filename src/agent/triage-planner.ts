@@ -12,10 +12,12 @@ import {
 import { normalizePlanBatch } from "../domain/plan-batch.js";
 import {
   PLAN_BATCH_MODES,
+  PLAN_PREMISE_KINDS,
   type PlanBatch,
   type PlanDependencyEdge,
   type PlanEnvelope,
   type PlanOptionLine,
+  type PlanPremiseRecord,
 } from "../domain/standing-plan.js";
 import type { PlanBody } from "../orchestrator/standing-plan-supersession.js";
 import type { CuratedPlannerComment } from "./planner-comment-curation.js";
@@ -256,6 +258,14 @@ const PLANNER_DEPENDENCIES_SCHEMA = z.array(
   }),
 );
 
+const PLANNER_PREMISES_SCHEMA = z.array(
+  z.object({
+    decisionAnchor: z.string(),
+    kind: z.enum(PLAN_PREMISE_KINDS),
+    statement: z.string(),
+  }),
+);
+
 export const PLANNER_OUTPUT_SCHEMA = z.object({
   rationale: z.string(),
   batches: z.array(PLANNER_BATCH_SCHEMA),
@@ -263,12 +273,14 @@ export const PLANNER_OUTPUT_SCHEMA = z.object({
   // an issue and the planned issues that must complete before it. Optional and
   // backward-compatible; resolved/validated in buildPlanBody.
   dependencies: PLANNER_DEPENDENCIES_SCHEMA.optional(),
+  premises: PLANNER_PREMISES_SCHEMA.optional(),
 });
 
 const PLANNER_OUTPUT_ENVELOPE_SCHEMA = z.object({
   rationale: z.string(),
   batches: z.array(z.unknown()),
   dependencies: PLANNER_DEPENDENCIES_SCHEMA.optional(),
+  premises: PLANNER_PREMISES_SCHEMA.optional(),
 });
 
 export type RawPlan = z.infer<typeof PLANNER_OUTPUT_SCHEMA>;
@@ -1032,6 +1044,10 @@ function renderPlannerPrompt(
     "  ],",
     '  "dependencies": [',
     '    { "issueIdentifier": "SYMPH-3", "dependsOn": ["SYMPH-2"] }',
+    "  ],",
+    '  "premises": [',
+    '    { "decisionAnchor": "SYMPH-2", "kind": "verifiable", "statement": "HARD blockedBy is empty" },',
+    '    { "decisionAnchor": "batch:SYMPH-2", "kind": "judgment", "statement": "Highest expected queue value" }',
     "  ]",
     "}",
     "```",
@@ -1040,6 +1056,7 @@ function renderPlannerPrompt(
     "- Order batches head-first (the highest-value batch first).",
     "- For `canary-chain`, set `canary` to an object with exactly these keys: `headIssueIdentifiers` (the gating head, at least one identifier) and `contingentIssueIdentifiers` (the tail, released only once the head validates) — both arrays of backlog identifiers. For every other mode set `canary` to null.",
     "- In `dependencies`, capture the cross-batch execution order you infer: an issue that must complete before another (e.g. a shared-surface foundation before its dependents). One entry per dependent issue, with its prerequisites in `dependsOn`; use only backlog identifiers. The `HARD blocked by` relations shown in the backlog are HARD constraints — never order an issue ahead of one it is blocked by.",
+    "- In `premises`, add concise per-decision premises. Use `verifiable` for tracker/envelope facts and `judgment` for prioritization or risk calls.",
   );
   return lines.join("\n");
 }
@@ -1143,6 +1160,9 @@ export function parsePlannerOutput(
   };
   if (envelope.data.dependencies !== undefined) {
     value.dependencies = envelope.data.dependencies;
+  }
+  if (envelope.data.premises !== undefined) {
+    value.premises = envelope.data.premises;
   }
   return { ok: true, value, droppedMalformedBatchCount };
 }
@@ -1253,6 +1273,7 @@ export function buildPlanBody(raw: RawPlan, context: PlannerContext): PlanBody {
     options,
     envelope: context.envelope,
     rationale: raw.rationale,
+    premises: normalizePlanPremises(raw.premises, raw.rationale, batches),
     source: "planner",
     dependencyEdges: resolvePlanDependencyEdges(
       batches,
@@ -1260,6 +1281,48 @@ export function buildPlanBody(raw: RawPlan, context: PlannerContext): PlanBody {
       raw.dependencies ?? [],
     ),
   };
+}
+
+function normalizePlanPremises(
+  rawPremises: readonly PlanPremiseRecord[] | undefined,
+  rationale: string,
+  batches: readonly PlanBatch[],
+): PlanPremiseRecord[] {
+  const cleaned =
+    rawPremises
+      ?.map((premise) => ({
+        decisionAnchor: premise.decisionAnchor.trim(),
+        kind: premise.kind,
+        statement: premise.statement.trim(),
+      }))
+      .filter(
+        (premise) =>
+          premise.decisionAnchor.length > 0 && premise.statement.length > 0,
+      ) ?? [];
+  if (cleaned.length > 0) {
+    return cleaned;
+  }
+  const fallback: PlanPremiseRecord[] = [];
+  const planRationale = rationale.trim();
+  if (planRationale.length > 0) {
+    fallback.push({
+      decisionAnchor: "plan",
+      kind: "judgment",
+      statement: planRationale,
+    });
+  }
+  for (const batch of batches) {
+    const statement = batch.rationale.trim();
+    if (statement.length === 0) {
+      continue;
+    }
+    fallback.push({
+      decisionAnchor: batch.batchId,
+      kind: "judgment",
+      statement,
+    });
+  }
+  return fallback;
 }
 
 /**
@@ -1371,6 +1434,13 @@ export async function runTriagePlanner(
         envelope: context.envelope,
         rationale:
           "Eligible backlog is empty; no standing-plan batches proposed.",
+        premises: [
+          {
+            decisionAnchor: "plan",
+            kind: "verifiable",
+            statement: "Eligible backlog is empty.",
+          },
+        ],
         source: "planner",
         dependencyEdges: [],
       },

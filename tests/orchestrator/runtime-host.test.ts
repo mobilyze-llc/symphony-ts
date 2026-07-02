@@ -6432,8 +6432,13 @@ describe("startRuntimeService shutdown", () => {
       workflowWatcher: null,
       runtimeHost,
       createStandingPlanPlannerRunner: () => async (prompt: string) => {
-        tickOrder.push("planner");
-        capturedPrompt = prompt;
+        const isReviewPrompt = prompt.startsWith(
+          "Review this already-produced standing plan.",
+        );
+        tickOrder.push(isReviewPrompt ? "review" : "planner");
+        if (!isReviewPrompt) {
+          capturedPrompt = prompt;
+        }
         return {
           status: "ok",
           markdown:
@@ -6452,7 +6457,7 @@ describe("startRuntimeService shutdown", () => {
       });
       expect(tracker.fetchCandidateIssues).toHaveBeenCalledTimes(1);
       expect(hygieneIssues).toEqual([sharedIssue, killedIssue, duplicateIssue]);
-      expect(tickOrder).toEqual(["hygiene", "planner"]);
+      expect(tickOrder).toEqual(["hygiene", "planner", "review"]);
       expect(capturedPrompt).not.toContain("SYMPH-KILLED");
       expect(capturedPrompt).toContain(
         "duplicate cluster: SYMPH-SHARED, SYMPH-DUP",

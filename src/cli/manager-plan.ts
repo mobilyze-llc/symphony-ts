@@ -43,6 +43,7 @@ import {
   type GroundingExtractionResult,
   extractGroundingEvidence,
 } from "../orchestrator/grounding-extractor.js";
+import { runPlanPostEmitReview } from "../orchestrator/plan-post-emit-review.js";
 import {
   STANDING_PLAN_ID,
   assembleShadowPlannerContext,
@@ -52,7 +53,10 @@ import {
   type RecordPlanRevisionResult,
   recordPlanRevision,
 } from "../orchestrator/standing-plan-store.js";
-import type { PlanBody } from "../orchestrator/standing-plan-supersession.js";
+import type {
+  PlanBody,
+  RotateRevisionOptions,
+} from "../orchestrator/standing-plan-supersession.js";
 import { partitionPortfolioEligibleIssues } from "../portfolio/eligibility.js";
 import {
   type LinearIssueComment,
@@ -210,7 +214,7 @@ export interface ManagerPlanCliDependencies {
   persistPlanRevision?: (
     workspaceRoot: string,
     body: PlanBody,
-    options: { createdAt: string; planId: string },
+    options: RotateRevisionOptions,
   ) => Promise<RecordPlanRevisionResult>;
   /** Defaults to a standalone LinearTrackerClient; injected in tests. */
   loadCandidates?: (query: ManagerPlanCandidateQuery) => Promise<Issue[]>;
@@ -764,6 +768,11 @@ export async function runManagerPlanCli(
 
   let persistence: ManagerPlanPersistenceSummary | null = null;
   if (options.persist) {
+    const review = await runPlanPostEmitReview({
+      context,
+      body: result.body,
+      runClaude,
+    });
     const persistPlanRevision =
       dependencies.persistPlanRevision ?? recordPlanRevision;
     const persistRoot = join(artifactDir, "manager-plan-store");
@@ -771,6 +780,7 @@ export async function runManagerPlanCli(
       const record = await persistPlanRevision(persistRoot, result.body, {
         createdAt: now().toISOString(),
         planId: STANDING_PLAN_ID,
+        findings: review.findings,
       });
       persistence = {
         workspaceRoot: persistRoot,

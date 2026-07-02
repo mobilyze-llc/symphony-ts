@@ -29,7 +29,13 @@ import type { PlanEnvelope, StandingPlan } from "../domain/standing-plan.js";
 import type { LinearIssueComment } from "../tracker/linear-client.js";
 import type { BacklogHygieneProposal } from "./backlog-hygiene.js";
 import { extractGroundingPathHints } from "./code-grounding.js";
+import { runPlanPostEmitReview } from "./plan-post-emit-review.js";
 import { loadStandingPlan, recordPlanRevision } from "./standing-plan-store.js";
+import type { RecordPlanRevisionResult } from "./standing-plan-store.js";
+import type {
+  PlanBody,
+  RotateRevisionOptions,
+} from "./standing-plan-supersession.js";
 
 // ---------------------------------------------------------------------------
 // Shadow plan cycle (SYMPH-784 PR1)
@@ -499,6 +505,11 @@ export interface ShadowPlanCycleDeps {
   ) => void | Promise<void>;
   now: () => Date;
   planId?: string;
+  persistPlanRevision?: (
+    workspaceRoot: string,
+    body: PlanBody,
+    options: RotateRevisionOptions,
+  ) => Promise<RecordPlanRevisionResult>;
 }
 
 export async function runShadowPlanCycle(
@@ -531,9 +542,17 @@ export async function runShadowPlanCycle(
     return { status: "invalid", detail: planned.detail };
   }
 
-  const record = await recordPlanRevision(deps.workspaceRoot, planned.body, {
+  const review = await runPlanPostEmitReview({
+    context: deps.context,
+    body: planned.body,
+    runClaude: deps.planner.runClaude,
+  });
+
+  const persistPlanRevision = deps.persistPlanRevision ?? recordPlanRevision;
+  const record = await persistPlanRevision(deps.workspaceRoot, planned.body, {
     createdAt: deps.now().toISOString(),
     planId: deps.planId ?? STANDING_PLAN_ID,
+    findings: review.findings,
   });
 
   await deps.log(
@@ -554,6 +573,7 @@ export async function runShadowPlanCycle(
         status: batch.status,
         members: batch.members.map((member) => member.issueIdentifier),
       })),
+      review_findings: record.plan.findings ?? [],
     },
   );
 

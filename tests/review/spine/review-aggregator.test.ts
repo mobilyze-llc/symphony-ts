@@ -678,13 +678,79 @@ describe("ReviewAggregator review-quality ledger capture (SYMPH-924)", () => {
     expect(argv[argv.indexOf("--round") + 1]).toBe("1");
   });
 
+  it("replays coalesced same-location findings per reviewer for fp-keyed ledger recovery", async () => {
+    const coalesced = finding({
+      location: "src/parser.ts:42",
+      summary: "Parser drops findings from the crucible section.",
+      fp: "src/parser.ts::9609936f74",
+      reviewer: "codex",
+      reviewers: ["codex", "cursor"],
+      coalesced_fps: ["src/parser.ts::9609936f74", "src/parser.ts::4ad7ac701c"],
+    });
+    let captured: RqlRecordInput | undefined;
+    const client = new ReviewQualityLedgerClient({
+      ledgerScriptPath: "/fake/rql.mjs",
+    });
+    client.record = async (input: RqlRecordInput) => {
+      captured = input;
+      return {
+        schema: "crucible.review-quality-ledger.record-result.v1",
+        ledger_file: "/tmp/ledger.jsonl",
+        ledger_source: "explicit",
+        dry_run: false,
+        finding_count: 1,
+        appended: 1,
+        deduped: 0,
+        classification_counts: { P1: 1 },
+      };
+    };
+
+    const result = await aggregatorWith({
+      triage: triage({
+        escalate: [coalesced],
+        summary: { ...triage().summary, escalate: 1 },
+      }),
+      crossExam: crossExam(),
+    }).aggregate({
+      laneArtifacts: [
+        {
+          reviewer: "codex",
+          markdown:
+            "## Verdict\nCHANGES_REQUESTED\n\n## Findings\n- [P1] src/parser.ts:42 - Parser drops findings from the crucible section.",
+        },
+        {
+          reviewer: "cursor",
+          markdown:
+            "## Verdict\nCHANGES_REQUESTED\n\n## Findings\n- [P1] src/parser.ts:42 - Crucible findings section is ignored by the parser.",
+        },
+      ],
+      currentDiffHash: "head",
+      ledger: { client },
+    });
+
+    expect(result.blockingFindings).toHaveLength(1);
+    expect(captured?.blockingFps).toEqual(["src/parser.ts::9609936f74"]);
+    expect(
+      captured?.laneArtifacts.filter((artifact) =>
+        artifact.markdown.includes(
+          "Parser drops findings from the crucible section.",
+        ),
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ reviewer: "codex" }),
+        expect.objectContaining({ reviewer: "cursor" }),
+      ]),
+    );
+  });
+
   it("captures CONFIRM/REFUTE cross-exam verdicts when a judge ran", async () => {
     const judge: EscalateJudge = async (targets) =>
       targets.map((t) => ({ fp: t.fp, real: t.fp.endsWith("real") }));
     const escalateTwo = triage({
       escalate: [
-        finding({ fp: "src/a.ts::real" }),
-        finding({ fp: "src/b.ts::fake" }),
+        finding({ fp: "src/a.ts::real", location: "src/a.ts:1" }),
+        finding({ fp: "src/b.ts::fake", location: "src/b.ts:1" }),
       ],
       summary: { ...triage().summary, escalate: 2 },
     });
@@ -774,9 +840,9 @@ describe("ReviewAggregator review-quality ledger capture (SYMPH-924)", () => {
         .map((t) => ({ fp: t.fp, real: t.fp === "src/a.ts::real" }));
     const escalateThree = triage({
       escalate: [
-        finding({ fp: "src/a.ts::real" }),
-        finding({ fp: "src/b.ts::fake" }),
-        finding({ fp: "src/c.ts::silent" }),
+        finding({ fp: "src/a.ts::real", location: "src/a.ts:1" }),
+        finding({ fp: "src/b.ts::fake", location: "src/b.ts:1" }),
+        finding({ fp: "src/c.ts::silent", location: "src/c.ts:1" }),
       ],
       summary: { ...triage().summary, escalate: 3 },
     });
