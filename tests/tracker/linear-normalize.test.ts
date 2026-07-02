@@ -25,6 +25,21 @@ describe("linear-normalize", () => {
       labels: {
         nodes: [{ name: "Backend" }, { name: "TRACKER" }],
       },
+      relations: {
+        nodes: [
+          {
+            type: "supersedes",
+            relatedIssue: {
+              id: "issue-old",
+              identifier: "ENG-99",
+              title: "Old ticket",
+              state: {
+                name: "Todo",
+              },
+            },
+          },
+        ],
+      },
       inverseRelations: {
         nodes: [
           {
@@ -62,11 +77,11 @@ describe("linear-normalize", () => {
           {
             type: "supersedes",
             issue: {
-              id: "issue-old",
-              identifier: "ENG-99",
-              title: "Old ticket",
+              id: "issue-newer",
+              identifier: "ENG-124",
+              title: "Replacement ticket",
               state: {
-                name: "Todo",
+                name: "Backlog",
               },
             },
           },
@@ -130,6 +145,14 @@ describe("linear-normalize", () => {
       ],
       supersededBy: [
         {
+          id: "issue-newer",
+          identifier: "ENG-124",
+          title: "Replacement ticket",
+          state: "Backlog",
+        },
+      ],
+      supersedes: [
+        {
           id: "issue-old",
           identifier: "ENG-99",
           title: "Old ticket",
@@ -186,6 +209,42 @@ describe("linear-normalize", () => {
         id: "issue-newer",
         identifier: "ENG-124",
         title: "Replacement ticket",
+        state: "Backlog",
+      },
+    ]);
+  });
+
+  it("preserves forward supersede relation direction as supersedes", () => {
+    const issue = normalizeLinearIssue({
+      id: "issue-1",
+      identifier: "ENG-123",
+      title: "Implement adapter",
+      state: {
+        name: "Todo",
+      },
+      relations: {
+        nodes: [
+          {
+            type: "supersedes",
+            relatedIssue: {
+              id: "issue-old",
+              identifier: "ENG-122",
+              title: "Old ticket",
+              state: {
+                name: "Backlog",
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    expect(issue.supersededBy).toBeUndefined();
+    expect(issue.supersedes).toEqual([
+      {
+        id: "issue-old",
+        identifier: "ENG-122",
+        title: "Old ticket",
         state: "Backlog",
       },
     ]);

@@ -48,6 +48,19 @@ const ISSUE_FIELDS = `
       }
     }
   }
+  relations(first: $relationFirst) {
+    nodes {
+      type
+      relatedIssue {
+        id
+        identifier
+        title
+        state {
+          name
+        }
+      }
+    }
+  }
   inverseRelations(first: $relationFirst) {
     nodes {
       type

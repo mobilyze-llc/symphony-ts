@@ -45,11 +45,8 @@ interface LinearIssueNode {
   }> | null;
   parent?: LinearIssueRelationNode | null;
   children?: LinearConnection<LinearIssueRelationNode> | null;
-  inverseRelations?: LinearConnection<{
-    type?: unknown;
-    issue?: LinearIssueRelationNode | null;
-    sourceIssue?: LinearIssueRelationNode | null;
-  }> | null;
+  relations?: LinearConnection<LinearIssueRelationPayload> | null;
+  inverseRelations?: LinearConnection<LinearIssueRelationPayload> | null;
 }
 
 interface LinearIssueRelationNode {
@@ -59,6 +56,13 @@ interface LinearIssueRelationNode {
   state?: {
     name?: unknown;
   } | null;
+}
+
+interface LinearIssueRelationPayload {
+  type?: unknown;
+  issue?: LinearIssueRelationNode | null;
+  relatedIssue?: LinearIssueRelationNode | null;
+  sourceIssue?: LinearIssueRelationNode | null;
 }
 
 interface LinearIssueStateNode {
@@ -86,7 +90,10 @@ export function normalizeLinearIssue(node: unknown): Issue {
         }
       : {};
 
-  const advisoryRelations = normalizeAdvisoryRelations(issue.inverseRelations);
+  const advisoryRelations = normalizeAdvisoryRelations(
+    issue.relations,
+    issue.inverseRelations,
+  );
   const parent = normalizeIssueRelationRef(issue.parent);
   const children = normalizeIssueRelationRefs(issue.children);
 
@@ -288,6 +295,7 @@ function normalizeBlocker(
 }
 
 function normalizeAdvisoryRelations(
+  relations: LinearIssueNode["relations"],
   inverseRelations: LinearIssueNode["inverseRelations"],
 ): {
   relatesTo: IssueRelationRef[];
@@ -306,12 +314,28 @@ function normalizeAdvisoryRelations(
     supersedes: [],
     supersededBy: [],
   };
-  const nodes = inverseRelations?.nodes;
-  if (!Array.isArray(nodes)) {
-    return output;
+  for (const relation of relationNodes(relations)) {
+    const type =
+      typeof relation?.type === "string" ? relation.type.toLowerCase() : "";
+    if (type === "blocks") {
+      continue;
+    }
+    const ref = normalizeIssueRelationRef(
+      relation?.relatedIssue ?? relation?.issue ?? relation?.sourceIssue,
+    );
+    if (ref == null) {
+      continue;
+    }
+    if (type.includes("duplicate")) {
+      output.duplicates.push(ref);
+    } else if (type.includes("supersede")) {
+      output.supersedes.push(ref);
+    } else if (type.includes("relate")) {
+      output.relatesTo.push(ref);
+    }
   }
 
-  for (const relation of nodes) {
+  for (const relation of relationNodes(inverseRelations)) {
     const type =
       typeof relation?.type === "string" ? relation.type.toLowerCase() : "";
     if (type === "blocks") {
@@ -338,6 +362,13 @@ function normalizeAdvisoryRelations(
     supersedes: dedupeIssueRelationRefs(output.supersedes),
     supersededBy: dedupeIssueRelationRefs(output.supersededBy),
   };
+}
+
+function relationNodes(
+  connection: LinearConnection<LinearIssueRelationPayload> | null | undefined,
+) {
+  const nodes = connection?.nodes;
+  return Array.isArray(nodes) ? nodes : [];
 }
 
 function normalizeIssueRelationRefs(
