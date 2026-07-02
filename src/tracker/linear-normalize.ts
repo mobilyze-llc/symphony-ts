@@ -128,7 +128,7 @@ export function normalizeLinearIssue(node: unknown): Issue {
     ...(advisoryRelations.supersededBy.length > 0
       ? { supersededBy: advisoryRelations.supersededBy }
       : {}),
-    ...(hasNextPage(issue.relations)
+    ...(hasNextAdvisoryRelationPage(issue)
       ? { advisoryRelationsTruncated: true }
       : {}),
     ...(parent === undefined ? {} : { parent }),
@@ -266,6 +266,10 @@ function hasNextPage(
   connection: LinearConnection<unknown> | null | undefined,
 ): boolean {
   return connection?.pageInfo?.hasNextPage === true;
+}
+
+function hasNextAdvisoryRelationPage(issue: LinearIssueNode): boolean {
+  return hasNextPage(issue.relations) || hasNextPage(issue.inverseRelations);
 }
 
 function normalizeBlockedBy(

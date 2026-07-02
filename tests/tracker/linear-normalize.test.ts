@@ -418,6 +418,52 @@ describe("linear-normalize", () => {
     expect(issue.blockedByRelationTruncated).toBeUndefined();
   });
 
+  it("marks advisory relations as truncated when inverse relations have another page", () => {
+    const issue = normalizeLinearIssue({
+      id: "issue-1",
+      identifier: "ENG-123",
+      title: "Implement adapter",
+      state: {
+        name: "Todo",
+      },
+      relations: {
+        nodes: [],
+        pageInfo: {
+          hasNextPage: false,
+        },
+      },
+      inverseRelations: {
+        nodes: [
+          {
+            type: "duplicate",
+            issue: {
+              id: "issue-dupe",
+              identifier: "ENG-101",
+              title: "Older duplicate",
+              state: {
+                name: "Backlog",
+              },
+            },
+          },
+        ],
+        pageInfo: {
+          hasNextPage: true,
+        },
+      },
+    });
+
+    expect(issue.duplicatedBy).toEqual([
+      {
+        id: "issue-dupe",
+        identifier: "ENG-101",
+        title: "Older duplicate",
+        state: "Backlog",
+      },
+    ]);
+    expect(issue.advisoryRelationsTruncated).toBe(true);
+    expect(issue.blockedByRelationTruncated).toBe(true);
+  });
+
   it("returns null for non-integer priority and invalid timestamps", () => {
     const issue = normalizeLinearIssue({
       id: "issue-1",
