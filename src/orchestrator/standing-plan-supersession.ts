@@ -45,6 +45,7 @@ export interface RotateRevisionOptions {
   /** Stable plan identity for the first revision; ignored once a prior exists. */
   planId?: string;
   findings?: PlanRevision["findings"];
+  reviewRecords?: PlanRevision["reviewRecords"];
 }
 
 /**
@@ -115,6 +116,7 @@ export function rotateRevision(
     rationale: body.rationale,
     premises: body.premises ?? [],
     findings: options.findings ?? [],
+    reviewRecords: options.reviewRecords ?? [],
     source: body.source,
   };
 }

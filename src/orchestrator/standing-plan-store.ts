@@ -68,6 +68,7 @@ export function projectStandingPlan(
     rationale: revision.rationale,
     premises: revision.premises ?? [],
     findings: revision.findings ?? [],
+    reviewRecords: revision.reviewRecords ?? [],
     createdAt: revision.createdAt,
     updatedAt: latest.timestamp,
   };
@@ -176,9 +177,10 @@ function refreshedReportRevision(
   }
   const premises = body.premises ?? [];
   const findings = options.findings ?? [];
+  const reviewRecords = options.reviewRecords ?? [];
   if (
     planReportHash(latest.revision) ===
-    planReportHash({ ...latest.revision, premises, findings })
+    planReportHash({ ...latest.revision, premises, findings, reviewRecords })
   ) {
     return null;
   }
@@ -186,18 +188,21 @@ function refreshedReportRevision(
     ...latest.revision,
     premises,
     findings,
+    reviewRecords,
   };
 }
 
 function planReportHash(input: {
   premises?: readonly PlanPremiseRecord[];
   findings?: readonly PlanReviewFinding[];
+  reviewRecords?: NonNullable<PlanRevision["reviewRecords"]>;
 }): string {
   return createHash("sha256")
     .update(
       JSON.stringify({
         premises: input.premises ?? [],
         findings: input.findings ?? [],
+        reviewRecords: input.reviewRecords ?? [],
       }),
     )
     .digest("hex");
