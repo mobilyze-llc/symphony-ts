@@ -96,6 +96,35 @@ describe("renderStandingPlanControlDoc", () => {
     });
     expect(md).toContain(STANDING_PLAN_DOC_TITLE);
     expect(md).toContain("(none)");
+    expect(md).not.toContain("Review findings");
+  });
+
+  it("renders review findings grouped by severity when present", () => {
+    const p = {
+      ...plan(),
+      findings: [
+        {
+          title: "Cancelled issue was scheduled",
+          planAnchor: "b-aaa:SYMPH-1",
+          severity: "P2" as const,
+        },
+        {
+          title: "Watch this area",
+          planAnchor: "b-aaa",
+          severity: "Track" as const,
+        },
+      ],
+    };
+    const md = renderStandingPlanControlDoc({
+      plan: p,
+      recentlyShipped: [],
+      inFlight: [],
+      changelog: [],
+    });
+
+    expect(md).toContain("## Review findings");
+    expect(md).toMatch(/### P2[\s\S]*b-aaa:SYMPH-1: Cancelled issue/);
+    expect(md).toMatch(/### Track[\s\S]*b-aaa: Watch this area/);
   });
 
   it("renders canary structure for a canary-chain batch", () => {

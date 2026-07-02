@@ -30,12 +30,50 @@ const ISSUE_FIELDS = `
       url
     }
   }
+  parent {
+    id
+    identifier
+    title
+    state {
+      name
+    }
+  }
+  children(first: $relationFirst) {
+    nodes {
+      id
+      identifier
+      title
+      state {
+        name
+      }
+    }
+    pageInfo {
+      hasNextPage
+    }
+  }
+  relations(first: $relationFirst) {
+    nodes {
+      type
+      relatedIssue {
+        id
+        identifier
+        title
+        state {
+          name
+        }
+      }
+    }
+    pageInfo {
+      hasNextPage
+    }
+  }
   inverseRelations(first: $relationFirst) {
     nodes {
       type
       issue {
         id
         identifier
+        title
         state {
           name
         }

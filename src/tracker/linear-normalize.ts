@@ -2,6 +2,7 @@ import type {
   BlockerRef,
   Issue,
   IssueDocumentAttachment,
+  IssueRelationRef,
 } from "../domain/model.js";
 import { ERROR_CODES } from "../errors/codes.js";
 import { TrackerError } from "./errors.js";
@@ -42,23 +43,26 @@ interface LinearIssueNode {
     title?: unknown;
     url?: unknown;
   }> | null;
-  inverseRelations?: LinearConnection<{
-    type?: unknown;
-    issue?: {
-      id?: unknown;
-      identifier?: unknown;
-      state?: {
-        name?: unknown;
-      } | null;
-    } | null;
-    sourceIssue?: {
-      id?: unknown;
-      identifier?: unknown;
-      state?: {
-        name?: unknown;
-      } | null;
-    } | null;
-  }> | null;
+  parent?: LinearIssueRelationNode | null;
+  children?: LinearConnection<LinearIssueRelationNode> | null;
+  relations?: LinearConnection<LinearIssueRelationPayload> | null;
+  inverseRelations?: LinearConnection<LinearIssueRelationPayload> | null;
+}
+
+interface LinearIssueRelationNode {
+  id?: unknown;
+  identifier?: unknown;
+  title?: unknown;
+  state?: {
+    name?: unknown;
+  } | null;
+}
+
+interface LinearIssueRelationPayload {
+  type?: unknown;
+  issue?: LinearIssueRelationNode | null;
+  relatedIssue?: LinearIssueRelationNode | null;
+  sourceIssue?: LinearIssueRelationNode | null;
 }
 
 interface LinearIssueStateNode {
@@ -86,6 +90,13 @@ export function normalizeLinearIssue(node: unknown): Issue {
         }
       : {};
 
+  const advisoryRelations = normalizeAdvisoryRelations(
+    issue.relations,
+    issue.inverseRelations,
+  );
+  const parent = normalizeIssueRelationRef(issue.parent);
+  const children = normalizeIssueRelationRefs(issue.children);
+
   return {
     id,
     identifier,
@@ -102,6 +113,27 @@ export function normalizeLinearIssue(node: unknown): Issue {
     ...(hasNextPage(issue.inverseRelations)
       ? { blockedByRelationTruncated: true }
       : {}),
+    ...(advisoryRelations.relatesTo.length > 0
+      ? { relatesTo: advisoryRelations.relatesTo }
+      : {}),
+    ...(advisoryRelations.duplicates.length > 0
+      ? { duplicates: advisoryRelations.duplicates }
+      : {}),
+    ...(advisoryRelations.duplicatedBy.length > 0
+      ? { duplicatedBy: advisoryRelations.duplicatedBy }
+      : {}),
+    ...(advisoryRelations.supersedes.length > 0
+      ? { supersedes: advisoryRelations.supersedes }
+      : {}),
+    ...(advisoryRelations.supersededBy.length > 0
+      ? { supersededBy: advisoryRelations.supersededBy }
+      : {}),
+    ...(hasNextAdvisoryRelationPage(issue)
+      ? { advisoryRelationsTruncated: true }
+      : {}),
+    ...(parent === undefined ? {} : { parent }),
+    ...(children.length > 0 ? { children } : {}),
+    ...(hasNextPage(issue.children) ? { childrenTruncated: true } : {}),
     createdAt: normalizeTimestamp(issue.createdAt),
     updatedAt: normalizeTimestamp(issue.updatedAt),
   };
@@ -236,6 +268,10 @@ function hasNextPage(
   return connection?.pageInfo?.hasNextPage === true;
 }
 
+function hasNextAdvisoryRelationPage(issue: LinearIssueNode): boolean {
+  return hasNextPage(issue.relations) || hasNextPage(issue.inverseRelations);
+}
+
 function normalizeBlockedBy(
   inverseRelations: LinearIssueNode["inverseRelations"],
 ): BlockerRef[] {
@@ -254,16 +290,7 @@ function normalizeBlockedBy(
 }
 
 function normalizeBlocker(
-  sourceIssue:
-    | {
-        id?: unknown;
-        identifier?: unknown;
-        state?: {
-          name?: unknown;
-        } | null;
-      }
-    | null
-    | undefined,
+  sourceIssue: LinearIssueRelationNode | null | undefined,
 ): BlockerRef {
   return {
     id: typeof sourceIssue?.id === "string" ? sourceIssue.id : null,
@@ -276,6 +303,140 @@ function normalizeBlocker(
         ? sourceIssue.state.name
         : null,
   };
+}
+
+function normalizeAdvisoryRelations(
+  relations: LinearIssueNode["relations"],
+  inverseRelations: LinearIssueNode["inverseRelations"],
+): {
+  relatesTo: IssueRelationRef[];
+  duplicates: IssueRelationRef[];
+  duplicatedBy: IssueRelationRef[];
+  supersedes: IssueRelationRef[];
+  supersededBy: IssueRelationRef[];
+} {
+  const output: {
+    relatesTo: IssueRelationRef[];
+    duplicates: IssueRelationRef[];
+    duplicatedBy: IssueRelationRef[];
+    supersedes: IssueRelationRef[];
+    supersededBy: IssueRelationRef[];
+  } = {
+    relatesTo: [],
+    duplicates: [],
+    duplicatedBy: [],
+    supersedes: [],
+    supersededBy: [],
+  };
+  for (const relation of relationNodes(relations)) {
+    const type =
+      typeof relation?.type === "string" ? relation.type.toLowerCase() : "";
+    if (type === "blocks") {
+      continue;
+    }
+    const ref = normalizeIssueRelationRef(
+      relation?.relatedIssue ?? relation?.issue ?? relation?.sourceIssue,
+    );
+    if (ref == null) {
+      continue;
+    }
+    if (type.includes("duplicate")) {
+      output.duplicates.push(ref);
+    } else if (type.includes("supersede")) {
+      output.supersedes.push(ref);
+    } else if (type.includes("relate")) {
+      output.relatesTo.push(ref);
+    }
+  }
+
+  for (const relation of relationNodes(inverseRelations)) {
+    const type =
+      typeof relation?.type === "string" ? relation.type.toLowerCase() : "";
+    if (type === "blocks") {
+      continue;
+    }
+    const ref = normalizeIssueRelationRef(
+      relation?.issue ?? relation?.sourceIssue,
+    );
+    if (ref == null) {
+      continue;
+    }
+    if (type.includes("duplicate")) {
+      output.duplicatedBy.push(ref);
+    } else if (type.includes("supersede")) {
+      output.supersededBy.push(ref);
+    } else if (type.includes("relate")) {
+      output.relatesTo.push(ref);
+    }
+  }
+
+  return {
+    relatesTo: dedupeIssueRelationRefs(output.relatesTo),
+    duplicates: dedupeIssueRelationRefs(output.duplicates),
+    duplicatedBy: dedupeIssueRelationRefs(output.duplicatedBy),
+    supersedes: dedupeIssueRelationRefs(output.supersedes),
+    supersededBy: dedupeIssueRelationRefs(output.supersededBy),
+  };
+}
+
+function relationNodes(
+  connection: LinearConnection<LinearIssueRelationPayload> | null | undefined,
+) {
+  const nodes = connection?.nodes;
+  return Array.isArray(nodes) ? nodes : [];
+}
+
+function normalizeIssueRelationRefs(
+  connection: LinearConnection<LinearIssueRelationNode> | null | undefined,
+): IssueRelationRef[] {
+  const nodes = connection?.nodes;
+  if (!Array.isArray(nodes)) {
+    return [];
+  }
+  return dedupeIssueRelationRefs(
+    nodes
+      .map((node) => normalizeIssueRelationRef(node))
+      .filter((ref): ref is IssueRelationRef => ref != null),
+  );
+}
+
+function normalizeIssueRelationRef(
+  sourceIssue: LinearIssueRelationNode | null | undefined,
+): IssueRelationRef | null | undefined {
+  if (sourceIssue === undefined) {
+    return undefined;
+  }
+  if (sourceIssue === null) {
+    return null;
+  }
+  return {
+    id: typeof sourceIssue.id === "string" ? sourceIssue.id : null,
+    identifier:
+      typeof sourceIssue.identifier === "string"
+        ? sourceIssue.identifier
+        : null,
+    title: typeof sourceIssue.title === "string" ? sourceIssue.title : null,
+    state:
+      typeof sourceIssue.state?.name === "string"
+        ? sourceIssue.state.name
+        : null,
+  };
+}
+
+function dedupeIssueRelationRefs(
+  refs: readonly IssueRelationRef[],
+): IssueRelationRef[] {
+  const seen = new Set<string>();
+  const output: IssueRelationRef[] = [];
+  for (const ref of refs) {
+    const key = ref.identifier ?? ref.id;
+    if (key === null || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    output.push(ref);
+  }
+  return output;
 }
 
 function normalizeTimestamp(value: unknown): string | null {

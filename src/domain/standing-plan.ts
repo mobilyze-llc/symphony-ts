@@ -17,10 +17,20 @@
 import { createHash } from "node:crypto";
 
 import { isValidPlanBatch } from "./plan-batch.js";
+import {
+  type PlanReviewFinding,
+  type PlanReviewRecord,
+  isPlanReviewFinding,
+} from "./plan-review-finding.js";
 export {
   PLAN_BATCH_MODES,
   PLAN_BATCH_STATUSES,
 } from "./plan-batch-contract.js";
+export type {
+  PlanReviewFinding,
+  PlanReviewRecord,
+  PlanReviewFindingSeverity,
+} from "./plan-review-finding.js";
 export type {
   PlanBatch,
   PlanBatchMember,
@@ -138,6 +148,16 @@ export interface PlanOptionIntent {
   batchId: string | null;
 }
 
+export const PLAN_PREMISE_KINDS = ["verifiable", "judgment"] as const;
+
+export type PlanPremiseKind = (typeof PLAN_PREMISE_KINDS)[number];
+
+export interface PlanPremiseRecord {
+  decisionAnchor: string;
+  kind: PlanPremiseKind;
+  statement: string;
+}
+
 export const PLAN_REVISION_SOURCES = [
   "planner", // produced by the Opus@max planner (SYMPH-786)
   "supersession", // produced by a supersession rotation (SYMPH-788)
@@ -167,6 +187,9 @@ export interface PlanRevision {
   dependencyEdges: PlanDependencyEdge[];
   options: PlanOptionLine[];
   rationale: string;
+  premises?: PlanPremiseRecord[];
+  findings?: PlanReviewFinding[];
+  reviewRecords?: PlanReviewRecord[];
   source: PlanRevisionSource;
 }
 
@@ -227,6 +250,9 @@ export interface StandingPlan {
   dependencyEdges: PlanDependencyEdge[];
   options: PlanOptionLine[];
   rationale: string;
+  premises?: PlanPremiseRecord[];
+  findings?: PlanReviewFinding[];
+  reviewRecords?: PlanReviewRecord[];
   createdAt: string;
   updatedAt: string;
 }
@@ -292,7 +318,7 @@ export type StandingPlanJournalEntryDraft = DistributiveOmit<
 /**
  * Stable content hash of the meaningful structural plan body (batches +
  * dependency edges + options + envelope + source). Excludes rationale,
- * revision, createdAt, and contentHash so an
+ * premises, findings, revision, createdAt, and contentHash so an
  * unchanged plan re-proposed later hashes identically (idempotency: no churn).
  */
 export function computePlanContentHash(
@@ -502,7 +528,84 @@ function isPlanRevision(value: unknown): value is PlanRevision {
     Array.isArray(value.options) &&
     value.options.every(isPlanOptionLine) &&
     typeof value.rationale === "string" &&
+    (value.premises === undefined || isPlanPremiseRecords(value.premises)) &&
+    (value.findings === undefined ||
+      (Array.isArray(value.findings) &&
+        value.findings.every(isPlanReviewFinding))) &&
+    (value.reviewRecords === undefined ||
+      isPlanReviewRecords(value.reviewRecords)) &&
     PLAN_REVISION_SOURCES.includes(value.source as PlanRevisionSource)
+  );
+}
+
+function isPlanReviewRecords(value: unknown): value is PlanReviewRecord[] {
+  return Array.isArray(value) && value.every(isPlanReviewRecord);
+}
+
+function isPlanReviewRecord(value: unknown): value is PlanReviewRecord {
+  return (
+    isRecord(value) &&
+    value.tier === "tier-2" &&
+    ["reviewed", "skipped", "degraded"].includes(String(value.status)) &&
+    typeof value.diffHash === "string" &&
+    ["no_baseline", "content_hash_changed", "content_hash_unchanged"].includes(
+      String(value.gateReason),
+    ) &&
+    (value.aggregateVerdict === null ||
+      ["pass", "fail", "degraded"].includes(String(value.aggregateVerdict))) &&
+    (value.note === null || typeof value.note === "string") &&
+    Array.isArray(value.reviewedGroundingEvidence) &&
+    value.reviewedGroundingEvidence.every(isPlanReviewCoverageEvidence) &&
+    Array.isArray(value.findingFingerprints) &&
+    value.findingFingerprints.every((item) => typeof item === "string") &&
+    Array.isArray(value.postHocEntries) &&
+    value.postHocEntries.every(isPlanReviewPostHocEntry)
+  );
+}
+
+function isPlanReviewCoverageEvidence(
+  value: unknown,
+): value is PlanReviewRecord["reviewedGroundingEvidence"][number] {
+  return (
+    isRecord(value) &&
+    typeof value.issueId === "string" &&
+    typeof value.issueIdentifier === "string" &&
+    ["grounded", "ungrounded"].includes(String(value.status)) &&
+    typeof value.renderedHash === "string" &&
+    typeof value.renderedChars === "number" &&
+    Array.isArray(value.claimIds) &&
+    value.claimIds.every((item) => typeof item === "string") &&
+    Array.isArray(value.unitIds) &&
+    value.unitIds.every((item) => typeof item === "string") &&
+    Array.isArray(value.warnings) &&
+    value.warnings.every((item) => typeof item === "string")
+  );
+}
+
+function isPlanReviewPostHocEntry(
+  value: unknown,
+): value is PlanReviewRecord["postHocEntries"][number] {
+  return (
+    isRecord(value) &&
+    value.kind === "coverage_gap" &&
+    typeof value.issueIdentifier === "string" &&
+    typeof value.note === "string" &&
+    typeof value.createdAt === "string"
+  );
+}
+
+function isPlanPremiseRecords(value: unknown): value is PlanPremiseRecord[] {
+  return Array.isArray(value) && value.every(isPlanPremiseRecord);
+}
+
+function isPlanPremiseRecord(value: unknown): value is PlanPremiseRecord {
+  return (
+    isRecord(value) &&
+    typeof value.decisionAnchor === "string" &&
+    value.decisionAnchor.trim().length > 0 &&
+    PLAN_PREMISE_KINDS.includes(value.kind as PlanPremiseKind) &&
+    typeof value.statement === "string" &&
+    value.statement.trim().length > 0
   );
 }
 

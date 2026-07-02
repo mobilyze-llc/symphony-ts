@@ -1,5 +1,11 @@
 import type { WorkflowOperatorAnchorsConfig } from "../config/types.js";
 import {
+  DEFAULT_GROUNDING_EXTRACTOR_CONFIG,
+  type GroundingCommentRelevanceDecision,
+  isGroundingCommentStatusUpdate,
+  scoreGroundingCommentRelevance,
+} from "../orchestrator/grounding-extractor.js";
+import {
   type TicketFeatureActor,
   type TicketFeatureActorClass,
   classifyActor,
@@ -12,10 +18,9 @@ import {
 // Curated issue comments are the richest same-surface signal the Manager can
 // read (file/PR refs, "overlaps with X"), but they are also the noisiest tracker
 // surface and the ONLY enrichment that costs an N+1 fetch over the backlog. This
-// module is the deterministic (zero-LLM) curation + measurement core: drop bot /
-// service-account / automation-dump noise, bound size, and quantify the added
-// context REPORT-ONLY so the two-pass-vs-curated-one-pass topology can be decided
-// from data (design SYMPH-795 §9 / measure-before-caps), never a guess.
+// module is the bounded curation + measurement core: score relevance with the
+// central extractor path, keep actor allow/deny as overrides, bound size, and
+// quantify the added context REPORT-ONLY so the topology can be tuned from data.
 // ---------------------------------------------------------------------------
 
 /** Minimal comment shape the curator needs (decoupled from the Linear client). */
@@ -33,6 +38,9 @@ export interface CuratedPlannerComment {
   createdAt: string;
   /** Whitespace-normalized + length-capped comment body. */
   body: string;
+  /** Report-only relevance score from the central grounding extractor. */
+  relevanceScore: number;
+  relevanceRationale: string;
 }
 
 export interface PlannerCommentCurationConfig {
@@ -42,6 +50,8 @@ export interface PlannerCommentCurationConfig {
   maxCommentChars: number;
   /** Max total curated characters per issue (oldest kept dropped until under). */
   maxTotalChars: number;
+  /** Minimum central-extractor relevance score required unless allowlisted. */
+  minRelevanceScore?: number;
 }
 
 export const DEFAULT_PLANNER_COMMENT_CURATION_CONFIG: PlannerCommentCurationConfig =
@@ -55,18 +65,33 @@ export interface PlannerCommentCurationResult {
   comments: CuratedPlannerComment[];
   /** Comments considered (input length). */
   consideredCount: number;
-  /** Dropped as noise (bot / service-account / automation dump / empty). */
+  /** Dropped as hard noise (service-account / empty). Disjoint from low relevance. */
   droppedNoiseCount: number;
+  /** Dropped because the relevance/value score was below threshold. */
+  droppedLowRelevanceCount: number;
   /** Dropped to satisfy the count / total-size budget. */
   droppedForBudgetCount: number;
+  /** Report-only baseline: comments the retired actor rule would have dropped. */
+  baselineDroppedActorCount: number;
+  /** Report-only delta: baseline-dropped actor comments now kept by relevance. */
+  relevanceKeptActorDroppedCount: number;
 }
 
+export type PlannerCommentRelevanceScorer = (input: {
+  comment: PlannerCommentInput;
+  normalizedBody: string;
+  authorClass: TicketFeatureActorClass;
+  automationNoise: boolean;
+}) => GroundingCommentRelevanceDecision;
+
+type PlannerCommentSurvivor = CuratedPlannerComment & {
+  baselineActorDropped: boolean;
+};
+
 /**
- * Automation / council-dump body markers (SYMPH-896). Conservative by design —
- * the strongest noise signal is actor-based (bot / service_account); these only
- * catch automation dumps a human-looking actor can still author: council review
- * dumps, pipeline stage / human-block markers, the planner/council untrusted
- * fence token, and the control-doc surface. Tune from the measurement.
+ * Automation / council-dump body markers. These are relevance features rather
+ * than an actor-class blanket drop: agent-authored design summaries are common
+ * signal in this pipeline, while status dumps remain low-value by content.
  */
 const AUTOMATION_NOISE_PATTERNS: readonly RegExp[] = [
   /\[STAGE_(?:COMPLETE|FAILED)/,
@@ -78,7 +103,10 @@ const AUTOMATION_NOISE_PATTERNS: readonly RegExp[] = [
 ];
 
 function isAutomationNoise(body: string): boolean {
-  return AUTOMATION_NOISE_PATTERNS.some((pattern) => pattern.test(body));
+  return (
+    AUTOMATION_NOISE_PATTERNS.some((pattern) => pattern.test(body)) ||
+    isGroundingCommentStatusUpdate(body)
+  );
 }
 
 function normalizeCommentBody(body: string): string {
@@ -86,9 +114,9 @@ function normalizeCommentBody(body: string): string {
 }
 
 /**
- * Curate an issue's comments for the planner prompt: drop noise (bot /
- * service-account authors, automation dumps, blank bodies), keep the newest
- * `maxComments` human/operator comments, truncate each to `maxCommentChars`, and
+ * Curate an issue's comments for the planner prompt: drop blank bodies, explicit
+ * service-account deny overrides, and low-relevance automation/content; keep the
+ * newest `maxComments` relevant comments, truncate each to `maxCommentChars`, and
  * enforce a per-issue `maxTotalChars` budget by dropping the oldest kept first.
  * Pure and deterministic; surviving order is newest-first by (createdAt, id).
  */
@@ -100,35 +128,66 @@ export function curatePlannerComments(
       WorkflowOperatorAnchorsConfig,
       "operatorAllowlist" | "serviceAccounts"
     >;
+    relevanceScorer?: PlannerCommentRelevanceScorer;
   } = {},
 ): PlannerCommentCurationResult {
   const config = options.config ?? DEFAULT_PLANNER_COMMENT_CURATION_CONFIG;
   const accountSets = normalizeOperatorConfig(options.operatorConfig);
+  const relevanceThreshold =
+    config.minRelevanceScore ??
+    DEFAULT_GROUNDING_EXTRACTOR_CONFIG.minCommentRelevanceScore;
+  const relevanceScorer = options.relevanceScorer ?? defaultRelevanceScorer;
 
   let droppedNoiseCount = 0;
-  const survivors: CuratedPlannerComment[] = [];
+  let droppedLowRelevanceCount = 0;
+  let baselineDroppedActorCount = 0;
+  const survivors: PlannerCommentSurvivor[] = [];
   for (const comment of comments) {
     const authorClass = classifyActor(comment.actor, accountSets);
     const normalizedBody = normalizeCommentBody(comment.body);
-    if (
-      authorClass === "bot" ||
-      authorClass === "service_account" ||
-      normalizedBody === "" ||
-      isAutomationNoise(comment.body)
-    ) {
+    const baselineActorDropped =
+      authorClass === "bot" || authorClass === "service_account";
+    if (baselineActorDropped) {
+      baselineDroppedActorCount += 1;
+    }
+    if (normalizedBody === "" || authorClass === "service_account") {
       droppedNoiseCount += 1;
+      continue;
+    }
+    const automationNoise = isAutomationNoise(comment.body);
+    const allowOverride = authorClass === "operator";
+    const relevance = allowOverride
+      ? {
+          score: 1,
+          rationale: "operator allowlist override",
+          modelRoute: scoreGroundingCommentRelevance({
+            body: normalizedBody,
+            automationNoise,
+          }).modelRoute,
+        }
+      : relevanceScorer({
+          comment,
+          normalizedBody,
+          authorClass,
+          automationNoise,
+        });
+    if (!allowOverride && relevance.score < relevanceThreshold) {
+      droppedLowRelevanceCount += 1;
       continue;
     }
     survivors.push({
       id: comment.id,
       authorClass,
       createdAt: comment.createdAt,
+      baselineActorDropped,
       // Hard per-comment cap: the ellipsis counts toward maxCommentChars, so a
       // truncated body is exactly maxCommentChars chars, never +1 (council Track).
       body:
         normalizedBody.length > config.maxCommentChars
           ? `${normalizedBody.slice(0, Math.max(0, config.maxCommentChars - 1))}…`
           : normalizedBody,
+      relevanceScore: relevance.score,
+      relevanceRationale: relevance.rationale,
     });
   }
 
@@ -154,12 +213,32 @@ export function curatePlannerComments(
     droppedForBudgetCount += 1;
   }
 
+  const relevanceKeptActorDroppedCount = kept.filter(
+    (comment) => comment.baselineActorDropped,
+  ).length;
+  const keptComments = kept.map(
+    ({ baselineActorDropped, ...comment }) => comment,
+  );
+
   return {
-    comments: kept,
+    comments: keptComments,
     consideredCount: comments.length,
     droppedNoiseCount,
+    droppedLowRelevanceCount,
     droppedForBudgetCount,
+    baselineDroppedActorCount,
+    relevanceKeptActorDroppedCount,
   };
+}
+
+function defaultRelevanceScorer(input: {
+  normalizedBody: string;
+  automationNoise: boolean;
+}): GroundingCommentRelevanceDecision {
+  return scoreGroundingCommentRelevance({
+    body: input.normalizedBody,
+    automationNoise: input.automationNoise,
+  });
 }
 
 /**
@@ -185,7 +264,10 @@ export interface PlannerCommentEnrichmentMeasurement {
   totalCommentsFetched: number;
   totalCommentsKept: number;
   totalDroppedNoise: number;
+  totalDroppedLowRelevance: number;
   totalDroppedForBudget: number;
+  baselineDroppedActorCount: number;
+  relevanceKeptActorDroppedCount: number;
   totalCuratedChars: number;
   estimatedAddedTokens: number;
 }
@@ -199,13 +281,19 @@ export function measurePlannerCommentEnrichment(input: {
   let totalCommentsFetched = 0;
   let totalCommentsKept = 0;
   let totalDroppedNoise = 0;
+  let totalDroppedLowRelevance = 0;
   let totalDroppedForBudget = 0;
+  let baselineDroppedActorCount = 0;
+  let relevanceKeptActorDroppedCount = 0;
   let totalCuratedChars = 0;
   for (const result of input.results) {
     totalCommentsFetched += result.consideredCount;
     totalCommentsKept += result.comments.length;
     totalDroppedNoise += result.droppedNoiseCount;
+    totalDroppedLowRelevance += result.droppedLowRelevanceCount;
     totalDroppedForBudget += result.droppedForBudgetCount;
+    baselineDroppedActorCount += result.baselineDroppedActorCount;
+    relevanceKeptActorDroppedCount += result.relevanceKeptActorDroppedCount;
     totalCuratedChars += result.comments.reduce(
       (total, comment) => total + comment.body.length,
       0,
@@ -219,7 +307,10 @@ export function measurePlannerCommentEnrichment(input: {
     totalCommentsFetched,
     totalCommentsKept,
     totalDroppedNoise,
+    totalDroppedLowRelevance,
     totalDroppedForBudget,
+    baselineDroppedActorCount,
+    relevanceKeptActorDroppedCount,
     totalCuratedChars,
     estimatedAddedTokens: Math.ceil(totalCuratedChars / 4),
   };

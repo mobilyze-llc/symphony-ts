@@ -3,11 +3,13 @@ import {
   type PlannerCommentCurationConfig,
   type PlannerCommentCurationResult,
   type PlannerCommentEnrichmentMeasurement,
+  type PlannerCommentRelevanceScorer,
   curatePlannerComments,
   measurePlannerCommentEnrichment,
 } from "../agent/planner-comment-curation.js";
 import type {
   HotFileGrowth,
+  PlannerCandidateGroundingEvidence,
   PlannerContext,
   PlannerInFlight,
   PlannerPrInfo,
@@ -27,7 +29,13 @@ import type { PlanEnvelope, StandingPlan } from "../domain/standing-plan.js";
 import type { LinearIssueComment } from "../tracker/linear-client.js";
 import type { BacklogHygieneProposal } from "./backlog-hygiene.js";
 import { extractGroundingPathHints } from "./code-grounding.js";
+import { runPlanPostEmitReview } from "./plan-post-emit-review.js";
 import { loadStandingPlan, recordPlanRevision } from "./standing-plan-store.js";
+import type { RecordPlanRevisionResult } from "./standing-plan-store.js";
+import type {
+  PlanBody,
+  RotateRevisionOptions,
+} from "./standing-plan-supersession.js";
 
 // ---------------------------------------------------------------------------
 // Shadow plan cycle (SYMPH-784 PR1)
@@ -56,6 +64,9 @@ export interface AssembleShadowPlannerContextInput {
    * `health` omitted (back-compat).
    */
   triageHealthInput?: QueueHealth;
+  groundingEvidenceByIssueId?:
+    | ReadonlyMap<string, PlannerCandidateGroundingEvidence>
+    | Readonly<Record<string, PlannerCandidateGroundingEvidence>>;
 }
 
 export type ShadowPlannerAuditDispositionType = "kill" | "stale" | "duplicate";
@@ -102,40 +113,58 @@ export function assembleShadowPlannerContext(
   const backlog = input.candidates
     .filter((issue) => !inFlightIdentifiers.has(issue.identifier))
     .filter((issue) => !excludedIdentifiers.has(issue.identifier))
-    .map((issue) => ({
-      issueId: issue.id,
-      issueIdentifier: issue.identifier,
-      title: issue.title,
-      priority: issue.priority,
-      state: issue.state,
-      // SYMPH-841: carry the recorded blocker identifiers through to the planner
-      // so its dependency reasoning is grounded in the real graph, not just titles.
-      blockedBy: issue.blockedBy
-        .map((ref) => ref.identifier)
-        .filter((identifier): identifier is string => identifier !== null),
-      // SYMPH-874: carry the body + labels so the Manager reasons over real
-      // ticket content (surface / area / intent), not just one-line titles.
-      description: issue.description,
-      labels: issue.labels,
-      // SYMPH-874 Tier 2 / SYMPH-895: the strongest same-surface signal —
-      // concrete file overlap. Deterministically extract the repo-relative
-      // paths the ticket itself cites (title + body) via the code-grounding
-      // path vocabulary. Absent/blank/no-path → [] → rendered as nothing.
-      pathHints: extractGroundingPathHints(
-        [issue.title, issue.description]
-          .filter(
-            (value): value is string =>
-              typeof value === "string" && value.trim() !== "",
-          )
-          .join("\n"),
-      ),
-      ...(duplicateClustersByIdentifier.has(issue.identifier)
-        ? {
-            duplicateClusterIdentifiers:
-              duplicateClustersByIdentifier.get(issue.identifier) ?? [],
-          }
-        : {}),
-    }));
+    .map((issue) => {
+      const groundingEvidence = readGroundingEvidence(
+        input.groundingEvidenceByIssueId,
+        issue,
+      );
+      return {
+        issueId: issue.id,
+        issueIdentifier: issue.identifier,
+        title: issue.title,
+        priority: issue.priority,
+        state: issue.state,
+        // SYMPH-841: carry the recorded blocker identifiers through to the planner
+        // so its dependency reasoning is grounded in the real graph, not just titles.
+        blockedBy: issue.blockedBy
+          .map((ref) => ref.identifier)
+          .filter((identifier): identifier is string => identifier !== null),
+        advisoryRelations: {
+          relatesTo: issue.relatesTo?.flatMap(toRelationIdentifier) ?? [],
+          duplicates: issue.duplicates?.flatMap(toRelationIdentifier) ?? [],
+          duplicatedBy: issue.duplicatedBy?.flatMap(toRelationIdentifier) ?? [],
+          supersedes: issue.supersedes?.flatMap(toRelationIdentifier) ?? [],
+          supersededBy: issue.supersededBy?.flatMap(toRelationIdentifier) ?? [],
+          relationsTruncated: issue.advisoryRelationsTruncated === true,
+          parent: issue.parent?.identifier ?? null,
+          children: issue.children?.flatMap(toRelationIdentifier) ?? [],
+          childrenTruncated: issue.childrenTruncated === true,
+        },
+        // SYMPH-874: carry the body + labels so the Manager reasons over real
+        // ticket content (surface / area / intent), not just one-line titles.
+        description: issue.description,
+        labels: issue.labels,
+        ...(groundingEvidence === undefined ? {} : { groundingEvidence }),
+        // SYMPH-874 Tier 2 / SYMPH-895: the strongest same-surface signal —
+        // concrete file overlap. Deterministically extract the repo-relative
+        // paths the ticket itself cites (title + body) via the code-grounding
+        // path vocabulary. Absent/blank/no-path → [] → rendered as nothing.
+        pathHints: extractGroundingPathHints(
+          [issue.title, issue.description]
+            .filter(
+              (value): value is string =>
+                typeof value === "string" && value.trim() !== "",
+            )
+            .join("\n"),
+        ),
+        ...(duplicateClustersByIdentifier.has(issue.identifier)
+          ? {
+              duplicateClusterIdentifiers:
+                duplicateClustersByIdentifier.get(issue.identifier) ?? [],
+            }
+          : {}),
+      };
+    });
   return {
     backlog,
     inFlight: input.inFlight,
@@ -146,6 +175,34 @@ export function assembleShadowPlannerContext(
       ? {}
       : { health: input.triageHealthInput }),
   };
+}
+
+function toRelationIdentifier(ref: { identifier: string | null }): string[] {
+  return ref.identifier === null ? [] : [ref.identifier];
+}
+
+function readGroundingEvidence(
+  evidence:
+    | ReadonlyMap<string, PlannerCandidateGroundingEvidence>
+    | Readonly<Record<string, PlannerCandidateGroundingEvidence>>
+    | undefined,
+  issue: Issue,
+): PlannerCandidateGroundingEvidence | undefined {
+  if (evidence === undefined) {
+    return undefined;
+  }
+  if (isGroundingEvidenceMap(evidence)) {
+    return evidence.get(issue.id) ?? evidence.get(issue.identifier);
+  }
+  return evidence[issue.id] ?? evidence[issue.identifier];
+}
+
+function isGroundingEvidenceMap(
+  evidence:
+    | ReadonlyMap<string, PlannerCandidateGroundingEvidence>
+    | Readonly<Record<string, PlannerCandidateGroundingEvidence>>,
+): evidence is ReadonlyMap<string, PlannerCandidateGroundingEvidence> {
+  return typeof (evidence as { get?: unknown }).get === "function";
 }
 
 function buildAuditDispositionIndex(
@@ -329,6 +386,7 @@ export interface EnrichPlannerContextWithCommentsDeps {
     WorkflowOperatorAnchorsConfig,
     "operatorAllowlist" | "serviceAccounts"
   >;
+  commentRelevanceScorer?: PlannerCommentRelevanceScorer;
 }
 
 export interface EnrichPlannerContextWithCommentsResult {
@@ -374,6 +432,9 @@ export async function enrichPlannerContextWithComments(
         })),
         {
           config: curationConfig,
+          ...(deps.commentRelevanceScorer === undefined
+            ? {}
+            : { relevanceScorer: deps.commentRelevanceScorer }),
           ...(deps.operatorConfig === undefined
             ? {}
             : { operatorConfig: deps.operatorConfig }),
@@ -444,6 +505,11 @@ export interface ShadowPlanCycleDeps {
   ) => void | Promise<void>;
   now: () => Date;
   planId?: string;
+  persistPlanRevision?: (
+    workspaceRoot: string,
+    body: PlanBody,
+    options: RotateRevisionOptions,
+  ) => Promise<RecordPlanRevisionResult>;
 }
 
 export async function runShadowPlanCycle(
@@ -476,9 +542,17 @@ export async function runShadowPlanCycle(
     return { status: "invalid", detail: planned.detail };
   }
 
-  const record = await recordPlanRevision(deps.workspaceRoot, planned.body, {
+  const review = await runPlanPostEmitReview({
+    context: deps.context,
+    body: planned.body,
+    runClaude: deps.planner.runClaude,
+  });
+
+  const persistPlanRevision = deps.persistPlanRevision ?? recordPlanRevision;
+  const record = await persistPlanRevision(deps.workspaceRoot, planned.body, {
     createdAt: deps.now().toISOString(),
     planId: deps.planId ?? STANDING_PLAN_ID,
+    findings: review.findings,
   });
 
   await deps.log(
@@ -499,6 +573,7 @@ export async function runShadowPlanCycle(
         status: batch.status,
         members: batch.members.map((member) => member.issueIdentifier),
       })),
+      review_findings: record.plan.findings ?? [],
     },
   );
 

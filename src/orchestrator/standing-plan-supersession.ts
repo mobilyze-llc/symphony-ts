@@ -6,6 +6,7 @@ import {
   type PlanDependencyEdge,
   type PlanEnvelope,
   type PlanOptionLine,
+  type PlanPremiseRecord,
   type PlanRevision,
   type PlanRevisionSource,
   type StandingPlan,
@@ -28,6 +29,7 @@ export interface PlanBody {
   options: PlanOptionLine[];
   envelope: PlanEnvelope;
   rationale: string;
+  premises?: PlanPremiseRecord[];
   source: PlanRevisionSource;
   /**
    * Resolved execution-dependency edges (SYMPH-843): soft (model) + recorded
@@ -42,6 +44,8 @@ export interface RotateRevisionOptions {
   createdAt: string;
   /** Stable plan identity for the first revision; ignored once a prior exists. */
   planId?: string;
+  findings?: PlanRevision["findings"];
+  reviewRecords?: PlanRevision["reviewRecords"];
 }
 
 /**
@@ -110,6 +114,9 @@ export function rotateRevision(
     dependencyEdges,
     options: optionsForLookahead,
     rationale: body.rationale,
+    premises: body.premises ?? [],
+    findings: options.findings ?? [],
+    reviewRecords: options.reviewRecords ?? [],
     source: body.source,
   };
 }

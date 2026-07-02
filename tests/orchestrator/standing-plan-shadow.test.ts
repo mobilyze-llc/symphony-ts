@@ -6,9 +6,11 @@ import { describe, expect, it } from "vitest";
 
 import type {
   HotFileGrowth,
+  PlannerCandidateGroundingEvidence,
   PlannerRunResult,
   QueueHealth,
 } from "../../src/agent/triage-planner.js";
+import { runTriagePlanner } from "../../src/agent/triage-planner.js";
 import type { WorkflowQueueTriageConfig } from "../../src/config/types.js";
 import type { Issue } from "../../src/domain/model.js";
 import type { PlanEnvelope } from "../../src/domain/standing-plan.js";
@@ -63,6 +65,19 @@ function okPlanner(): { runClaude: () => Promise<PlannerRunResult> } {
   };
 }
 
+function groundingEvidence(): PlannerCandidateGroundingEvidence {
+  return {
+    status: "grounded",
+    reason: null,
+    digest: { text: "digest", status: "unverified", truncated: false },
+    claims: [],
+    units: [],
+    warnings: [],
+    extractorCallCount: 1,
+    wallClockMs: 10,
+  };
+}
+
 function linearComment(
   over: Partial<LinearIssueComment> = {},
 ): LinearIssueComment {
@@ -112,6 +127,59 @@ describe("assembleShadowPlannerContext", () => {
     expect(context.backlog[0]?.blockedBy).toEqual(["SYMPH-9"]);
   });
 
+  it("carries advisory Linear relations onto planner candidates (SYMPH-1020)", () => {
+    const related: Issue = {
+      ...issue("u1", "SYMPH-1"),
+      relatesTo: [
+        { id: "r1", identifier: "SYMPH-2", title: "Related", state: "Todo" },
+      ],
+      duplicates: [
+        { id: "d1", identifier: "SYMPH-3", title: "Duplicate", state: "Todo" },
+      ],
+      duplicatedBy: [
+        {
+          id: "d2",
+          identifier: "SYMPH-8",
+          title: "Duplicates this",
+          state: "Todo",
+        },
+      ],
+      supersedes: [
+        { id: "s1", identifier: "SYMPH-4", title: "Old", state: "Todo" },
+      ],
+      supersededBy: [
+        { id: "s2", identifier: "SYMPH-7", title: "New", state: "Todo" },
+      ],
+      parent: {
+        id: "p1",
+        identifier: "SYMPH-5",
+        title: "Parent",
+        state: "Backlog",
+      },
+      children: [
+        { id: "c1", identifier: "SYMPH-6", title: "Child", state: "Todo" },
+      ],
+      advisoryRelationsTruncated: true,
+      childrenTruncated: true,
+    };
+    const context = assembleShadowPlannerContext({
+      candidates: [related],
+      inFlight: [],
+      envelope: ENVELOPE,
+    });
+    expect(context.backlog[0]?.advisoryRelations).toEqual({
+      relatesTo: ["SYMPH-2"],
+      duplicates: ["SYMPH-3"],
+      duplicatedBy: ["SYMPH-8"],
+      supersedes: ["SYMPH-4"],
+      supersededBy: ["SYMPH-7"],
+      relationsTruncated: true,
+      parent: "SYMPH-5",
+      children: ["SYMPH-6"],
+      childrenTruncated: true,
+    });
+  });
+
   it("carries the issue description and labels onto the candidate (SYMPH-874)", () => {
     const enriched: Issue = {
       ...issue("u1", "SYMPH-1"),
@@ -144,6 +212,17 @@ describe("assembleShadowPlannerContext", () => {
       "src/orchestrator/core.ts",
       "src/agent/triage-planner.ts",
     ]);
+  });
+
+  it("threads supplied grounded evidence onto planner candidates (SYMPH-1017 U4)", () => {
+    const evidence = groundingEvidence();
+    const context = assembleShadowPlannerContext({
+      candidates: [issue("u1", "SYMPH-1")],
+      inFlight: [],
+      envelope: ENVELOPE,
+      groundingEvidenceByIssueId: new Map([["u1", evidence]]),
+    });
+    expect(context.backlog[0]?.groundingEvidence).toBe(evidence);
   });
 
   it("yields empty path hints when the body cites no paths (SYMPH-895)", () => {
@@ -392,6 +471,48 @@ describe("runShadowPlanCycle", () => {
       // Persisted + queryable after the cycle.
       const plan = await loadStandingPlan(root);
       expect(plan?.revision).toBe(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("runs tier-1 review report-only and records a cancelled-candidate finding", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-"));
+    try {
+      const context = assembleShadowPlannerContext({
+        candidates: [{ ...issue("u1", "SYMPH-1"), state: "Cancelled" }],
+        inFlight: [],
+        envelope: ENVELOPE,
+      });
+      const expected = await runTriagePlanner(context, okPlanner());
+      expect(expected.status).toBe("ok");
+      if (expected.status !== "ok") {
+        throw new Error("expected ok planner result");
+      }
+      let persistedBodyJson: string | null = null;
+
+      const result = await runShadowPlanCycle({
+        workspaceRoot: root,
+        context,
+        planner: okPlanner(),
+        persistPlanRevision: async (workspaceRoot, body, options) => {
+          persistedBodyJson = JSON.stringify(body);
+          return recordPlanRevision(workspaceRoot, body, options);
+        },
+        log: () => undefined,
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+        planId: "plan-1",
+      });
+
+      expect(result.status).toBe("ok");
+      expect(persistedBodyJson).toBe(JSON.stringify(expected.body));
+      expect((await loadStandingPlan(root))?.findings).toEqual([
+        {
+          title: "Scheduled ineligible candidate SYMPH-1 (Cancelled)",
+          planAnchor: `${expected.body.batches[0]?.batchId}:SYMPH-1`,
+          severity: "P2",
+        },
+      ]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1219,21 +1340,25 @@ describe("SYMPH-939 health signals", () => {
 
     it("renders a non-empty Queue health block when production health deps are wired", async () => {
       const root = mkdtempSync(join(tmpdir(), "symph-shadow-health-"));
-      let capturedPrompt = "";
+      let capturedPlannerPrompt = "";
       try {
         const result = await runStandingPlanShadowTick({
           ...fullHealthDeps(root),
           createPlannerRunner: () => async (prompt: string) => {
-            capturedPrompt = prompt;
+            if (
+              !prompt.startsWith("Review this already-produced standing plan.")
+            ) {
+              capturedPlannerPrompt = prompt;
+            }
             return okPlanner().runClaude();
           },
         });
         expect(result.status).toBe("ok");
-        expect(capturedPrompt).toContain("## Queue health");
-        expect(capturedPrompt).toContain("- Triage intake: depth 2");
-        expect(capturedPrompt).toContain("- Residual share: 0.500");
-        expect(capturedPrompt).toContain("- Hot-file growth:");
-        expect(capturedPrompt).toContain("- Review-round depth: 3");
+        expect(capturedPlannerPrompt).toContain("## Queue health");
+        expect(capturedPlannerPrompt).toContain("- Triage intake: depth 2");
+        expect(capturedPlannerPrompt).toContain("- Residual share: 0.500");
+        expect(capturedPlannerPrompt).toContain("- Hot-file growth:");
+        expect(capturedPlannerPrompt).toContain("- Review-round depth: 3");
       } finally {
         rmSync(root, { recursive: true, force: true });
       }
@@ -1311,7 +1436,7 @@ describe("runStandingPlanShadowTick comment enrichment (SYMPH-896)", () => {
 
   it("fetches, injects curated comments, and logs a measurement when enabled", async () => {
     const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-"));
-    let capturedPrompt = "";
+    let capturedPlannerPrompt = "";
     const logged: Array<{ event: string; fields: Record<string, unknown> }> =
       [];
     try {
@@ -1330,7 +1455,11 @@ describe("runStandingPlanShadowTick comment enrichment (SYMPH-896)", () => {
         fetchCandidates: async () => [issue("u1", "SYMPH-1")],
         getInFlight: () => [],
         createPlannerRunner: () => async (prompt: string) => {
-          capturedPrompt = prompt;
+          if (
+            !prompt.startsWith("Review this already-produced standing plan.")
+          ) {
+            capturedPlannerPrompt = prompt;
+          }
           return okPlanner().runClaude();
         },
         fetchIssueComments: async () => [
@@ -1347,7 +1476,9 @@ describe("runStandingPlanShadowTick comment enrichment (SYMPH-896)", () => {
       );
       expect(measure).toBeDefined();
       expect(measure?.fields.totalCommentsKept).toBe(1);
-      expect(capturedPrompt).toContain("- [human] overlaps with SYMPH-2");
+      expect(capturedPlannerPrompt).toContain(
+        "- [human] overlaps with SYMPH-2",
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

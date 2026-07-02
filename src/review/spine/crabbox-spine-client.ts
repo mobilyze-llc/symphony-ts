@@ -7,6 +7,7 @@ import {
   type ConvergenceDecisionResult,
   type CouncilTriageResult,
   type CrossExamSelectResult,
+  type TriageFinding,
   convergenceDecisionResultSchema,
   councilTriageResultSchema,
   crossExamSelectResultSchema,
@@ -126,7 +127,12 @@ export class CrabboxSpineClient {
     for (const review of input.reviews) {
       args.push("--review-file", review.file, "--reviewer", review.reviewer);
     }
-    return this.run("council-triage", args, councilTriageResultSchema.parse);
+    const result = await this.run(
+      "council-triage",
+      args,
+      councilTriageResultSchema.parse,
+    );
+    return normalizeCouncilTriageSameLocationDuplicates(result);
   }
 
   async crossExamSelect(
@@ -284,4 +290,149 @@ function errorMessage(error: unknown): string {
 function truncate(text: string, max = 500): string {
   const trimmed = text.trim();
   return trimmed.length > max ? `${trimmed.slice(0, max)}…` : trimmed;
+}
+
+type FindingWithCompatFields = TriageFinding & {
+  reviewers?: unknown;
+  coalesced_fps?: string[];
+  coalesced_summaries?: string[];
+};
+
+function normalizeCouncilTriageSameLocationDuplicates(
+  result: CouncilTriageResult,
+): CouncilTriageResult {
+  const escalate = coalesceWordingOnlySameLocationFindings(result.escalate);
+  if (escalate === null) {
+    return result;
+  }
+  return {
+    ...result,
+    summary: { ...result.summary, escalate: escalate.length },
+    escalate,
+  };
+}
+
+function coalesceWordingOnlySameLocationFindings(
+  findings: readonly TriageFinding[],
+): TriageFinding[] | null {
+  const coalesced: TriageFinding[] = [];
+  let changed = false;
+  for (const finding of findings) {
+    const existing = coalesced.find((candidate) =>
+      shouldCoalesceFinding(candidate, finding),
+    );
+    if (existing === undefined) {
+      coalesced.push({ ...finding });
+      continue;
+    }
+    mergeFindingCompatFields(
+      existing as FindingWithCompatFields,
+      finding as FindingWithCompatFields,
+    );
+    changed = true;
+  }
+  return changed ? coalesced : null;
+}
+
+function shouldCoalesceFinding(
+  left: TriageFinding,
+  right: TriageFinding,
+): boolean {
+  const leftLocation = locationLineKey(left.location);
+  const rightLocation = locationLineKey(right.location);
+  return (
+    leftLocation !== null &&
+    leftLocation === rightLocation &&
+    left.severity.trim().toUpperCase() ===
+      right.severity.trim().toUpperCase() &&
+    summaryTokenSimilarity(left.summary, right.summary) >= 0.2
+  );
+}
+
+function mergeFindingCompatFields(
+  kept: FindingWithCompatFields,
+  duplicate: FindingWithCompatFields,
+): void {
+  const reviewers = new Set([
+    ...findingReviewers(kept),
+    ...findingReviewers(duplicate),
+  ]);
+  if (reviewers.size > 0) {
+    kept.reviewers = [...reviewers];
+  }
+  kept.coalesced_fps = [
+    ...new Set([
+      ...(kept.coalesced_fps ?? [kept.fp]),
+      ...(duplicate.coalesced_fps ?? [duplicate.fp]),
+    ]),
+  ];
+  kept.coalesced_summaries = [
+    ...new Set([
+      ...(kept.coalesced_summaries ?? [kept.summary]),
+      ...(duplicate.coalesced_summaries ?? [duplicate.summary]),
+    ]),
+  ];
+}
+
+function findingReviewers(finding: FindingWithCompatFields): string[] {
+  const reviewers: string[] = [];
+  const add = (value: unknown) => {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        add(item);
+      }
+      return;
+    }
+    if (typeof value === "string" && value.trim() !== "") {
+      reviewers.push(value.trim());
+    }
+  };
+  add(finding.reviewers);
+  add(finding.reviewer);
+  return reviewers;
+}
+
+function locationLineKey(location: string): string | null {
+  const match = location
+    .trim()
+    .toLowerCase()
+    .match(/^(.+?:\d+)/);
+  return match?.[1] ?? null;
+}
+
+const SUMMARY_STOPWORDS = new Set([
+  "and",
+  "can",
+  "for",
+  "from",
+  "here",
+  "into",
+  "the",
+  "this",
+  "that",
+  "with",
+]);
+
+function summaryTokenSimilarity(left: string, right: string): number {
+  const leftTokens = summaryTokens(left);
+  const rightTokens = summaryTokens(right);
+  if (leftTokens.size === 0 || rightTokens.size === 0) {
+    return 0;
+  }
+  const intersection = [...leftTokens].filter((token) =>
+    rightTokens.has(token),
+  ).length;
+  const union = new Set([...leftTokens, ...rightTokens]).size;
+  return union === 0 ? 0 : intersection / union;
+}
+
+function summaryTokens(value: string): Set<string> {
+  return new Set(
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9_:-]+/g, " ")
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter((token) => token.length > 2 && !SUMMARY_STOPWORDS.has(token)),
+  );
 }

@@ -51,6 +51,13 @@ export interface BlockerRef {
   state: string | null;
 }
 
+export interface IssueRelationRef {
+  id: string | null;
+  identifier: string | null;
+  state: string | null;
+  title: string | null;
+}
+
 export interface IssueDocumentAttachment {
   title: string | null;
   url: string;
@@ -74,6 +81,15 @@ export interface Issue {
   documentAttachments?: IssueDocumentAttachment[];
   blockedBy: BlockerRef[];
   blockedByRelationTruncated?: boolean;
+  relatesTo?: IssueRelationRef[];
+  duplicates?: IssueRelationRef[];
+  duplicatedBy?: IssueRelationRef[];
+  supersedes?: IssueRelationRef[];
+  supersededBy?: IssueRelationRef[];
+  advisoryRelationsTruncated?: boolean;
+  parent?: IssueRelationRef | null;
+  children?: IssueRelationRef[];
+  childrenTruncated?: boolean;
   createdAt: string | null;
   updatedAt: string | null;
 }
