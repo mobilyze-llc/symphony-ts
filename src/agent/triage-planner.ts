@@ -489,7 +489,7 @@ function renderCandidatePathHints(
   return cleaned.length === 0 ? null : cleaned.join(", ");
 }
 
-function renderCandidateGroundingEvidence(
+export function renderCandidateGroundingEvidence(
   evidence: PlannerCandidateGroundingEvidence | undefined,
 ): string[] {
   if (evidence === undefined) {

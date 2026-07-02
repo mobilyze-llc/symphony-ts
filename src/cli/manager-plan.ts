@@ -43,7 +43,11 @@ import {
   type GroundingExtractionResult,
   extractGroundingEvidence,
 } from "../orchestrator/grounding-extractor.js";
-import { runPlanPostEmitReview } from "../orchestrator/plan-post-emit-review.js";
+import {
+  type PlanPostEmitReviewDeps,
+  type PlanPostEmitReviewResult,
+  runPlanPostEmitReview,
+} from "../orchestrator/plan-post-emit-review.js";
 import {
   STANDING_PLAN_ID,
   assembleShadowPlannerContext,
@@ -233,6 +237,10 @@ export interface ManagerPlanCliDependencies {
   groundPlannerContext?: (
     input: ManagerPlanGroundingInput,
   ) => Promise<ManagerPlanGroundingResult>;
+  /** Defaults to the production post-plan review hook; injected in tests. */
+  runPlanPostEmitReview?: (
+    deps: PlanPostEmitReviewDeps,
+  ) => Promise<PlanPostEmitReviewResult>;
   now?: () => Date;
 }
 
@@ -768,10 +776,20 @@ export async function runManagerPlanCli(
 
   let persistence: ManagerPlanPersistenceSummary | null = null;
   if (options.persist) {
-    const review = await runPlanPostEmitReview({
+    const postEmitReview =
+      dependencies.runPlanPostEmitReview ?? runPlanPostEmitReview;
+    const review = await postEmitReview({
       context,
       body: result.body,
       runClaude,
+      tier2: {
+        enabled: true,
+        planId: STANDING_PLAN_ID,
+        artifactDir,
+        workspace: process.cwd(),
+        plannerGroundingEnabled: options.plannerGrounding,
+        env,
+      },
     });
     const persistPlanRevision =
       dependencies.persistPlanRevision ?? recordPlanRevision;
@@ -781,6 +799,7 @@ export async function runManagerPlanCli(
         createdAt: now().toISOString(),
         planId: STANDING_PLAN_ID,
         findings: review.findings,
+        reviewRecords: review.reviewRecords,
       });
       persistence = {
         workspaceRoot: persistRoot,

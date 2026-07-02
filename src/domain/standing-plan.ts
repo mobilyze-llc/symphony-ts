@@ -19,6 +19,7 @@ import { createHash } from "node:crypto";
 import { isValidPlanBatch } from "./plan-batch.js";
 import {
   type PlanReviewFinding,
+  type PlanReviewRecord,
   isPlanReviewFinding,
 } from "./plan-review-finding.js";
 export {
@@ -27,6 +28,7 @@ export {
 } from "./plan-batch-contract.js";
 export type {
   PlanReviewFinding,
+  PlanReviewRecord,
   PlanReviewFindingSeverity,
 } from "./plan-review-finding.js";
 export type {
@@ -187,6 +189,7 @@ export interface PlanRevision {
   rationale: string;
   premises?: PlanPremiseRecord[];
   findings?: PlanReviewFinding[];
+  reviewRecords?: PlanReviewRecord[];
   source: PlanRevisionSource;
 }
 
@@ -249,6 +252,7 @@ export interface StandingPlan {
   rationale: string;
   premises?: PlanPremiseRecord[];
   findings?: PlanReviewFinding[];
+  reviewRecords?: PlanReviewRecord[];
   createdAt: string;
   updatedAt: string;
 }
@@ -528,7 +532,65 @@ function isPlanRevision(value: unknown): value is PlanRevision {
     (value.findings === undefined ||
       (Array.isArray(value.findings) &&
         value.findings.every(isPlanReviewFinding))) &&
+    (value.reviewRecords === undefined ||
+      isPlanReviewRecords(value.reviewRecords)) &&
     PLAN_REVISION_SOURCES.includes(value.source as PlanRevisionSource)
+  );
+}
+
+function isPlanReviewRecords(value: unknown): value is PlanReviewRecord[] {
+  return Array.isArray(value) && value.every(isPlanReviewRecord);
+}
+
+function isPlanReviewRecord(value: unknown): value is PlanReviewRecord {
+  return (
+    isRecord(value) &&
+    value.tier === "tier-2" &&
+    ["reviewed", "skipped", "degraded"].includes(String(value.status)) &&
+    typeof value.diffHash === "string" &&
+    ["no_baseline", "content_hash_changed", "content_hash_unchanged"].includes(
+      String(value.gateReason),
+    ) &&
+    (value.aggregateVerdict === null ||
+      ["pass", "fail", "degraded"].includes(String(value.aggregateVerdict))) &&
+    (value.note === null || typeof value.note === "string") &&
+    Array.isArray(value.reviewedGroundingEvidence) &&
+    value.reviewedGroundingEvidence.every(isPlanReviewCoverageEvidence) &&
+    Array.isArray(value.findingFingerprints) &&
+    value.findingFingerprints.every((item) => typeof item === "string") &&
+    Array.isArray(value.postHocEntries) &&
+    value.postHocEntries.every(isPlanReviewPostHocEntry)
+  );
+}
+
+function isPlanReviewCoverageEvidence(
+  value: unknown,
+): value is PlanReviewRecord["reviewedGroundingEvidence"][number] {
+  return (
+    isRecord(value) &&
+    typeof value.issueId === "string" &&
+    typeof value.issueIdentifier === "string" &&
+    ["grounded", "ungrounded"].includes(String(value.status)) &&
+    typeof value.renderedHash === "string" &&
+    typeof value.renderedChars === "number" &&
+    Array.isArray(value.claimIds) &&
+    value.claimIds.every((item) => typeof item === "string") &&
+    Array.isArray(value.unitIds) &&
+    value.unitIds.every((item) => typeof item === "string") &&
+    Array.isArray(value.warnings) &&
+    value.warnings.every((item) => typeof item === "string")
+  );
+}
+
+function isPlanReviewPostHocEntry(
+  value: unknown,
+): value is PlanReviewRecord["postHocEntries"][number] {
+  return (
+    isRecord(value) &&
+    value.kind === "coverage_gap" &&
+    typeof value.issueIdentifier === "string" &&
+    typeof value.note === "string" &&
+    typeof value.createdAt === "string"
   );
 }
 

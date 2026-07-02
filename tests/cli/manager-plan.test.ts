@@ -19,6 +19,7 @@ import {
   toPlannerCandidateGroundingEvidence,
 } from "../../src/cli/manager-plan.js";
 import type { Issue } from "../../src/domain/model.js";
+import type { PlanReviewRecord } from "../../src/domain/standing-plan.js";
 import {
   GROUNDING_EXTRACTOR_ROUTE,
   type GroundingExtractionResult,
@@ -1166,6 +1167,100 @@ describe("runManagerPlanCli", () => {
           planAnchor: `${expected.body.batches[0]?.batchId}:MOB-1`,
           severity: "P2",
         },
+      ]);
+    } finally {
+      await rm(outDir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists report-only tier-2 review records from the CLI hook", async () => {
+    const { io } = captureIo();
+    const outDir = await mkdtemp(join(tmpdir(), "manager-plan-tier2-"));
+    const tier2Record: PlanReviewRecord = {
+      tier: "tier-2",
+      status: "reviewed",
+      diffHash: "plan-content-hash",
+      gateReason: "no_baseline",
+      aggregateVerdict: "pass",
+      note: null,
+      reviewedGroundingEvidence: [
+        {
+          issueId: "u1",
+          issueIdentifier: "MOB-1",
+          status: "grounded",
+          renderedHash: "rendered-hash",
+          renderedChars: 12,
+          claimIds: ["claim-1"],
+          unitIds: ["unit-1"],
+          warnings: [],
+        },
+      ],
+      findingFingerprints: [],
+      postHocEntries: [],
+    };
+    const persistPlanRevision = vi.fn<
+      NonNullable<ManagerPlanCliDependencies["persistPlanRevision"]>
+    >(async (_workspaceRoot, body, options) => ({
+      recorded: true,
+      plan: {
+        planId: options.planId ?? "plan-1",
+        revision: 1,
+        contentHash: "hash",
+        envelope: body.envelope,
+        batches: body.batches,
+        dependencyEdges: body.dependencyEdges,
+        options: body.options,
+        rationale: body.rationale,
+        premises: body.premises ?? [],
+        findings: options.findings ?? [],
+        reviewRecords: options.reviewRecords ?? [],
+        createdAt: options.createdAt,
+        updatedAt: options.createdAt,
+      },
+    }));
+    const postEmitReview = vi.fn<
+      NonNullable<ManagerPlanCliDependencies["runPlanPostEmitReview"]>
+    >(async (deps) => {
+      expect(deps.tier2).toMatchObject({
+        enabled: true,
+        artifactDir: outDir,
+        workspace: process.cwd(),
+        plannerGroundingEnabled: true,
+      });
+      return {
+        findings: [],
+        reviewRecords: [tier2Record],
+      };
+    });
+
+    try {
+      const code = await runManagerPlanCli(
+        [
+          "--team",
+          "MOB",
+          "--state",
+          "Backlog",
+          "--out-dir",
+          outDir,
+          "--persist",
+          "--planner-grounding",
+        ],
+        {
+          io,
+          env: {},
+          loadCandidates: async () => [issue("u1", "MOB-1")],
+          createPlannerRunner: okRunner,
+          groundPlannerContext: async ({ context }) => ({ context }),
+          persistPlanRevision,
+          runPlanPostEmitReview: postEmitReview,
+          now: () => new Date("2026-06-30T13:15:03.000Z"),
+        },
+      );
+
+      expect(code).toBe(0);
+      expect(postEmitReview).toHaveBeenCalledTimes(1);
+      expect(persistPlanRevision.mock.calls[0]?.[2].reviewRecords).toEqual([
+        tier2Record,
       ]);
     } finally {
       await rm(outDir, { recursive: true, force: true });
