@@ -88,6 +88,9 @@ describe("LinearTrackerClient", () => {
       /inverseRelations\(first: \$relationFirst\)[\s\S]*pageInfo[\s\S]*hasNextPage/,
     );
     expect(firstRequest.query).toMatch(
+      /\n {2}relations\(first: \$relationFirst\)[\s\S]*relatedIssue/,
+    );
+    expect(firstRequest.query).toMatch(
       /attachments\s*\{\s*nodes\s*\{\s*title\s*url\s*\}/,
     );
     expect(firstRequest.variables).toEqual({

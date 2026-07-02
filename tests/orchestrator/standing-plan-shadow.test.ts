@@ -126,6 +126,46 @@ describe("assembleShadowPlannerContext", () => {
     expect(context.backlog[0]?.blockedBy).toEqual(["SYMPH-9"]);
   });
 
+  it("carries advisory Linear relations onto planner candidates (SYMPH-1020)", () => {
+    const related: Issue = {
+      ...issue("u1", "SYMPH-1"),
+      relatesTo: [
+        { id: "r1", identifier: "SYMPH-2", title: "Related", state: "Todo" },
+      ],
+      duplicates: [
+        { id: "d1", identifier: "SYMPH-3", title: "Duplicate", state: "Todo" },
+      ],
+      supersedes: [
+        { id: "s1", identifier: "SYMPH-4", title: "Old", state: "Todo" },
+      ],
+      supersededBy: [
+        { id: "s2", identifier: "SYMPH-7", title: "New", state: "Todo" },
+      ],
+      parent: {
+        id: "p1",
+        identifier: "SYMPH-5",
+        title: "Parent",
+        state: "Backlog",
+      },
+      children: [
+        { id: "c1", identifier: "SYMPH-6", title: "Child", state: "Todo" },
+      ],
+    };
+    const context = assembleShadowPlannerContext({
+      candidates: [related],
+      inFlight: [],
+      envelope: ENVELOPE,
+    });
+    expect(context.backlog[0]?.advisoryRelations).toEqual({
+      relatesTo: ["SYMPH-2"],
+      duplicates: ["SYMPH-3"],
+      supersedes: ["SYMPH-4"],
+      supersededBy: ["SYMPH-7"],
+      parent: "SYMPH-5",
+      children: ["SYMPH-6"],
+    });
+  });
+
   it("carries the issue description and labels onto the candidate (SYMPH-874)", () => {
     const enriched: Issue = {
       ...issue("u1", "SYMPH-1"),

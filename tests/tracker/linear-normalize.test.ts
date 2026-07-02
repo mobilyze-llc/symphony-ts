@@ -8,7 +8,7 @@ import {
 } from "../../src/index.js";
 
 describe("linear-normalize", () => {
-  it("normalizes labels, blockers, integer priority, and timestamps", () => {
+  it("normalizes labels, blockers, relations, parent/children, integer priority, and timestamps", () => {
     const issue = normalizeLinearIssue({
       id: "issue-1",
       identifier: "ENG-123",
@@ -24,6 +24,21 @@ describe("linear-normalize", () => {
       },
       labels: {
         nodes: [{ name: "Backend" }, { name: "TRACKER" }],
+      },
+      relations: {
+        nodes: [
+          {
+            type: "supersedes",
+            relatedIssue: {
+              id: "issue-old",
+              identifier: "ENG-99",
+              title: "Old ticket",
+              state: {
+                name: "Todo",
+              },
+            },
+          },
+        ],
       },
       inverseRelations: {
         nodes: [
@@ -42,9 +57,52 @@ describe("linear-normalize", () => {
             issue: {
               id: "issue-x",
               identifier: "ENG-X",
+              title: "Related work",
               state: {
                 name: "Todo",
               },
+            },
+          },
+          {
+            type: "duplicate",
+            issue: {
+              id: "issue-dupe",
+              identifier: "ENG-101",
+              title: "Older duplicate",
+              state: {
+                name: "Backlog",
+              },
+            },
+          },
+          {
+            type: "supersedes",
+            issue: {
+              id: "issue-newer",
+              identifier: "ENG-124",
+              title: "Replacement ticket",
+              state: {
+                name: "Backlog",
+              },
+            },
+          },
+        ],
+      },
+      parent: {
+        id: "issue-parent",
+        identifier: "ENG-1",
+        title: "Parent epic",
+        state: {
+          name: "Backlog",
+        },
+      },
+      children: {
+        nodes: [
+          {
+            id: "issue-child",
+            identifier: "ENG-124",
+            title: "Child task",
+            state: {
+              name: "Todo",
             },
           },
         ],
@@ -69,9 +127,127 @@ describe("linear-normalize", () => {
           state: "In Progress",
         },
       ],
+      relatesTo: [
+        {
+          id: "issue-x",
+          identifier: "ENG-X",
+          title: "Related work",
+          state: "Todo",
+        },
+      ],
+      duplicates: [
+        {
+          id: "issue-dupe",
+          identifier: "ENG-101",
+          title: "Older duplicate",
+          state: "Backlog",
+        },
+      ],
+      supersededBy: [
+        {
+          id: "issue-newer",
+          identifier: "ENG-124",
+          title: "Replacement ticket",
+          state: "Backlog",
+        },
+      ],
+      supersedes: [
+        {
+          id: "issue-old",
+          identifier: "ENG-99",
+          title: "Old ticket",
+          state: "Todo",
+        },
+      ],
+      parent: {
+        id: "issue-parent",
+        identifier: "ENG-1",
+        title: "Parent epic",
+        state: "Backlog",
+      },
+      children: [
+        {
+          id: "issue-child",
+          identifier: "ENG-124",
+          title: "Child task",
+          state: "Todo",
+        },
+      ],
       createdAt: "2026-03-01T00:00:00.000Z",
       updatedAt: "2026-03-02T12:34:56.789Z",
     });
+  });
+
+  it("preserves inverse supersede relation direction as superseded-by", () => {
+    const issue = normalizeLinearIssue({
+      id: "issue-1",
+      identifier: "ENG-123",
+      title: "Implement adapter",
+      state: {
+        name: "Todo",
+      },
+      inverseRelations: {
+        nodes: [
+          {
+            type: "supersedes",
+            issue: {
+              id: "issue-newer",
+              identifier: "ENG-124",
+              title: "Replacement ticket",
+              state: {
+                name: "Backlog",
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    expect(issue.supersedes).toBeUndefined();
+    expect(issue.supersededBy).toEqual([
+      {
+        id: "issue-newer",
+        identifier: "ENG-124",
+        title: "Replacement ticket",
+        state: "Backlog",
+      },
+    ]);
+  });
+
+  it("preserves forward supersede relation direction as supersedes", () => {
+    const issue = normalizeLinearIssue({
+      id: "issue-1",
+      identifier: "ENG-123",
+      title: "Implement adapter",
+      state: {
+        name: "Todo",
+      },
+      relations: {
+        nodes: [
+          {
+            type: "supersedes",
+            relatedIssue: {
+              id: "issue-old",
+              identifier: "ENG-122",
+              title: "Old ticket",
+              state: {
+                name: "Backlog",
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    expect(issue.supersededBy).toBeUndefined();
+    expect(issue.supersedes).toEqual([
+      {
+        id: "issue-old",
+        identifier: "ENG-122",
+        title: "Old ticket",
+        state: "Backlog",
+      },
+    ]);
   });
 
   it("accepts legacy blocker payloads that still use sourceIssue", () => {

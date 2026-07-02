@@ -123,6 +123,14 @@ export function assembleShadowPlannerContext(
         blockedBy: issue.blockedBy
           .map((ref) => ref.identifier)
           .filter((identifier): identifier is string => identifier !== null),
+        advisoryRelations: {
+          relatesTo: issue.relatesTo?.flatMap(toRelationIdentifier) ?? [],
+          duplicates: issue.duplicates?.flatMap(toRelationIdentifier) ?? [],
+          supersedes: issue.supersedes?.flatMap(toRelationIdentifier) ?? [],
+          supersededBy: issue.supersededBy?.flatMap(toRelationIdentifier) ?? [],
+          parent: issue.parent?.identifier ?? null,
+          children: issue.children?.flatMap(toRelationIdentifier) ?? [],
+        },
         // SYMPH-874: carry the body + labels so the Manager reasons over real
         // ticket content (surface / area / intent), not just one-line titles.
         description: issue.description,
@@ -158,6 +166,10 @@ export function assembleShadowPlannerContext(
       ? {}
       : { health: input.triageHealthInput }),
   };
+}
+
+function toRelationIdentifier(ref: { identifier: string | null }): string[] {
+  return ref.identifier === null ? [] : [ref.identifier];
 }
 
 function readGroundingEvidence(
