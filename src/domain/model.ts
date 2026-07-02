@@ -83,10 +83,13 @@ export interface Issue {
   blockedByRelationTruncated?: boolean;
   relatesTo?: IssueRelationRef[];
   duplicates?: IssueRelationRef[];
+  duplicatedBy?: IssueRelationRef[];
   supersedes?: IssueRelationRef[];
   supersededBy?: IssueRelationRef[];
+  advisoryRelationsTruncated?: boolean;
   parent?: IssueRelationRef | null;
   children?: IssueRelationRef[];
+  childrenTruncated?: boolean;
   createdAt: string | null;
   updatedAt: string | null;
 }

@@ -38,6 +38,17 @@ describe("linear-normalize", () => {
               },
             },
           },
+          {
+            type: "duplicate",
+            relatedIssue: {
+              id: "issue-forward-dupe",
+              identifier: "ENG-102",
+              title: "Forward duplicate",
+              state: {
+                name: "Todo",
+              },
+            },
+          },
         ],
       },
       inverseRelations: {
@@ -136,6 +147,14 @@ describe("linear-normalize", () => {
         },
       ],
       duplicates: [
+        {
+          id: "issue-forward-dupe",
+          identifier: "ENG-102",
+          title: "Forward duplicate",
+          state: "Todo",
+        },
+      ],
+      duplicatedBy: [
         {
           id: "issue-dupe",
           identifier: "ENG-101",
@@ -250,6 +269,64 @@ describe("linear-normalize", () => {
     ]);
   });
 
+  it("preserves duplicate relation direction", () => {
+    const issue = normalizeLinearIssue({
+      id: "issue-1",
+      identifier: "ENG-123",
+      title: "Implement adapter",
+      state: {
+        name: "Todo",
+      },
+      relations: {
+        nodes: [
+          {
+            type: "duplicate",
+            relatedIssue: {
+              id: "issue-122",
+              identifier: "ENG-122",
+              title: "Original ticket",
+              state: {
+                name: "Backlog",
+              },
+            },
+          },
+        ],
+      },
+      inverseRelations: {
+        nodes: [
+          {
+            type: "duplicate",
+            issue: {
+              id: "issue-124",
+              identifier: "ENG-124",
+              title: "Duplicate of this ticket",
+              state: {
+                name: "Todo",
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    expect(issue.duplicates).toEqual([
+      {
+        id: "issue-122",
+        identifier: "ENG-122",
+        title: "Original ticket",
+        state: "Backlog",
+      },
+    ]);
+    expect(issue.duplicatedBy).toEqual([
+      {
+        id: "issue-124",
+        identifier: "ENG-124",
+        title: "Duplicate of this ticket",
+        state: "Todo",
+      },
+    ]);
+  });
+
   it("accepts legacy blocker payloads that still use sourceIssue", () => {
     const issue = normalizeLinearIssue({
       id: "issue-1",
@@ -312,6 +389,33 @@ describe("linear-normalize", () => {
 
     expect(issue.blockedBy).toEqual([]);
     expect(issue.blockedByRelationTruncated).toBe(true);
+  });
+
+  it("marks advisory relations and children as truncated when Linear reports another page", () => {
+    const issue = normalizeLinearIssue({
+      id: "issue-1",
+      identifier: "ENG-123",
+      title: "Implement adapter",
+      state: {
+        name: "Todo",
+      },
+      relations: {
+        nodes: [],
+        pageInfo: {
+          hasNextPage: true,
+        },
+      },
+      children: {
+        nodes: [],
+        pageInfo: {
+          hasNextPage: true,
+        },
+      },
+    });
+
+    expect(issue.advisoryRelationsTruncated).toBe(true);
+    expect(issue.childrenTruncated).toBe(true);
+    expect(issue.blockedByRelationTruncated).toBeUndefined();
   });
 
   it("returns null for non-integer priority and invalid timestamps", () => {

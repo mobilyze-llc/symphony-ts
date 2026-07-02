@@ -135,6 +135,14 @@ describe("assembleShadowPlannerContext", () => {
       duplicates: [
         { id: "d1", identifier: "SYMPH-3", title: "Duplicate", state: "Todo" },
       ],
+      duplicatedBy: [
+        {
+          id: "d2",
+          identifier: "SYMPH-8",
+          title: "Duplicates this",
+          state: "Todo",
+        },
+      ],
       supersedes: [
         { id: "s1", identifier: "SYMPH-4", title: "Old", state: "Todo" },
       ],
@@ -150,6 +158,8 @@ describe("assembleShadowPlannerContext", () => {
       children: [
         { id: "c1", identifier: "SYMPH-6", title: "Child", state: "Todo" },
       ],
+      advisoryRelationsTruncated: true,
+      childrenTruncated: true,
     };
     const context = assembleShadowPlannerContext({
       candidates: [related],
@@ -159,10 +169,13 @@ describe("assembleShadowPlannerContext", () => {
     expect(context.backlog[0]?.advisoryRelations).toEqual({
       relatesTo: ["SYMPH-2"],
       duplicates: ["SYMPH-3"],
+      duplicatedBy: ["SYMPH-8"],
       supersedes: ["SYMPH-4"],
       supersededBy: ["SYMPH-7"],
+      relationsTruncated: true,
       parent: "SYMPH-5",
       children: ["SYMPH-6"],
+      childrenTruncated: true,
     });
   });
 

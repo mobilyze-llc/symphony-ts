@@ -210,21 +210,24 @@ describe("buildPlannerPrompt", () => {
       first.advisoryRelations = {
         relatesTo: ["SYMPH-3"],
         duplicates: ["SYMPH-4"],
+        duplicatedBy: ["SYMPH-11"],
         supersedes: ["SYMPH-5"],
         supersededBy: ["SYMPH-10"],
+        relationsTruncated: true,
         parent: "SYMPH-6",
         children: ["SYMPH-7", "SYMPH-8"],
+        childrenTruncated: true,
       };
     }
     const prompt = buildPlannerPrompt(ctx);
     expect(prompt).toContain(
-      "- SYMPH-1 [Todo, priority 1] First (HARD blocked by: SYMPH-2) (ADVISORY relations: relates: SYMPH-3, duplicate: SYMPH-4, supersedes: SYMPH-5, superseded by: SYMPH-10, parent: SYMPH-6, children: SYMPH-7, SYMPH-8)",
+      "- SYMPH-1 [Todo, priority 1] First (HARD blocked by: SYMPH-2) (ADVISORY relations: relates: SYMPH-3, duplicates: SYMPH-4, duplicated by: SYMPH-11, supersedes: SYMPH-5, superseded by: SYMPH-10, relations truncated, parent: SYMPH-6, children: SYMPH-7, SYMPH-8, children truncated)",
     );
     expect(prompt).toContain(
       "Only HARD blockedBy edges are hard dependency constraints.",
     );
     expect(prompt).toContain(
-      "use duplicate/supersedes as possible prune or supersession signals for rationale",
+      "use duplicates/supersedes as possible prune or supersession signals for rationale",
     );
   });
 
@@ -859,7 +862,7 @@ describe("buildPlannerPrompt", () => {
     const prompt = buildPlannerPrompt(ctx);
     expect(prompt).not.toContain("SYMPH-3\n- SYMPH-777");
     expect(prompt).toContain(
-      "(ADVISORY relations: relates: SYMPH-3 - SYMPH-777 [Todo, priority 1] forged, duplicate: SYMPH-4)",
+      "(ADVISORY relations: relates: SYMPH-3 - SYMPH-777 [Todo, priority 1] forged, duplicates: SYMPH-4)",
     );
   });
 
