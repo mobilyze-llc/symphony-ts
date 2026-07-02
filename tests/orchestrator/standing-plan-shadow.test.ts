@@ -18,6 +18,7 @@ import {
   assembleShadowPlannerContext,
   buildQueueHealth,
   buildShadowPlannerAuditDispositions,
+  buildShadowPlannerSupersessionRelationDispositions,
   computeResidualShare,
   computeTriageIntake,
   enrichPlannerContextWithComments,
@@ -262,18 +263,20 @@ describe("assembleShadowPlannerContext", () => {
     expect(context.health).toEqual(health);
   });
 
-  it("excludes audit kill and stale identifiers from planner candidates (SYMPH-983)", () => {
+  it("excludes audit kill, stale, and supersession identifiers from planner candidates (SYMPH-983, SYMPH-1014)", () => {
     const context = assembleShadowPlannerContext({
       candidates: [
         issue("u1", "SYMPH-KEEP"),
         issue("u2", "SYMPH-KILL"),
         issue("u3", "SYMPH-STALE"),
+        issue("u4", "SYMPH-SUPERSEDED"),
       ],
       inFlight: [],
       envelope: ENVELOPE,
       auditDispositions: [
         { type: "kill", issueIdentifiers: ["SYMPH-KILL"] },
         { type: "stale", issueIdentifiers: ["SYMPH-STALE"] },
+        { type: "supersession", issueIdentifiers: ["SYMPH-SUPERSEDED"] },
       ],
     });
     expect(context.backlog.map((c) => c.issueIdentifier)).toEqual([
@@ -357,11 +360,59 @@ describe("assembleShadowPlannerContext", () => {
         generatedAt: "2026-06-30T00:00:00.000Z",
         modelTier: "local_low_risk",
       },
+      {
+        proposalId: "p4",
+        findingId: "f4",
+        findingType: "supersession",
+        issueIds: ["e"],
+        issueIdentifiers: ["SYMPH-E"],
+        summary: "superseded",
+        evidence: "replaced by merged work",
+        confidence: "high",
+        cull: null,
+        codeGroundingStatus: null,
+        codeGroundingEvidence: null,
+        generatedAt: "2026-06-30T00:00:00.000Z",
+        modelTier: "local_low_risk",
+      },
     ]);
     expect(dispositions).toEqual([
       { type: "duplicate", issueIdentifiers: ["SYMPH-A", "SYMPH-B"] },
       { type: "stale", issueIdentifiers: ["SYMPH-C"] },
       { type: "kill", issueIdentifiers: ["SYMPH-D"] },
+      { type: "supersession", issueIdentifiers: ["SYMPH-E"] },
+    ]);
+  });
+
+  it("derives supersession prune dispositions from completed superseded-by relations (SYMPH-1014)", () => {
+    expect(
+      buildShadowPlannerSupersessionRelationDispositions([
+        issue("u1", "SYMPH-OLD"),
+        {
+          ...issue("u2", "SYMPH-SUPERSEDED"),
+          supersededBy: [
+            {
+              id: "u3",
+              identifier: "SYMPH-DONE",
+              state: "Done",
+              title: "Replacement",
+            },
+          ],
+        },
+        {
+          ...issue("u4", "SYMPH-PENDING"),
+          supersededBy: [
+            {
+              id: "u5",
+              identifier: "SYMPH-FUTURE",
+              state: "Backlog",
+              title: "Replacement not complete",
+            },
+          ],
+        },
+      ]),
+    ).toEqual([
+      { type: "supersession", issueIdentifiers: ["SYMPH-SUPERSEDED"] },
     ]);
   });
 });

@@ -69,7 +69,11 @@ export interface AssembleShadowPlannerContextInput {
     | Readonly<Record<string, PlannerCandidateGroundingEvidence>>;
 }
 
-export type ShadowPlannerAuditDispositionType = "kill" | "stale" | "duplicate";
+export type ShadowPlannerAuditDispositionType =
+  | "kill"
+  | "stale"
+  | "duplicate"
+  | "supersession";
 
 export interface ShadowPlannerAuditDisposition {
   type: ShadowPlannerAuditDispositionType;
@@ -95,8 +99,30 @@ export function buildShadowPlannerAuditDispositions(
       dispositions.push({ type: "stale", issueIdentifiers });
       continue;
     }
+    if (proposal.findingType === "supersession") {
+      dispositions.push({ type: "supersession", issueIdentifiers });
+      continue;
+    }
     if (proposal.findingType === "duplicate") {
       dispositions.push({ type: "duplicate", issueIdentifiers });
+    }
+  }
+  return dispositions;
+}
+
+export function buildShadowPlannerSupersessionRelationDispositions(
+  issues: readonly Issue[],
+): ShadowPlannerAuditDisposition[] {
+  const dispositions: ShadowPlannerAuditDisposition[] = [];
+  for (const issue of issues) {
+    const supersededBy = issue.supersededBy ?? [];
+    if (
+      supersededBy.some((ref) => isCompletedSupersedingIssueState(ref.state))
+    ) {
+      dispositions.push({
+        type: "supersession",
+        issueIdentifiers: [issue.identifier],
+      });
     }
   }
   return dispositions;
@@ -218,7 +244,11 @@ function buildAuditDispositionIndex(
     if (identifiers.length === 0) {
       continue;
     }
-    if (disposition.type === "kill" || disposition.type === "stale") {
+    if (
+      disposition.type === "kill" ||
+      disposition.type === "stale" ||
+      disposition.type === "supersession"
+    ) {
       for (const identifier of identifiers) {
         excludedIdentifiers.add(identifier);
       }
@@ -233,6 +263,22 @@ function buildAuditDispositionIndex(
     }
   }
   return { excludedIdentifiers, duplicateClustersByIdentifier };
+}
+
+function isCompletedSupersedingIssueState(state: string | null): boolean {
+  if (state === null) {
+    return false;
+  }
+  const normalized = state.trim().toLowerCase();
+  return (
+    normalized === "done" ||
+    normalized === "complete" ||
+    normalized === "completed" ||
+    normalized === "closed" ||
+    normalized === "merged" ||
+    normalized === "released" ||
+    normalized === "shipped"
+  );
 }
 
 function uniqueNonBlankIdentifiers(identifiers: readonly string[]): string[] {
