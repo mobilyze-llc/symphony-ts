@@ -401,10 +401,10 @@ export class ReviewAggregator {
       ];
       await capture.client.record({
         triage: review.triage,
-        laneArtifacts: input.laneArtifacts.map((lane) => ({
-          reviewer: lane.reviewer,
-          markdown: lane.markdown,
-        })),
+        laneArtifacts: ledgerLaneArtifactsForReview(
+          input.laneArtifacts,
+          review,
+        ),
         blockingFps,
         ...(crossExamVerdicts.length > 0 ? { crossExamVerdicts } : {}),
         ...(capture.runId === undefined ? {} : { runId: capture.runId }),
@@ -678,6 +678,56 @@ function normalizeSymptom(value: string): string {
 
 function uniqueInEncounterOrder(values: readonly string[]): string[] {
   return [...new Set(values.filter((value) => value !== ""))];
+}
+
+function ledgerLaneArtifactsForReview(
+  laneArtifacts: readonly ReviewLaneArtifact[],
+  review: AggregatedReview,
+): ReviewLaneArtifact[] {
+  const base = laneArtifacts.map((lane) => ({
+    reviewer: lane.reviewer,
+    markdown: lane.markdown,
+  }));
+  const synthetic = [...review.triage.escalate, ...review.triage.track].flatMap(
+    (finding) => syntheticCoalescedLaneArtifacts(finding),
+  );
+  return synthetic.length === 0 ? base : [...base, ...synthetic];
+}
+
+function syntheticCoalescedLaneArtifacts(
+  finding: TriageFinding,
+): ReviewLaneArtifact[] {
+  const reviewers = compatReviewers(finding);
+  if (reviewers.length <= 1) {
+    return [];
+  }
+  // MOB-681: Crucible RQL currently recovers lane raisers by fp only. Replay the
+  // coalesced finding once per reviewer so wording-only duplicates retain raised_by.
+  return reviewers.map((reviewer) => ({
+    reviewer,
+    markdown: [
+      "## Verdict",
+      finding.severity.toLowerCase() === "track" ? "PASS" : "CHANGES_REQUESTED",
+      "",
+      "## Findings",
+      `- [${finding.severity}] ${finding.location} - ${finding.summary}`,
+    ].join("\n"),
+  }));
+}
+
+function compatReviewers(finding: TriageFinding): string[] {
+  const value = (finding as TriageFinding & { reviewers?: unknown }).reviewers;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return [
+    ...new Set(
+      value.filter(
+        (reviewer): reviewer is string =>
+          typeof reviewer === "string" && reviewer.trim() !== "",
+      ),
+    ),
+  ];
 }
 
 function withCurrentSpineRound(input: {

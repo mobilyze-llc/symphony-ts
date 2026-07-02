@@ -130,6 +130,139 @@ describe("standing-plan store", () => {
     }
   });
 
+  it("round-trips premise trail and refreshes findings without rotating the revision", async () => {
+    const root = tmpRoot();
+    try {
+      const first = await recordPlanRevision(
+        root,
+        {
+          ...body([lookahead("b1", "SYMPH-1")]),
+          premises: [
+            {
+              decisionAnchor: "SYMPH-1",
+              kind: "verifiable",
+              statement: "Candidate is in Backlog.",
+            },
+          ],
+        },
+        {
+          planId: "plan-1",
+          createdAt: "2026-06-18T00:00:00.000Z",
+          findings: [
+            {
+              title: "Scheduled ineligible candidate SYMPH-1 (Cancelled)",
+              planAnchor: "b1:SYMPH-1",
+              severity: "P2",
+            },
+          ],
+        },
+      );
+
+      expect(first.recorded).toBe(true);
+      expect(first.plan.premises).toEqual([
+        {
+          decisionAnchor: "SYMPH-1",
+          kind: "verifiable",
+          statement: "Candidate is in Backlog.",
+        },
+      ]);
+      expect(first.plan.findings).toEqual([
+        {
+          title: "Scheduled ineligible candidate SYMPH-1 (Cancelled)",
+          planAnchor: "b1:SYMPH-1",
+          severity: "P2",
+        },
+      ]);
+      expect((await loadStandingPlan(root))?.findings).toEqual(
+        first.plan.findings,
+      );
+
+      const sameStructure = await recordPlanRevision(
+        root,
+        {
+          ...body([lookahead("b1", "SYMPH-1")]),
+          premises: [
+            {
+              decisionAnchor: "SYMPH-1",
+              kind: "judgment",
+              statement: "Different report-only premise.",
+            },
+          ],
+        },
+        {
+          createdAt: "2026-06-18T00:05:00.000Z",
+          findings: [
+            {
+              title: "Different report-only finding",
+              planAnchor: "b1",
+              severity: "Track",
+            },
+          ],
+        },
+      );
+
+      expect(sameStructure.plan.revision).toBe(1);
+      expect(sameStructure.recorded).toBe(true);
+      expect(sameStructure.plan.findings).toEqual([
+        {
+          title: "Different report-only finding",
+          planAnchor: "b1",
+          severity: "Track",
+        },
+      ]);
+      expect((await loadStandingPlan(root))?.findings).toEqual(
+        sameStructure.plan.findings,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("can return to a previously seen report state for the same structural plan", async () => {
+    const root = tmpRoot();
+    const reportA = {
+      title: "Report A",
+      planAnchor: "b1",
+      severity: "Track" as const,
+    };
+    const reportB = {
+      title: "Report B",
+      planAnchor: "b1",
+      severity: "Track" as const,
+    };
+    try {
+      await recordPlanRevision(root, body([lookahead("b1", "SYMPH-1")]), {
+        planId: "plan-1",
+        createdAt: "2026-06-18T00:00:00.000Z",
+        findings: [reportA],
+      });
+
+      await recordPlanRevision(root, body([lookahead("b1", "SYMPH-1")]), {
+        createdAt: "2026-06-18T00:05:00.000Z",
+        findings: [reportB],
+      });
+      await recordPlanRevision(root, body([lookahead("b1", "SYMPH-1")]), {
+        createdAt: "2026-06-18T00:10:00.000Z",
+        findings: [reportA],
+      });
+      const final = await recordPlanRevision(
+        root,
+        body([lookahead("b1", "SYMPH-1")]),
+        {
+          createdAt: "2026-06-18T00:15:00.000Z",
+          findings: [reportB],
+        },
+      );
+
+      expect(final.recorded).toBe(true);
+      expect(final.plan.revision).toBe(1);
+      expect(final.plan.findings).toEqual([reportB]);
+      expect((await loadStandingPlan(root))?.findings).toEqual([reportB]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("rotates the revision when only dependency edges change", async () => {
     const root = tmpRoot();
     try {

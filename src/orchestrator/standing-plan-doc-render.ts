@@ -1,6 +1,7 @@
 import type {
   PlanBatch,
   PlanDependencyEdge,
+  PlanReviewFinding,
   StandingPlan,
   StandingPlanJournal,
 } from "../domain/standing-plan.js";
@@ -105,6 +106,11 @@ export function renderStandingPlanControlDoc(
   const waveLines = renderExecutionWaves(plan);
   lines.push(waveLines.length === 0 ? "- (none)" : waveLines.join("\n"));
 
+  const reviewFindingLines = renderReviewFindings(plan.findings ?? []);
+  if (reviewFindingLines.length > 0) {
+    lines.push("", "## Review findings", ...reviewFindingLines);
+  }
+
   lines.push("", "## Options");
   lines.push(
     `_Comment on an option line below to act (operator-gated; bound to revision ${plan.revision})._`,
@@ -134,6 +140,26 @@ export function renderStandingPlanControlDoc(
   );
 
   return lines.join("\n");
+}
+
+function renderReviewFindings(
+  findings: readonly PlanReviewFinding[],
+): string[] {
+  if (findings.length === 0) {
+    return [];
+  }
+  const lines: string[] = [];
+  for (const severity of ["P1", "P2", "Track", "Dismissed"] as const) {
+    const group = findings.filter((finding) => finding.severity === severity);
+    if (group.length === 0) {
+      continue;
+    }
+    lines.push(`### ${severity}`);
+    for (const finding of group) {
+      lines.push(`- ${finding.planAnchor}: ${finding.title}`);
+    }
+  }
+  return lines;
 }
 
 function renderExecutionWaves(plan: StandingPlan): string[] {

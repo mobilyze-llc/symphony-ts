@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import type { PlannerRunResult } from "../../src/agent/triage-planner.js";
+import { runTriagePlanner } from "../../src/agent/triage-planner.js";
 import {
   DEFAULT_MANAGER_PLAN_IN_FLIGHT_STATES,
   MANAGER_PLAN_RUNTIME_STATE_BASE_URL_ENV,
@@ -22,6 +23,7 @@ import {
   GROUNDING_EXTRACTOR_ROUTE,
   type GroundingExtractionResult,
 } from "../../src/orchestrator/grounding-extractor.js";
+import { assembleShadowPlannerContext } from "../../src/orchestrator/standing-plan-shadow.js";
 import { PORTFOLIO_TAXONOMY_PROJECTS } from "../../src/portfolio/taxonomy.js";
 
 function issue(
@@ -1030,7 +1032,7 @@ describe("runManagerPlanCli", () => {
     >(async (_workspaceRoot, body, options) => ({
       recorded: true,
       plan: {
-        planId: options.planId,
+        planId: options.planId ?? "plan-1",
         revision: 1,
         contentHash: "hash",
         envelope: body.envelope,
@@ -1038,6 +1040,8 @@ describe("runManagerPlanCli", () => {
         dependencyEdges: body.dependencyEdges,
         options: body.options,
         rationale: body.rationale,
+        premises: body.premises ?? [],
+        findings: options.findings ?? [],
         createdAt: options.createdAt,
         updatedAt: options.createdAt,
       },
@@ -1082,6 +1086,87 @@ describe("runManagerPlanCli", () => {
         join(outDir, "manager-plan-store"),
       );
       expect(out()).toContain("Persisted revision 1");
+    } finally {
+      await rm(outDir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists tier-1 findings from the CLI without mutating the planned body", async () => {
+    const { io } = captureIo();
+    const outDir = await mkdtemp(join(tmpdir(), "manager-plan-tier1-"));
+    const candidates = [issue("u1", "MOB-1", 2, { state: "Cancelled" })];
+    const persistPlanRevision = vi.fn<
+      NonNullable<ManagerPlanCliDependencies["persistPlanRevision"]>
+    >(async (_workspaceRoot, body, options) => ({
+      recorded: true,
+      plan: {
+        planId: options.planId ?? "plan-1",
+        revision: 1,
+        contentHash: "hash",
+        envelope: body.envelope,
+        batches: body.batches,
+        dependencyEdges: body.dependencyEdges,
+        options: body.options,
+        rationale: body.rationale,
+        premises: body.premises ?? [],
+        findings: options.findings ?? [],
+        createdAt: options.createdAt,
+        updatedAt: options.createdAt,
+      },
+    }));
+
+    try {
+      const expectedContext = assembleShadowPlannerContext({
+        candidates,
+        inFlight: [],
+        envelope: {
+          version: 1,
+          concurrencyCeiling: 3,
+          allowedRisk: "medium",
+          allowedModes: ["parallel-isolated", "canary-chain"],
+        },
+      });
+      const expected = await runTriagePlanner(expectedContext, {
+        runClaude: okRunner(),
+      });
+      expect(expected.status).toBe("ok");
+      if (expected.status !== "ok") {
+        throw new Error("expected ok planner result");
+      }
+
+      const code = await runManagerPlanCli(
+        [
+          "--team",
+          "MOB",
+          "--state",
+          "Cancelled",
+          "--out-dir",
+          outDir,
+          "--persist",
+          "--no-comment-enrichment",
+        ],
+        {
+          io,
+          env: {},
+          loadCandidates: async () => candidates,
+          loadInFlight: async () => [],
+          createPlannerRunner: okRunner,
+          persistPlanRevision,
+          now: () => new Date("2026-06-30T13:15:03.000Z"),
+        },
+      );
+
+      expect(code).toBe(0);
+      expect(JSON.stringify(persistPlanRevision.mock.calls[0]?.[1])).toBe(
+        JSON.stringify(expected.body),
+      );
+      expect(persistPlanRevision.mock.calls[0]?.[2].findings).toEqual([
+        {
+          title: "Scheduled ineligible candidate MOB-1 (Cancelled)",
+          planAnchor: `${expected.body.batches[0]?.batchId}:MOB-1`,
+          severity: "P2",
+        },
+      ]);
     } finally {
       await rm(outDir, { recursive: true, force: true });
     }
