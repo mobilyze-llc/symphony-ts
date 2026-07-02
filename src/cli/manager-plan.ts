@@ -1306,15 +1306,13 @@ async function resolveManagerPlanGroundingTarget(
   };
 }
 
-function toPlannerCandidateGroundingEvidence(
+export function toPlannerCandidateGroundingEvidence(
   result: GroundingExtractionResult,
   wallClockMs: number,
   docWarnings: readonly string[] = [],
 ): PlannerCandidateGroundingEvidence {
   const reportStatus = result.groundingReport?.status;
-  const ungrounded =
-    reportStatus === "ungrounded" ||
-    result.claims.some((claim) => claim.status === "ungrounded");
+  const ungrounded = reportStatus === "ungrounded";
   return {
     status: ungrounded ? "ungrounded" : "grounded",
     reason: ungrounded
@@ -1373,10 +1371,11 @@ function readManagerPlanGroundingRepoScope(
   return null;
 }
 
-function inferManagerPlanGroundingRepoScope(
+export function inferManagerPlanGroundingRepoScope(
   repoUrl: string,
 ): "symphony" | "non_symphony" {
-  return /(?:^|[/:])symphony(?:-ts)?(?:\.git)?$/i.test(repoUrl.trim())
+  const normalizedRepoUrl = repoUrl.trim().replace(/\/+$/u, "");
+  return /(?:^|[/:])symphony(?:-ts)?(?:\.git)?$/i.test(normalizedRepoUrl)
     ? "symphony"
     : "non_symphony";
 }

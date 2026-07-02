@@ -12,10 +12,16 @@ import {
   type ManagerPlanCliDependencies,
   ManagerPlanCliUsageError,
   type ManagerPlanGroundingInput,
+  inferManagerPlanGroundingRepoScope,
   parseManagerPlanCliArgs,
   runManagerPlanCli,
+  toPlannerCandidateGroundingEvidence,
 } from "../../src/cli/manager-plan.js";
 import type { Issue } from "../../src/domain/model.js";
+import {
+  GROUNDING_EXTRACTOR_ROUTE,
+  type GroundingExtractionResult,
+} from "../../src/orchestrator/grounding-extractor.js";
 import { PORTFOLIO_TAXONOMY_PROJECTS } from "../../src/portfolio/taxonomy.js";
 
 function issue(
@@ -203,6 +209,29 @@ describe("parseManagerPlanCliArgs", () => {
     expect(opts.plannerGroundingRepoScope).toBe("symphony");
   });
 
+  it("infers Symphony planner grounding scope for common git URL forms (SYMPH-1017 council)", () => {
+    expect(
+      inferManagerPlanGroundingRepoScope(
+        "https://github.com/mobilyze-llc/symphony-ts/",
+      ),
+    ).toBe("symphony");
+    expect(
+      inferManagerPlanGroundingRepoScope(
+        "https://github.com/mobilyze-llc/symphony-ts.git/",
+      ),
+    ).toBe("symphony");
+    expect(
+      inferManagerPlanGroundingRepoScope(
+        "git@github.com:mobilyze-llc/symphony.git",
+      ),
+    ).toBe("symphony");
+    expect(
+      inferManagerPlanGroundingRepoScope(
+        "https://github.com/mobilyze-llc/not-symphony-ts.git/",
+      ),
+    ).toBe("non_symphony");
+  });
+
   it("parses --out-dir for controller-side prompt evidence artifacts (SYMPH-961)", () => {
     const opts = parseManagerPlanCliArgs([
       "--project",
@@ -270,6 +299,131 @@ describe("parseManagerPlanCliArgs", () => {
   it("rejects an unknown flag", () => {
     expect(() => parseManagerPlanCliArgs(["--frobnicate"])).toThrow(
       ManagerPlanCliUsageError,
+    );
+  });
+});
+
+describe("planner grounding helpers", () => {
+  it("keeps verified evidence visible when only some claims are ungrounded (SYMPH-1017 council)", () => {
+    const result: GroundingExtractionResult = {
+      route: GROUNDING_EXTRACTOR_ROUTE,
+      digest: {
+        text: "Mixed evidence should still guide the planner.",
+        charLimit: 2_000,
+        truncated: false,
+        status: "unverified",
+      },
+      claims: [
+        {
+          id: "claim-verified",
+          sourceId: "body",
+          kind: "path_symbol",
+          text: "src/agent/triage-planner.ts",
+          summary: "Planner prompt rendering exists",
+          status: "verified",
+          citations: [
+            {
+              checkoutId: "checkout-1",
+              commitSha: "abc123",
+              path: "src/agent/triage-planner.ts",
+              lineRange: [10, 12],
+              contentHash: "hash",
+              matchedSpan: "buildPlannerPrompt",
+            },
+          ],
+          missing: [],
+        },
+        {
+          id: "claim-ungrounded",
+          sourceId: "body",
+          kind: "behavioral",
+          text: "Historical deployment note",
+          summary: "No code citation found",
+          status: "ungrounded",
+          citations: [],
+          missing: ["No matching repo evidence"],
+        },
+      ],
+      units: [],
+      groundingReport: {
+        generatedAt: "2026-07-01T00:00:00.000Z",
+        status: "verified",
+        checkout: {
+          checkoutId: "checkout-1",
+          path: "/tmp/checkout-1",
+          commitSha: "abc123",
+          repoUrl: "git@github.com:mobilyze-llc/symphony-ts.git",
+        },
+        entries: [],
+        cleanup: {
+          leaseReleased: true,
+          checkoutPurged: false,
+          dirtyState: null,
+        },
+        warnings: ["grounding report warning"],
+      },
+      extractorCallCount: 1,
+      warnings: ["extractor warning"],
+    };
+
+    const evidence = toPlannerCandidateGroundingEvidence(result, 37, [
+      "doc warning",
+    ]);
+
+    expect(evidence.status).toBe("grounded");
+    expect(evidence.reason).toBeNull();
+    expect(evidence.claims.map((claim) => claim.status)).toEqual([
+      "verified",
+      "ungrounded",
+    ]);
+    expect(evidence.claims[0]?.citations[0]?.path).toBe(
+      "src/agent/triage-planner.ts",
+    );
+    expect(evidence.warnings).toEqual([
+      "doc warning",
+      "extractor warning",
+      "grounding report warning",
+    ]);
+  });
+
+  it("marks the whole candidate ungrounded only when the grounding report is ungrounded", () => {
+    const evidence = toPlannerCandidateGroundingEvidence(
+      {
+        route: GROUNDING_EXTRACTOR_ROUTE,
+        digest: {
+          text: "Repository outside supported scope.",
+          charLimit: 2_000,
+          truncated: false,
+          status: "unverified",
+        },
+        claims: [],
+        units: [],
+        groundingReport: {
+          generatedAt: "2026-07-01T00:00:00.000Z",
+          status: "ungrounded",
+          checkout: {
+            checkoutId: null,
+            path: null,
+            commitSha: "abc123",
+            repoUrl: "git@github.com:mobilyze-llc/other.git",
+          },
+          entries: [],
+          cleanup: {
+            leaseReleased: true,
+            checkoutPurged: true,
+            dirtyState: null,
+          },
+          warnings: [],
+        },
+        extractorCallCount: 1,
+        warnings: [],
+      },
+      12,
+    );
+
+    expect(evidence.status).toBe("ungrounded");
+    expect(evidence.reason).toContain(
+      "outside the v1 Symphony grounding scope",
     );
   });
 });
