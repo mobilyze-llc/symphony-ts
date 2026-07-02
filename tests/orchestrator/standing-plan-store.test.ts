@@ -218,6 +218,51 @@ describe("standing-plan store", () => {
     }
   });
 
+  it("can return to a previously seen report state for the same structural plan", async () => {
+    const root = tmpRoot();
+    const reportA = {
+      title: "Report A",
+      planAnchor: "b1",
+      severity: "Track" as const,
+    };
+    const reportB = {
+      title: "Report B",
+      planAnchor: "b1",
+      severity: "Track" as const,
+    };
+    try {
+      await recordPlanRevision(root, body([lookahead("b1", "SYMPH-1")]), {
+        planId: "plan-1",
+        createdAt: "2026-06-18T00:00:00.000Z",
+        findings: [reportA],
+      });
+
+      await recordPlanRevision(root, body([lookahead("b1", "SYMPH-1")]), {
+        createdAt: "2026-06-18T00:05:00.000Z",
+        findings: [reportB],
+      });
+      await recordPlanRevision(root, body([lookahead("b1", "SYMPH-1")]), {
+        createdAt: "2026-06-18T00:10:00.000Z",
+        findings: [reportA],
+      });
+      const final = await recordPlanRevision(
+        root,
+        body([lookahead("b1", "SYMPH-1")]),
+        {
+          createdAt: "2026-06-18T00:15:00.000Z",
+          findings: [reportB],
+        },
+      );
+
+      expect(final.recorded).toBe(true);
+      expect(final.plan.revision).toBe(1);
+      expect(final.plan.findings).toEqual([reportB]);
+      expect((await loadStandingPlan(root))?.findings).toEqual([reportB]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("rotates the revision when only dependency edges change", async () => {
     const root = tmpRoot();
     try {

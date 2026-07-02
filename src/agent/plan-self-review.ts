@@ -7,14 +7,14 @@ import {
 import type { PlanBody } from "../orchestrator/standing-plan-supersession.js";
 import type { PlannerContext, PlannerRunResult } from "./triage-planner.js";
 
+const SELF_REVIEW_FINDING_SCHEMA = z.object({
+  title: z.string().trim().min(1),
+  planAnchor: z.string().trim().min(1),
+  severity: z.enum(PLAN_REVIEW_FINDING_SEVERITIES),
+});
+
 const SELF_REVIEW_OUTPUT_SCHEMA = z.object({
-  findings: z.array(
-    z.object({
-      title: z.string().min(1),
-      planAnchor: z.string().min(1),
-      severity: z.enum(PLAN_REVIEW_FINDING_SEVERITIES),
-    }),
-  ),
+  findings: z.array(z.unknown()),
 });
 
 export interface PlanSelfReviewDeps {
@@ -80,7 +80,13 @@ export function parsePlanSelfReviewFindings(
     return [];
   }
   const result = SELF_REVIEW_OUTPUT_SCHEMA.safeParse(parsed);
-  return result.success ? result.data.findings : [];
+  if (!result.success) {
+    return [];
+  }
+  return result.data.findings.flatMap((finding) => {
+    const parsedFinding = SELF_REVIEW_FINDING_SCHEMA.safeParse(finding);
+    return parsedFinding.success ? [parsedFinding.data] : [];
+  });
 }
 
 function extractFencedJson(markdown: string): string | null {

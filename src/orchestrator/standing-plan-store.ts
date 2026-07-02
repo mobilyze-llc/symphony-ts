@@ -105,7 +105,10 @@ export async function recordPlanRevision(
       if (reportUpdate !== null) {
         const appended = appendStandingPlanJournalEntry(journal, {
           kind: "plan_revision",
-          idempotencyKey: `${reportUpdate.planId}:rev:${reportUpdate.revision}:report:${planReportHash(reportUpdate)}`,
+          idempotencyKey: reportRefreshIdempotencyKey(
+            reportUpdate,
+            latestPlanRevisionEntry(journal),
+          ),
           timestamp: options.createdAt,
           planId: reportUpdate.planId,
           revision: reportUpdate,
@@ -198,6 +201,13 @@ function planReportHash(input: {
       }),
     )
     .digest("hex");
+}
+
+function reportRefreshIdempotencyKey(
+  revision: PlanRevision,
+  latest: PlanRevisionJournalEntry | null,
+): string {
+  return `${revision.planId}:rev:${revision.revision}:report:${latest?.sequence ?? 0}:${planReportHash(revision)}`;
 }
 
 /**
