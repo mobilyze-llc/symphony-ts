@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import {
+  type PlannerCandidateGroundingEvidence,
   type PlannerContext,
   type PlannerInFlight,
   type PlannerRunResult,
@@ -17,6 +18,10 @@ import {
   runTriagePlanner,
 } from "../agent/triage-planner.js";
 import {
+  DEFAULT_CODE_GROUNDING_BASE_DIR,
+  DEFAULT_CODE_GROUNDING_MATERIALIZATION_TIMEOUT_MS,
+  DEFAULT_CODE_GROUNDING_MAX_CHECKOUTS_PER_REPO,
+  DEFAULT_CODE_GROUNDING_TTL_MS,
   DEFAULT_LINEAR_ENDPOINT,
   DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_CANDIDATES,
   DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_COMMENTS,
@@ -32,6 +37,12 @@ import {
   computeDependencyWaves,
   resolveStandingPlanEnvelope,
 } from "../domain/standing-plan.js";
+import type { CodeGroundingTarget } from "../orchestrator/code-grounding.js";
+import { followGroundingDocs } from "../orchestrator/doc-follower.js";
+import {
+  type GroundingExtractionResult,
+  extractGroundingEvidence,
+} from "../orchestrator/grounding-extractor.js";
 import {
   STANDING_PLAN_ID,
   assembleShadowPlannerContext,
@@ -48,6 +59,7 @@ import {
   type LinearProjectReference,
   LinearTrackerClient,
 } from "../tracker/linear-client.js";
+import { fetchLinearDocumentContent } from "../tracker/linear-documents.js";
 
 // ---------------------------------------------------------------------------
 // symphony-manager-plan (SYMPH-837) — run the Queue Triage v2 backlog Manager
@@ -74,6 +86,12 @@ export const MANAGER_PLAN_RUNTIME_STATE_BASE_URL_ENV =
   "SYMPHONY_MANAGER_PLAN_RUNTIME_STATE_BASE_URL";
 export const MANAGER_PLAN_GITHUB_REPO_ENV = "GITHUB_REPOSITORY";
 export const MANAGER_PLAN_REPO_URL_ENV = "REPO_URL";
+export const MANAGER_PLAN_GROUNDING_REPO_URL_ENV =
+  "SYMPHONY_MANAGER_PLAN_GROUNDING_REPO_URL";
+export const MANAGER_PLAN_GROUNDING_COMMIT_ENV =
+  "SYMPHONY_MANAGER_PLAN_GROUNDING_COMMIT";
+export const MANAGER_PLAN_GROUNDING_REPO_SCOPE_ENV =
+  "SYMPHONY_MANAGER_PLAN_GROUNDING_REPO_SCOPE";
 const MANAGER_PLAN_RUNTIME_STATE_FETCH_TIMEOUT_MS = 10_000;
 const MANAGER_PLAN_RECENTLY_MERGED_LIMIT = 20;
 const execFileAsync = promisify(execFile);
@@ -106,6 +124,10 @@ export interface ManagerPlanCliOptions {
   githubRepo: string | null;
   persist: boolean;
   promptOnly: boolean;
+  plannerGrounding: boolean;
+  plannerGroundingRepoUrl: string | null;
+  plannerGroundingCommit: string | null;
+  plannerGroundingRepoScope: "symphony" | "non_symphony" | null;
   json: boolean;
   noCanary: boolean;
   help: boolean;
@@ -159,6 +181,20 @@ export type CreateManagerPlanPlannerRunner = (
   input: ManagerPlanPlannerRunnerInput,
 ) => (prompt: string) => Promise<PlannerRunResult>;
 
+export interface ManagerPlanGroundingInput {
+  context: PlannerContext;
+  candidates: readonly Issue[];
+  env: NodeJS.ProcessEnv;
+  now: () => Date;
+  repoUrl: string | null;
+  commitSha: string | null;
+  repoScope: "symphony" | "non_symphony" | null;
+}
+
+export interface ManagerPlanGroundingResult {
+  context: PlannerContext;
+}
+
 export interface ManagerPlanCliDependencies {
   env?: NodeJS.ProcessEnv;
   io?: ManagerPlanCliIo;
@@ -189,6 +225,10 @@ export interface ManagerPlanCliDependencies {
   ) => Promise<LinearIssueComment[]>;
   /** Defaults to the production cmux/Opus runner; injected in tests. */
   createPlannerRunner?: CreateManagerPlanPlannerRunner;
+  /** Defaults to local report-only code grounding when --planner-grounding is set. */
+  groundPlannerContext?: (
+    input: ManagerPlanGroundingInput,
+  ) => Promise<ManagerPlanGroundingResult>;
   now?: () => Date;
 }
 
@@ -219,6 +259,10 @@ export function parseManagerPlanCliArgs(
   let githubRepo: string | null = null;
   let persist = false;
   let promptOnly = false;
+  let plannerGrounding = false;
+  let plannerGroundingRepoUrl: string | null = null;
+  let plannerGroundingCommit: string | null = null;
+  let plannerGroundingRepoScope: "symphony" | "non_symphony" | null = null;
   let json = false;
   let noCanary = false;
   let help = false;
@@ -235,6 +279,10 @@ export function parseManagerPlanCliArgs(
     }
     if (token === "--prompt-only") {
       promptOnly = true;
+      continue;
+    }
+    if (token === "--planner-grounding") {
+      plannerGrounding = true;
       continue;
     }
     if (token === "--json") {
@@ -306,6 +354,22 @@ export function parseManagerPlanCliArgs(
       case "--github-repo":
         githubRepo = readValue("--github-repo");
         break;
+      case "--planner-grounding-repo-url":
+        plannerGroundingRepoUrl = readValue("--planner-grounding-repo-url");
+        break;
+      case "--planner-grounding-commit":
+        plannerGroundingCommit = readValue("--planner-grounding-commit");
+        break;
+      case "--planner-grounding-repo-scope": {
+        const value = readValue("--planner-grounding-repo-scope");
+        if (value !== "symphony" && value !== "non_symphony") {
+          throw new ManagerPlanCliUsageError(
+            "--planner-grounding-repo-scope must be symphony or non_symphony",
+          );
+        }
+        plannerGroundingRepoScope = value;
+        break;
+      }
       case "--in-flight-state":
         inFlightStates.push(readValue("--in-flight-state"));
         break;
@@ -342,6 +406,10 @@ export function parseManagerPlanCliArgs(
     githubRepo,
     persist,
     promptOnly,
+    plannerGrounding,
+    plannerGroundingRepoUrl,
+    plannerGroundingCommit,
+    plannerGroundingRepoScope,
     json,
     noCanary,
     help,
@@ -400,6 +468,24 @@ export async function runManagerPlanCli(
   }
   if (options.githubRepo !== null && options.githubRepo.trim() === "") {
     io.stderr(`--github-repo must be non-empty.\n${renderUsage()}`);
+    return MANAGER_PLAN_EXIT.usage;
+  }
+  if (
+    options.plannerGroundingRepoUrl !== null &&
+    options.plannerGroundingRepoUrl.trim() === ""
+  ) {
+    io.stderr(
+      `--planner-grounding-repo-url must be non-empty.\n${renderUsage()}`,
+    );
+    return MANAGER_PLAN_EXIT.usage;
+  }
+  if (
+    options.plannerGroundingCommit !== null &&
+    options.plannerGroundingCommit.trim() === ""
+  ) {
+    io.stderr(
+      `--planner-grounding-commit must be non-empty.\n${renderUsage()}`,
+    );
     return MANAGER_PLAN_EXIT.usage;
   }
   if (options.persist && options.promptOnly) {
@@ -602,6 +688,36 @@ export async function runManagerPlanCli(
       fetchIssueComments,
     });
     context = enriched.context;
+  }
+
+  if (options.plannerGrounding && context.backlog.length > 0) {
+    const groundPlannerContext =
+      dependencies.groundPlannerContext ?? defaultGroundPlannerContext;
+    try {
+      const grounded = await groundPlannerContext({
+        context,
+        candidates: portfolioPartition.eligible,
+        env,
+        now,
+        repoUrl:
+          options.plannerGroundingRepoUrl ??
+          env[MANAGER_PLAN_GROUNDING_REPO_URL_ENV] ??
+          env[MANAGER_PLAN_REPO_URL_ENV] ??
+          null,
+        commitSha:
+          options.plannerGroundingCommit ??
+          env[MANAGER_PLAN_GROUNDING_COMMIT_ENV] ??
+          null,
+        repoScope:
+          options.plannerGroundingRepoScope ??
+          readManagerPlanGroundingRepoScope(env) ??
+          null,
+      });
+      context = grounded.context;
+    } catch (error) {
+      io.stderr(`Failed to ground planner candidates: ${formatError(error)}\n`);
+      return MANAGER_PLAN_EXIT.loadFailed;
+    }
   }
 
   if (options.promptOnly) {
@@ -1039,6 +1155,231 @@ function defaultCreatePlannerRunner(
     });
 }
 
+async function defaultGroundPlannerContext(
+  input: ManagerPlanGroundingInput,
+): Promise<ManagerPlanGroundingResult> {
+  const target = await resolveManagerPlanGroundingTarget(input);
+  const candidatesById = new Map(
+    input.candidates.map((issue) => [issue.id, issue]),
+  );
+  const evidenceByIssueId = new Map<
+    string,
+    PlannerCandidateGroundingEvidence
+  >();
+
+  for (const candidate of input.context.backlog) {
+    const issue = candidatesById.get(candidate.issueId);
+    if (issue === undefined) {
+      continue;
+    }
+    const startedAt = input.now().getTime();
+    const rootSources = [
+      {
+        id: "title",
+        text: candidate.title,
+      },
+      {
+        id: "body",
+        text: candidate.description,
+      },
+      ...(candidate.comments ?? []).map((comment) => ({
+        id: `comment:${comment.id}`,
+        text: comment.body,
+      })),
+    ];
+    const followedDocs = await followGroundingDocs({
+      checkoutRoot: process.cwd(),
+      candidateId: candidate.issueId,
+      candidateIdentifier: candidate.issueIdentifier,
+      rootSources,
+      attachedDocuments: issue.documentAttachments ?? [],
+      ...(input.env.LINEAR_API_KEY === undefined ||
+      input.env.LINEAR_API_KEY.trim() === ""
+        ? {}
+        : {
+            readLinearDocument: async (documentId: string) =>
+              (
+                await fetchLinearDocumentContent(
+                  {
+                    endpoint:
+                      input.env.LINEAR_ENDPOINT ?? DEFAULT_LINEAR_ENDPOINT,
+                    apiKey: input.env.LINEAR_API_KEY ?? "",
+                    fetchFn: fetch,
+                  },
+                  { documentId },
+                )
+              )?.content ?? null,
+          }),
+    });
+    const result = await extractGroundingEvidence({
+      candidateId: candidate.issueId,
+      candidateIdentifier: candidate.issueIdentifier,
+      sources: [
+        {
+          id: "title",
+          kind: "ticket_title",
+          label: "ticket title",
+          text: candidate.title,
+        },
+        {
+          id: "body",
+          kind: "ticket_body",
+          label: "ticket body",
+          text: candidate.description,
+        },
+        ...(candidate.comments ?? []).map((comment) => ({
+          id: `comment:${comment.id}`,
+          kind: "comment" as const,
+          label: `comment ${comment.id}`,
+          text: comment.body,
+        })),
+        ...followedDocs.followedDocs.map((document) => ({
+          id: `document:${document.key}`,
+          kind: "document" as const,
+          label:
+            document.title ?? `${document.kind} document ${document.reference}`,
+          text: document.content,
+        })),
+      ],
+      grounding: {
+        workspaceRoot: process.cwd(),
+        runId: `manager-plan-${input.now().toISOString()}`,
+        config: {
+          enabled: true,
+          baseDir: DEFAULT_CODE_GROUNDING_BASE_DIR,
+          ttlMs: DEFAULT_CODE_GROUNDING_TTL_MS,
+          maxCheckoutsPerRepo: DEFAULT_CODE_GROUNDING_MAX_CHECKOUTS_PER_REPO,
+          materializationTimeoutMs:
+            DEFAULT_CODE_GROUNDING_MATERIALIZATION_TIMEOUT_MS,
+        },
+        target,
+      },
+    });
+    evidenceByIssueId.set(
+      candidate.issueId,
+      toPlannerCandidateGroundingEvidence(
+        result,
+        Math.max(0, input.now().getTime() - startedAt),
+        followedDocs.warnings,
+      ),
+    );
+  }
+
+  return {
+    context: {
+      ...input.context,
+      backlog: input.context.backlog.map((candidate) => {
+        const groundingEvidence = evidenceByIssueId.get(candidate.issueId);
+        return {
+          ...candidate,
+          ...(groundingEvidence === undefined ? {} : { groundingEvidence }),
+        };
+      }),
+    },
+  };
+}
+
+async function resolveManagerPlanGroundingTarget(
+  input: ManagerPlanGroundingInput,
+): Promise<CodeGroundingTarget> {
+  const repoUrl =
+    input.repoUrl?.trim() ||
+    (await readGitValue(["config", "--get", "remote.origin.url"]));
+  if (repoUrl === null || repoUrl.trim() === "") {
+    throw new Error(
+      "planner grounding requires --planner-grounding-repo-url, SYMPHONY_MANAGER_PLAN_GROUNDING_REPO_URL, REPO_URL, or git remote.origin.url",
+    );
+  }
+  const commitSha =
+    input.commitSha?.trim() || (await readGitValue(["rev-parse", "HEAD"]));
+  if (commitSha === null || commitSha.trim() === "") {
+    throw new Error(
+      "planner grounding requires --planner-grounding-commit, SYMPHONY_MANAGER_PLAN_GROUNDING_COMMIT, or git rev-parse HEAD",
+    );
+  }
+  const repoScope =
+    input.repoScope ?? inferManagerPlanGroundingRepoScope(repoUrl);
+  return {
+    repoUrl,
+    commitSha,
+    repoScope,
+  };
+}
+
+export function toPlannerCandidateGroundingEvidence(
+  result: GroundingExtractionResult,
+  wallClockMs: number,
+  docWarnings: readonly string[] = [],
+): PlannerCandidateGroundingEvidence {
+  const reportStatus = result.groundingReport?.status;
+  const ungrounded = reportStatus === "ungrounded";
+  return {
+    status: ungrounded ? "ungrounded" : "grounded",
+    reason: ungrounded
+      ? "Grounding skipped because the repository is outside the v1 Symphony grounding scope."
+      : null,
+    digest: result.digest,
+    claims: result.claims.map((claim) => ({
+      id: claim.id,
+      kind: claim.kind,
+      text: claim.text,
+      summary: claim.summary,
+      status: claim.status,
+      citations: claim.citations.map((citation) => ({
+        path: citation.path,
+        lineRange: citation.lineRange,
+        matchedSpan: citation.matchedSpan,
+      })),
+      missing: claim.missing,
+    })),
+    units: result.units.map((unit) => ({
+      unitId: unit.unitId,
+      title: unit.title,
+      wave: unit.wave,
+      completionState: unit.completionState,
+      rationale: unit.rationale,
+    })),
+    warnings: [
+      ...docWarnings,
+      ...result.warnings,
+      ...(result.groundingReport?.warnings ?? []),
+    ],
+    extractorCallCount: result.extractorCallCount,
+    wallClockMs,
+  };
+}
+
+async function readGitValue(args: readonly string[]): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync("git", [...args], {
+      cwd: process.cwd(),
+    });
+    const value = stdout.trim();
+    return value === "" ? null : value;
+  } catch {
+    return null;
+  }
+}
+
+function readManagerPlanGroundingRepoScope(
+  env: NodeJS.ProcessEnv,
+): "symphony" | "non_symphony" | null {
+  const value = env[MANAGER_PLAN_GROUNDING_REPO_SCOPE_ENV];
+  if (value === "symphony" || value === "non_symphony") {
+    return value;
+  }
+  return null;
+}
+
+export function inferManagerPlanGroundingRepoScope(
+  repoUrl: string,
+): "symphony" | "non_symphony" {
+  const normalizedRepoUrl = repoUrl.trim().replace(/\/+$/u, "");
+  return /(?:^|[/:])symphony(?:-ts)?(?:\.git)?$/i.test(normalizedRepoUrl)
+    ? "symphony"
+    : "non_symphony";
+}
+
 function defaultArtifactDir(now: () => Date): string {
   return join(tmpdir(), `symphony-manager-plan-${stamp(now)}`);
 }
@@ -1077,6 +1418,13 @@ export function renderUsage(): string {
     "  --no-comment-enrichment      Disable curated comment enrichment in the planner prompt",
     "  --gh-pr-context              Source open/recently merged PR context from gh",
     "  --github-repo <OWNER/REPO>   GitHub repo for --gh-pr-context",
+    "  --planner-grounding          Add report-only code grounding evidence to the planner prompt",
+    "  --planner-grounding-repo-url <url>",
+    "                               Repository URL for planner grounding (defaults env/git remote)",
+    "  --planner-grounding-commit <sha>",
+    "                               Commit SHA for planner grounding (defaults env/git HEAD)",
+    "  --planner-grounding-repo-scope <symphony|non_symphony>",
+    "                               Explicit grounding repo scope (defaults inferred from repo URL)",
     "  --persist                    Persist the plan revision to an isolated artifact store",
     "  --prompt-only                Print the assembled planner prompt and exit (no Opus pass)",
     "  --json                       Emit the plan as JSON",
@@ -1087,6 +1435,12 @@ export function renderUsage(): string {
     "  LINEAR_ENDPOINT              Optional override of the Linear GraphQL endpoint",
     `  ${MANAGER_PLAN_GITHUB_REPO_ENV}          Optional OWNER/REPO fallback for --gh-pr-context`,
     `  ${MANAGER_PLAN_REPO_URL_ENV}                  Optional Git remote URL fallback for --gh-pr-context`,
+    `  ${MANAGER_PLAN_GROUNDING_REPO_URL_ENV}`,
+    "                               Optional repo URL fallback for --planner-grounding",
+    `  ${MANAGER_PLAN_GROUNDING_COMMIT_ENV}`,
+    "                               Optional commit SHA fallback for --planner-grounding",
+    `  ${MANAGER_PLAN_GROUNDING_REPO_SCOPE_ENV}`,
+    "                               Optional symphony/non_symphony scope for --planner-grounding",
     `  ${MANAGER_PLAN_RUNTIME_STATE_BASE_URL_ENV}`,
     "                               Optional runtime host base URL for live in-flight issues",
     "",

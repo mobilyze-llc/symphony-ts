@@ -11,10 +11,17 @@ import {
   type ManagerPlanCandidateQuery,
   type ManagerPlanCliDependencies,
   ManagerPlanCliUsageError,
+  type ManagerPlanGroundingInput,
+  inferManagerPlanGroundingRepoScope,
   parseManagerPlanCliArgs,
   runManagerPlanCli,
+  toPlannerCandidateGroundingEvidence,
 } from "../../src/cli/manager-plan.js";
 import type { Issue } from "../../src/domain/model.js";
+import {
+  GROUNDING_EXTRACTOR_ROUTE,
+  type GroundingExtractionResult,
+} from "../../src/orchestrator/grounding-extractor.js";
 import { PORTFOLIO_TAXONOMY_PROJECTS } from "../../src/portfolio/taxonomy.js";
 
 function issue(
@@ -181,6 +188,50 @@ describe("parseManagerPlanCliArgs", () => {
     expect(opts.persist).toBe(true);
   });
 
+  it("parses planner grounding controls (SYMPH-1017 U4)", () => {
+    const opts = parseManagerPlanCliArgs([
+      "--team",
+      "MOB",
+      "--planner-grounding",
+      "--planner-grounding-repo-url",
+      "git@github.com:mobilyze-llc/symphony-ts.git",
+      "--planner-grounding-commit",
+      "abc123",
+      "--planner-grounding-repo-scope",
+      "symphony",
+    ]);
+
+    expect(opts.plannerGrounding).toBe(true);
+    expect(opts.plannerGroundingRepoUrl).toBe(
+      "git@github.com:mobilyze-llc/symphony-ts.git",
+    );
+    expect(opts.plannerGroundingCommit).toBe("abc123");
+    expect(opts.plannerGroundingRepoScope).toBe("symphony");
+  });
+
+  it("infers Symphony planner grounding scope for common git URL forms (SYMPH-1017 council)", () => {
+    expect(
+      inferManagerPlanGroundingRepoScope(
+        "https://github.com/mobilyze-llc/symphony-ts/",
+      ),
+    ).toBe("symphony");
+    expect(
+      inferManagerPlanGroundingRepoScope(
+        "https://github.com/mobilyze-llc/symphony-ts.git/",
+      ),
+    ).toBe("symphony");
+    expect(
+      inferManagerPlanGroundingRepoScope(
+        "git@github.com:mobilyze-llc/symphony.git",
+      ),
+    ).toBe("symphony");
+    expect(
+      inferManagerPlanGroundingRepoScope(
+        "https://github.com/mobilyze-llc/not-symphony-ts.git/",
+      ),
+    ).toBe("non_symphony");
+  });
+
   it("parses --out-dir for controller-side prompt evidence artifacts (SYMPH-961)", () => {
     const opts = parseManagerPlanCliArgs([
       "--project",
@@ -248,6 +299,131 @@ describe("parseManagerPlanCliArgs", () => {
   it("rejects an unknown flag", () => {
     expect(() => parseManagerPlanCliArgs(["--frobnicate"])).toThrow(
       ManagerPlanCliUsageError,
+    );
+  });
+});
+
+describe("planner grounding helpers", () => {
+  it("keeps verified evidence visible when only some claims are ungrounded (SYMPH-1017 council)", () => {
+    const result: GroundingExtractionResult = {
+      route: GROUNDING_EXTRACTOR_ROUTE,
+      digest: {
+        text: "Mixed evidence should still guide the planner.",
+        charLimit: 2_000,
+        truncated: false,
+        status: "unverified",
+      },
+      claims: [
+        {
+          id: "claim-verified",
+          sourceId: "body",
+          kind: "path_symbol",
+          text: "src/agent/triage-planner.ts",
+          summary: "Planner prompt rendering exists",
+          status: "verified",
+          citations: [
+            {
+              checkoutId: "checkout-1",
+              commitSha: "abc123",
+              path: "src/agent/triage-planner.ts",
+              lineRange: [10, 12],
+              contentHash: "hash",
+              matchedSpan: "buildPlannerPrompt",
+            },
+          ],
+          missing: [],
+        },
+        {
+          id: "claim-ungrounded",
+          sourceId: "body",
+          kind: "behavioral",
+          text: "Historical deployment note",
+          summary: "No code citation found",
+          status: "ungrounded",
+          citations: [],
+          missing: ["No matching repo evidence"],
+        },
+      ],
+      units: [],
+      groundingReport: {
+        generatedAt: "2026-07-01T00:00:00.000Z",
+        status: "verified",
+        checkout: {
+          checkoutId: "checkout-1",
+          path: "/tmp/checkout-1",
+          commitSha: "abc123",
+          repoUrl: "git@github.com:mobilyze-llc/symphony-ts.git",
+        },
+        entries: [],
+        cleanup: {
+          leaseReleased: true,
+          checkoutPurged: false,
+          dirtyState: null,
+        },
+        warnings: ["grounding report warning"],
+      },
+      extractorCallCount: 1,
+      warnings: ["extractor warning"],
+    };
+
+    const evidence = toPlannerCandidateGroundingEvidence(result, 37, [
+      "doc warning",
+    ]);
+
+    expect(evidence.status).toBe("grounded");
+    expect(evidence.reason).toBeNull();
+    expect(evidence.claims.map((claim) => claim.status)).toEqual([
+      "verified",
+      "ungrounded",
+    ]);
+    expect(evidence.claims[0]?.citations[0]?.path).toBe(
+      "src/agent/triage-planner.ts",
+    );
+    expect(evidence.warnings).toEqual([
+      "doc warning",
+      "extractor warning",
+      "grounding report warning",
+    ]);
+  });
+
+  it("marks the whole candidate ungrounded only when the grounding report is ungrounded", () => {
+    const evidence = toPlannerCandidateGroundingEvidence(
+      {
+        route: GROUNDING_EXTRACTOR_ROUTE,
+        digest: {
+          text: "Repository outside supported scope.",
+          charLimit: 2_000,
+          truncated: false,
+          status: "unverified",
+        },
+        claims: [],
+        units: [],
+        groundingReport: {
+          generatedAt: "2026-07-01T00:00:00.000Z",
+          status: "ungrounded",
+          checkout: {
+            checkoutId: null,
+            path: null,
+            commitSha: "abc123",
+            repoUrl: "git@github.com:mobilyze-llc/other.git",
+          },
+          entries: [],
+          cleanup: {
+            leaseReleased: true,
+            checkoutPurged: true,
+            dirtyState: null,
+          },
+          warnings: [],
+        },
+        extractorCallCount: 1,
+        warnings: [],
+      },
+      12,
+    );
+
+    expect(evidence.status).toBe("ungrounded");
+    expect(evidence.reason).toContain(
+      "outside the v1 Symphony grounding scope",
     );
   });
 });
@@ -517,6 +693,105 @@ describe("runManagerPlanCli", () => {
     expect(out()).toContain("- MOB-2 (In Progress)");
     expect(out()).toContain("comments:");
     expect(out()).toContain("Parked decision");
+  });
+
+  it("--planner-grounding enriches the prompt after comments without invoking mutation (SYMPH-1017 U4/U5)", async () => {
+    const { io, out } = captureIo();
+    const info = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const seenGroundingInputs: ManagerPlanGroundingInput[] = [];
+    try {
+      const code = await runManagerPlanCli(
+        [
+          "--team",
+          "MOB",
+          "--state",
+          "Backlog",
+          "--prompt-only",
+          "--planner-grounding",
+          "--planner-grounding-repo-url",
+          "git@github.com:mobilyze-llc/symphony-ts.git",
+          "--planner-grounding-commit",
+          "abc123",
+          "--planner-grounding-repo-scope",
+          "symphony",
+        ],
+        {
+          io,
+          env: {},
+          loadCandidates: async () => [
+            issue("u1", "MOB-1", 1, {
+              description: "Plan references src/agent/triage-planner.ts",
+            }),
+          ],
+          fetchIssueComments: async () => [
+            {
+              id: "comment-1",
+              body: "Closeout: src/agent/triage-planner.ts is complete.",
+              createdAt: "2026-06-28T00:00:00.000Z",
+              updatedAt: "2026-06-28T00:00:00.000Z",
+              user: null,
+              botActor: null,
+            },
+          ],
+          groundPlannerContext: async (input) => {
+            seenGroundingInputs.push(input);
+            return {
+              context: {
+                ...input.context,
+                backlog: input.context.backlog.map((candidate) => ({
+                  ...candidate,
+                  groundingEvidence: {
+                    status: "grounded" as const,
+                    reason: null,
+                    digest: {
+                      text: "Digest from ticket, comment, and referenced docs.",
+                      status: "unverified" as const,
+                      truncated: false,
+                    },
+                    claims: [
+                      {
+                        id: "claim-1",
+                        kind: "path_symbol" as const,
+                        text: "src/agent/triage-planner.ts",
+                        summary: "Planner grounding renderer exists",
+                        status: "verified" as const,
+                        citations: [
+                          {
+                            path: "src/agent/triage-planner.ts",
+                            lineRange: [1, 3] as const,
+                            matchedSpan: "export function buildPlannerPrompt",
+                          },
+                        ],
+                        missing: [],
+                      },
+                    ],
+                    units: [],
+                    warnings: [],
+                    extractorCallCount: 1,
+                    wallClockMs: 5,
+                  },
+                })),
+              },
+            };
+          },
+          createPlannerRunner: okRunner,
+        },
+      );
+
+      expect(code).toBe(0);
+      expect(seenGroundingInputs).toHaveLength(1);
+      expect(
+        seenGroundingInputs[0]?.context.backlog[0]?.comments?.[0]?.body,
+      ).toContain("Closeout");
+      expect(seenGroundingInputs[0]?.repoUrl).toBe(
+        "git@github.com:mobilyze-llc/symphony-ts.git",
+      );
+      expect(seenGroundingInputs[0]?.commitSha).toBe("abc123");
+      expect(out()).toContain("grounding evidence (report-only");
+      expect(out()).toContain("[verified] Planner grounding renderer exists");
+    } finally {
+      info.mockRestore();
+    }
   });
 
   it("--gh-pr-context includes gh-sourced open and recently merged PRs in the planner prompt (SYMPH-838)", async () => {
@@ -944,6 +1219,62 @@ describe("runManagerPlanCli", () => {
     expect(code).toBe(0);
     const parsed = JSON.parse(out());
     expect(parsed.batches[0].members[0].issueIdentifier).toBe("MOB-1");
+  });
+
+  it("keeps --json machine output parseable when planner grounding emits telemetry", async () => {
+    const { io, out } = captureIo();
+    const telemetry = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    try {
+      const code = await runManagerPlanCli(
+        [
+          "--team",
+          "MOB",
+          "--state",
+          "Backlog",
+          "--json",
+          "--planner-grounding",
+        ],
+        {
+          io,
+          env: {},
+          loadCandidates: async () => [issue("u1", "MOB-1")],
+          groundPlannerContext: async (input) => ({
+            context: {
+              ...input.context,
+              backlog: input.context.backlog.map((candidate) => ({
+                ...candidate,
+                groundingEvidence: {
+                  status: "grounded" as const,
+                  reason: null,
+                  digest: {
+                    text: "Grounding telemetry should not corrupt JSON stdout.",
+                    status: "unverified" as const,
+                    truncated: false,
+                  },
+                  claims: [],
+                  units: [],
+                  warnings: [],
+                  extractorCallCount: 1,
+                  wallClockMs: 3,
+                },
+              })),
+            },
+          }),
+          createPlannerRunner: okRunner,
+        },
+      );
+
+      expect(code).toBe(0);
+      const parsed = JSON.parse(out());
+      expect(parsed.batches[0].members[0].issueIdentifier).toBe("MOB-1");
+      expect(telemetry).toHaveBeenCalledWith(
+        expect.stringContaining("planner grounding telemetry"),
+      );
+    } finally {
+      telemetry.mockRestore();
+    }
   });
 
   it("emits project and initiative scope in --json output (SYMPH-858)", async () => {
