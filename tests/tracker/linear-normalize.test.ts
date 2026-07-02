@@ -8,7 +8,7 @@ import {
 } from "../../src/index.js";
 
 describe("linear-normalize", () => {
-  it("normalizes labels, blockers, integer priority, and timestamps", () => {
+  it("normalizes labels, blockers, relations, parent/children, integer priority, and timestamps", () => {
     const issue = normalizeLinearIssue({
       id: "issue-1",
       identifier: "ENG-123",
@@ -42,9 +42,52 @@ describe("linear-normalize", () => {
             issue: {
               id: "issue-x",
               identifier: "ENG-X",
+              title: "Related work",
               state: {
                 name: "Todo",
               },
+            },
+          },
+          {
+            type: "duplicate",
+            issue: {
+              id: "issue-dupe",
+              identifier: "ENG-101",
+              title: "Older duplicate",
+              state: {
+                name: "Backlog",
+              },
+            },
+          },
+          {
+            type: "supersedes",
+            issue: {
+              id: "issue-old",
+              identifier: "ENG-99",
+              title: "Old ticket",
+              state: {
+                name: "Todo",
+              },
+            },
+          },
+        ],
+      },
+      parent: {
+        id: "issue-parent",
+        identifier: "ENG-1",
+        title: "Parent epic",
+        state: {
+          name: "Backlog",
+        },
+      },
+      children: {
+        nodes: [
+          {
+            id: "issue-child",
+            identifier: "ENG-124",
+            title: "Child task",
+            state: {
+              name: "Todo",
             },
           },
         ],
@@ -67,6 +110,44 @@ describe("linear-normalize", () => {
           id: "issue-0",
           identifier: "ENG-100",
           state: "In Progress",
+        },
+      ],
+      relatesTo: [
+        {
+          id: "issue-x",
+          identifier: "ENG-X",
+          title: "Related work",
+          state: "Todo",
+        },
+      ],
+      duplicates: [
+        {
+          id: "issue-dupe",
+          identifier: "ENG-101",
+          title: "Older duplicate",
+          state: "Backlog",
+        },
+      ],
+      supersedes: [
+        {
+          id: "issue-old",
+          identifier: "ENG-99",
+          title: "Old ticket",
+          state: "Todo",
+        },
+      ],
+      parent: {
+        id: "issue-parent",
+        identifier: "ENG-1",
+        title: "Parent epic",
+        state: "Backlog",
+      },
+      children: [
+        {
+          id: "issue-child",
+          identifier: "ENG-124",
+          title: "Child task",
+          state: "Todo",
         },
       ],
       createdAt: "2026-03-01T00:00:00.000Z",
