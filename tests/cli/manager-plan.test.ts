@@ -1499,6 +1499,47 @@ describe("runManagerPlanCli", () => {
     expect(out()).not.toContain("team");
   });
 
+  it("prunes candidates superseded by completed Linear relations before manager planning (SYMPH-1014)", async () => {
+    const { io, out } = captureIo();
+    const prompts: string[] = [];
+    const code = await runManagerPlanCli(
+      ["--team", "MOB", "--state", "Backlog", "--json"],
+      {
+        io,
+        env: {},
+        loadCandidates: async () => [
+          issue("u1", "MOB-1", 2, {
+            supersededBy: [
+              {
+                id: "u3",
+                identifier: "MOB-3",
+                state: "Done",
+                title: "Completed replacement",
+              },
+            ],
+          }),
+          issue("u2", "MOB-2"),
+        ],
+        createPlannerRunner: () => async (prompt: string) => {
+          prompts.push(prompt);
+          return {
+            status: "ok",
+            markdown:
+              '# Plan\n```json\n{"rationale":"go","batches":[{"mode":"parallel-isolated","issueIdentifiers":["MOB-2"],"rationale":"surviving candidate"}]}\n```\n',
+          };
+        },
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).not.toContain("MOB-1");
+    expect(prompts[0]).toContain("MOB-2");
+    const parsed = JSON.parse(out());
+    expect(parsed.candidateCount).toBe(1);
+    expect(parsed.batches[0].members[0].issueIdentifier).toBe("MOB-2");
+  });
+
   it("excludes portfolio-held candidates from manager planning JSON", async () => {
     const taxonomyProject = PORTFOLIO_TAXONOMY_PROJECTS.find(
       (project) =>

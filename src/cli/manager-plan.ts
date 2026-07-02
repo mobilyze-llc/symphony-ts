@@ -51,6 +51,7 @@ import {
 import {
   STANDING_PLAN_ID,
   assembleShadowPlannerContext,
+  buildShadowPlannerSupersessionRelationDispositions,
   enrichPlannerContextWithComments,
 } from "../orchestrator/standing-plan-shadow.js";
 import {
@@ -640,10 +641,14 @@ export async function runManagerPlanCli(
   }
 
   const portfolioPartition = partitionPortfolioEligibleIssues(candidates);
+  const auditDispositions = buildShadowPlannerSupersessionRelationDispositions(
+    portfolioPartition.eligible,
+  );
   let context = assembleShadowPlannerContext({
     candidates: portfolioPartition.eligible,
     inFlight,
     envelope,
+    auditDispositions,
   });
 
   if (options.ghPrContext) {
@@ -814,8 +819,20 @@ export async function runManagerPlanCli(
 
   io.stdout(
     options.json
-      ? `${renderPlanJson(options, portfolioPartition.eligible.length, result.body, portfolioPartition.held.length, persistence)}\n`
-      : `${renderPlanHuman(options, portfolioPartition.eligible.length, result.body, portfolioPartition.held.length, persistence)}\n`,
+      ? `${renderPlanJson(
+          options,
+          context.backlog.length,
+          result.body,
+          portfolioPartition.held.length,
+          persistence,
+        )}\n`
+      : `${renderPlanHuman(
+          options,
+          context.backlog.length,
+          result.body,
+          portfolioPartition.held.length,
+          persistence,
+        )}\n`,
   );
   return MANAGER_PLAN_EXIT.ok;
 }
