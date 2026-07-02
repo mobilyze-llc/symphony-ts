@@ -47,6 +47,9 @@ const ISSUE_FIELDS = `
         name
       }
     }
+    pageInfo {
+      hasNextPage
+    }
   }
   relations(first: $relationFirst) {
     nodes {
@@ -59,6 +62,9 @@ const ISSUE_FIELDS = `
           name
         }
       }
+    }
+    pageInfo {
+      hasNextPage
     }
   }
   inverseRelations(first: $relationFirst) {

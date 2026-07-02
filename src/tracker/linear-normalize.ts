@@ -119,14 +119,21 @@ export function normalizeLinearIssue(node: unknown): Issue {
     ...(advisoryRelations.duplicates.length > 0
       ? { duplicates: advisoryRelations.duplicates }
       : {}),
+    ...(advisoryRelations.duplicatedBy.length > 0
+      ? { duplicatedBy: advisoryRelations.duplicatedBy }
+      : {}),
     ...(advisoryRelations.supersedes.length > 0
       ? { supersedes: advisoryRelations.supersedes }
       : {}),
     ...(advisoryRelations.supersededBy.length > 0
       ? { supersededBy: advisoryRelations.supersededBy }
       : {}),
+    ...(hasNextAdvisoryRelationPage(issue)
+      ? { advisoryRelationsTruncated: true }
+      : {}),
     ...(parent === undefined ? {} : { parent }),
     ...(children.length > 0 ? { children } : {}),
+    ...(hasNextPage(issue.children) ? { childrenTruncated: true } : {}),
     createdAt: normalizeTimestamp(issue.createdAt),
     updatedAt: normalizeTimestamp(issue.updatedAt),
   };
@@ -261,6 +268,10 @@ function hasNextPage(
   return connection?.pageInfo?.hasNextPage === true;
 }
 
+function hasNextAdvisoryRelationPage(issue: LinearIssueNode): boolean {
+  return hasNextPage(issue.relations) || hasNextPage(issue.inverseRelations);
+}
+
 function normalizeBlockedBy(
   inverseRelations: LinearIssueNode["inverseRelations"],
 ): BlockerRef[] {
@@ -300,17 +311,20 @@ function normalizeAdvisoryRelations(
 ): {
   relatesTo: IssueRelationRef[];
   duplicates: IssueRelationRef[];
+  duplicatedBy: IssueRelationRef[];
   supersedes: IssueRelationRef[];
   supersededBy: IssueRelationRef[];
 } {
   const output: {
     relatesTo: IssueRelationRef[];
     duplicates: IssueRelationRef[];
+    duplicatedBy: IssueRelationRef[];
     supersedes: IssueRelationRef[];
     supersededBy: IssueRelationRef[];
   } = {
     relatesTo: [],
     duplicates: [],
+    duplicatedBy: [],
     supersedes: [],
     supersededBy: [],
   };
@@ -348,7 +362,7 @@ function normalizeAdvisoryRelations(
       continue;
     }
     if (type.includes("duplicate")) {
-      output.duplicates.push(ref);
+      output.duplicatedBy.push(ref);
     } else if (type.includes("supersede")) {
       output.supersededBy.push(ref);
     } else if (type.includes("relate")) {
@@ -359,6 +373,7 @@ function normalizeAdvisoryRelations(
   return {
     relatesTo: dedupeIssueRelationRefs(output.relatesTo),
     duplicates: dedupeIssueRelationRefs(output.duplicates),
+    duplicatedBy: dedupeIssueRelationRefs(output.duplicatedBy),
     supersedes: dedupeIssueRelationRefs(output.supersedes),
     supersededBy: dedupeIssueRelationRefs(output.supersededBy),
   };

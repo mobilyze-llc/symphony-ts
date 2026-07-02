@@ -126,10 +126,13 @@ export function assembleShadowPlannerContext(
         advisoryRelations: {
           relatesTo: issue.relatesTo?.flatMap(toRelationIdentifier) ?? [],
           duplicates: issue.duplicates?.flatMap(toRelationIdentifier) ?? [],
+          duplicatedBy: issue.duplicatedBy?.flatMap(toRelationIdentifier) ?? [],
           supersedes: issue.supersedes?.flatMap(toRelationIdentifier) ?? [],
           supersededBy: issue.supersededBy?.flatMap(toRelationIdentifier) ?? [],
+          relationsTruncated: issue.advisoryRelationsTruncated === true,
           parent: issue.parent?.identifier ?? null,
           children: issue.children?.flatMap(toRelationIdentifier) ?? [],
+          childrenTruncated: issue.childrenTruncated === true,
         },
         // SYMPH-874: carry the body + labels so the Manager reasons over real
         // ticket content (surface / area / intent), not just one-line titles.
