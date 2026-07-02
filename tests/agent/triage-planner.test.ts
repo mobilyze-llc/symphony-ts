@@ -211,13 +211,14 @@ describe("buildPlannerPrompt", () => {
         relatesTo: ["SYMPH-3"],
         duplicates: ["SYMPH-4"],
         supersedes: ["SYMPH-5"],
+        supersededBy: ["SYMPH-10"],
         parent: "SYMPH-6",
         children: ["SYMPH-7", "SYMPH-8"],
       };
     }
     const prompt = buildPlannerPrompt(ctx);
     expect(prompt).toContain(
-      "- SYMPH-1 [Todo, priority 1] First (HARD blocked by: SYMPH-2) (ADVISORY relations: relates: SYMPH-3, duplicate: SYMPH-4, supersedes: SYMPH-5, parent: SYMPH-6, children: SYMPH-7, SYMPH-8)",
+      "- SYMPH-1 [Todo, priority 1] First (HARD blocked by: SYMPH-2) (ADVISORY relations: relates: SYMPH-3, duplicate: SYMPH-4, supersedes: SYMPH-5, superseded by: SYMPH-10, parent: SYMPH-6, children: SYMPH-7, SYMPH-8)",
     );
     expect(prompt).toContain(
       "Only HARD blockedBy edges are hard dependency constraints.",
@@ -225,6 +226,26 @@ describe("buildPlannerPrompt", () => {
     expect(prompt).toContain(
       "use duplicate/supersedes as possible prune or supersession signals for rationale",
     );
+  });
+
+  it("renders superseded-by advisory relations without reversing direction (SYMPH-1020)", () => {
+    const ctx = context();
+    const first = ctx.backlog[0];
+    if (first) {
+      first.advisoryRelations = {
+        supersededBy: ["SYMPH-5"],
+      };
+    }
+
+    const prompt = buildPlannerPrompt(ctx);
+
+    expect(prompt).toContain(
+      "- SYMPH-1 [Todo, priority 1] First (ADVISORY relations: superseded by: SYMPH-5)",
+    );
+    expect(prompt).not.toContain(
+      "- SYMPH-1 [Todo, priority 1] First (ADVISORY relations: supersedes: SYMPH-5)",
+    );
+    expect(prompt).toContain("superseded-by as a candidate-pruning signal");
   });
 
   it("asks the model to emit cross-batch dependencies (SYMPH-843)", () => {

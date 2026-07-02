@@ -138,6 +138,9 @@ describe("assembleShadowPlannerContext", () => {
       supersedes: [
         { id: "s1", identifier: "SYMPH-4", title: "Old", state: "Todo" },
       ],
+      supersededBy: [
+        { id: "s2", identifier: "SYMPH-7", title: "New", state: "Todo" },
+      ],
       parent: {
         id: "p1",
         identifier: "SYMPH-5",
@@ -157,6 +160,7 @@ describe("assembleShadowPlannerContext", () => {
       relatesTo: ["SYMPH-2"],
       duplicates: ["SYMPH-3"],
       supersedes: ["SYMPH-4"],
+      supersededBy: ["SYMPH-7"],
       parent: "SYMPH-5",
       children: ["SYMPH-6"],
     });

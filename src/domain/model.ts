@@ -84,6 +84,7 @@ export interface Issue {
   relatesTo?: IssueRelationRef[];
   duplicates?: IssueRelationRef[];
   supersedes?: IssueRelationRef[];
+  supersededBy?: IssueRelationRef[];
   parent?: IssueRelationRef | null;
   children?: IssueRelationRef[];
   createdAt: string | null;

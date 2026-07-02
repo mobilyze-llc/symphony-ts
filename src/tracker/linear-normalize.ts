@@ -115,6 +115,9 @@ export function normalizeLinearIssue(node: unknown): Issue {
     ...(advisoryRelations.supersedes.length > 0
       ? { supersedes: advisoryRelations.supersedes }
       : {}),
+    ...(advisoryRelations.supersededBy.length > 0
+      ? { supersededBy: advisoryRelations.supersededBy }
+      : {}),
     ...(parent === undefined ? {} : { parent }),
     ...(children.length > 0 ? { children } : {}),
     createdAt: normalizeTimestamp(issue.createdAt),
@@ -290,15 +293,18 @@ function normalizeAdvisoryRelations(
   relatesTo: IssueRelationRef[];
   duplicates: IssueRelationRef[];
   supersedes: IssueRelationRef[];
+  supersededBy: IssueRelationRef[];
 } {
   const output: {
     relatesTo: IssueRelationRef[];
     duplicates: IssueRelationRef[];
     supersedes: IssueRelationRef[];
+    supersededBy: IssueRelationRef[];
   } = {
     relatesTo: [],
     duplicates: [],
     supersedes: [],
+    supersededBy: [],
   };
   const nodes = inverseRelations?.nodes;
   if (!Array.isArray(nodes)) {
@@ -320,7 +326,7 @@ function normalizeAdvisoryRelations(
     if (type.includes("duplicate")) {
       output.duplicates.push(ref);
     } else if (type.includes("supersede")) {
-      output.supersedes.push(ref);
+      output.supersededBy.push(ref);
     } else if (type.includes("relate")) {
       output.relatesTo.push(ref);
     }
@@ -330,6 +336,7 @@ function normalizeAdvisoryRelations(
     relatesTo: dedupeIssueRelationRefs(output.relatesTo),
     duplicates: dedupeIssueRelationRefs(output.duplicates),
     supersedes: dedupeIssueRelationRefs(output.supersedes),
+    supersededBy: dedupeIssueRelationRefs(output.supersededBy),
   };
 }
 

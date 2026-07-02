@@ -127,6 +127,7 @@ export function assembleShadowPlannerContext(
           relatesTo: issue.relatesTo?.flatMap(toRelationIdentifier) ?? [],
           duplicates: issue.duplicates?.flatMap(toRelationIdentifier) ?? [],
           supersedes: issue.supersedes?.flatMap(toRelationIdentifier) ?? [],
+          supersededBy: issue.supersededBy?.flatMap(toRelationIdentifier) ?? [],
           parent: issue.parent?.identifier ?? null,
           children: issue.children?.flatMap(toRelationIdentifier) ?? [],
         },

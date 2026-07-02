@@ -128,7 +128,7 @@ describe("linear-normalize", () => {
           state: "Backlog",
         },
       ],
-      supersedes: [
+      supersededBy: [
         {
           id: "issue-old",
           identifier: "ENG-99",
@@ -153,6 +153,42 @@ describe("linear-normalize", () => {
       createdAt: "2026-03-01T00:00:00.000Z",
       updatedAt: "2026-03-02T12:34:56.789Z",
     });
+  });
+
+  it("preserves inverse supersede relation direction as superseded-by", () => {
+    const issue = normalizeLinearIssue({
+      id: "issue-1",
+      identifier: "ENG-123",
+      title: "Implement adapter",
+      state: {
+        name: "Todo",
+      },
+      inverseRelations: {
+        nodes: [
+          {
+            type: "supersedes",
+            issue: {
+              id: "issue-newer",
+              identifier: "ENG-124",
+              title: "Replacement ticket",
+              state: {
+                name: "Backlog",
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    expect(issue.supersedes).toBeUndefined();
+    expect(issue.supersededBy).toEqual([
+      {
+        id: "issue-newer",
+        identifier: "ENG-124",
+        title: "Replacement ticket",
+        state: "Backlog",
+      },
+    ]);
   });
 
   it("accepts legacy blocker payloads that still use sourceIssue", () => {
