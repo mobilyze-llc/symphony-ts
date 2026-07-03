@@ -44,6 +44,7 @@ export * from "./tracker/linear-queries.js";
 export * from "./tracker/ticket-feature.js";
 export * from "./tracker/tracker.js";
 export * from "./runners/index.js";
+export * from "./claude-runner/crabrunner-claude-runner.js";
 export * from "./spec-review/spec-review.js";
 // SYMPH-812 removes the active local review runtime from the package barrel,
 // but keeps review artifact types available for external parsers.
