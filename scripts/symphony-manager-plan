@@ -4,7 +4,7 @@
 #
 # Runs the Queue Triage v2 backlog Manager (planner) ONE-SHOT against a Linear
 # team's eligible backlog and prints the suggested batch plan. Output-only: it
-# spends one Opus pass (via cmux-spawn) unless --prompt-only, and writes NOTHING
+# spends one Opus pass (via crabrunner) unless --prompt-only, and writes NOTHING
 # to Linear, the live standing-plan store, or dispatch.
 #
 # Loads .env for LINEAR_API_KEY, ensures dist/ is built, then execs the compiled

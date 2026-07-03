@@ -7,10 +7,15 @@ import { pathToFileURL } from "node:url";
 import {
   CLAUDE_RUNNER_PURPOSES,
   type ClaudeRunnerPurpose,
+  type ClaudeRunnerResult,
   MAX_CLAUDE_RUNNER_DIAGNOSTIC_BYTE_LIMIT,
   isSafeClaudeArtifactName,
-  runClaudeCmux,
 } from "../claude-runner/cmux-claude-runner.js";
+import {
+  type ClaudeCrabrunnerRunnerInput,
+  resolveClaudeCrabrunnerSchedulerOptions,
+  runClaudeCrabrunner,
+} from "../claude-runner/crabrunner-claude-runner.js";
 
 interface ParsedArgs {
   purpose: ClaudeRunnerPurpose;
@@ -34,7 +39,9 @@ interface ParsedArgs {
 }
 
 export interface ClaudeRunnerCliDependencies {
-  runClaude?: typeof runClaudeCmux;
+  runClaude?: (
+    input: ClaudeCrabrunnerRunnerInput,
+  ) => Promise<ClaudeRunnerResult>;
   stdout?: (text: string) => void;
   stderr?: (text: string) => void;
 }
@@ -50,7 +57,7 @@ function usage(): string {
   return [
     "Usage: claude-runner --purpose <purpose> --workspace <dir> --prompt-file <file> --artifact-dir <dir> --artifact-name <name> [options]",
     "",
-    "Calls Claude through cmux-spawn and validates the direct artifact before reporting success.",
+    "Calls Claude through crabrunner and validates the direct artifact before reporting success.",
     "",
     "Options:",
     "  --purpose <name>             review|research|spec-review|spec-partner|development-agent|critique|custom",
@@ -59,8 +66,8 @@ function usage(): string {
     "  --artifact-dir <dir>         Directory for prompt/output/status/result files",
     "  --artifact-name <name>       Basename for the Claude artifact",
     "  --model <name>               Claude model alias (default: opus)",
-    "  --profile <name>             cmux-spawn Claude profile (default: legacy)",
-    "  --cmux-spawn-bin <path>      cmux-spawn binary (default: CMUX_SPAWN_BIN or cmux-spawn on PATH)",
+    "  --profile <name>             Crabrunner Claude profile (default: read-only)",
+    "  --cmux-spawn-bin <path>      Legacy compatibility flag; ignored by crabrunner execution",
     "  --timeout-seconds <n>        Lane timeout (default: 1800)",
     "  --source <file>              Extra source file that must be readable inside workspace (repeatable)",
     "  --required-heading <text>    Markdown heading required in artifact (repeatable)",
@@ -215,7 +222,14 @@ export async function runClaudeRunnerCli(
     dependencies.stdout ?? ((text: string) => process.stdout.write(text));
   const stderr =
     dependencies.stderr ?? ((text: string) => process.stderr.write(text));
-  const runClaude = dependencies.runClaude ?? runClaudeCmux;
+  const runClaude =
+    dependencies.runClaude ??
+    ((input) =>
+      runClaudeCrabrunner(input, {
+        schedulerOptions: resolveClaudeCrabrunnerSchedulerOptions({
+          targetRepoRoot: input.workspace,
+        }),
+      }));
   let parsed: ParsedArgs;
   try {
     parsed = parseClaudeRunnerArgs(argv);
@@ -240,9 +254,6 @@ export async function runClaudeRunnerCli(
     artifactName: parsed.artifactName,
     ...(parsed.model === null ? {} : { model: parsed.model }),
     ...(parsed.profile === null ? {} : { profile: parsed.profile }),
-    ...(parsed.cmuxSpawnBin === null
-      ? {}
-      : { cmuxSpawnBin: parsed.cmuxSpawnBin }),
     ...(parsed.timeoutSeconds === null
       ? {}
       : { timeoutSeconds: parsed.timeoutSeconds }),

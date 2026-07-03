@@ -132,7 +132,7 @@ function usage(): string {
     "  --ticket <id>             Alias for --issue-direct",
     "  --force, --review-now     Review targeted issues even when normal selection heuristics would skip them",
     "  --source-ref <path>       Source-of-truth file to include (repeatable, default: SPEC.mobilyze.md)",
-    "  --cmux-spawn-bin <path>   cmux-spawn binary",
+    "  --cmux-spawn-bin <path>   Legacy compatibility flag; ignored by crabrunner execution",
     "  --dry-run                 Select and print candidates without invoking Claude or writing Linear",
     "  --help                    Show this help",
     "",
@@ -505,9 +505,6 @@ export async function runSpecReviewWatchCli(
           ...(config.operatorAnchors === undefined
             ? {}
             : { operatorConfig: config.operatorAnchors }),
-          ...(parsed.cmuxSpawnBin === null
-            ? {}
-            : { cmuxSpawnBin: parsed.cmuxSpawnBin }),
           sourceOfTruthRefs,
           writer: {
             fetchIssueDescription: async (issueId) => {

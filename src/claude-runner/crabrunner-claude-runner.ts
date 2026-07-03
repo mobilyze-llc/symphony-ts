@@ -88,6 +88,73 @@ export function createClaudeCrabrunnerSchedulerClient(
   return new CrabrunnerCliSchedulerClient(options);
 }
 
+export function resolveClaudeCrabrunnerSchedulerOptions(
+  input: {
+    env?: NodeJS.ProcessEnv;
+    targetRepoRoot?: string;
+    cwd?: string;
+  } = {},
+): CrabrunnerCliSchedulerClientOptions {
+  const env = input.env ?? process.env;
+  const cwd = input.cwd ?? process.cwd();
+  const crucibleRoot = firstNonEmpty(env.SYMPHONY_CRABRUNNER_ROOT);
+  if (crucibleRoot === null) {
+    throw new Error(
+      "SYMPHONY_CRABRUNNER_ROOT is required to run Claude through crabrunner",
+    );
+  }
+  const targetRepoRoot =
+    firstNonEmpty(
+      env.SYMPHONY_CRABRUNNER_TARGET_REPO,
+      input.targetRepoRoot,
+      env.REPO_URL,
+      cwd,
+    ) ?? cwd;
+  return {
+    crucibleRoot,
+    targetRepoRoot,
+    ...(env.SYMPHONY_CRABRUNNER_HOST === undefined ||
+    env.SYMPHONY_CRABRUNNER_HOST.trim() === ""
+      ? {}
+      : { host: env.SYMPHONY_CRABRUNNER_HOST.trim() }),
+    ...(env.SYMPHONY_CRABRUNNER_STATE_ROOT === undefined ||
+    env.SYMPHONY_CRABRUNNER_STATE_ROOT.trim() === ""
+      ? {}
+      : { stateRoot: env.SYMPHONY_CRABRUNNER_STATE_ROOT.trim() }),
+    ...(env.SYMPHONY_CRABRUNNER_REMOTE_USER === undefined ||
+    env.SYMPHONY_CRABRUNNER_REMOTE_USER.trim() === ""
+      ? {}
+      : { remoteUser: env.SYMPHONY_CRABRUNNER_REMOTE_USER.trim() }),
+    ...(env.SYMPHONY_CRABRUNNER_REMOTE_PORT === undefined ||
+    env.SYMPHONY_CRABRUNNER_REMOTE_PORT.trim() === ""
+      ? {}
+      : { remotePort: env.SYMPHONY_CRABRUNNER_REMOTE_PORT.trim() }),
+    ...(env.SYMPHONY_CRABRUNNER_REMOTE_WORK_ROOT === undefined ||
+    env.SYMPHONY_CRABRUNNER_REMOTE_WORK_ROOT.trim() === ""
+      ? {}
+      : { remoteWorkRoot: env.SYMPHONY_CRABRUNNER_REMOTE_WORK_ROOT.trim() }),
+    ...(env.SYMPHONY_CRABRUNNER_REMOTE_STATE_ROOT === undefined ||
+    env.SYMPHONY_CRABRUNNER_REMOTE_STATE_ROOT.trim() === ""
+      ? {}
+      : { remoteStateRoot: env.SYMPHONY_CRABRUNNER_REMOTE_STATE_ROOT.trim() }),
+    ...(env.SYMPHONY_CRABRUNNER_REMOTE_ARTIFACT_DIR === undefined ||
+    env.SYMPHONY_CRABRUNNER_REMOTE_ARTIFACT_DIR.trim() === ""
+      ? {}
+      : {
+          remoteRunArtifactDir:
+            env.SYMPHONY_CRABRUNNER_REMOTE_ARTIFACT_DIR.trim(),
+        }),
+    ...(env.SYMPHONY_CRABRUNNER_CRABBOX_BIN === undefined ||
+    env.SYMPHONY_CRABRUNNER_CRABBOX_BIN.trim() === ""
+      ? {}
+      : { crabboxBin: env.SYMPHONY_CRABRUNNER_CRABBOX_BIN.trim() }),
+    ...(env.SYMPHONY_CRABRUNNER_VERSION === undefined ||
+    env.SYMPHONY_CRABRUNNER_VERSION.trim() === ""
+      ? {}
+      : { crabrunnerVersion: env.SYMPHONY_CRABRUNNER_VERSION.trim() }),
+  };
+}
+
 export async function runClaudeCrabrunner(
   input: ClaudeCrabrunnerRunnerInput,
   dependencies: ClaudeCrabrunnerDependencies = {},
@@ -829,6 +896,19 @@ function truncateUtf8ByBytes(
     end += char.length;
   }
   return { text: text.slice(0, end), bytes };
+}
+
+function firstNonEmpty(...values: Array<string | undefined>): string | null {
+  for (const value of values) {
+    if (value === undefined) {
+      continue;
+    }
+    const trimmed = value.trim();
+    if (trimmed !== "") {
+      return trimmed;
+    }
+  }
+  return null;
 }
 
 function formatUnknownError(error: unknown): string {

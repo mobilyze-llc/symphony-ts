@@ -69,8 +69,10 @@ describe("plan review lanes", () => {
       {
         laneId: "codex-plan-review",
         reviewer: "codex-plan-review",
-        model: "codex-high",
+        model: "codex",
         modelFamily: "openai",
+        runnerProvider: "openai",
+        reasoningEffort: "high",
       },
     );
 
@@ -82,8 +84,22 @@ describe("plan review lanes", () => {
   });
 
   it("returns ReviewLaneArtifact output from decorrelated non-Opus lane configs", async () => {
+    expect(DEFAULT_PLAN_REVIEW_LANES[0]).toMatchObject({
+      laneId: "codex-plan-review",
+      model: "codex",
+      modelFamily: "openai",
+      runnerProvider: "openai",
+      reasoningEffort: "high",
+    });
+    expect(DEFAULT_PLAN_REVIEW_LANES[1]).toMatchObject({
+      laneId: "sonnet-plan-review",
+      model: "sonnet",
+      runnerProvider: "anthropic",
+    });
+
     for (const lane of DEFAULT_PLAN_REVIEW_LANES) {
       expect(lane.model.toLowerCase()).not.toContain("opus");
+      expect(lane.model).not.toBe("codex-high");
       expect(lane.modelFamily.toLowerCase()).not.toContain("deepseek");
       expect(lane.model.toLowerCase()).not.toContain("deepseek");
     }

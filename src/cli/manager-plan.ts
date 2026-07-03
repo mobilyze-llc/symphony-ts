@@ -14,7 +14,7 @@ import {
   type PlannerInFlight,
   type PlannerRunResult,
   buildPlannerPrompt,
-  createCmuxPlannerRunner,
+  createCrabrunnerPlannerRunner,
   runTriagePlanner,
 } from "../agent/triage-planner.js";
 import {
@@ -184,6 +184,7 @@ interface ManagerPlanPersistenceSummary {
 export interface ManagerPlanPlannerRunnerInput {
   model: string;
   artifactDir: string;
+  workspace: string;
 }
 
 export type CreateManagerPlanPlannerRunner = (
@@ -232,7 +233,7 @@ export interface ManagerPlanCliDependencies {
     issueId: string,
     options: { maxPages?: number },
   ) => Promise<LinearIssueComment[]>;
-  /** Defaults to the production cmux/Opus runner; injected in tests. */
+  /** Defaults to the production crabrunner/Opus runner; injected in tests. */
   createPlannerRunner?: CreateManagerPlanPlannerRunner;
   /** Defaults to local report-only code grounding when --planner-grounding is set. */
   groundPlannerContext?: (
@@ -764,6 +765,7 @@ export async function runManagerPlanCli(
   const runClaude = createPlannerRunner({
     model: options.model,
     artifactDir,
+    workspace: process.cwd(),
   });
 
   const result = await runTriagePlanner(context, { runClaude });
@@ -1190,9 +1192,9 @@ function defaultFetchIssueComments(input: {
 function defaultCreatePlannerRunner(
   now: () => Date,
 ): CreateManagerPlanPlannerRunner {
-  return ({ model, artifactDir }) =>
-    createCmuxPlannerRunner({
-      workspace: artifactDir,
+  return ({ model, artifactDir, workspace }) =>
+    createCrabrunnerPlannerRunner({
+      workspace,
       artifactDir,
       model,
       // Unique artifact name keeps a manual run from clobbering a live

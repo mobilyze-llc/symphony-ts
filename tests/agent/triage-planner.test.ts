@@ -7,7 +7,7 @@ import {
   type QueueHealth,
   buildPlanBody,
   buildPlannerPrompt,
-  createCmuxPlannerRunner,
+  createCrabrunnerPlannerRunner,
   parsePlannerOutput,
   runTriagePlanner,
 } from "../../src/agent/triage-planner.js";
@@ -1929,8 +1929,10 @@ describe("runTriagePlanner", () => {
   });
 });
 
-describe("createCmuxPlannerRunner", () => {
-  function cmuxResult(over: Partial<ClaudeRunnerResult>): ClaudeRunnerResult {
+describe("createCrabrunnerPlannerRunner", () => {
+  function crabrunnerResult(
+    over: Partial<ClaudeRunnerResult>,
+  ): ClaudeRunnerResult {
     return {
       status: "passed",
       artifactPath: "/artifacts/plan.md",
@@ -1943,13 +1945,13 @@ describe("createCmuxPlannerRunner", () => {
   it("invokes the version-floating opus alias and returns the artifact markdown on pass", async () => {
     const calls: Array<{ model: string | undefined; promptFile: string }> = [];
     const writes: Array<{ path: string; data: string }> = [];
-    const runner = createCmuxPlannerRunner({
+    const runner = createCrabrunnerPlannerRunner({
       workspace: "/ws",
       artifactDir: "/artifacts",
       artifactName: "plan",
-      runCmux: async (input) => {
+      runCrabrunner: async (input) => {
         calls.push({ model: input.model, promptFile: input.promptFile });
-        return cmuxResult({ artifactPath: "/artifacts/plan.md" });
+        return crabrunnerResult({ artifactPath: "/artifacts/plan.md" });
       },
       fs: {
         mkdir: async () => undefined,
@@ -1969,13 +1971,13 @@ describe("createCmuxPlannerRunner", () => {
     expect(writes[0]?.data).toBe("PROMPT-BODY");
   });
 
-  it("degrades to unavailable when cmux does not pass", async () => {
-    const runner = createCmuxPlannerRunner({
+  it("degrades to unavailable when crabrunner does not pass", async () => {
+    const runner = createCrabrunnerPlannerRunner({
       workspace: "/ws",
       artifactDir: "/artifacts",
       artifactName: "plan",
-      runCmux: async () =>
-        cmuxResult({ status: "degraded", artifactPath: null }),
+      runCrabrunner: async () =>
+        crabrunnerResult({ status: "degraded", artifactPath: null }),
       fs: {
         mkdir: async () => undefined,
         writeFile: async () => undefined,

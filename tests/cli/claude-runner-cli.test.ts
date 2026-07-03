@@ -2,10 +2,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
-import type {
-  ClaudeCmuxRunnerInput,
-  ClaudeRunnerResult,
-} from "../../src/claude-runner/cmux-claude-runner.js";
+import type { ClaudeRunnerResult } from "../../src/claude-runner/cmux-claude-runner.js";
+import type { ClaudeCrabrunnerRunnerInput } from "../../src/claude-runner/crabrunner-claude-runner.js";
 import {
   parseClaudeRunnerArgs,
   runClaudeRunnerCli,
@@ -210,7 +208,7 @@ describe("claude-runner CLI", () => {
 });
 
 function makeResult(
-  input: ClaudeCmuxRunnerInput,
+  input: ClaudeCrabrunnerRunnerInput,
   status: ClaudeRunnerResult["status"],
 ): ClaudeRunnerResult {
   return {
@@ -218,7 +216,7 @@ function makeResult(
     status,
     purpose: input.purpose,
     model: input.model ?? "opus",
-    profile: input.profile ?? "legacy",
+    profile: input.profile ?? "read-only",
     workspace: input.workspace,
     promptFile: input.promptFile,
     promptSha256: "prompt-hash",
@@ -226,7 +224,7 @@ function makeResult(
     artifactName: input.artifactName,
     artifactPath: `${input.artifactDir}/${input.artifactName}.md`,
     resultJsonPath: `${input.artifactDir}/${input.artifactName}.result.json`,
-    cmuxSpawnBin: input.cmuxSpawnBin ?? "cmux-spawn",
+    cmuxSpawnBin: input.crabrunnerBin ?? "crabrunner",
     laneId: "claude-custom",
     phase: input.purpose,
     startedAt: "2026-06-14T00:00:00.000Z",

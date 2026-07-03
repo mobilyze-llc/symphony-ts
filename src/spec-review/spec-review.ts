@@ -3,10 +3,12 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import type { BacklogAuditFinding } from "../audit/backlog-audit.js";
+import type { ClaudeRunnerResult } from "../claude-runner/cmux-claude-runner.js";
 import {
-  type ClaudeRunnerResult,
-  runClaudeCmux,
-} from "../claude-runner/cmux-claude-runner.js";
+  type ClaudeCrabrunnerRunnerInput,
+  resolveClaudeCrabrunnerSchedulerOptions,
+  runClaudeCrabrunner,
+} from "../claude-runner/crabrunner-claude-runner.js";
 import type { WorkflowOperatorAnchorsConfig } from "../config/types.js";
 import type { DispatcherRunJournalEntry, Issue } from "../domain/model.js";
 import {
@@ -191,6 +193,10 @@ export interface SpecReviewDocumentPublisher {
   }): Promise<{ url: string; identifier: string | null }>;
 }
 
+export type SpecReviewRunner = (
+  input: ClaudeCrabrunnerRunnerInput,
+) => Promise<ClaudeRunnerResult>;
+
 export interface SpecReviewRunIssueInput {
   issue: Issue;
   ticketFeature?: TicketFeature | null;
@@ -198,6 +204,7 @@ export interface SpecReviewRunIssueInput {
   workspaceRoot: string;
   artifactRoot: string;
   mode: SpecReviewMode;
+  /** Legacy compatibility; crabrunner-backed spec review ignores this value. */
   cmuxSpawnBin?: string;
   sourceOfTruthRefs?: SpecReviewSourceOfTruthRef[];
   sourceOfTruthExcerpt?: string | null;
@@ -212,7 +219,7 @@ export interface SpecReviewRunIssueInput {
   commentConfig?: Partial<SpecReviewCommentConfig>;
   writer: SpecReviewWriteClient;
   documentPublisher?: SpecReviewDocumentPublisher | undefined;
-  runner?: typeof runClaudeCmux;
+  runner?: SpecReviewRunner;
   appendSpecReviewResultJournal?: typeof appendSpecReviewResultJournal;
   now?: () => Date;
 }
@@ -976,7 +983,14 @@ export async function runSpecReviewForIssue(
   input: SpecReviewRunIssueInput,
 ): Promise<SpecReviewRunIssueResult> {
   const now = input.now ?? (() => new Date());
-  const runClaude = input.runner ?? runClaudeCmux;
+  const runClaude: SpecReviewRunner =
+    input.runner ??
+    ((runnerInput) =>
+      runClaudeCrabrunner(runnerInput, {
+        schedulerOptions: resolveClaudeCrabrunnerSchedulerOptions({
+          targetRepoRoot: input.workspaceRoot,
+        }),
+      }));
   const appendJournal =
     input.appendSpecReviewResultJournal ?? appendSpecReviewResultJournal;
   const commentConfig = resolveSpecReviewCommentConfig(input.commentConfig);
@@ -1086,9 +1100,6 @@ export async function runSpecReviewForIssue(
     promptFile: promptPath,
     artifactDir,
     artifactName: "spec-review-opus",
-    ...(input.cmuxSpawnBin === undefined
-      ? {}
-      : { cmuxSpawnBin: input.cmuxSpawnBin }),
     retryOnInvalid: true,
     validation: {
       minBytes: 400,
