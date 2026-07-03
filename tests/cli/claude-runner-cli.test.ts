@@ -79,6 +79,11 @@ describe("claude-runner CLI", () => {
       runClaudeRunnerCli(["--help"], { stdout, stderr }),
     ).resolves.toBe(0);
     expect(stdout).toHaveBeenCalledWith(expect.stringContaining("Usage:"));
+    expect(stdout).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "--retry-on-invalid           Unsupported for crabrunner execution",
+      ),
+    );
 
     await expect(runClaudeRunnerCli([], { stdout, stderr })).resolves.toBe(2);
     expect(stderr).toHaveBeenCalledWith(

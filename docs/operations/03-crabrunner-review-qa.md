@@ -26,8 +26,11 @@ work during that interval.
 For the Claude crabrunner adapter, `input.workspace` is the authoritative target
 repo checkout. Production `schedulerOptions.targetRepoRoot` must resolve to the
 same path so source visibility preflight and delegated execution inspect the
-same tree. The adapter is a one-shot lane and does not support CMUX
-`retryOnInvalid`; callers that pass it fail before scheduler submission.
+same tree. When callers provide an explicit target repo root, that explicit
+workspace-derived value wins over `SYMPHONY_CRABRUNNER_TARGET_REPO`; the
+environment value is only a production default for callers that do not supply
+one. The adapter is a one-shot lane and does not support CMUX `retryOnInvalid`;
+callers that pass it fail before scheduler submission.
 
 ## Smoke
 

@@ -117,8 +117,8 @@ export function resolveClaudeCrabrunnerSchedulerOptions(
   }
   const targetRepoRoot =
     firstNonEmpty(
-      env.SYMPHONY_CRABRUNNER_TARGET_REPO,
       input.targetRepoRoot,
+      env.SYMPHONY_CRABRUNNER_TARGET_REPO,
       env.REPO_URL,
       cwd,
     ) ?? cwd;
