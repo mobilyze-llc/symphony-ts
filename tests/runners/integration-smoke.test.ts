@@ -26,7 +26,7 @@ describe.skipIf(SKIP)("integration: AI SDK provider smoke tests", () => {
   it("claude-code runner returns text from a trivial prompt", async () => {
     const runner = new ClaudeCodeRunner({
       cwd: process.cwd(),
-      model: "sonnet",
+      model: "opus",
     });
 
     try {
@@ -47,10 +47,10 @@ describe.skipIf(SKIP)("integration: AI SDK provider smoke tests", () => {
     }
   }, 60_000);
 
-  it("claude-code runner maps full model IDs to short names", async () => {
+  it("claude-code runner maps supported full model IDs to short names", async () => {
     const runner = new ClaudeCodeRunner({
       cwd: process.cwd(),
-      model: "claude-sonnet-4-5", // Should be mapped to "sonnet"
+      model: "claude-opus-4-6", // Should be mapped to "opus"
     });
 
     try {

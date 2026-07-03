@@ -64,7 +64,7 @@ describe("createRunnerFromConfig", () => {
       onEvent: vi.fn(),
     });
 
-    // Default model for claude-code is "sonnet"
+    // Default model for claude-code is "opus"
     expect(runner).toBeInstanceOf(ClaudeCodeRunner);
   });
 

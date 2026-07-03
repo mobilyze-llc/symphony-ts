@@ -60,10 +60,10 @@ export const DEFAULT_PLAN_REVIEW_LANES: readonly PlanReviewLaneConfig[] = [
     reasoningEffort: "high",
   },
   {
-    laneId: "sonnet-plan-review",
-    reviewer: "sonnet-plan-review",
-    model: "sonnet",
-    modelFamily: "anthropic-sonnet",
+    laneId: "opus-plan-review",
+    reviewer: "opus-plan-review",
+    model: "opus",
+    modelFamily: "anthropic-opus",
     runnerProvider: "anthropic",
   },
 ];

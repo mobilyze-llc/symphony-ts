@@ -17,8 +17,8 @@ export interface SlackBotConfig {
   /** Channel ID → project directory mapping */
   channelMap: ChannelProjectMap;
   /**
-   * Claude Code model identifier (e.g. "sonnet", "opus", "haiku").
-   * Defaults to "sonnet".
+   * Claude Code model identifier (e.g. "opus", "haiku").
+   * Defaults to "opus".
    */
   model?: string;
   /** Enable verbose diagnostic logging (session IDs, stream timing). */

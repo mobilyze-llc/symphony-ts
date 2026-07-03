@@ -55,7 +55,7 @@ describe("ClaudeCodeRunner", () => {
   it("implements AgentRunnerCodexClient interface (startSession, continueTurn, close)", () => {
     const runner = new ClaudeCodeRunner({
       cwd: "/tmp/workspace",
-      model: "sonnet",
+      model: "opus",
     });
 
     expect(typeof runner.startSession).toBe("function");
@@ -160,7 +160,7 @@ describe("ClaudeCodeRunner", () => {
     const events: CodexClientEvent[] = [];
     const runner = new ClaudeCodeRunner({
       cwd: "/tmp/workspace",
-      model: "sonnet",
+      model: "opus",
       onEvent: (event) => events.push(event),
     });
 
@@ -177,7 +177,7 @@ describe("ClaudeCodeRunner", () => {
       stageUsage: {
         source: "claude_code_ai_sdk",
         provider: "anthropic",
-        model: "sonnet",
+        model: "opus",
         measurementQuality: "true",
         tokens: {
           inputTokens: 10,
@@ -213,7 +213,7 @@ describe("ClaudeCodeRunner", () => {
     const events: CodexClientEvent[] = [];
     const runner = new ClaudeCodeRunner({
       cwd: "/tmp/workspace",
-      model: "sonnet",
+      model: "opus",
       onEvent: (event) => events.push(event),
     });
 
@@ -275,7 +275,7 @@ describe("ClaudeCodeRunner", () => {
     const events: CodexClientEvent[] = [];
     const runner = new ClaudeCodeRunner({
       cwd: "/tmp/workspace",
-      model: "sonnet",
+      model: "opus",
       onEvent: (event) => events.push(event),
     });
 
@@ -327,7 +327,7 @@ describe("ClaudeCodeRunner", () => {
     // Throw only on approval_auto_approved (the hook path), not session lifecycle events
     const runner = new ClaudeCodeRunner({
       cwd: "/tmp/workspace",
-      model: "sonnet",
+      model: "opus",
       onEvent: (event) => {
         if (event.event === "approval_auto_approved") {
           throw new Error("observer blew up");
@@ -371,7 +371,7 @@ describe("ClaudeCodeRunner", () => {
 
     const runner = new ClaudeCodeRunner({
       cwd: "/tmp/workspace",
-      model: "sonnet",
+      model: "opus",
       modePolicy: createModeScopedPermissionPolicy({
         mode: "thin",
         stageName: "implement",
@@ -412,7 +412,7 @@ describe("ClaudeCodeRunner", () => {
     const events: CodexClientEvent[] = [];
     const runner = new ClaudeCodeRunner({
       cwd: "/tmp/workspace",
-      model: "sonnet",
+      model: "opus",
       onEvent: (event) => events.push(event),
       modePolicy: createModeScopedPermissionPolicy({
         mode: "thin",
@@ -454,7 +454,7 @@ describe("ClaudeCodeRunner", () => {
 
     const runner = new ClaudeCodeRunner({
       cwd: "/tmp/workspace",
-      model: "sonnet",
+      model: "opus",
       modePolicy: createModeScopedPermissionPolicy({
         mode: "full",
         stageName: "merge",
@@ -504,7 +504,7 @@ describe("ClaudeCodeRunner", () => {
     const events: CodexClientEvent[] = [];
     const runner = new ClaudeCodeRunner({
       cwd: "/tmp/workspace",
-      model: "sonnet",
+      model: "opus",
       onEvent: (event) => events.push(event),
     });
 
@@ -546,7 +546,7 @@ describe("ClaudeCodeRunner", () => {
 
     const runner = new ClaudeCodeRunner({
       cwd: "/tmp/workspace",
-      model: "sonnet",
+      model: "opus",
     });
 
     const first = await runner.startSession({ prompt: "p1", title: "t" });
@@ -579,7 +579,7 @@ describe("ClaudeCodeRunner", () => {
 
     const runner = new ClaudeCodeRunner({
       cwd: "/tmp/workspace",
-      model: "sonnet",
+      model: "opus",
     });
 
     const result = await runner.startSession({ prompt: "p", title: "t" });
@@ -590,7 +590,7 @@ describe("ClaudeCodeRunner", () => {
       stageUsage: {
         source: "claude_code_ai_sdk",
         provider: "anthropic",
-        model: "sonnet",
+        model: "opus",
         measurementQuality: "unavailable",
         tokens: {
           inputTokens: null,
@@ -627,7 +627,7 @@ describe("ClaudeCodeRunner", () => {
 
     const runner = new ClaudeCodeRunner({
       cwd: "/tmp/workspace",
-      model: "sonnet",
+      model: "opus",
     });
 
     const result = await runner.startSession({ prompt: "p", title: "t" });
@@ -637,7 +637,7 @@ describe("ClaudeCodeRunner", () => {
     expect(result.usage?.reasoningTokens).toBe(10);
   });
 
-  it("maps full Anthropic model IDs to short provider names", async () => {
+  it("maps supported full Anthropic model IDs to short provider names", async () => {
     mockGenerateText.mockResolvedValueOnce({
       text: "ok",
       usage: {
@@ -658,14 +658,14 @@ describe("ClaudeCodeRunner", () => {
 
     const runner = new ClaudeCodeRunner({
       cwd: "/tmp/workspace",
-      model: "claude-sonnet-4-5",
+      model: "claude-opus-4-6",
     });
 
     await runner.startSession({ prompt: "test", title: "test" });
 
-    // Should resolve "claude-sonnet-4-5" → "sonnet"
+    // Should resolve "claude-opus-4-6" -> "opus"
     expect(mockClaudeCode).toHaveBeenCalledWith(
-      "sonnet",
+      "opus",
       expect.objectContaining({
         cwd: "/tmp/workspace",
         permissionMode: "bypassPermissions",
@@ -701,7 +701,7 @@ describe("ClaudeCodeRunner", () => {
 
     const runner = new ClaudeCodeRunner({
       cwd: "/tmp/workspace",
-      model: "sonnet",
+      model: "opus",
     });
 
     await runner.startSession({ prompt: "test", title: "test" });
@@ -722,7 +722,7 @@ describe("ClaudeCodeRunner", () => {
 
     const runner = new ClaudeCodeRunner({
       cwd: "/tmp/workspace",
-      model: "sonnet",
+      model: "opus",
     });
 
     // Start a turn but don't await — the async function runs synchronously
@@ -799,7 +799,7 @@ describe("ClaudeCodeRunner heartbeat", () => {
     const events: CodexClientEvent[] = [];
     const runner = new ClaudeCodeRunner({
       cwd: "/tmp/workspace",
-      model: "sonnet",
+      model: "opus",
       onEvent: (event) => events.push(event),
       heartbeatIntervalMs: 5000,
     });
@@ -841,7 +841,7 @@ describe("ClaudeCodeRunner heartbeat", () => {
     const events: CodexClientEvent[] = [];
     const runner = new ClaudeCodeRunner({
       cwd: "/tmp/workspace",
-      model: "sonnet",
+      model: "opus",
       onEvent: (event) => events.push(event),
       heartbeatIntervalMs: 5000,
     });
@@ -882,7 +882,7 @@ describe("ClaudeCodeRunner heartbeat", () => {
     const events: CodexClientEvent[] = [];
     const runner = new ClaudeCodeRunner({
       cwd: "/tmp/workspace",
-      model: "sonnet",
+      model: "opus",
       onEvent: (event) => events.push(event),
       heartbeatIntervalMs: 5000,
     });
@@ -915,7 +915,7 @@ describe("ClaudeCodeRunner heartbeat", () => {
     const events: CodexClientEvent[] = [];
     const runner = new ClaudeCodeRunner({
       cwd: "/tmp/workspace",
-      model: "sonnet",
+      model: "opus",
       onEvent: (event) => events.push(event),
       heartbeatIntervalMs: 5000,
     });
@@ -955,7 +955,7 @@ describe("ClaudeCodeRunner heartbeat", () => {
     const events: CodexClientEvent[] = [];
     const runner = new ClaudeCodeRunner({
       cwd: "/tmp/workspace",
-      model: "sonnet",
+      model: "opus",
       onEvent: (event) => events.push(event),
       heartbeatIntervalMs: 5000,
     });
@@ -1003,7 +1003,7 @@ describe("ClaudeCodeRunner heartbeat", () => {
     const events: CodexClientEvent[] = [];
     const runner = new ClaudeCodeRunner({
       cwd: "/tmp/workspace",
-      model: "sonnet",
+      model: "opus",
       onEvent: (event) => events.push(event),
       heartbeatIntervalMs: 5000,
     });
@@ -1051,7 +1051,7 @@ describe("ClaudeCodeRunner heartbeat", () => {
     const events: CodexClientEvent[] = [];
     const runner = new ClaudeCodeRunner({
       cwd: "/tmp/workspace",
-      model: "sonnet",
+      model: "opus",
       onEvent: (event) => events.push(event),
       heartbeatIntervalMs: 5000,
     });
@@ -1082,7 +1082,7 @@ describe("ClaudeCodeRunner heartbeat", () => {
     const events: CodexClientEvent[] = [];
     const runner = new ClaudeCodeRunner({
       cwd: "/tmp/workspace",
-      model: "sonnet",
+      model: "opus",
       onEvent: (event) => events.push(event),
       heartbeatIntervalMs: 5000,
     });
@@ -1115,7 +1115,7 @@ describe("ClaudeCodeRunner heartbeat", () => {
     const events: CodexClientEvent[] = [];
     const runner = new ClaudeCodeRunner({
       cwd: "/tmp/workspace",
-      model: "sonnet",
+      model: "opus",
       onEvent: (event) => events.push(event),
       heartbeatIntervalMs: 0,
     });
@@ -1147,7 +1147,7 @@ describe("ClaudeCodeRunner heartbeat", () => {
     const events: CodexClientEvent[] = [];
     const runner = new ClaudeCodeRunner({
       cwd: "/tmp/workspace",
-      model: "sonnet",
+      model: "opus",
       onEvent: (event) => events.push(event),
       heartbeatIntervalMs: 5000,
     });
@@ -1186,8 +1186,8 @@ describe("resolveClaudeModelId", () => {
     expect(resolveClaudeModelId("claude-opus-4-6")).toBe("opus");
   });
 
-  it("maps claude-sonnet-4-5 to sonnet", () => {
-    expect(resolveClaudeModelId("claude-sonnet-4-5")).toBe("sonnet");
+  it("passes through unsupported sonnet model IDs unchanged", () => {
+    expect(resolveClaudeModelId("claude-sonnet-4-5")).toBe("claude-sonnet-4-5");
   });
 
   it("maps claude-haiku-4-5 to haiku", () => {
@@ -1196,7 +1196,6 @@ describe("resolveClaudeModelId", () => {
 
   it("passes through already-short names unchanged", () => {
     expect(resolveClaudeModelId("opus")).toBe("opus");
-    expect(resolveClaudeModelId("sonnet")).toBe("sonnet");
     expect(resolveClaudeModelId("haiku")).toBe("haiku");
   });
 

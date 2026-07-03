@@ -72,7 +72,7 @@ describe("runner config resolution", () => {
       config: {
         runner: {
           kind: "claude-code",
-          model: "sonnet",
+          model: "opus",
         },
         codex: {
           command: "codex app-server",

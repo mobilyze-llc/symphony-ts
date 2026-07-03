@@ -29,8 +29,6 @@ import { gitIsolationEnv } from "../workspace/git-isolation.js";
 const MODEL_ID_MAP: Record<string, string> = {
   "claude-opus-4": "opus",
   "claude-opus-4-6": "opus",
-  "claude-sonnet-4": "sonnet",
-  "claude-sonnet-4-5": "sonnet",
   "claude-haiku-4": "haiku",
   "claude-haiku-4-5": "haiku",
 };

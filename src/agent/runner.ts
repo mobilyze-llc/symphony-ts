@@ -1544,7 +1544,7 @@ function resolveBudgetModel(input: {
     case "codex":
       return "codex";
     case "claude-code":
-      return "sonnet";
+      return "opus";
     case "gemini":
       return "gemini-2.5-pro";
   }
