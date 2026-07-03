@@ -4,12 +4,15 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
+  readlink,
+  realpath,
   rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -100,6 +103,56 @@ async function runCrabrunnerPreflight(options: {
         : { SYMPHONY_CRABRUNNER_ROOT: options.crabrunnerRoot }),
     },
   });
+}
+
+async function makeCmuxSkillSource(): Promise<{
+  configDir: string;
+  sourceDir: string;
+}> {
+  const configDir = await makeTempDir("symphony-deploy-config-");
+  const sourceDir = join(configDir, "skills", "cmux-spawn");
+  await mkdir(sourceDir, { recursive: true });
+  await writeFile(join(sourceDir, "SKILL.md"), "# cmux-spawn\n");
+  return { configDir, sourceDir };
+}
+
+async function runCmuxSkillInstall(options: {
+  configDir: string;
+  homeDir: string;
+}) {
+  const source = await deploySource();
+  const functions = extractShellFunctions(source, [
+    "archive_active_cmux_spawn_duplicate",
+    "ensure_cmux_spawn_skill_install",
+  ]);
+  const shell = [
+    'info() { echo "INFO $*"; }',
+    'ok() { echo "OK $*"; }',
+    'warn() { echo "WARN $*" >&2; }',
+    'die() { echo "DIE $*" >&2; exit 1; }',
+    'run_or_dry() { "$@"; }',
+    "DRY_RUN=false",
+    `CLAUDE_CONFIG_DIR=${JSON.stringify(options.configDir)}`,
+    functions,
+    "ensure_cmux_spawn_skill_install",
+  ].join("\n");
+
+  return spawnSync("/bin/bash", ["-c", shell], {
+    encoding: "utf8",
+    env: {
+      HOME: options.homeDir,
+      PATH: SAFE_PATH,
+    },
+  });
+}
+
+async function expectCanonicalCmuxLink(homeDir: string, sourceDir: string) {
+  const installDir = join(homeDir, ".agents", "skills", "cmux-spawn");
+  await expect(readFile(join(installDir, "SKILL.md"), "utf8")).resolves.toBe(
+    "# cmux-spawn\n",
+  );
+  expect(await readlink(installDir)).toBe(await realpath(sourceDir));
+  expect(await realpath(installDir)).toBe(await realpath(sourceDir));
 }
 
 it("does not invoke the removed local review runtime preflight", async () => {
@@ -242,5 +295,86 @@ describe("crabrunner review substrate preflight", () => {
 
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain("Crabrunner review preflight passed");
+  });
+});
+
+describe("cmux-spawn skill install canonicalization", () => {
+  it("installs the canonical ~/.agents symlink", async () => {
+    const homeDir = await makeTempDir("symphony-deploy-home-");
+    const { configDir, sourceDir } = await makeCmuxSkillSource();
+
+    const result = await runCmuxSkillInstall({ configDir, homeDir });
+
+    expect(result.status, result.stderr).toBe(0);
+    await expectCanonicalCmuxLink(homeDir, sourceDir);
+  });
+
+  it("uses a resolved target when CLAUDE_CONFIG_DIR is relative", async () => {
+    const homeDir = await makeTempDir("symphony-deploy-home-");
+    const { configDir, sourceDir } = await makeCmuxSkillSource();
+
+    const result = await runCmuxSkillInstall({
+      configDir: relative(process.cwd(), configDir),
+      homeDir,
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    await expectCanonicalCmuxLink(homeDir, sourceDir);
+  });
+
+  it("keeps the canonical ~/.agents symlink idempotent", async () => {
+    const homeDir = await makeTempDir("symphony-deploy-home-");
+    const { configDir, sourceDir } = await makeCmuxSkillSource();
+
+    expect((await runCmuxSkillInstall({ configDir, homeDir })).status).toBe(0);
+    const result = await runCmuxSkillInstall({ configDir, homeDir });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("cmux-spawn user skill already points");
+    await expectCanonicalCmuxLink(homeDir, sourceDir);
+  });
+
+  it("archives copy-style ~/.agents installs before replacing them", async () => {
+    const homeDir = await makeTempDir("symphony-deploy-home-");
+    const { configDir, sourceDir } = await makeCmuxSkillSource();
+    const userInstall = join(homeDir, ".agents", "skills", "cmux-spawn");
+    await mkdir(userInstall, { recursive: true });
+    await writeFile(join(userInstall, "SKILL.md"), "copy\n");
+
+    const result = await runCmuxSkillInstall({ configDir, homeDir });
+
+    expect(result.status, result.stderr).toBe(0);
+    await expectCanonicalCmuxLink(homeDir, sourceDir);
+    expect(await readdir(join(homeDir, ".agents", "skills"))).toContainEqual(
+      expect.stringMatching(/^cmux-spawn\.disabled\./),
+    );
+  });
+
+  it("archives active .claude and .codex duplicate cmux-spawn installs", async () => {
+    const homeDir = await makeTempDir("symphony-deploy-home-");
+    const { configDir, sourceDir } = await makeCmuxSkillSource();
+    const claudeDuplicate = join(homeDir, ".claude", "skills", "cmux-spawn");
+    const codexDuplicate = join(homeDir, ".codex", "skills", "cmux-spawn");
+    await mkdir(claudeDuplicate, { recursive: true });
+    await mkdir(codexDuplicate, { recursive: true });
+    await writeFile(join(claudeDuplicate, "SKILL.md"), "duplicate\n");
+    await writeFile(join(codexDuplicate, "SKILL.md"), "duplicate\n");
+
+    const result = await runCmuxSkillInstall({ configDir, homeDir });
+
+    expect(result.status, result.stderr).toBe(0);
+    await expectCanonicalCmuxLink(homeDir, sourceDir);
+    await expect(
+      readFile(join(claudeDuplicate, "SKILL.md"), "utf8"),
+    ).rejects.toThrow();
+    await expect(
+      readFile(join(codexDuplicate, "SKILL.md"), "utf8"),
+    ).rejects.toThrow();
+    expect(await readdir(join(homeDir, ".claude", "skills"))).toContainEqual(
+      expect.stringMatching(/^cmux-spawn\.disabled\./),
+    );
+    expect(await readdir(join(homeDir, ".codex", "skills"))).toContainEqual(
+      expect.stringMatching(/^cmux-spawn\.disabled\./),
+    );
   });
 });

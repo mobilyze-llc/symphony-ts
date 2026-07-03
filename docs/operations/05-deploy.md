@@ -71,6 +71,7 @@ ops/symphony-ctl restart
 - **`symphony-ctl install` refuses a worktree root.** A `.codex/worktrees/` or `.claude/worktrees/` path dies with `Refusing to install from worktree root`; any other linked git worktree dies with `Refusing to install from a linked git worktree root`. Re-run from the stable checkout, or set `SYMPHONY_ALLOW_WORKTREE_ROOT=1` to override. If `git` is not on `PATH`, the git-aware check is skipped with a warning instead of silently passing.
 - **`symphony-deploy` never stashes or resets.** A dirty or diverged tracked tree fails the `git pull --ff-only` loudly — by design (stash-churn caused a stale deploy on 2026-06-10). Commit or stash by hand, then re-run.
 - **`symphony-deploy` has no drain/version gate yet.** It stops the service without waiting for in-flight lanes to drain and restarts without asserting the deployed SHA. Tracked in **SYMPH-888**; until then, prefer `deploy-train.sh` when lanes may be running.
+- **`cmux-spawn` skill source of truth is `claude-config`.** During the config phase, `symphony-deploy` requires `~/projects/claude-config/skills/cmux-spawn/SKILL.md`, enforces `~/.agents/skills/cmux-spawn` as a resolved symlink to that source, and archives any active duplicate installs under `~/.claude/skills/cmux-spawn` or `~/.codex/skills/cmux-spawn` so later `pnpm test` pretests do not fail on duplicate skill discovery.
 
 ## Deploy
 
