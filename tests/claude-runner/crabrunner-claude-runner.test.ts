@@ -21,7 +21,6 @@ describe("Claude crabrunner adapter", () => {
     expect(
       resolveClaudeCrabrunnerSchedulerOptions({
         cwd: "/fallback/repo",
-        targetRepoRoot: "/input/repo",
         env: {
           SYMPHONY_CRABRUNNER_ROOT: " /crucible ",
           SYMPHONY_CRABRUNNER_TARGET_REPO: " /target/repo ",
@@ -49,6 +48,20 @@ describe("Claude crabrunner adapter", () => {
       crabboxBin: "/bin/crabbox",
       crabrunnerVersion: "2026.07.03",
     });
+  });
+
+  it("prefers explicit target repo input over the crabrunner target repo environment", () => {
+    expect(
+      resolveClaudeCrabrunnerSchedulerOptions({
+        cwd: "/fallback/repo",
+        targetRepoRoot: "/input/repo",
+        env: {
+          SYMPHONY_CRABRUNNER_ROOT: "/crucible",
+          SYMPHONY_CRABRUNNER_TARGET_REPO: "/env/repo",
+          REPO_URL: "https://github.com/mobilyze-llc/symphony-ts.git",
+        },
+      }).targetRepoRoot,
+    ).toBe("/input/repo");
   });
 
   it("requires an explicit crabrunner root for production scheduler resolution", () => {
@@ -325,6 +338,81 @@ describe("Claude crabrunner adapter", () => {
     expect(result.validationErrors).toEqual([
       "one or more declared source paths are unreadable",
     ]);
+    expect(scheduler.submissions).toHaveLength(0);
+  });
+
+  it("rejects scheduler target repo roots that do not match the workspace", async () => {
+    const harness = await createHarness();
+    const otherRepo = await mkdtemp(join(tmpdir(), "claude-crabrunner-other-"));
+
+    await expect(
+      runClaudeCrabrunner(baseInput(harness), {
+        schedulerOptions: {
+          crucibleRoot: harness.workspace,
+          targetRepoRoot: otherRepo,
+        },
+        now: fixedClock(),
+      }),
+    ).rejects.toThrow(
+      "runClaudeCrabrunner requires schedulerOptions.targetRepoRoot to match input.workspace",
+    );
+  });
+
+  it("allows scheduler target repo roots that match the workspace", async () => {
+    const harness = await createHarness();
+    const artifactPath = join(harness.artifactDir, "opus.md");
+    await writeFile(artifactPath, validReviewArtifact(), "utf8");
+    const scheduler = new RecordingScheduler({
+      terminal: {
+        state: "succeeded",
+        artifactRefs: [artifactPath],
+      },
+    });
+
+    const result = await runClaudeCrabrunner(
+      {
+        ...baseInput(harness),
+        validation: {
+          minBytes: 50,
+          requireFirstHeading: "Verdict",
+          requiredHeadings: ["Source Read Status"],
+          verdictEnums: ["ready_as_written"],
+        },
+      },
+      {
+        schedulerClient: scheduler,
+        schedulerOptions: {
+          crucibleRoot: harness.workspace,
+          targetRepoRoot: harness.workspace,
+        },
+        now: fixedClock(),
+      },
+    );
+
+    expect(result.status).toBe("passed");
+    expect(scheduler.submissions).toHaveLength(1);
+  });
+
+  it("rejects retryOnInvalid because crabrunner adapter lanes are one-shot", async () => {
+    const harness = await createHarness();
+    const scheduler = new RecordingScheduler({
+      terminal: {
+        state: "succeeded",
+      },
+    });
+
+    await expect(
+      runClaudeCrabrunner(
+        {
+          ...baseInput(harness),
+          retryOnInvalid: true,
+        } as unknown as ClaudeCrabrunnerRunnerInput,
+        {
+          schedulerClient: scheduler,
+          now: fixedClock(),
+        },
+      ),
+    ).rejects.toThrow("runClaudeCrabrunner does not support retryOnInvalid");
     expect(scheduler.submissions).toHaveLength(0);
   });
 

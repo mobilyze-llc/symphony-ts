@@ -235,7 +235,6 @@ async function defaultPlanReviewLaneRunner(
         requiredHeadings: ["## Verdict", "## Findings"],
         verdictEnums: ["PASS", "CHANGES_REQUESTED", "BLOCKED"],
       },
-      retryOnInvalid: true,
       ...(input.env === undefined ? {} : { env: input.env }),
     },
     {

@@ -1100,7 +1100,6 @@ export async function runSpecReviewForIssue(
     promptFile: promptPath,
     artifactDir,
     artifactName: "spec-review-opus",
-    retryOnInvalid: true,
     validation: {
       minBytes: 400,
       requireFirstHeading: "Verdict",

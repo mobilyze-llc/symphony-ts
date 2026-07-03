@@ -76,7 +76,7 @@ function usage(): string {
     "  --required-json-section <h>  Heading whose section must contain one fenced JSON object (repeatable)",
     "  --min-bytes <n>              Minimum artifact byte size",
     `  --diagnostic-byte-limit <n>  Max stdout/stderr bytes retained in result diagnostics (default: 16384, max: ${MAX_CLAUDE_RUNNER_DIAGNOSTIC_BYTE_LIMIT})`,
-    "  --retry-on-invalid           Retry once with validation errors when artifact is malformed",
+    "  --retry-on-invalid           Unsupported for crabrunner execution; exits with usage error",
     "  --help                       Show this help",
   ].join("\n");
 }
@@ -245,6 +245,12 @@ export async function runClaudeRunnerCli(
     stdout(`${usage()}\n`);
     return 0;
   }
+  if (parsed.retryOnInvalid) {
+    stderr(
+      "--retry-on-invalid is not supported by crabrunner execution; crabrunner lanes are one-shot and return invalid_artifact for malformed artifacts\n",
+    );
+    return 2;
+  }
 
   const result = await runClaude({
     purpose: parsed.purpose,
@@ -258,7 +264,6 @@ export async function runClaudeRunnerCli(
       ? {}
       : { timeoutSeconds: parsed.timeoutSeconds }),
     sourcePaths: parsed.sourcePaths,
-    retryOnInvalid: parsed.retryOnInvalid,
     ...(parsed.diagnosticByteLimit === null
       ? {}
       : { diagnosticByteLimit: parsed.diagnosticByteLimit }),

@@ -79,6 +79,11 @@ describe("claude-runner CLI", () => {
       runClaudeRunnerCli(["--help"], { stdout, stderr }),
     ).resolves.toBe(0);
     expect(stdout).toHaveBeenCalledWith(expect.stringContaining("Usage:"));
+    expect(stdout).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "--retry-on-invalid           Unsupported for crabrunner execution",
+      ),
+    );
 
     await expect(runClaudeRunnerCli([], { stdout, stderr })).resolves.toBe(2);
     expect(stderr).toHaveBeenCalledWith(
@@ -136,6 +141,29 @@ describe("claude-runner CLI", () => {
       expect.stringContaining("--diagnostic-byte-limit must be <="),
     );
     expect(runClaude).not.toHaveBeenCalled();
+
+    await expect(
+      runClaudeRunnerCli(
+        [
+          "--purpose",
+          "custom",
+          "--workspace",
+          "/repo",
+          "--prompt-file",
+          "/repo/prompt.md",
+          "--artifact-dir",
+          "/repo/artifacts",
+          "--artifact-name",
+          "opus",
+          "--retry-on-invalid",
+        ],
+        { runClaude, stdout, stderr },
+      ),
+    ).resolves.toBe(2);
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining("--retry-on-invalid is not supported"),
+    );
+    expect(runClaude).not.toHaveBeenCalled();
   });
 
   it("passes parsed input to the runner and maps runner status to exit code", async () => {
@@ -170,7 +198,6 @@ describe("claude-runner CLI", () => {
     expect(runClaude).toHaveBeenCalledWith(
       expect.objectContaining({
         purpose: "spec-review",
-        retryOnInvalid: false,
         diagnosticByteLimit: 1024,
         validation: expect.objectContaining({
           requiredHeadings: ["Source Read Status"],
