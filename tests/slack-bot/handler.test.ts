@@ -164,7 +164,6 @@ describe("createMessageHandler", () => {
       channelMap,
       sessions,
       ccSessions,
-      model: "sonnet",
     });
 
     const { args } = createMockBoltArgs(
@@ -174,7 +173,7 @@ describe("createMessageHandler", () => {
     await handler(args);
 
     // Verify claudeCode was called with correct cwd, permissionMode, and settingSources
-    expect(claudeCode).toHaveBeenCalledWith("sonnet", {
+    expect(claudeCode).toHaveBeenCalledWith("opus", {
       cwd: "/tmp/test-project",
       permissionMode: "bypassPermissions",
       settingSources: ["user", "project"],
@@ -554,7 +553,7 @@ describe("createMessageHandler", () => {
       channelMap,
       sessions,
       ccSessions,
-      model: "sonnet",
+      model: "opus",
     });
 
     // First message in thread
@@ -564,7 +563,7 @@ describe("createMessageHandler", () => {
     await handler(firstArgs);
 
     // Verify first call does NOT include resume
-    expect(claudeCode).toHaveBeenCalledWith("sonnet", {
+    expect(claudeCode).toHaveBeenCalledWith("opus", {
       cwd: "/tmp/test-project",
       permissionMode: "bypassPermissions",
       settingSources: ["user", "project"],
@@ -584,7 +583,7 @@ describe("createMessageHandler", () => {
 
     // Verify second call includes resume but NOT settingSources
     // (settingSources on resume forces fresh initialisation, breaking context)
-    expect(claudeCode).toHaveBeenCalledWith("sonnet", {
+    expect(claudeCode).toHaveBeenCalledWith("opus", {
       cwd: "/tmp/test-project",
       permissionMode: "bypassPermissions",
       resume: "cc-session-abc",
@@ -608,7 +607,7 @@ describe("createMessageHandler", () => {
       channelMap,
       sessions,
       ccSessions,
-      model: "sonnet",
+      model: "opus",
     });
 
     const { args } = createMockBoltArgs("C123", "brand new thread", {
@@ -617,7 +616,7 @@ describe("createMessageHandler", () => {
     await handler(args);
 
     // Should not include resume option
-    expect(claudeCode).toHaveBeenCalledWith("sonnet", {
+    expect(claudeCode).toHaveBeenCalledWith("opus", {
       cwd: "/tmp/test-project",
       permissionMode: "bypassPermissions",
       settingSources: ["user", "project"],

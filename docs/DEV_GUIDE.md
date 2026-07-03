@@ -579,10 +579,11 @@ curl -s http://localhost:3000/api/v1/state | jq '{
 - `review_routing.decorrelationBasis.authorFamilies` canonicalizes author
   provenance with token-boundary model-family matching. Recognized tokens are
   OpenAI/Codex (`codex`, `openai`, `gpt` including separator-delimited
-  variants such as `gpt-*`), Anthropic (`anthropic`, `claude`, `opus`,
-  `sonnet`), and Pi/DeepSeek (`pi`, `deepseek`). Wrapper names and transport
-  labels such as `myopenaiclient`, `claudewrapper`, or `local-api` remain their
-  explicit provenance string instead of collapsing into a canonical family.
+  variants such as `gpt-*`), Anthropic (`anthropic`, `claude`, `opus`;
+  `sonnet` is recognized only for defensive detection), and Pi/DeepSeek (`pi`,
+  `deepseek`). Wrapper names and transport labels such as `myopenaiclient`,
+  `claudewrapper`, or `local-api` remain their explicit provenance string
+  instead of collapsing into a canonical family.
   Underscore/snake_case separators are intentional token boundaries:
   `my_codex_client` canonicalizes to `openai-codex`.
 - Council reviewer artifact preambles are normalized only when the text before

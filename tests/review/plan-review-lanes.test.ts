@@ -83,7 +83,7 @@ describe("plan review lanes", () => {
     expect(prompt).not.toContain("\n## Verdict\nPASS\n- [P1]");
   });
 
-  it("returns ReviewLaneArtifact output from decorrelated non-Opus lane configs", async () => {
+  it("returns ReviewLaneArtifact output from decorrelated Codex and Opus lane configs", async () => {
     expect(DEFAULT_PLAN_REVIEW_LANES[0]).toMatchObject({
       laneId: "codex-plan-review",
       model: "codex",
@@ -92,13 +92,13 @@ describe("plan review lanes", () => {
       reasoningEffort: "high",
     });
     expect(DEFAULT_PLAN_REVIEW_LANES[1]).toMatchObject({
-      laneId: "sonnet-plan-review",
-      model: "sonnet",
+      laneId: "opus-plan-review",
+      model: "opus",
+      modelFamily: "anthropic-opus",
       runnerProvider: "anthropic",
     });
 
     for (const lane of DEFAULT_PLAN_REVIEW_LANES) {
-      expect(lane.model.toLowerCase()).not.toContain("opus");
       expect(lane.model).not.toBe("codex-high");
       expect(lane.modelFamily.toLowerCase()).not.toContain("deepseek");
       expect(lane.model.toLowerCase()).not.toContain("deepseek");
@@ -108,7 +108,6 @@ describe("plan review lanes", () => {
       { context, body, artifactDir: "/tmp/unused", workspace: "/tmp/unused" },
       {
         runLane: async ({ lane, prompt }) => {
-          expect(lane.model).not.toContain("opus");
           expect(lane.model.toLowerCase()).not.toContain("deepseek");
           expect(prompt).toContain("Failure-mode rubric");
           return "## Verdict\nPASS\n\n## Findings\nNone";

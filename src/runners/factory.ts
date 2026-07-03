@@ -5,7 +5,7 @@ import type { RunnerFactoryInput, RunnerKind } from "./types.js";
 
 const DEFAULT_MODELS: Record<RunnerKind, string> = {
   codex: "codex",
-  "claude-code": "sonnet",
+  "claude-code": "opus",
   gemini: "gemini-2.5-pro",
 };
 

@@ -33,7 +33,7 @@ export interface HandleMessageOptions {
   sessions: SessionMap;
   /** In-memory CC session store (thread ID → CC session ID) */
   ccSessions: CcSessionStore;
-  /** Claude Code model identifier (default: "sonnet") */
+  /** Claude Code model identifier (default: "opus") */
   model?: string;
   /** Enable verbose diagnostic logging (session IDs, stream timing). */
   verbose?: boolean;
@@ -90,7 +90,7 @@ export function createMessageHandler(options: HandleMessageOptions) {
     channelMap,
     sessions,
     ccSessions,
-    model = "sonnet",
+    model = "opus",
     verbose = false,
   } = options;
 
