@@ -1533,7 +1533,7 @@ function resolveBudgetProvider(input: {
   }
 }
 
-function resolveBudgetModel(input: {
+export function resolveBudgetModel(input: {
   runnerKind: RunnerKind;
   model: string | null;
 }): string {

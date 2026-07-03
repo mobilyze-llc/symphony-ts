@@ -27,6 +27,7 @@ import {
   type AgentRunnerError,
   WorkspaceHookError,
   augmentWorkspaceWriteSandbox,
+  resolveBudgetModel,
 } from "../../src/index.js";
 import type {
   IssueStateSnapshot,
@@ -556,6 +557,12 @@ describe("AgentRunner", () => {
       outcome: "PAUSED-budget",
       trigger: "token_budget",
     });
+  });
+
+  it("uses Opus as the default Claude Code budget model", () => {
+    expect(resolveBudgetModel({ runnerKind: "claude-code", model: null })).toBe(
+      "opus",
+    );
   });
 
   it("lets an in-flight turn finish within live budget grace, then pauses", async () => {
