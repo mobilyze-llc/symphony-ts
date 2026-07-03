@@ -328,6 +328,46 @@ describe("Claude crabrunner adapter", () => {
     expect(scheduler.submissions).toHaveLength(0);
   });
 
+  it("rejects scheduler target repo roots that do not match the workspace", async () => {
+    const harness = await createHarness();
+    const otherRepo = await mkdtemp(join(tmpdir(), "claude-crabrunner-other-"));
+
+    await expect(
+      runClaudeCrabrunner(baseInput(harness), {
+        schedulerOptions: {
+          crucibleRoot: harness.workspace,
+          targetRepoRoot: otherRepo,
+        },
+        now: fixedClock(),
+      }),
+    ).rejects.toThrow(
+      "runClaudeCrabrunner requires schedulerOptions.targetRepoRoot to match input.workspace",
+    );
+  });
+
+  it("rejects retryOnInvalid because crabrunner adapter lanes are one-shot", async () => {
+    const harness = await createHarness();
+    const scheduler = new RecordingScheduler({
+      terminal: {
+        state: "succeeded",
+      },
+    });
+
+    await expect(
+      runClaudeCrabrunner(
+        {
+          ...baseInput(harness),
+          retryOnInvalid: true,
+        } as unknown as ClaudeCrabrunnerRunnerInput,
+        {
+          schedulerClient: scheduler,
+          now: fixedClock(),
+        },
+      ),
+    ).rejects.toThrow("runClaudeCrabrunner does not support retryOnInvalid");
+    expect(scheduler.submissions).toHaveLength(0);
+  });
+
   it("rejects invalid diagnostic limits before scheduler resolution", async () => {
     const harness = await createHarness();
 

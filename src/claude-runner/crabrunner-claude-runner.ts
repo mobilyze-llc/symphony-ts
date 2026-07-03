@@ -35,6 +35,14 @@ import {
 /**
  * Adapter-facing crabrunner boundary for Claude one-shot lanes.
  *
+ * `input.workspace` is the authoritative target repo checkout for both source
+ * visibility preflight and delegated execution. When production
+ * `schedulerOptions` are used, `schedulerOptions.targetRepoRoot` must resolve to
+ * the same canonical path or the adapter rejects before scheduler submission.
+ * Crabrunner execution is intentionally one-shot here: CMUX
+ * `retryOnInvalid` repair semantics are not supported, and validation failures
+ * return `invalid_artifact`.
+ *
  * This consumes the Crucible execution schemas documented in
  * `docs/crabrunner-execution-contract.md`: `crucible.crabrunner.scheduler.*`,
  * `crucible.crabrunner.host-capacity.v1`,
@@ -65,7 +73,10 @@ export interface ClaudeCrabrunnerIssueIdentity {
 }
 
 export interface ClaudeCrabrunnerRunnerInput
-  extends Omit<ClaudeCmuxRunnerInput, "cmuxSpawnBin" | "profile"> {
+  extends Omit<
+    ClaudeCmuxRunnerInput,
+    "cmuxSpawnBin" | "profile" | "retryOnInvalid"
+  > {
   profile?: typeof DEFAULT_PROFILE | "write" | string;
   runnerKind?: string;
   runnerProvider?: string | null;
@@ -74,6 +85,7 @@ export interface ClaudeCrabrunnerRunnerInput
   targetHeadRef?: string | null;
   issue?: Partial<ClaudeCrabrunnerIssueIdentity>;
   crabrunnerBin?: string;
+  retryOnInvalid?: never;
 }
 
 export interface ClaudeCrabrunnerDependencies {
@@ -174,10 +186,21 @@ export async function runClaudeCrabrunner(
       `diagnosticByteLimit must be <= ${MAX_CLAUDE_RUNNER_DIAGNOSTIC_BYTE_LIMIT}`,
     );
   }
+  if (Object.prototype.hasOwnProperty.call(input, "retryOnInvalid")) {
+    throw new Error(
+      "runClaudeCrabrunner does not support retryOnInvalid; crabrunner lanes are one-shot and return invalid_artifact for validation failures",
+    );
+  }
 
   const now = dependencies.now ?? (() => new Date());
-  const scheduler = resolveSchedulerClient(dependencies);
   const workspace = resolve(input.workspace);
+  await assertSchedulerTargetRepoRootMatchesWorkspace({
+    workspace,
+    ...(dependencies.schedulerOptions === undefined
+      ? {}
+      : { schedulerOptions: dependencies.schedulerOptions }),
+  });
+  const scheduler = resolveSchedulerClient(dependencies);
   const promptFile = resolve(input.promptFile);
   const artifactDir = resolve(input.artifactDir);
   const artifactName = input.artifactName;
@@ -401,6 +424,24 @@ function resolveSchedulerClient(
   throw new Error(
     "runClaudeCrabrunner requires schedulerClient or schedulerOptions",
   );
+}
+
+async function assertSchedulerTargetRepoRootMatchesWorkspace(input: {
+  workspace: string;
+  schedulerOptions?: CrabrunnerCliSchedulerClientOptions;
+}): Promise<void> {
+  if (input.schedulerOptions === undefined) {
+    return;
+  }
+  const workspace = await realpathOrSelf(resolve(input.workspace));
+  const targetRepoRoot = await realpathOrSelf(
+    resolve(input.schedulerOptions.targetRepoRoot),
+  );
+  if (targetRepoRoot !== workspace) {
+    throw new Error(
+      `runClaudeCrabrunner requires schedulerOptions.targetRepoRoot to match input.workspace; workspace=${workspace} targetRepoRoot=${targetRepoRoot}`,
+    );
+  }
 }
 
 function buildCrabrunnerJobSpec(input: {

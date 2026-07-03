@@ -23,6 +23,12 @@ work during that interval.
 - A `crabrunner` stage backend and review dispatcher are both wired. If either
   is missing, review fails closed and must not fall back to local review.
 
+For the Claude crabrunner adapter, `input.workspace` is the authoritative target
+repo checkout. Production `schedulerOptions.targetRepoRoot` must resolve to the
+same path so source visibility preflight and delegated execution inspect the
+same tree. The adapter is a one-shot lane and does not support CMUX
+`retryOnInvalid`; callers that pass it fail before scheduler submission.
+
 ## Smoke
 
 Run the focused contract tests before enabling a workflow or after changing the

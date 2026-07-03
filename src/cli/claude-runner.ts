@@ -245,6 +245,12 @@ export async function runClaudeRunnerCli(
     stdout(`${usage()}\n`);
     return 0;
   }
+  if (parsed.retryOnInvalid) {
+    stderr(
+      "--retry-on-invalid is not supported by crabrunner execution; crabrunner lanes are one-shot and return invalid_artifact for malformed artifacts\n",
+    );
+    return 2;
+  }
 
   const result = await runClaude({
     purpose: parsed.purpose,
@@ -258,7 +264,6 @@ export async function runClaudeRunnerCli(
       ? {}
       : { timeoutSeconds: parsed.timeoutSeconds }),
     sourcePaths: parsed.sourcePaths,
-    retryOnInvalid: parsed.retryOnInvalid,
     ...(parsed.diagnosticByteLimit === null
       ? {}
       : { diagnosticByteLimit: parsed.diagnosticByteLimit }),
