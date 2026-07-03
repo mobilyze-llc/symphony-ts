@@ -7,7 +7,10 @@ import {
   type PlannerContext,
   renderCandidateGroundingEvidence,
 } from "../agent/triage-planner.js";
-import { runClaudeCmux } from "../claude-runner/cmux-claude-runner.js";
+import {
+  resolveClaudeCrabrunnerSchedulerOptions,
+  runClaudeCrabrunner,
+} from "../claude-runner/crabrunner-claude-runner.js";
 import type { PlanBody } from "../orchestrator/standing-plan-supersession.js";
 import { buildUntrustedDataFence } from "./prompt-fence.js";
 import type { ReviewLaneArtifact } from "./spine/review-aggregator.js";
@@ -17,6 +20,8 @@ export interface PlanReviewLaneConfig {
   reviewer: string;
   model: string;
   modelFamily: string;
+  runnerProvider?: string | null;
+  reasoningEffort?: string | null;
 }
 
 export interface PlanReviewLaneRunnerInput {
@@ -49,14 +54,17 @@ export const DEFAULT_PLAN_REVIEW_LANES: readonly PlanReviewLaneConfig[] = [
   {
     laneId: "codex-plan-review",
     reviewer: "codex-plan-review",
-    model: "codex-high",
+    model: "codex",
     modelFamily: "openai",
+    runnerProvider: "openai",
+    reasoningEffort: "high",
   },
   {
     laneId: "sonnet-plan-review",
     reviewer: "sonnet-plan-review",
     model: "sonnet",
     modelFamily: "anthropic-sonnet",
+    runnerProvider: "anthropic",
   },
 ];
 
@@ -206,23 +214,37 @@ async function defaultPlanReviewLaneRunner(
   const artifactName = `tier-2-plan-review-${sanitize(input.lane.laneId)}`;
   const promptFile = join(input.artifactDir, `${artifactName}.prompt.md`);
   await writeFile(promptFile, input.prompt, "utf8");
-  const result = await runClaudeCmux({
-    purpose: "review",
-    workspace: input.workspace,
-    promptFile,
-    artifactDir: input.artifactDir,
-    artifactName,
-    laneId: input.lane.laneId,
-    model: input.lane.model,
-    profile: "lean-review",
-    validation: {
-      requireFirstHeading: "## Verdict",
-      requiredHeadings: ["## Verdict", "## Findings"],
-      verdictEnums: ["PASS", "CHANGES_REQUESTED", "BLOCKED"],
+  const result = await runClaudeCrabrunner(
+    {
+      purpose: "review",
+      workspace: input.workspace,
+      promptFile,
+      artifactDir: input.artifactDir,
+      artifactName,
+      laneId: input.lane.laneId,
+      model: input.lane.model,
+      ...(input.lane.runnerProvider === undefined
+        ? {}
+        : { runnerProvider: input.lane.runnerProvider }),
+      ...(input.lane.reasoningEffort === undefined
+        ? {}
+        : { reasoningEffort: input.lane.reasoningEffort }),
+      profile: "lean-review",
+      validation: {
+        requireFirstHeading: "## Verdict",
+        requiredHeadings: ["## Verdict", "## Findings"],
+        verdictEnums: ["PASS", "CHANGES_REQUESTED", "BLOCKED"],
+      },
+      retryOnInvalid: true,
+      ...(input.env === undefined ? {} : { env: input.env }),
     },
-    retryOnInvalid: true,
-    ...(input.env === undefined ? {} : { env: input.env }),
-  });
+    {
+      schedulerOptions: resolveClaudeCrabrunnerSchedulerOptions({
+        targetRepoRoot: input.workspace,
+        ...(input.env === undefined ? {} : { env: input.env }),
+      }),
+    },
+  );
   if (result.status !== "passed" || result.artifactPath === null) {
     return [
       "## Verdict",

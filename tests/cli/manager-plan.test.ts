@@ -13,6 +13,7 @@ import {
   type ManagerPlanCliDependencies,
   ManagerPlanCliUsageError,
   type ManagerPlanGroundingInput,
+  type ManagerPlanPlannerRunnerInput,
   inferManagerPlanGroundingRepoScope,
   parseManagerPlanCliArgs,
   runManagerPlanCli,
@@ -462,6 +463,32 @@ describe("runManagerPlanCli", () => {
     expect(seen[0]?.teamKeys).toEqual([]);
     expect(seen[0]?.projectSlug).toBe("abc123");
     expect(seen[0]?.initiative).toBeNull();
+  });
+
+  it("passes the current workspace to the default-capable planner runner", async () => {
+    const { io } = captureIo();
+    const seen: ManagerPlanPlannerRunnerInput[] = [];
+    const outDir = join(tmpdir(), "manager-plan-runner-workspace");
+
+    const code = await runManagerPlanCli(
+      ["--project", "abc123", "--state", "Backlog", "--out-dir", outDir],
+      {
+        io,
+        env: {},
+        loadCandidates: async () => [issue("u1", "MOB-1")],
+        createPlannerRunner: (input) => {
+          seen.push(input);
+          return okRunner();
+        },
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(seen[0]).toMatchObject({
+      artifactDir: outDir,
+      model: "opus",
+      workspace: process.cwd(),
+    });
   });
 
   it("resolves --project name-or-slug to slugId before loading candidates (SYMPH-838)", async () => {

@@ -4,11 +4,12 @@ import { join } from "node:path";
 
 import { z } from "zod";
 
+import type { ClaudeRunnerResult } from "../claude-runner/cmux-claude-runner.js";
 import {
-  type ClaudeCmuxRunnerInput,
-  type ClaudeRunnerResult,
-  runClaudeCmux,
-} from "../claude-runner/cmux-claude-runner.js";
+  type ClaudeCrabrunnerRunnerInput,
+  resolveClaudeCrabrunnerSchedulerOptions,
+  runClaudeCrabrunner,
+} from "../claude-runner/crabrunner-claude-runner.js";
 import { normalizePlanBatch } from "../domain/plan-batch.js";
 import {
   PLAN_BATCH_MODES,
@@ -29,8 +30,8 @@ import type { CuratedPlannerComment } from "./planner-comment-curation.js";
 // merged + in-flight state, within the current envelope, and emits a
 // revision-stamped lookahead of mode-tagged batches. This module owns the
 // pure, testable core (prompt assembly, output parsing, plan-body construction)
-// plus the orchestration over an injected model runner. The actual cmux/Opus
-// invocation is the injected dependency (see createCmuxPlannerRunner), so this
+// plus the orchestration over an injected model runner. The actual crabrunner
+// invocation is the injected dependency (see createCrabrunnerPlannerRunner), so this
 // core is unit-testable without spawning a subprocess.
 //
 // Invariant (zero-LLM-on-dispatch, SYMPH-787): this runs ONLY on a re-plan
@@ -290,7 +291,7 @@ export type PlannerRunResult =
   | { status: "unavailable"; detail: string };
 
 export interface TriagePlannerDeps {
-  /** Inject the model runner (cmux/Opus in prod, a fake in tests). */
+  /** Inject the model runner (crabrunner/Opus in prod, a fake in tests). */
   runClaude: (prompt: string) => Promise<PlannerRunResult>;
 }
 
@@ -304,7 +305,7 @@ export type PlannerResult =
       attempts: number;
       droppedMalformedBatchCount: number;
     }
-  // The model/cmux is down → caller degrades gracefully to the comparator.
+  // The model runner is down → caller degrades gracefully to the comparator.
   | { status: "unavailable"; detail: string; attempts: number }
   // The model produced output we could not parse/validate.
   | { status: "invalid"; detail: string; attempts: number };
@@ -1452,7 +1453,7 @@ export async function runTriagePlanner(
   // model occasionally returns prose with no JSON plan object (~1.7% of cycles —
   // transient output variance, not a systematic failure); re-asking the same
   // prompt once usually recovers it. We do NOT retry `unavailable` (the
-  // runner/cmux is down — a different failure that degrades to the comparator
+  // runner is down — a different failure that degrades to the comparator
   // and is retried on the next heartbeat). `attempts` is returned so the retry
   // rate is observable (no silent caps); tune the ceiling from that data.
   const MAX_PLANNER_ATTEMPTS = 2;
@@ -1562,11 +1563,11 @@ function isParseableJson(candidate: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Production model runner: Opus@max via cmux-spawn (subscription-backed).
+// Production model runner: Opus via crabrunner (subscription-backed).
 //
 // This is the same frontier-Claude path the council gate uses — NOT the
 // metered Anthropic API and NOT the weak local judge that the v1 backlog-audit
-// used. The model alias is version-floating ("opus"); effort rides the cmux
+// used. The model alias is version-floating ("opus"); effort rides the crabrunner
 // agent/profile. Anything other than a clean pass degrades to `unavailable`,
 // which the caller turns into graceful degradation to the comparator.
 // ---------------------------------------------------------------------------
@@ -1578,32 +1579,43 @@ export interface PlannerFileSystem {
   readFile(path: string, encoding: "utf8"): Promise<string>;
 }
 
-export interface CmuxPlannerRunnerOptions {
+export interface CrabrunnerPlannerRunnerOptions {
   workspace: string;
   artifactDir: string;
   /** Version-floating model alias; do not pin. Defaults to "opus". */
   model?: string;
   profile?: string;
   timeoutSeconds?: number;
-  cmuxSpawnBin?: string;
   env?: NodeJS.ProcessEnv;
   artifactName?: string;
   // Injected for tests.
-  runCmux?: (input: ClaudeCmuxRunnerInput) => Promise<ClaudeRunnerResult>;
+  runCrabrunner?: (
+    input: ClaudeCrabrunnerRunnerInput,
+  ) => Promise<ClaudeRunnerResult>;
   fs?: PlannerFileSystem;
 }
 
+export type CmuxPlannerRunnerOptions = CrabrunnerPlannerRunnerOptions;
+
 export const DEFAULT_PLANNER_MODEL = "opus";
 
-export function createCmuxPlannerRunner(
-  options: CmuxPlannerRunnerOptions,
+export function createCrabrunnerPlannerRunner(
+  options: CrabrunnerPlannerRunnerOptions,
 ): (prompt: string) => Promise<PlannerRunResult> {
   const fs: PlannerFileSystem = options.fs ?? {
     mkdir: (path, fsOptions) => nodeFs.mkdir(path, fsOptions),
     writeFile: (path, data, encoding) => nodeFs.writeFile(path, data, encoding),
     readFile: (path, encoding) => nodeFs.readFile(path, encoding),
   };
-  const runCmux = options.runCmux ?? runClaudeCmux;
+  const runCrabrunner =
+    options.runCrabrunner ??
+    ((runnerInput: ClaudeCrabrunnerRunnerInput) =>
+      runClaudeCrabrunner(runnerInput, {
+        schedulerOptions: resolveClaudeCrabrunnerSchedulerOptions({
+          targetRepoRoot: options.workspace,
+          ...(options.env === undefined ? {} : { env: options.env }),
+        }),
+      }));
   const artifactName = options.artifactName ?? "triage-plan";
   const model = options.model ?? DEFAULT_PLANNER_MODEL;
 
@@ -1614,7 +1626,7 @@ export function createCmuxPlannerRunner(
 
     let result: ClaudeRunnerResult;
     try {
-      result = await runCmux({
+      result = await runCrabrunner({
         purpose: "research",
         workspace: options.workspace,
         promptFile,
@@ -1625,22 +1637,19 @@ export function createCmuxPlannerRunner(
         ...(options.timeoutSeconds === undefined
           ? {}
           : { timeoutSeconds: options.timeoutSeconds }),
-        ...(options.cmuxSpawnBin === undefined
-          ? {}
-          : { cmuxSpawnBin: options.cmuxSpawnBin }),
         ...(options.env === undefined ? {} : { env: options.env }),
       });
     } catch (error) {
       return {
         status: "unavailable",
-        detail: `cmux planner threw: ${(error as Error).message}`,
+        detail: `crabrunner planner threw: ${(error as Error).message}`,
       };
     }
 
     if (result.status !== "passed" || result.artifactPath === null) {
       return {
         status: "unavailable",
-        detail: `cmux planner ${result.status}: ${result.message}`,
+        detail: `crabrunner planner ${result.status}: ${result.message}`,
       };
     }
 
@@ -1648,3 +1657,5 @@ export function createCmuxPlannerRunner(
     return { status: "ok", markdown };
   };
 }
+
+export const createCmuxPlannerRunner = createCrabrunnerPlannerRunner;

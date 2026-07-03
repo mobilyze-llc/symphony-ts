@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   type ClaudeCrabrunnerRunnerInput,
+  resolveClaudeCrabrunnerSchedulerOptions,
   runClaudeCrabrunner,
 } from "../../src/claude-runner/crabrunner-claude-runner.js";
 import type {
@@ -16,6 +17,76 @@ import type {
 } from "../../src/stage-execution/crabrunner-backend.js";
 
 describe("Claude crabrunner adapter", () => {
+  it("resolves scheduler options from the Symphony crabrunner environment", () => {
+    expect(
+      resolveClaudeCrabrunnerSchedulerOptions({
+        cwd: "/fallback/repo",
+        targetRepoRoot: "/input/repo",
+        env: {
+          SYMPHONY_CRABRUNNER_ROOT: " /crucible ",
+          SYMPHONY_CRABRUNNER_TARGET_REPO: " /target/repo ",
+          SYMPHONY_CRABRUNNER_HOST: " studio2.local ",
+          SYMPHONY_CRABRUNNER_STATE_ROOT: " /state ",
+          SYMPHONY_CRABRUNNER_REMOTE_USER: " eric ",
+          SYMPHONY_CRABRUNNER_REMOTE_PORT: " 2222 ",
+          SYMPHONY_CRABRUNNER_REMOTE_WORK_ROOT: " /remote/work ",
+          SYMPHONY_CRABRUNNER_REMOTE_STATE_ROOT: " /remote/state ",
+          SYMPHONY_CRABRUNNER_REMOTE_ARTIFACT_DIR: " /remote/artifacts ",
+          SYMPHONY_CRABRUNNER_CRABBOX_BIN: " /bin/crabbox ",
+          SYMPHONY_CRABRUNNER_VERSION: " 2026.07.03 ",
+        },
+      }),
+    ).toMatchObject({
+      crucibleRoot: "/crucible",
+      targetRepoRoot: "/target/repo",
+      host: "studio2.local",
+      stateRoot: "/state",
+      remoteUser: "eric",
+      remotePort: "2222",
+      remoteWorkRoot: "/remote/work",
+      remoteStateRoot: "/remote/state",
+      remoteRunArtifactDir: "/remote/artifacts",
+      crabboxBin: "/bin/crabbox",
+      crabrunnerVersion: "2026.07.03",
+    });
+  });
+
+  it("requires an explicit crabrunner root for production scheduler resolution", () => {
+    expect(() =>
+      resolveClaudeCrabrunnerSchedulerOptions({
+        cwd: "/repo",
+        env: { SYMPHONY_CRABRUNNER_ROOT: " " },
+      }),
+    ).toThrow(
+      "SYMPHONY_CRABRUNNER_ROOT is required to run Claude through crabrunner",
+    );
+  });
+
+  it("prefers explicit target repo input over ambient REPO_URL", () => {
+    expect(
+      resolveClaudeCrabrunnerSchedulerOptions({
+        cwd: "/fallback/repo",
+        targetRepoRoot: "/input/repo",
+        env: {
+          SYMPHONY_CRABRUNNER_ROOT: "/crucible",
+          REPO_URL: "https://github.com/mobilyze-llc/symphony-ts.git",
+        },
+      }).targetRepoRoot,
+    ).toBe("/input/repo");
+  });
+
+  it("falls back to REPO_URL only when no explicit target repo is provided", () => {
+    expect(
+      resolveClaudeCrabrunnerSchedulerOptions({
+        cwd: "/fallback/repo",
+        env: {
+          SYMPHONY_CRABRUNNER_ROOT: "/crucible",
+          REPO_URL: "https://github.com/mobilyze-llc/symphony-ts.git",
+        },
+      }).targetRepoRoot,
+    ).toBe("https://github.com/mobilyze-llc/symphony-ts.git");
+  });
+
   it("submits a read-only crabrunner lane and maps the artifact to ClaudeRunnerResult", async () => {
     const harness = await createHarness();
     const artifactPath = join(harness.artifactDir, "opus.md");
@@ -297,6 +368,39 @@ describe("Claude crabrunner adapter", () => {
       runner: {
         model: "anthropic/claude-opus-4",
         provider: null,
+      },
+    });
+  });
+
+  it("passes explicit provider and reasoning effort to crabrunner job specs", async () => {
+    const harness = await createHarness();
+    const artifactPath = join(harness.artifactDir, "codex.md");
+    await writeFile(artifactPath, validReviewArtifact(), "utf8");
+    const scheduler = new RecordingScheduler({
+      terminal: {
+        state: "succeeded",
+        artifactRefs: [artifactPath],
+      },
+    });
+
+    await runClaudeCrabrunner(
+      {
+        ...baseInput(harness),
+        model: "codex",
+        runnerProvider: "openai",
+        reasoningEffort: "high",
+      },
+      {
+        schedulerClient: scheduler,
+        now: fixedClock(),
+      },
+    );
+
+    expect(scheduler.submissions[0]).toMatchObject({
+      runner: {
+        model: "codex",
+        provider: "openai",
+        reasoningEffort: "high",
       },
     });
   });

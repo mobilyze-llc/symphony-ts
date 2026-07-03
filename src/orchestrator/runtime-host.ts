@@ -44,7 +44,7 @@ import {
 import { runStuckTriage } from "../agent/stuck-triage.js";
 import {
   type PlannerRunResult,
-  createCmuxPlannerRunner,
+  createCrabrunnerPlannerRunner,
 } from "../agent/triage-planner.js";
 import type { BacklogAuditConfig } from "../audit/backlog-audit.js";
 import { validateDispatchConfig } from "../config/config-resolver.js";
@@ -508,7 +508,7 @@ export interface RuntimeServiceOptions {
   shutdownTimeoutMs?: number;
   /**
    * Test seam for the Queue Triage shadow planner runner. Production defaults
-   * to cmux/Opus; tests inject this to capture the prompt without spawning.
+   * to crabrunner/Opus; tests inject this to capture the prompt without spawning.
    */
   createStandingPlanPlannerRunner?: (
     model: string,
@@ -6474,7 +6474,7 @@ export async function startRuntimeService(
         (
           options.createStandingPlanPlannerRunner ??
           ((plannerModel: string) =>
-            createCmuxPlannerRunner({
+            createCrabrunnerPlannerRunner({
               workspace: process.cwd(),
               artifactDir: join(
                 workspaceManager.root,
