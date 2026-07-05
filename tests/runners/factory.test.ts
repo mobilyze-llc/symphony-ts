@@ -66,6 +66,9 @@ describe("createRunnerFromConfig", () => {
 
     // Default model for claude-code is "opus"
     expect(runner).toBeInstanceOf(ClaudeCodeRunner);
+    expect(
+      (runner as unknown as { options: { model?: string } }).options.model,
+    ).toBe("opus");
   });
 
   it("passes mode policy through to the claude-code runner", () => {

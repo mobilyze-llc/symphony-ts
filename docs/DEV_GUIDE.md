@@ -577,7 +577,8 @@ curl -s http://localhost:3000/api/v1/state | jq '{
   no-finding artifacts use the verdict parser confidence (`0.75` for PASS,
   `0.6` otherwise).
 - `review_routing.decorrelationBasis.authorFamilies` canonicalizes author
-  provenance with token-boundary model-family matching. Recognized tokens are
+  provenance with token-boundary model-family matching. Claude Code defaults to
+  `opus`; recognized decorrelation tokens are
   OpenAI/Codex (`codex`, `openai`, `gpt` including separator-delimited
   variants such as `gpt-*`), Anthropic (`anthropic`, `claude`, `opus`;
   `sonnet` is recognized only for defensive detection), and Pi/DeepSeek (`pi`,
