@@ -24,6 +24,7 @@ export interface PlanPostEmitReviewDeps {
     artifactDir: string;
     workspace: string;
     plannerGroundingEnabled: boolean;
+    body?: PlanBody;
     lastReviewedContentHash?: string | null;
     env?: NodeJS.ProcessEnv;
     dependencies?: PlanTier2ReviewDependencies;
@@ -61,7 +62,7 @@ export async function runPlanPostEmitReview(
   const tier2 = await runPlanTier2Review(
     {
       context: deps.context,
-      body: deps.body,
+      body: deps.tier2.body ?? deps.body,
       planId: deps.tier2.planId,
       artifactDir: deps.tier2.artifactDir,
       workspace: deps.tier2.workspace,

@@ -90,6 +90,8 @@ import {
   DEFAULT_QUEUE_TRIAGE_ENABLED,
   DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS,
   DEFAULT_QUEUE_TRIAGE_PLANNER_MODEL,
+  DEFAULT_QUEUE_TRIAGE_PLAN_REVIEW_ENABLED,
+  DEFAULT_QUEUE_TRIAGE_PLAN_REVIEW_PLANNER_GROUNDING_ENABLED,
   DEFAULT_QUEUE_TRIAGE_SHADOW_MODE,
   DEFAULT_RATE_LIMIT_DEFER_JITTER_MS,
   DEFAULT_RATE_LIMIT_DEFER_UNTIL_RESET,
@@ -551,6 +553,7 @@ function resolveQueueTriageConfig(
   const allowedModes = readStringList(envelope.allowed_modes, []);
   const allowedRisk = readString(envelope.allowed_risk);
   const commentEnrichment = asRecord(queueTriage.comment_enrichment);
+  const planReview = asRecord(queueTriage.plan_review);
   return {
     enabled: readBoolean(queueTriage.enabled) ?? DEFAULT_QUEUE_TRIAGE_ENABLED,
     shadowMode:
@@ -594,6 +597,14 @@ function resolveQueueTriageConfig(
       maxTotalChars:
         readPositiveInteger(commentEnrichment.max_total_chars) ??
         DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_TOTAL_CHARS,
+    },
+    planReview: {
+      enabled:
+        readBoolean(planReview.enabled) ??
+        DEFAULT_QUEUE_TRIAGE_PLAN_REVIEW_ENABLED,
+      plannerGroundingEnabled:
+        readBoolean(planReview.planner_grounding_enabled) ??
+        DEFAULT_QUEUE_TRIAGE_PLAN_REVIEW_PLANNER_GROUNDING_ENABLED,
     },
     envelope: resolveStandingPlanEnvelope({
       version: readPositiveInteger(envelope.version) ?? 1,

@@ -5,6 +5,8 @@ import {
   DEFAULT_QUEUE_TRIAGE_ENABLED,
   DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS,
   DEFAULT_QUEUE_TRIAGE_PLANNER_MODEL,
+  DEFAULT_QUEUE_TRIAGE_PLAN_REVIEW_ENABLED,
+  DEFAULT_QUEUE_TRIAGE_PLAN_REVIEW_PLANNER_GROUNDING_ENABLED,
   DEFAULT_QUEUE_TRIAGE_SHADOW_MODE,
 } from "../../src/config/defaults.js";
 
@@ -57,6 +59,11 @@ describe("config-resolver queue triage (SYMPH-784)", () => {
       maxCommentChars: 25_000,
       maxTotalChars: 25_000,
     });
+    expect(resolved.queueTriage?.planReview).toEqual({
+      enabled: DEFAULT_QUEUE_TRIAGE_PLAN_REVIEW_ENABLED,
+      plannerGroundingEnabled:
+        DEFAULT_QUEUE_TRIAGE_PLAN_REVIEW_PLANNER_GROUNDING_ENABLED,
+    });
   });
 
   it("honors explicit comment_enrichment overrides (SYMPH-896)", () => {
@@ -85,6 +92,48 @@ describe("config-resolver queue triage (SYMPH-784)", () => {
       maxComments: 4,
       maxCommentChars: 200,
       maxTotalChars: 600,
+    });
+  });
+
+  it("honors explicit plan_review overrides (SYMPH-1066)", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      config: {
+        queue_triage: {
+          enabled: true,
+          plan_review: {
+            enabled: true,
+            planner_grounding_enabled: true,
+          },
+        },
+      },
+      promptTemplate: "Prompt",
+    });
+
+    expect(resolved.queueTriage?.planReview).toEqual({
+      enabled: true,
+      plannerGroundingEnabled: true,
+    });
+  });
+
+  it("falls back to plan_review defaults for malformed values (SYMPH-1066)", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      config: {
+        queue_triage: {
+          enabled: true,
+          plan_review: {
+            enabled: "yes",
+            planner_grounding_enabled: "yes",
+          },
+        },
+      },
+      promptTemplate: "Prompt",
+    });
+
+    expect(resolved.queueTriage?.planReview).toEqual({
+      enabled: false,
+      plannerGroundingEnabled: false,
     });
   });
 

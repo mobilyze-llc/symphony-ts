@@ -6422,6 +6422,7 @@ describe("startRuntimeService shutdown", () => {
           maxCommentChars: 400,
           maxTotalChars: 1200,
         },
+        planReview: { enabled: false, plannerGroundingEnabled: false },
       },
     } satisfies ResolvedWorkflowConfig;
 

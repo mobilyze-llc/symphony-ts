@@ -529,6 +529,7 @@ describe("decidePlanDrivenDispatch (hot-path composition)", () => {
         maxCommentChars: 400,
         maxTotalChars: 1200,
       },
+      planReview: { enabled: false, plannerGroundingEnabled: false },
       envelope: ENVELOPE,
       ...over,
     };
@@ -746,6 +747,7 @@ describe("resolvePlanDrivenDispatchForTick — single-snapshot read (SYMPH-830)"
       maxCommentChars: 400,
       maxTotalChars: 1200,
     },
+    planReview: { enabled: false, plannerGroundingEnabled: false },
     envelope: ENVELOPE,
   };
   const freshPlan = () =>

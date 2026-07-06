@@ -1,3 +1,5 @@
+import { join } from "node:path";
+
 import {
   type CuratedPlannerComment,
   type PlannerCommentCurationConfig,
@@ -25,22 +27,35 @@ import type {
   WorkflowQueueTriageConfig,
 } from "../config/types.js";
 import type { Issue } from "../domain/model.js";
-import type { PlanEnvelope, StandingPlan } from "../domain/standing-plan.js";
+import type {
+  PlanEnvelope,
+  PlanRevision,
+  StandingPlan,
+} from "../domain/standing-plan.js";
 import type { LinearIssueComment } from "../tracker/linear-client.js";
 import type { BacklogHygieneProposal } from "./backlog-hygiene.js";
 import { extractGroundingPathHints } from "./code-grounding.js";
-import { runPlanPostEmitReview } from "./plan-post-emit-review.js";
+import {
+  type PlanPostEmitReviewDeps,
+  type PlanPostEmitReviewResult,
+  runPlanPostEmitReview,
+} from "./plan-post-emit-review.js";
 import {
   buildQueueHealth,
   computeResidualShare,
   computeTriageIntake,
 } from "./standing-plan-queue-health.js";
-import { loadStandingPlan, recordPlanRevision } from "./standing-plan-store.js";
+import {
+  loadLastReviewedContentHash,
+  loadStandingPlan,
+  recordPlanRevision,
+} from "./standing-plan-store.js";
 import type { RecordPlanRevisionResult } from "./standing-plan-store.js";
 import type {
   PlanBody,
   RotateRevisionOptions,
 } from "./standing-plan-supersession.js";
+import { rotateRevision } from "./standing-plan-supersession.js";
 
 // ---------------------------------------------------------------------------
 // Shadow plan cycle (SYMPH-784 PR1)
@@ -470,6 +485,17 @@ export interface ShadowPlanCycleDeps {
   ) => void | Promise<void>;
   now: () => Date;
   planId?: string;
+  planReview?: {
+    enabled: boolean;
+    plannerGroundingEnabled: boolean;
+    lastReviewedContentHash: string | null;
+    artifactDir: string;
+    workspace: string;
+    env?: NodeJS.ProcessEnv;
+  };
+  runPlanPostEmitReview?: (
+    deps: PlanPostEmitReviewDeps,
+  ) => Promise<PlanPostEmitReviewResult>;
   persistPlanRevision?: (
     workspaceRoot: string,
     body: PlanBody,
@@ -507,18 +533,61 @@ export async function runShadowPlanCycle(
     return { status: "invalid", detail: planned.detail };
   }
 
-  const review = await runPlanPostEmitReview({
+  const planId = deps.planId ?? STANDING_PLAN_ID;
+  const createdAt = deps.now().toISOString();
+  const tier2Body =
+    deps.planReview?.enabled === true
+      ? planBodyFromRevision(
+          rotateRevision(
+            await loadStandingPlan(deps.workspaceRoot),
+            planned.body,
+            {
+              createdAt,
+              planId,
+            },
+          ),
+        )
+      : undefined;
+  const postEmitReview = deps.runPlanPostEmitReview ?? runPlanPostEmitReview;
+  const review = await postEmitReview({
     context: deps.context,
     body: planned.body,
     runClaude: deps.planner.runClaude,
+    ...(deps.planReview?.enabled === true
+      ? {
+          tier2: {
+            enabled: true,
+            planId,
+            artifactDir: deps.planReview.artifactDir,
+            workspace: deps.planReview.workspace,
+            plannerGroundingEnabled: deps.planReview.plannerGroundingEnabled,
+            ...(tier2Body === undefined ? {} : { body: tier2Body }),
+            lastReviewedContentHash: deps.planReview.lastReviewedContentHash,
+            ...(deps.planReview.env === undefined
+              ? {}
+              : { env: deps.planReview.env }),
+          },
+        }
+      : {}),
   });
 
   const persistPlanRevision = deps.persistPlanRevision ?? recordPlanRevision;
-  const record = await persistPlanRevision(deps.workspaceRoot, planned.body, {
-    createdAt: deps.now().toISOString(),
-    planId: deps.planId ?? STANDING_PLAN_ID,
+  const reviewOptions: RotateRevisionOptions = {
+    createdAt,
+    planId,
     findings: review.findings,
-  });
+    ...(review.reviewRecords.length === 0
+      ? {}
+      : { reviewRecords: review.reviewRecords }),
+  };
+  const record = await persistPlanRevision(
+    deps.workspaceRoot,
+    planned.body,
+    reviewOptions,
+  );
+  const tier2Record = review.reviewRecords.find(
+    (record) => record.tier === "tier-2",
+  );
 
   await deps.log(
     "queue_triage_shadow_plan",
@@ -539,6 +608,16 @@ export async function runShadowPlanCycle(
         members: batch.members.map((member) => member.issueIdentifier),
       })),
       review_findings: record.plan.findings ?? [],
+      ...(tier2Record === undefined
+        ? {}
+        : {
+            review_tier2: {
+              gate_reason: tier2Record.gateReason,
+              status: tier2Record.status,
+              aggregate_verdict: tier2Record.aggregateVerdict,
+              finding_count: tier2Record.findingFingerprints.length,
+            },
+          }),
     },
   );
 
@@ -625,6 +704,17 @@ export interface StandingPlanShadowTickDeps {
   getReviewRoundDepth?: () => Promise<number | null>;
   /** Read hot-file growth (bound thunk over the git-churn reader); null on any read failure. */
   getHotFileGrowth?: () => Promise<HotFileGrowth | null>;
+  /** Durable tier-2 diff-gate baseline read. Defaults to the standing-plan store. */
+  loadLastReviewedContentHash?: (
+    workspaceRoot: string,
+  ) => Promise<string | null>;
+  /** Optional tier-2 artifact directory override for tests or custom runtimes. */
+  planReviewArtifactDir?: string;
+  /** Optional review workspace override. Defaults to the current process cwd. */
+  planReviewWorkspace?: string;
+  runPlanPostEmitReview?: (
+    deps: PlanPostEmitReviewDeps,
+  ) => Promise<PlanPostEmitReviewResult>;
   auditDispositions?: readonly ShadowPlannerAuditDisposition[];
   /**
    * Bypass the heartbeat cadence and re-plan now (SYMPH-787/789): a re-plan
@@ -809,12 +899,29 @@ export async function runStandingPlanShadowTick(
       }
     }
     const runClaude = deps.createPlannerRunner(config.plannerModel);
+    const planReview = await buildShadowPlanReviewConfig({
+      config,
+      workspaceRoot: deps.workspaceRoot,
+      loadLastReviewedContentHash:
+        deps.loadLastReviewedContentHash ?? loadLastReviewedContentHash,
+      log: deps.log,
+      ...(deps.planReviewArtifactDir === undefined
+        ? {}
+        : { artifactDir: deps.planReviewArtifactDir }),
+      ...(deps.planReviewWorkspace === undefined
+        ? {}
+        : { workspace: deps.planReviewWorkspace }),
+    });
     const result = await runShadowPlanCycle({
       workspaceRoot: deps.workspaceRoot,
       context,
       planner: { runClaude },
       log: deps.log,
       now: () => now,
+      ...(planReview === undefined ? {} : { planReview }),
+      ...(deps.runPlanPostEmitReview === undefined
+        ? {}
+        : { runPlanPostEmitReview: deps.runPlanPostEmitReview }),
     });
     return result;
   } catch (error) {
@@ -825,4 +932,54 @@ export async function runStandingPlanShadowTick(
     );
     return { status: "skipped", reason: "error" };
   }
+}
+
+async function buildShadowPlanReviewConfig(input: {
+  config: WorkflowQueueTriageConfig;
+  workspaceRoot: string;
+  loadLastReviewedContentHash: (
+    workspaceRoot: string,
+  ) => Promise<string | null>;
+  log: StandingPlanShadowTickDeps["log"];
+  artifactDir?: string;
+  workspace?: string;
+}): Promise<ShadowPlanCycleDeps["planReview"] | undefined> {
+  if (!input.config.planReview.enabled) {
+    return undefined;
+  }
+  let lastReviewedContentHash: string | null = null;
+  try {
+    lastReviewedContentHash = await input.loadLastReviewedContentHash(
+      input.workspaceRoot,
+    );
+  } catch (error) {
+    await input.log(
+      "queue_triage_plan_review_baseline_failed",
+      "Standing-plan tier-2 baseline read failed (report-only; treating as no baseline).",
+      { outcome: "degraded", detail: (error as Error).message },
+    );
+  }
+  return {
+    enabled: true,
+    plannerGroundingEnabled: input.config.planReview.plannerGroundingEnabled,
+    lastReviewedContentHash,
+    artifactDir:
+      input.artifactDir ??
+      join(input.workspaceRoot, ".symphony", "standing-plan", "tier-2"),
+    workspace: input.workspace ?? process.cwd(),
+    env: process.env,
+  };
+}
+
+function planBodyFromRevision(revision: PlanRevision): PlanBody {
+  const premises = revision.premises ?? [];
+  return {
+    batches: revision.batches,
+    options: revision.options,
+    envelope: revision.envelope,
+    rationale: revision.rationale,
+    source: revision.source,
+    dependencyEdges: revision.dependencyEdges,
+    ...(premises.length === 0 ? {} : { premises }),
+  };
 }

@@ -13,7 +13,21 @@ import type {
 import { runTriagePlanner } from "../../src/agent/triage-planner.js";
 import type { WorkflowQueueTriageConfig } from "../../src/config/types.js";
 import type { Issue } from "../../src/domain/model.js";
-import type { PlanEnvelope } from "../../src/domain/standing-plan.js";
+import {
+  type PlanBatch,
+  type PlanEnvelope,
+  type PlanReviewRecord,
+  computePlanContentHash,
+} from "../../src/domain/standing-plan.js";
+import {
+  appendStandingPlanJournalEntriesWithLock,
+  readStandingPlanJournal,
+} from "../../src/logging/standing-plan-journal.js";
+import type {
+  PlanPostEmitReviewDeps,
+  PlanPostEmitReviewResult,
+} from "../../src/orchestrator/plan-post-emit-review.js";
+import { renderStandingPlanControlDoc } from "../../src/orchestrator/standing-plan-doc-render.js";
 import {
   assembleShadowPlannerContext,
   buildShadowPlannerAuditDispositions,
@@ -24,6 +38,7 @@ import {
   shouldRunShadowPlanCycle,
 } from "../../src/orchestrator/standing-plan-shadow.js";
 import {
+  loadLastReviewedContentHash,
   loadStandingPlan,
   recordPlanRevision,
 } from "../../src/orchestrator/standing-plan-store.js";
@@ -35,6 +50,21 @@ const ENVELOPE: PlanEnvelope = {
   allowedRisk: "medium",
   allowedModes: ["parallel-isolated"],
 };
+
+function batch(
+  id: string,
+  identifier: string,
+  status: PlanBatch["status"] = "lookahead",
+): PlanBatch {
+  return {
+    batchId: id,
+    mode: "parallel-isolated",
+    status,
+    members: [{ issueId: id, issueIdentifier: identifier }],
+    rationale: "r",
+    canary: null,
+  };
+}
 
 function issue(id: string, identifier: string): Issue {
   return {
@@ -63,6 +93,43 @@ function okPlanner(): { runClaude: () => Promise<PlannerRunResult> } {
   };
 }
 
+function plannerFor(identifier: string): {
+  runClaude: () => Promise<PlannerRunResult>;
+} {
+  return {
+    runClaude: async () => ({
+      status: "ok",
+      markdown: `# Plan\n\`\`\`json\n{\"rationale\":\"go\",\"batches\":[{\"mode\":\"parallel-isolated\",\"issueIdentifiers\":[\"${identifier}\"],\"rationale\":\"first\"}]}\n\`\`\`\n`,
+    }),
+  };
+}
+
+function plannerForBatches(identifiers: readonly string[]): {
+  runClaude: (prompt: string) => Promise<PlannerRunResult>;
+} {
+  return {
+    runClaude: async (prompt) => {
+      if (prompt.startsWith("Review this already-produced standing plan.")) {
+        return {
+          status: "ok",
+          markdown: '```json\n{"findings":[]}\n```',
+        };
+      }
+      return {
+        status: "ok",
+        markdown: `# Plan\n\`\`\`json\n${JSON.stringify({
+          rationale: "go",
+          batches: identifiers.map((identifier) => ({
+            mode: "parallel-isolated",
+            issueIdentifiers: [identifier],
+            rationale: "first",
+          })),
+        })}\n\`\`\`\n`,
+      };
+    },
+  };
+}
+
 function groundingEvidence(): PlannerCandidateGroundingEvidence {
   return {
     status: "grounded",
@@ -74,6 +141,46 @@ function groundingEvidence(): PlannerCandidateGroundingEvidence {
     extractorCallCount: 1,
     wallClockMs: 10,
   };
+}
+
+function tier2Record(over: Partial<PlanReviewRecord> = {}): PlanReviewRecord {
+  return {
+    tier: "tier-2",
+    status: "reviewed",
+    diffHash: "diff-hash",
+    gateReason: "no_baseline",
+    aggregateVerdict: "pass",
+    note: null,
+    reviewedGroundingEvidence: [],
+    findingFingerprints: [],
+    postHocEntries: [],
+    ...over,
+  };
+}
+
+function tier2RecordForReview(
+  deps: PlanPostEmitReviewDeps,
+  over: Partial<PlanReviewRecord> = {},
+): PlanReviewRecord {
+  const body = deps.tier2?.body ?? deps.body;
+  return tier2Record({
+    diffHash: computePlanContentHash({
+      planId: deps.tier2?.planId ?? "symphony-standing-plan",
+      batches: body.batches,
+      dependencyEdges: body.dependencyEdges,
+      options: body.options,
+      envelope: body.envelope,
+      rationale: body.rationale,
+      source: body.source,
+    }),
+    ...over,
+  });
+}
+
+function postEmitStub(
+  fn: (deps: PlanPostEmitReviewDeps) => PlanPostEmitReviewResult,
+): (deps: PlanPostEmitReviewDeps) => Promise<PlanPostEmitReviewResult> {
+  return async (deps) => fn(deps);
 }
 
 function linearComment(
@@ -566,6 +673,91 @@ describe("runShadowPlanCycle", () => {
     }
   });
 
+  it("does not advance the tier-2 baseline when a reentrant persist changes the rotated hash", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-"));
+    try {
+      const context = assembleShadowPlannerContext({
+        candidates: [issue("u1", "SYMPH-1")],
+        inFlight: [],
+        envelope: ENVELOPE,
+      });
+      const interveningBatch = batch("b0", "SYMPH-0", "in_flight");
+      const interveningHash = computePlanContentHash({
+        planId: "symphony-standing-plan",
+        batches: [interveningBatch],
+        dependencyEdges: [],
+        options: [],
+        envelope: ENVELOPE,
+        rationale: "intervening",
+        source: "manual",
+      });
+      let injected = false;
+
+      const result = await runShadowPlanCycle({
+        workspaceRoot: root,
+        context,
+        planner: okPlanner(),
+        planReview: {
+          enabled: true,
+          plannerGroundingEnabled: true,
+          lastReviewedContentHash: null,
+          artifactDir: join(root, "tier2-artifacts"),
+          workspace: root,
+        },
+        runPlanPostEmitReview: postEmitStub((deps) => ({
+          findings: [],
+          reviewRecords: [
+            tier2RecordForReview(deps, {
+              status: "reviewed",
+              gateReason: "no_baseline",
+              aggregateVerdict: "pass",
+            }),
+          ],
+        })),
+        persistPlanRevision: async (workspaceRoot, body, options) => {
+          if (!injected) {
+            injected = true;
+            await appendStandingPlanJournalEntriesWithLock(workspaceRoot, [
+              {
+                kind: "plan_revision",
+                idempotencyKey: "symphony-standing-plan:intervening-replan",
+                timestamp: "2026-06-18T00:59:00.000Z",
+                planId: "symphony-standing-plan",
+                revision: {
+                  revision: 1,
+                  planId: "symphony-standing-plan",
+                  contentHash: interveningHash,
+                  supersedes: null,
+                  createdAt: "2026-06-18T00:59:00.000Z",
+                  envelope: ENVELOPE,
+                  batches: [interveningBatch],
+                  dependencyEdges: [],
+                  options: [],
+                  rationale: "intervening",
+                  premises: [],
+                  findings: [],
+                  reviewRecords: [],
+                  source: "manual",
+                },
+              },
+            ]);
+          }
+          return recordPlanRevision(workspaceRoot, body, options);
+        },
+        log: () => undefined,
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+      });
+
+      expect(result.status).toBe("ok");
+      const plan = await loadStandingPlan(root);
+      const tier2 = plan?.reviewRecords?.[0];
+      expect(plan?.contentHash).not.toBe(tier2?.diffHash);
+      expect(await loadLastReviewedContentHash(root)).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("degrades and records nothing when the planner is unavailable", async () => {
     const root = mkdtempSync(join(tmpdir(), "symph-shadow-"));
     const logs: string[] = [];
@@ -676,6 +868,7 @@ function triageConfig(
       maxCommentChars: 400,
       maxTotalChars: 1200,
     },
+    planReview: { enabled: false, plannerGroundingEnabled: false },
     envelope: ENVELOPE,
     ...over,
   };
@@ -725,6 +918,593 @@ describe("runStandingPlanShadowTick", () => {
       expect(result.status).toBe("ok");
       expect(requestedModel).toBe("opus");
       expect((await loadStandingPlan(root))?.revision).toBe(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves tier-2 review off by default and omits tier-2 telemetry", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-"));
+    const logs: Array<{ event: string; fields: Record<string, unknown> }> = [];
+    const reviewCalls: PlanPostEmitReviewDeps[] = [];
+    try {
+      const result = await runStandingPlanShadowTick({
+        config: triageConfig(),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        createPlannerRunner: () => okPlanner().runClaude,
+        runPlanPostEmitReview: postEmitStub((deps) => {
+          reviewCalls.push(deps);
+          return { findings: [], reviewRecords: [] };
+        }),
+        log: (event, _message, fields) => {
+          logs.push({ event, fields });
+        },
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+      });
+
+      expect(result.status).toBe("ok");
+      expect(reviewCalls).toHaveLength(1);
+      expect(reviewCalls[0]?.tier2).toBeUndefined();
+      const shadowLog = logs.find(
+        (entry) => entry.event === "queue_triage_shadow_plan",
+      );
+      expect(shadowLog?.fields).not.toHaveProperty("review_tier2");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("passes the durable tier-2 baseline and logs report-only telemetry when enabled", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-"));
+    const logs: Array<{ event: string; fields: Record<string, unknown> }> = [];
+    const artifactDir = join(root, "tier2-artifacts");
+    const workspace = join(root, "repo");
+    try {
+      const result = await runStandingPlanShadowTick({
+        config: triageConfig({
+          planReview: { enabled: true, plannerGroundingEnabled: false },
+        }),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        createPlannerRunner: () => okPlanner().runClaude,
+        loadLastReviewedContentHash: async (workspaceRoot) => {
+          expect(workspaceRoot).toBe(root);
+          return null;
+        },
+        planReviewArtifactDir: artifactDir,
+        planReviewWorkspace: workspace,
+        runPlanPostEmitReview: postEmitStub((deps) => {
+          expect(deps.tier2).toMatchObject({
+            enabled: true,
+            planId: "symphony-standing-plan",
+            artifactDir,
+            workspace,
+            plannerGroundingEnabled: false,
+            lastReviewedContentHash: null,
+          });
+          return {
+            findings: [],
+            reviewRecords: [
+              tier2RecordForReview(deps, {
+                status: "skipped",
+                gateReason: "no_baseline",
+                aggregateVerdict: null,
+                note: "no grounded evidence",
+              }),
+            ],
+          };
+        }),
+        log: (event, _message, fields) => {
+          logs.push({ event, fields });
+        },
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+      });
+
+      expect(result.status).toBe("ok");
+      const shadowLog = logs.find(
+        (entry) => entry.event === "queue_triage_shadow_plan",
+      );
+      expect(shadowLog?.fields).toMatchObject({
+        review_tier2: {
+          gate_reason: "no_baseline",
+          status: "skipped",
+          aggregate_verdict: null,
+          finding_count: 0,
+        },
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("persists reviewed tier-2 records as the next durable baseline", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-"));
+    try {
+      const result = await runStandingPlanShadowTick({
+        config: triageConfig({
+          planReview: { enabled: true, plannerGroundingEnabled: true },
+        }),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        createPlannerRunner: () => okPlanner().runClaude,
+        runPlanPostEmitReview: postEmitStub((deps) => {
+          expect(deps.tier2?.lastReviewedContentHash).toBeNull();
+          return {
+            findings: [],
+            reviewRecords: [
+              tier2RecordForReview(deps, {
+                status: "reviewed",
+                gateReason: "no_baseline",
+                aggregateVerdict: "pass",
+                findingFingerprints: ["f1"],
+              }),
+            ],
+          };
+        }),
+        log: () => undefined,
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+      });
+
+      expect(result.status).toBe("ok");
+      const plan = await loadStandingPlan(root);
+      expect(plan?.reviewRecords).toMatchObject([
+        {
+          tier: "tier-2",
+          status: "reviewed",
+          gateReason: "no_baseline",
+          findingFingerprints: ["f1"],
+        },
+      ]);
+      expect(await loadLastReviewedContentHash(root)).toBe(plan?.contentHash);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the last reviewed baseline after an unchanged-tick skip refresh", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-"));
+    const baselines: Array<string | null | undefined> = [];
+    try {
+      await runStandingPlanShadowTick({
+        config: triageConfig({
+          planReview: { enabled: true, plannerGroundingEnabled: true },
+        }),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        createPlannerRunner: () => okPlanner().runClaude,
+        runPlanPostEmitReview: postEmitStub((deps) => {
+          baselines.push(deps.tier2?.lastReviewedContentHash);
+          return {
+            findings: [],
+            reviewRecords: [
+              tier2RecordForReview(deps, {
+                status: "reviewed",
+                gateReason: "no_baseline",
+                aggregateVerdict: "pass",
+              }),
+            ],
+          };
+        }),
+        log: () => undefined,
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+      });
+      const reviewedHash = (await loadStandingPlan(root))?.contentHash;
+
+      await runStandingPlanShadowTick({
+        config: triageConfig({
+          planReview: { enabled: true, plannerGroundingEnabled: true },
+        }),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        createPlannerRunner: () => okPlanner().runClaude,
+        runPlanPostEmitReview: postEmitStub((deps) => {
+          baselines.push(deps.tier2?.lastReviewedContentHash);
+          return {
+            findings: [],
+            reviewRecords: [
+              tier2RecordForReview(deps, {
+                status: "skipped",
+                gateReason: "content_hash_unchanged",
+                aggregateVerdict: null,
+                note: "plan content hash already reviewed",
+              }),
+            ],
+          };
+        }),
+        log: () => undefined,
+        now: () => new Date("2026-06-18T01:16:00.000Z"),
+        force: true,
+      });
+
+      expect(baselines).toEqual([null, reviewedHash]);
+      expect((await loadStandingPlan(root))?.reviewRecords).toMatchObject([
+        { tier: "tier-2", status: "skipped" },
+      ]);
+      expect(await loadLastReviewedContentHash(root)).toBe(reviewedHash);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps prior tier-2 findings visible after an unchanged-tick skip refresh", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-"));
+    const tier2Finding = {
+      title: "Prior tier-2 finding",
+      planAnchor: "plan:issue/SYMPH-1",
+      severity: "P2" as const,
+      source: "tier-2" as const,
+      structuredFingerprint: "fp-tier2-prior",
+    };
+    try {
+      await runStandingPlanShadowTick({
+        config: triageConfig({
+          planReview: { enabled: true, plannerGroundingEnabled: true },
+        }),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        createPlannerRunner: () => okPlanner().runClaude,
+        runPlanPostEmitReview: postEmitStub((deps) => ({
+          findings: [tier2Finding],
+          reviewRecords: [
+            tier2RecordForReview(deps, {
+              status: "reviewed",
+              gateReason: "no_baseline",
+              aggregateVerdict: "fail",
+              findingFingerprints: ["fp-tier2-prior"],
+            }),
+          ],
+        })),
+        log: () => undefined,
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+      });
+
+      await runStandingPlanShadowTick({
+        config: triageConfig({
+          planReview: { enabled: true, plannerGroundingEnabled: true },
+        }),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        createPlannerRunner: () => okPlanner().runClaude,
+        runPlanPostEmitReview: postEmitStub((deps) => ({
+          findings: [],
+          reviewRecords: [
+            tier2RecordForReview(deps, {
+              status: "skipped",
+              gateReason: "content_hash_unchanged",
+              aggregateVerdict: null,
+              note: "plan content hash already reviewed",
+            }),
+          ],
+        })),
+        log: () => undefined,
+        now: () => new Date("2026-06-18T01:16:00.000Z"),
+        force: true,
+      });
+
+      const plan = await loadStandingPlan(root);
+      expect(plan?.findings).toEqual([tier2Finding]);
+      expect(
+        plan === null
+          ? ""
+          : renderStandingPlanControlDoc({
+              plan,
+              recentlyShipped: [],
+              inFlight: [],
+              changelog: [],
+            }),
+      ).toContain("Prior tier-2 finding");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("feeds tier-2 the rotated persisted body when committed batches carry forward", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-"));
+    try {
+      await recordPlanRevision(
+        root,
+        {
+          batches: [batch("b1", "SYMPH-1"), batch("b2", "SYMPH-2")],
+          options: [],
+          envelope: ENVELOPE,
+          rationale: "rationale",
+          source: "planner",
+          dependencyEdges: [],
+        },
+        {
+          planId: "symphony-standing-plan",
+          createdAt: "2026-06-18T00:00:00.000Z",
+        },
+      );
+      const latest = [...(await readStandingPlanJournal(root))]
+        .reverse()
+        .find((entry) => entry.kind === "plan_revision");
+      if (latest?.kind !== "plan_revision") {
+        throw new Error("expected seed revision");
+      }
+      const carriedBatches = latest.revision.batches.map((item) =>
+        item.members.some((member) => member.issueIdentifier === "SYMPH-1")
+          ? { ...item, status: "in_flight" as const }
+          : item,
+      );
+      const reviewedContentHash = computePlanContentHash({
+        planId: latest.revision.planId,
+        batches: carriedBatches,
+        dependencyEdges: latest.revision.dependencyEdges,
+        options: latest.revision.options,
+        envelope: latest.revision.envelope,
+        rationale: latest.revision.rationale,
+        source: latest.revision.source,
+      });
+      const reviewedRevision = {
+        ...latest.revision,
+        batches: carriedBatches,
+        contentHash: reviewedContentHash,
+        reviewRecords: [
+          tier2Record({
+            status: "reviewed",
+            diffHash: reviewedContentHash,
+            gateReason: "no_baseline",
+            aggregateVerdict: "pass",
+          }),
+        ],
+      };
+      await appendStandingPlanJournalEntriesWithLock(root, [
+        {
+          kind: "plan_revision",
+          idempotencyKey: "symphony-standing-plan:manual-in-flight-baseline",
+          timestamp: "2026-06-18T00:05:00.000Z",
+          planId: latest.revision.planId,
+          revision: reviewedRevision,
+        },
+      ]);
+      const baselineHash = await loadLastReviewedContentHash(root);
+      const tier2Batches: Array<{
+        status: PlanBatch["status"];
+        members: string[];
+      }> = [];
+
+      await runStandingPlanShadowTick({
+        config: triageConfig({
+          planReview: { enabled: true, plannerGroundingEnabled: true },
+        }),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u2", "SYMPH-2")],
+        getInFlight: () => [{ issueIdentifier: "SYMPH-1", stage: "In Review" }],
+        createPlannerRunner: () => plannerFor("SYMPH-2").runClaude,
+        runPlanPostEmitReview: postEmitStub((deps) => {
+          expect(deps.tier2?.lastReviewedContentHash).toBe(baselineHash);
+          for (const item of deps.tier2?.body?.batches ?? []) {
+            tier2Batches.push({
+              status: item.status,
+              members: item.members.map((member) => member.issueIdentifier),
+            });
+          }
+          return {
+            findings: [],
+            reviewRecords: [
+              tier2RecordForReview(deps, {
+                status: "skipped",
+                gateReason: "content_hash_unchanged",
+                aggregateVerdict: null,
+                note: "plan content hash already reviewed",
+              }),
+            ],
+          };
+        }),
+        log: () => undefined,
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+        force: true,
+      });
+
+      expect(tier2Batches).toContainEqual({
+        status: "in_flight",
+        members: ["SYMPH-1"],
+      });
+      expect(tier2Batches).toContainEqual({
+        status: "lookahead",
+        members: ["SYMPH-2"],
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("skips real tier-2 review when the rotated body hash matches the reviewed baseline", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-"));
+    const logs: Array<{ event: string; fields: Record<string, unknown> }> = [];
+    try {
+      const seedResult = await runStandingPlanShadowTick({
+        config: triageConfig({
+          planReview: { enabled: false, plannerGroundingEnabled: false },
+        }),
+        workspaceRoot: root,
+        fetchCandidates: async () => [
+          issue("u1", "SYMPH-1"),
+          issue("u2", "SYMPH-2"),
+        ],
+        getInFlight: () => [],
+        createPlannerRunner: () =>
+          plannerForBatches(["SYMPH-1", "SYMPH-2"]).runClaude,
+        runPlanPostEmitReview: postEmitStub(() => ({
+          findings: [],
+          reviewRecords: [],
+        })),
+        log: () => undefined,
+        now: () => new Date("2026-06-18T00:00:00.000Z"),
+      });
+      expect(seedResult).toMatchObject({ status: "ok" });
+      const latest = [...(await readStandingPlanJournal(root))]
+        .reverse()
+        .find((entry) => entry.kind === "plan_revision");
+      if (latest?.kind !== "plan_revision") {
+        throw new Error("expected seed revision");
+      }
+      const carriedBatches = latest.revision.batches.map((item) =>
+        item.members.some((member) => member.issueIdentifier === "SYMPH-1")
+          ? { ...item, status: "in_flight" as const }
+          : item,
+      );
+      const committedBatchIds = new Set(
+        carriedBatches
+          .filter((item) => item.status === "in_flight")
+          .map((item) => item.batchId),
+      );
+      const reviewedOptions = latest.revision.options
+        .filter(
+          (option) =>
+            option.intent === null ||
+            option.intent.batchId === null ||
+            !committedBatchIds.has(option.intent.batchId),
+        )
+        .map((option, index) =>
+          option.intent === null || option.intent.batchId === null
+            ? option
+            : { ...option, marker: `[opt-${index + 1}]` },
+        );
+      const reviewedHash = computePlanContentHash({
+        planId: latest.revision.planId,
+        batches: carriedBatches,
+        dependencyEdges: latest.revision.dependencyEdges,
+        options: reviewedOptions,
+        envelope: latest.revision.envelope,
+        rationale: latest.revision.rationale,
+        source: latest.revision.source,
+      });
+      await appendStandingPlanJournalEntriesWithLock(root, [
+        {
+          kind: "plan_revision",
+          idempotencyKey: "symphony-standing-plan:manual-reviewed-baseline",
+          timestamp: "2026-06-18T00:05:00.000Z",
+          planId: latest.revision.planId,
+          revision: {
+            ...latest.revision,
+            batches: carriedBatches,
+            options: reviewedOptions,
+            contentHash: reviewedHash,
+            reviewRecords: [
+              tier2Record({
+                status: "reviewed",
+                diffHash: reviewedHash,
+                gateReason: "no_baseline",
+                aggregateVerdict: "pass",
+              }),
+            ],
+          },
+        },
+      ]);
+
+      const result = await runStandingPlanShadowTick({
+        config: triageConfig({
+          planReview: { enabled: true, plannerGroundingEnabled: true },
+        }),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u2", "SYMPH-2")],
+        getInFlight: () => [{ issueIdentifier: "SYMPH-1", stage: "In Review" }],
+        createPlannerRunner: () => plannerForBatches(["SYMPH-2"]).runClaude,
+        log: (event, _message, fields) => {
+          logs.push({ event, fields });
+        },
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+        force: true,
+      });
+
+      expect(result.status).toBe("ok");
+      const plan = await loadStandingPlan(root);
+      expect(plan?.contentHash).toBe(reviewedHash);
+      expect(await loadLastReviewedContentHash(root)).toBe(reviewedHash);
+      expect(plan?.reviewRecords).toMatchObject([
+        {
+          tier: "tier-2",
+          status: "skipped",
+          diffHash: reviewedHash,
+          gateReason: "content_hash_unchanged",
+          aggregateVerdict: null,
+          note: "plan content hash already reviewed",
+        },
+      ]);
+      expect(
+        logs.find((entry) => entry.event === "queue_triage_shadow_plan")?.fields
+          .review_tier2,
+      ).toMatchObject({
+        gate_reason: "content_hash_unchanged",
+        status: "skipped",
+        aggregate_verdict: null,
+        finding_count: 0,
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("feeds the last reviewed hash into a changed-plan tier-2 review", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-"));
+    const baselines: Array<string | null | undefined> = [];
+    try {
+      await runStandingPlanShadowTick({
+        config: triageConfig({
+          planReview: { enabled: true, plannerGroundingEnabled: true },
+        }),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        createPlannerRunner: () => plannerFor("SYMPH-1").runClaude,
+        runPlanPostEmitReview: postEmitStub((deps) => {
+          baselines.push(deps.tier2?.lastReviewedContentHash);
+          return {
+            findings: [],
+            reviewRecords: [
+              tier2RecordForReview(deps, {
+                status: "reviewed",
+                gateReason: "no_baseline",
+                aggregateVerdict: "pass",
+              }),
+            ],
+          };
+        }),
+        log: () => undefined,
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+      });
+      const firstHash = (await loadStandingPlan(root))?.contentHash;
+
+      await runStandingPlanShadowTick({
+        config: triageConfig({
+          planReview: { enabled: true, plannerGroundingEnabled: true },
+        }),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u2", "SYMPH-2")],
+        getInFlight: () => [],
+        createPlannerRunner: () => plannerFor("SYMPH-2").runClaude,
+        runPlanPostEmitReview: postEmitStub((deps) => {
+          baselines.push(deps.tier2?.lastReviewedContentHash);
+          return {
+            findings: [],
+            reviewRecords: [
+              tier2RecordForReview(deps, {
+                status: "reviewed",
+                gateReason: "content_hash_changed",
+                aggregateVerdict: "pass",
+              }),
+            ],
+          };
+        }),
+        log: () => undefined,
+        now: () => new Date("2026-06-18T01:16:00.000Z"),
+        force: true,
+      });
+      const secondHash = (await loadStandingPlan(root))?.contentHash;
+
+      expect(baselines).toEqual([null, firstHash]);
+      expect(secondHash).not.toBe(firstHash);
+      expect(await loadLastReviewedContentHash(root)).toBe(secondHash);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

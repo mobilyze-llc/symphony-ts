@@ -10,13 +10,17 @@ import type {
   PlanDecision,
   PlanDependencyEdge,
   PlanEnvelope,
+  PlanReviewRecord,
 } from "../../src/domain/standing-plan.js";
 import { appendStandingPlanJournalEntriesWithLock } from "../../src/logging/standing-plan-journal.js";
 import { readStandingPlanJournal } from "../../src/logging/standing-plan-journal.js";
+import { renderStandingPlanControlDoc } from "../../src/orchestrator/standing-plan-doc-render.js";
 import {
   listHonoredDecisions,
+  loadLastReviewedContentHash,
   loadStandingPlan,
   projectHonoredDecisions,
+  projectLastReviewedContentHash,
   recordBatchOutcome,
   recordPlanControlDecision,
   recordPlanDecision,
@@ -60,11 +64,169 @@ function tmpRoot(): string {
   return mkdtempSync(join(tmpdir(), "symph-standing-plan-store-"));
 }
 
+function tier2Record(over: Partial<PlanReviewRecord> = {}): PlanReviewRecord {
+  return {
+    tier: "tier-2",
+    status: "reviewed",
+    diffHash: "diff-hash",
+    gateReason: "no_baseline",
+    aggregateVerdict: "pass",
+    note: null,
+    reviewedGroundingEvidence: [],
+    findingFingerprints: [],
+    postHocEntries: [],
+    ...over,
+  };
+}
+
+async function recordReviewedRevision(
+  root: string,
+  planBody: PlanBody,
+  options: {
+    planId?: string;
+    createdAt: string;
+    review?: Partial<PlanReviewRecord>;
+  },
+) {
+  const recorded = await recordPlanRevision(root, planBody, {
+    ...(options.planId === undefined ? {} : { planId: options.planId }),
+    createdAt: options.createdAt,
+  });
+  return recordPlanRevision(root, planBody, {
+    createdAt: options.createdAt,
+    reviewRecords: [
+      tier2Record({
+        diffHash: recorded.plan.contentHash,
+        ...(options.review ?? {}),
+      }),
+    ],
+  });
+}
+
 describe("standing-plan store", () => {
   it("returns null when no plan has been recorded", async () => {
     const root = tmpRoot();
     try {
       expect(await loadStandingPlan(root)).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null when no reviewed tier-2 baseline exists", async () => {
+    const root = tmpRoot();
+    try {
+      expect(projectLastReviewedContentHash([])).toBeNull();
+      await recordPlanRevision(root, body([lookahead("b1", "SYMPH-1")]), {
+        planId: "plan-1",
+        createdAt: "2026-06-18T00:00:00.000Z",
+        findings: [
+          {
+            title: "Tier-1 finding only",
+            planAnchor: "b1",
+            severity: "Track",
+          },
+        ],
+      });
+      expect(await loadLastReviewedContentHash(root)).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("loads the latest revision with a reviewed tier-2 record as the baseline", async () => {
+    const root = tmpRoot();
+    try {
+      await recordReviewedRevision(root, body([lookahead("b1", "SYMPH-1")]), {
+        planId: "plan-1",
+        createdAt: "2026-06-18T00:00:00.000Z",
+      });
+      const latest = await recordReviewedRevision(
+        root,
+        body([lookahead("b2", "SYMPH-2")]),
+        {
+          planId: "plan-1",
+          createdAt: "2026-06-18T00:05:00.000Z",
+        },
+      );
+
+      expect(await loadLastReviewedContentHash(root)).toBe(
+        latest.plan.contentHash,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores reviewed tier-2 records whose diff hash does not match persisted content", async () => {
+    const root = tmpRoot();
+    try {
+      await recordPlanRevision(root, body([lookahead("b1", "SYMPH-1")]), {
+        planId: "plan-1",
+        createdAt: "2026-06-18T00:00:00.000Z",
+        reviewRecords: [tier2Record({ diffHash: "stale-preview-hash" })],
+      });
+      expect(await loadLastReviewedContentHash(root)).toBeNull();
+
+      const reviewed = await recordReviewedRevision(
+        root,
+        body([lookahead("b2", "SYMPH-2")]),
+        {
+          createdAt: "2026-06-18T00:05:00.000Z",
+        },
+      );
+      await recordPlanRevision(root, body([lookahead("b3", "SYMPH-3")]), {
+        createdAt: "2026-06-18T00:10:00.000Z",
+        reviewRecords: [tier2Record({ diffHash: "stale-preview-hash-2" })],
+      });
+
+      expect(await loadLastReviewedContentHash(root)).toBe(
+        reviewed.plan.contentHash,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("skips newer skipped or degraded tier-2 records when loading the baseline", async () => {
+    const root = tmpRoot();
+    try {
+      const reviewed = await recordReviewedRevision(
+        root,
+        body([lookahead("b1", "SYMPH-1")]),
+        {
+          planId: "plan-1",
+          createdAt: "2026-06-18T00:00:00.000Z",
+        },
+      );
+      await recordPlanRevision(root, body([lookahead("b2", "SYMPH-2")]), {
+        planId: "plan-1",
+        createdAt: "2026-06-18T00:05:00.000Z",
+        reviewRecords: [
+          tier2Record({
+            status: "skipped",
+            gateReason: "content_hash_unchanged",
+            aggregateVerdict: null,
+            note: "plan content hash already reviewed",
+          }),
+        ],
+      });
+      await recordPlanRevision(root, body([lookahead("b3", "SYMPH-3")]), {
+        planId: "plan-1",
+        createdAt: "2026-06-18T00:10:00.000Z",
+        reviewRecords: [
+          tier2Record({
+            status: "degraded",
+            gateReason: "content_hash_changed",
+            aggregateVerdict: "degraded",
+            note: "tier-2 review degraded",
+          }),
+        ],
+      });
+
+      expect(await loadLastReviewedContentHash(root)).toBe(
+        reviewed.plan.contentHash,
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -258,6 +420,64 @@ describe("standing-plan store", () => {
       expect(final.plan.revision).toBe(1);
       expect(final.plan.findings).toEqual([reportB]);
       expect((await loadStandingPlan(root))?.findings).toEqual([reportB]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves prior tier-2 findings when an unchanged tier-2 skip refreshes the report", async () => {
+    const root = tmpRoot();
+    const planBody = body([lookahead("b1", "SYMPH-1")]);
+    const tier2Finding = {
+      title: "Prior tier-2 finding",
+      planAnchor: "plan:issue/SYMPH-1",
+      severity: "P2" as const,
+      source: "tier-2" as const,
+      structuredFingerprint: "fp-tier2-prior",
+    };
+    try {
+      const recorded = await recordPlanRevision(root, planBody, {
+        planId: "plan-1",
+        createdAt: "2026-06-18T00:00:00.000Z",
+      });
+      const reviewed = await recordPlanRevision(root, planBody, {
+        createdAt: "2026-06-18T00:05:00.000Z",
+        findings: [tier2Finding],
+        reviewRecords: [
+          tier2Record({
+            status: "reviewed",
+            diffHash: recorded.plan.contentHash,
+            gateReason: "no_baseline",
+            aggregateVerdict: "fail",
+            findingFingerprints: ["fp-tier2-prior"],
+          }),
+        ],
+      });
+
+      const skipped = await recordPlanRevision(root, planBody, {
+        createdAt: "2026-06-18T00:10:00.000Z",
+        findings: [],
+        reviewRecords: [
+          tier2Record({
+            status: "skipped",
+            diffHash: reviewed.plan.contentHash,
+            gateReason: "content_hash_unchanged",
+            aggregateVerdict: null,
+            note: "plan content hash already reviewed",
+          }),
+        ],
+      });
+
+      expect(skipped.plan.findings).toEqual([tier2Finding]);
+      expect((await loadStandingPlan(root))?.findings).toEqual([tier2Finding]);
+      expect(
+        renderStandingPlanControlDoc({
+          plan: skipped.plan,
+          recentlyShipped: [],
+          inFlight: [],
+          changelog: [],
+        }),
+      ).toContain("Prior tier-2 finding");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
