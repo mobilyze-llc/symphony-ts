@@ -7,6 +7,10 @@ import { promisify } from "node:util";
 
 import { z } from "zod";
 
+import {
+  type CollectedArtifact,
+  readCollectedArtifact,
+} from "./collected-artifact.js";
 import type {
   CrabrunnerAdmissionResult,
   CrabrunnerCancellationRequest,
@@ -192,6 +196,7 @@ const crabrunnerCollectSchema = z
     state: z.string(),
     status: crabrunnerStatusSchema,
     archive_path: z.string().nullish(),
+    materialized: z.unknown().nullish(),
   })
   .passthrough();
 
@@ -438,28 +443,23 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
 
     const lifecycleState = collect.state;
     let terminalState = mapLifecycleToTerminalState(lifecycleState, status);
+    const artifact = readCollectedArtifact(collect);
 
-    // artifact_path / usage_path in CrabrunnerStatus are RELATIVE to the job dir
-    // <stateRoot>/jobs/<jobId>/; collect_archive / archive_path are ABSOLUTE.
-    const artifactAbsPath = this.resolveJobPath(jobId, status.artifact_path);
+    // usage_path in CrabrunnerStatus is RELATIVE to <stateRoot>/jobs/<jobId>/.
+    // It remains a pre-materialization fallback during the additive rollout.
     const usageAbsPath = this.resolveJobPath(jobId, status.usage_path);
 
-    const artifactOk = await this.isArtifactPresent(artifactAbsPath);
-    if (terminalState === "succeeded" && !artifactOk) {
+    if (terminalState === "succeeded" && artifact.status !== "ready") {
       terminalState = "artifact_parse_failed";
     }
 
-    const usage = await this.readUsage(usageAbsPath);
-    const artifactRefs = collectArtifactRefs(
-      artifactAbsPath,
-      status.collect_archive ?? collect.archive_path,
-    );
-    const artifactHashes = await collectReadableArtifactHashes(artifactRefs);
+    const usage =
+      (await this.readUsageFromCollectedArtifact(artifact)) ??
+      (await this.readUsage(usageAbsPath));
 
     const evidence: CrabrunnerTerminalEvidence = {
       state: terminalState,
-      ...(artifactRefs.length > 0 ? { artifactRefs } : {}),
-      ...(artifactHashes.length > 0 ? { artifactHashes } : {}),
+      artifact,
       workspacePath: status.workspace ?? null,
       usage,
       message: status.message ?? null,
@@ -699,22 +699,9 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
       runResult.collect.state,
       status,
     );
-    const localArchivePath = join(
-      this.remoteRunArtifactDir,
-      `${runResult.job_id}.tar`,
-    );
-    const archivePresent = await this.isFilePresent(localArchivePath);
-    const archiveMissingMessage =
-      "remote crabrunner collect archive missing or empty";
-    if (terminalState === "succeeded" && !archivePresent) {
+    const artifact = readCollectedArtifact(runResult.collect);
+    if (terminalState === "succeeded" && artifact.status !== "ready") {
       terminalState = "artifact_parse_failed";
-    }
-
-    const artifactRefs: string[] = [];
-    const artifactHashes: string[] = [];
-    if (archivePresent) {
-      artifactRefs.push(localArchivePath);
-      artifactHashes.push(await hashFile(localArchivePath));
     }
 
     const workspaceSyncPath =
@@ -726,6 +713,9 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     const crabrunnerWorkspaceSyncHash = normalizeOptionalString(
       runResult.workspace_sync_artifact?.sha256 ?? undefined,
     );
+    let workspaceSyncRef:
+      | NonNullable<CrabrunnerTerminalEvidence["workspaceSyncRef"]>
+      | undefined;
     if (await this.isFilePresent(workspaceSyncPath)) {
       const workspaceSyncHash = await hashFile(workspaceSyncPath);
       if (
@@ -736,29 +726,30 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
           `remote workspace-sync artifact hash mismatch for ${workspaceSyncPath}: crabrunner reported ${crabrunnerWorkspaceSyncHash} but downloaded file is ${workspaceSyncHash}`,
         );
       }
-      artifactRefs.push(workspaceSyncPath);
-      artifactHashes.push(workspaceSyncHash);
+      workspaceSyncRef = {
+        path: workspaceSyncPath,
+        sha256: workspaceSyncHash,
+      };
     } else if (crabrunnerWorkspaceSyncHash !== null) {
       throw new Error(
         `remote workspace-sync artifact missing for ${workspaceSyncPath}: crabrunner reported ${crabrunnerWorkspaceSyncHash}`,
       );
     }
 
-    const usage = archivePresent
-      ? await this.readUsageFromCollectArchive(localArchivePath)
-      : {
-          status: "unavailable" as const,
-          reason: "remote crabrunner collect archive missing or empty",
-        };
+    const usage = (await this.readUsageFromCollectedArtifact(artifact)) ?? {
+      status: "unavailable" as const,
+      reason: "usage artifact not found in materialized collect artifact",
+    };
 
     return {
       state: terminalState,
-      ...(artifactRefs.length > 0 ? { artifactRefs } : {}),
-      ...(artifactHashes.length > 0 ? { artifactHashes } : {}),
+      artifact,
+      ...(workspaceSyncRef === undefined ? {} : { workspaceSyncRef }),
       workspacePath: status.workspace ?? null,
       usage,
       message:
-        status.message ?? (archivePresent ? null : archiveMissingMessage),
+        status.message ??
+        (artifact.status === "ready" ? null : artifact.reason),
       progress: buildProgress(status),
       process: buildProcess(status),
     };
@@ -912,20 +903,6 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     return join(this.stateRoot, "jobs", jobId, relativeOrAbsolute);
   }
 
-  private async isArtifactPresent(
-    artifactPath: string | null | undefined,
-  ): Promise<boolean> {
-    if (artifactPath === null || artifactPath === undefined) {
-      return false;
-    }
-    try {
-      const content = await readFile(artifactPath, "utf8");
-      return content.trim().length > 0;
-    } catch {
-      return false;
-    }
-  }
-
   private async isFilePresent(path: string): Promise<boolean> {
     try {
       const metadata = await stat(path);
@@ -969,27 +946,19 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     return mapLaneWorkerUsage(usage.data);
   }
 
-  private async readUsageFromCollectArchive(
-    archivePath: string,
-  ): Promise<CrabrunnerUsage> {
-    let archive: Buffer;
-    try {
-      archive = await readFile(archivePath);
-    } catch {
-      return {
-        status: "unavailable",
-        reason: "remote collect archive missing or unreadable",
-      };
-    }
-    const raw = findTarEntryText(
-      archive,
-      (name) => name.includes("/artifact/") && name.endsWith(".usage.json"),
+  private async readUsageFromCollectedArtifact(
+    artifact: CollectedArtifact,
+  ): Promise<CrabrunnerUsage | null> {
+    const usageEntry = artifact.entries.find(
+      (entry) =>
+        entry.name.includes("/artifact/") && entry.name.endsWith(".usage.json"),
     );
+    const raw =
+      usageEntry !== undefined && "content" in usageEntry
+        ? usageEntry.content
+        : null;
     if (raw === null) {
-      return {
-        status: "unavailable",
-        reason: "usage artifact not found in remote collect archive",
-      };
+      return null;
     }
     let parsed: unknown;
     try {
@@ -997,7 +966,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     } catch {
       return {
         status: "unavailable",
-        reason: "usage artifact in remote collect archive is not valid JSON",
+        reason: "usage artifact in materialized collect is not valid JSON",
       };
     }
     const usage = laneWorkerUsageSchema.safeParse(parsed);
@@ -1005,7 +974,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
       return {
         status: "unavailable",
         reason:
-          "usage artifact in remote collect archive failed schema validation",
+          "usage artifact in materialized collect failed schema validation",
       };
     }
     return mapLaneWorkerUsage(usage.data);
@@ -1236,41 +1205,6 @@ function normalizeToken(value: number | null | undefined): number | null {
   return Math.floor(value);
 }
 
-function collectArtifactRefs(
-  artifactAbsPath: string | null,
-  archivePath: string | null | undefined,
-): string[] {
-  const refs: string[] = [];
-  if (artifactAbsPath !== null) {
-    refs.push(artifactAbsPath);
-  }
-  if (
-    archivePath !== null &&
-    archivePath !== undefined &&
-    archivePath.trim().length > 0
-  ) {
-    refs.push(archivePath);
-  }
-  return refs;
-}
-
-async function collectReadableArtifactHashes(
-  artifactRefs: readonly string[],
-): Promise<string[]> {
-  const hashes: string[] = [];
-  for (const artifactRef of artifactRefs) {
-    try {
-      hashes.push(await hashFile(artifactRef));
-    } catch {
-      // Local collect may report host-owned refs that are not readable from this
-      // process. Stop at the first gap so the hash array remains aligned with
-      // the artifactRefs prefix it describes.
-      break;
-    }
-  }
-  return hashes;
-}
-
 async function hashFile(path: string): Promise<string> {
   const content = await readFile(path);
   return createHash("sha256").update(content).digest("hex");
@@ -1353,64 +1287,6 @@ function parseJson(stdout: string, command: string): unknown {
       }`,
     );
   }
-}
-
-function findTarEntryText(
-  archive: Buffer,
-  predicate: (name: string) => boolean,
-): string | null {
-  let offset = 0;
-  while (offset + 512 <= archive.length) {
-    if (isZeroTarBlock(archive, offset)) {
-      return null;
-    }
-    const size = parseTarEntrySize(archive, offset);
-    if (size === null || offset + 512 + size > archive.length) {
-      return null;
-    }
-    const name = parseTarEntryName(archive, offset);
-    const typeflag = archive.toString("utf8", offset + 156, offset + 157);
-    const dataStart = offset + 512;
-    if (typeflag !== "5" && predicate(name)) {
-      return archive.toString("utf8", dataStart, dataStart + size);
-    }
-    offset = dataStart + Math.ceil(size / 512) * 512;
-  }
-  return null;
-}
-
-function isZeroTarBlock(archive: Buffer, offset: number): boolean {
-  for (let index = offset; index < offset + 512; index += 1) {
-    if (archive[index] !== 0) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function parseTarEntryName(archive: Buffer, offset: number): string {
-  const name = readTarString(archive, offset, 100);
-  const prefix = readTarString(archive, offset + 345, 155);
-  return prefix.length === 0 ? name : `${prefix}/${name}`;
-}
-
-function parseTarEntrySize(archive: Buffer, offset: number): number | null {
-  const raw = readTarString(archive, offset + 124, 12).trim();
-  if (raw.length === 0 || !/^[0-7]+$/.test(raw)) {
-    return null;
-  }
-  const size = Number.parseInt(raw, 8);
-  return Number.isFinite(size) && size >= 0 ? size : null;
-}
-
-function readTarString(
-  archive: Buffer,
-  offset: number,
-  length: number,
-): string {
-  const raw = archive.toString("utf8", offset, offset + length);
-  const nullIndex = raw.indexOf("\0");
-  return (nullIndex === -1 ? raw : raw.slice(0, nullIndex)).trim();
 }
 
 function buildJobId(spec: CrabrunnerJobSpec): string {

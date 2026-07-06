@@ -22,7 +22,7 @@ import {
 } from "../../src/claude-runner/cmux-claude-runner.js";
 
 describe("Claude CMUX runner", () => {
-  it("rejects summary-only artifacts instead of reporting success", async () => {
+  it("returns invalid_artifact when a complete cmux lane omits the artifact file", async () => {
     const harness = await createHarness();
     const runCommand: ClaudeRunnerCommand = async (_command, args) => {
       if (args[0] === "preflight") {
@@ -30,7 +30,6 @@ describe("Claude CMUX runner", () => {
       }
       const artifactName = readFlag(args, "--artifact-name");
       const artifactPath = join(harness.artifactDir, `${artifactName}.md`);
-      await writeFile(artifactPath, "done\n", "utf8");
       return {
         exitCode: 0,
         stdout: JSON.stringify({
@@ -49,13 +48,6 @@ describe("Claude CMUX runner", () => {
         promptFile: harness.promptFile,
         artifactDir: harness.artifactDir,
         artifactName: "opus",
-        validation: {
-          minBytes: 50,
-          requireFirstHeading: "Verdict",
-          requiredHeadings: ["Source Read Status"],
-          requiredJsonSections: ["Reconciliation JSON"],
-          verdictEnums: ["ready_as_written"],
-        },
       },
       { runCommand },
     );
@@ -63,9 +55,7 @@ describe("Claude CMUX runner", () => {
     expect(result.status).toBe("invalid_artifact");
     expect(result.validationErrors).toEqual(
       expect.arrayContaining([
-        expect.stringContaining("artifact is too small"),
-        'artifact first heading must be "Verdict"',
-        'artifact is missing required heading "Source Read Status"',
+        expect.stringContaining("artifact is not readable at"),
       ]),
     );
   });
@@ -992,7 +982,7 @@ describe("Claude CMUX runner", () => {
       [
         "## Verdict",
         "",
-        "Verdict enum: needs_operator_context",
+        "NEEDS_OPERATOR_CONTEXT",
         "",
         "## Source Read Status",
         "",
@@ -1002,14 +992,14 @@ describe("Claude CMUX runner", () => {
     );
 
     await expect(
-      validateClaudeArtifact(artifact, {
+      validateClaudeArtifact(await readFile(artifact, "utf8"), {
         minBytes: 20,
-        requireFirstHeading: "Verdict",
-        requiredHeadings: ["Source Read Status"],
-        verdictEnums: ["ready_as_written"],
+        requireFirstHeading: "## Verdict",
+        requiredHeadings: ["## Source Read Status"],
+        verdictEnums: ["READY_AS_WRITTEN"],
       }),
     ).resolves.toContain(
-      'artifact verdict "needs_operator_context" is not one of ready_as_written',
+      'artifact verdict "needs_operator_context" is not one of READY_AS_WRITTEN',
     );
   });
 
@@ -1037,7 +1027,7 @@ describe("Claude CMUX runner", () => {
     );
 
     await expect(
-      validateClaudeArtifact(artifact, {
+      validateClaudeArtifact(await readFile(artifact, "utf8"), {
         minBytes: 50,
         requireSourceReadStatus: true,
       }),
@@ -1075,7 +1065,7 @@ describe("Claude CMUX runner", () => {
     );
 
     await expect(
-      validateClaudeArtifact(artifact, {
+      validateClaudeArtifact(await readFile(artifact, "utf8"), {
         minBytes: 50,
         requiredJsonSections: ["Reconciliation JSON"],
       }),
@@ -1104,7 +1094,7 @@ describe("Claude CMUX runner", () => {
     );
 
     await expect(
-      validateClaudeArtifact(artifact, {
+      validateClaudeArtifact(await readFile(artifact, "utf8"), {
         minBytes: 50,
         requireFirstHeading: "Verdict",
         requiredJsonSections: ["Reconciliation JSON"],
@@ -1142,7 +1132,7 @@ describe("Claude CMUX runner", () => {
     );
 
     await expect(
-      validateClaudeArtifact(artifact, {
+      validateClaudeArtifact(await readFile(artifact, "utf8"), {
         minBytes: 50,
         requiredJsonSections: ["Reconciliation JSON"],
       }),
@@ -1174,7 +1164,7 @@ describe("Claude CMUX runner", () => {
     );
 
     await expect(
-      validateClaudeArtifact(artifact, {
+      validateClaudeArtifact(await readFile(artifact, "utf8"), {
         minBytes: 50,
         requiredJsonSections: ["Reconciliation JSON"],
       }),
@@ -1211,7 +1201,7 @@ describe("Claude CMUX runner", () => {
     );
 
     await expect(
-      validateClaudeArtifact(artifact, {
+      validateClaudeArtifact(await readFile(artifact, "utf8"), {
         minBytes: 50,
         requiredJsonSections: ["Reconciliation JSON"],
       }),
@@ -1244,7 +1234,7 @@ describe("Claude CMUX runner", () => {
     );
 
     await expect(
-      validateClaudeArtifact(artifact, {
+      validateClaudeArtifact(await readFile(artifact, "utf8"), {
         minBytes: 50,
         requiredJsonSections: ["Reconciliation JSON"],
       }),
@@ -1279,7 +1269,7 @@ describe("Claude CMUX runner", () => {
     );
 
     await expect(
-      validateClaudeArtifact(artifact, {
+      validateClaudeArtifact(await readFile(artifact, "utf8"), {
         minBytes: 50,
         requiredJsonSections: ["Reconciliation JSON"],
       }),
@@ -1306,7 +1296,7 @@ describe("Claude CMUX runner", () => {
     );
 
     await expect(
-      validateClaudeArtifact(artifact, {
+      validateClaudeArtifact(await readFile(artifact, "utf8"), {
         minBytes: 20,
         requireFirstHeading: "Verdict",
         requiredHeadings: ["Source Read Status"],

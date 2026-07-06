@@ -12,16 +12,14 @@ import type {
   StageExecutionBackendResult,
   StageExecutionBackendRunner,
 } from "./backend.js";
+import {
+  type CollectedArtifact,
+  artifactHashesFromCollectedArtifact,
+  artifactRefsFromCollectedArtifact,
+} from "./collected-artifact.js";
 
 export const CRABRUNNER_JOB_SPEC_VERSION = "symphony.crabrunner.job.v1";
 
-/**
- * Name prefix for the OS-temp directories the factory's default prompt resolver
- * creates (SYMPH-856). Purely cosmetic/diagnostic — cleanup ownership is tracked
- * explicitly by the factory (a Set of the dirs it created), NOT inferred from
- * this prefix, so an override path that happens to share it is never deleted
- * (recheck-2 P2-1).
- */
 export const CRABRUNNER_TEMP_PROMPT_DIR_PREFIX = "crabrunner-prompt-";
 
 export type CrabrunnerTerminalState =
@@ -68,14 +66,6 @@ export interface CrabrunnerJobSpec {
     title: string;
     url: string | null;
   };
-  /**
-   * Path to the rendered stage prompt for the lane worker (SYMPH-856). When
-   * present, the scheduler client maps it to manifest `prompt_file` and uses the
-   * lane-worker.v1 protocol; when absent (and no worker_argv), the client fails
-   * closed at submit rather than emitting an unrunnable manifest. The factory's
-   * default resolver renders the stage prompt and populates this at dispatch
-   * (see `crabrunner-backend-factory.ts`).
-   */
   promptFile?: string;
 }
 
@@ -87,6 +77,8 @@ export interface CrabrunnerAdmissionResult {
 
 export interface CrabrunnerTerminalEvidence {
   state: CrabrunnerTerminalState;
+  artifact?: CollectedArtifact;
+  workspaceSyncRef?: { path: string; sha256?: string | null };
   artifactRefs?: readonly string[];
   artifactHashes?: readonly string[];
   workspacePath?: string | null;
@@ -116,6 +108,7 @@ export interface CrabrunnerTerminalEvidence {
 export interface CrabrunnerStageExecutionEvidence {
   admission: CrabrunnerAdmissionResult;
   terminal: CrabrunnerTerminalEvidence | null;
+  artifact?: CollectedArtifact;
   artifactRefs: readonly string[];
   artifactHashes?: readonly string[];
   usage: CrabrunnerUsage | null;
@@ -126,11 +119,6 @@ export interface CrabrunnerSchedulerClient {
     spec: CrabrunnerJobSpec,
     signal?: AbortSignal,
   ): Promise<CrabrunnerAdmissionResult>;
-  /**
-   * Resolves only after the job is terminal and collectible. Throw to fail
-   * closed before collection. The optional signal lets a polling client abort
-   * its loop promptly instead of orphaning a long poll (SYMPH-853, DeepSeek P1-1).
-   */
   status(jobId: string, signal?: AbortSignal): Promise<void>;
   collect(
     jobId: string,
@@ -314,8 +302,15 @@ export class CrabrunnerStageExecutionBackend
       return this.toBackendResult(input, {
         admission,
         terminal,
-        artifactRefs: terminal.artifactRefs ?? [],
-        artifactHashes: terminal.artifactHashes ?? [],
+        ...(terminal.artifact === undefined
+          ? {}
+          : { artifact: terminal.artifact }),
+        artifactRefs:
+          terminal.artifactRefs ??
+          artifactRefsFromCollectedArtifact(terminal.artifact),
+        artifactHashes:
+          terminal.artifactHashes ??
+          artifactHashesFromCollectedArtifact(terminal.artifact),
         usage: terminal.usage ?? null,
         status,
         ...(error === undefined ? {} : { error }),
@@ -473,6 +468,7 @@ export class CrabrunnerStageExecutionBackend
       evidence: {
         admission: mapped.admission,
         terminal: mapped.terminal,
+        ...(mapped.artifact === undefined ? {} : { artifact: mapped.artifact }),
         artifactRefs: mapped.artifactRefs,
         artifactHashes: mapped.artifactHashes ?? [],
         usage: mapped.usage,
@@ -636,7 +632,9 @@ function createCrabrunnerAgentResult(input: {
   now: () => Date;
 }): AgentRunResult {
   const terminal = input.terminal;
-  const artifactRefs = terminal?.artifactRefs ?? [];
+  const artifactRefs =
+    terminal?.artifactRefs ??
+    artifactRefsFromCollectedArtifact(terminal?.artifact);
   const terminalUsage = terminal?.usage;
   const usageMeasurement = mapCrabrunnerUsageToStageUsage({
     usage: terminalUsage,

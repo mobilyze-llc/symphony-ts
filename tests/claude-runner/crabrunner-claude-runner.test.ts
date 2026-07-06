@@ -15,6 +15,7 @@ import type {
   CrabrunnerSchedulerClient,
   CrabrunnerTerminalEvidence,
 } from "../../src/stage-execution/crabrunner-backend.js";
+import { readyCollectedArtifact } from "../stage-execution/collected-artifact-fixtures.js";
 
 describe("Claude crabrunner adapter", () => {
   it("resolves scheduler options from the Symphony crabrunner environment", () => {
@@ -103,11 +104,10 @@ describe("Claude crabrunner adapter", () => {
   it("submits a read-only crabrunner lane and maps the artifact to ClaudeRunnerResult", async () => {
     const harness = await createHarness();
     const artifactPath = join(harness.artifactDir, "opus.md");
-    await writeFile(artifactPath, validReviewArtifact(), "utf8");
     const scheduler = new RecordingScheduler({
       terminal: {
         state: "succeeded",
-        artifactRefs: [artifactPath],
+        artifact: readyArtifact(validReviewArtifact()),
         usage: {
           status: "available",
           inputTokens: 10,
@@ -232,27 +232,20 @@ describe("Claude crabrunner adapter", () => {
     ]);
   });
 
-  it("returns invalid_artifact when a successful lane emits unreadable output", async () => {
+  it("returns invalid_artifact when default validation rejects a short artifact", async () => {
     const harness = await createHarness();
     const artifactPath = join(harness.artifactDir, "opus.md");
-    await writeFile(artifactPath, "short\n", "utf8");
     const scheduler = new RecordingScheduler({
       terminal: {
         state: "succeeded",
-        artifactRefs: [artifactPath],
+        artifact: readyArtifact("short\n"),
       },
     });
 
-    const result = await runClaudeCrabrunner(
-      {
-        ...baseInput(harness),
-        validation: { minBytes: 50 },
-      },
-      {
-        schedulerClient: scheduler,
-        now: fixedClock(),
-      },
-    );
+    const result = await runClaudeCrabrunner(baseInput(harness), {
+      schedulerClient: scheduler,
+      now: fixedClock(),
+    });
 
     expect(result.status).toBe("invalid_artifact");
     expect(result.artifactPath).toBe(artifactPath);
@@ -360,12 +353,10 @@ describe("Claude crabrunner adapter", () => {
 
   it("allows scheduler target repo roots that match the workspace", async () => {
     const harness = await createHarness();
-    const artifactPath = join(harness.artifactDir, "opus.md");
-    await writeFile(artifactPath, validReviewArtifact(), "utf8");
     const scheduler = new RecordingScheduler({
       terminal: {
         state: "succeeded",
-        artifactRefs: [artifactPath],
+        artifact: readyArtifact(validReviewArtifact()),
       },
     });
 
@@ -429,12 +420,10 @@ describe("Claude crabrunner adapter", () => {
 
   it("maps write profile and provider-qualified models onto the job spec", async () => {
     const harness = await createHarness();
-    const artifactPath = join(harness.artifactDir, "opus.md");
-    await writeFile(artifactPath, validReviewArtifact(), "utf8");
     const scheduler = new RecordingScheduler({
       terminal: {
         state: "succeeded",
-        artifactRefs: [artifactPath],
+        artifact: readyArtifact(validReviewArtifact()),
       },
     });
 
@@ -462,12 +451,10 @@ describe("Claude crabrunner adapter", () => {
 
   it("passes explicit provider and reasoning effort to crabrunner job specs", async () => {
     const harness = await createHarness();
-    const artifactPath = join(harness.artifactDir, "codex.md");
-    await writeFile(artifactPath, validReviewArtifact(), "utf8");
     const scheduler = new RecordingScheduler({
       terminal: {
         state: "succeeded",
-        artifactRefs: [artifactPath],
+        artifact: readyArtifact(validReviewArtifact(), "artifact/codex.md"),
       },
     });
 
@@ -493,17 +480,13 @@ describe("Claude crabrunner adapter", () => {
     });
   });
 
-  it("extracts a Markdown artifact from a collect archive ref", async () => {
+  it("persists a ready collected artifact before validation", async () => {
     const harness = await createHarness();
-    const archivePath = join(harness.artifactDir, "collect.tar");
-    await writeFile(
-      archivePath,
-      tarWithEntry("job-1/attempts/01/artifact/opus.md", validReviewArtifact()),
-    );
+    const artifactName = "job-1/attempts/01/artifact/opus.md";
     const scheduler = new RecordingScheduler({
       terminal: {
         state: "succeeded",
-        artifactRefs: [archivePath],
+        artifact: readyArtifact(validReviewArtifact(), artifactName),
       },
     });
 
@@ -525,12 +508,31 @@ describe("Claude crabrunner adapter", () => {
 
     expect(result.status).toBe("passed");
     expect(result.artifactPath).toBe(join(harness.artifactDir, "opus.md"));
-    expect(result.remoteArtifactPath).toBe(
-      `${archivePath}:job-1/attempts/01/artifact/opus.md`,
-    );
+    expect(result.remoteArtifactPath).toBe(artifactName);
     await expect(readFile(result.artifactPath!, "utf8")).resolves.toContain(
       "ready_as_written",
     );
+  });
+
+  it("accepts validity2-style ready review content from collected artifacts", async () => {
+    const harness = await createHarness();
+    const scheduler = new RecordingScheduler({
+      terminal: {
+        state: "succeeded",
+        artifact: readyArtifact(
+          `## Verdict\nPASS\n\n## Findings\n- ${"No blocking findings. ".repeat(12)}\n`,
+        ),
+      },
+    });
+
+    const result = await runClaudeCrabrunner(baseInput(harness), {
+      schedulerClient: scheduler,
+      now: fixedClock(),
+    });
+
+    expect(result.status).toBe("passed");
+    expect(result.validationErrors).toEqual([]);
+    expect(result.message).not.toContain("invalid_artifact");
   });
 });
 
@@ -613,21 +615,9 @@ function validReviewArtifact(): string {
   ].join("\n");
 }
 
-function tarWithEntry(name: string, content: string): Buffer {
-  const payload = Buffer.from(content, "utf8");
-  const header = Buffer.alloc(512);
-  header.write(name, 0, 100, "utf8");
-  header.write("0000777\0", 100, 8, "ascii");
-  header.write("0000000\0", 108, 8, "ascii");
-  header.write("0000000\0", 116, 8, "ascii");
-  header.write(
-    `${payload.length.toString(8).padStart(11, "0")}\0`,
-    124,
-    12,
-    "ascii",
-  );
-  header.write("00000000000\0", 136, 12, "ascii");
-  header.write("0", 156, 1, "ascii");
-  const padding = Buffer.alloc((512 - (payload.length % 512)) % 512);
-  return Buffer.concat([header, payload, padding, Buffer.alloc(1024)]);
+function readyArtifact(
+  content: string,
+  name = "job-1/attempts/01/artifact/opus.md",
+) {
+  return readyCollectedArtifact(name, content);
 }

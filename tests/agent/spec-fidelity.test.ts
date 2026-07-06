@@ -237,20 +237,20 @@ describe("spec-fidelity lane", () => {
       findings: "AC1 FAIL: missing test.",
     });
 
-    const parsed = await parseSpecFidelityLaneResult(
-      {
-        job: JOB,
-        result: agentResult("fallback message"),
-        evidence: {
-          admission: { status: "accepted", jobId: "job-1" },
-          terminal: null,
-          artifactRefs: ["/tmp/spec-fidelity.json"],
-          usage: null,
-        },
+    const parsed = await parseSpecFidelityLaneResult({
+      job: JOB,
+      result: agentResult("fallback message"),
+      evidence: {
+        admission: { status: "accepted", jobId: "job-1" },
+        terminal: null,
+        artifact: readySpecArtifact(
+          '{"verdict":"pass","findings":"AC1 PASS: artifact JSON wins."}',
+          "artifact/spec-fidelity.json",
+        ),
+        artifactRefs: ["artifact/spec-fidelity.json"],
+        usage: null,
       },
-      async () =>
-        '{"verdict":"pass","findings":"AC1 PASS: artifact JSON wins."}',
-    );
+    });
     expect(parsed).toEqual({
       verdict: "pass",
       findings: "AC1 PASS: artifact JSON wins.",
@@ -299,76 +299,79 @@ describe("spec-fidelity lane", () => {
     });
   });
 
-  it("extracts the verdict from a remote collect tar artifact ref", async () => {
-    const parsed = await parseSpecFidelityLaneResult(
-      {
-        job: JOB,
-        result: agentResult("fallback message"),
-        evidence: {
-          admission: { status: "accepted", jobId: "job-1" },
-          terminal: null,
-          artifactRefs: ["/tmp/job-1.tar"],
-          usage: null,
-        },
+  it("extracts the verdict from a materialized spec-fidelity JSON entry", async () => {
+    const primary = '{"verdict":"pass","findings":"primary"}';
+    const parsed = await parseSpecFidelityLaneResult({
+      job: JOB,
+      result: agentResult("fallback message"),
+      evidence: {
+        admission: { status: "accepted", jobId: "job-1" },
+        terminal: null,
+        artifact: readySpecArtifact(primary, "artifact/spec-fidelity.json", [
+          artifactEntry(
+            "x/artifact/s.json",
+            '{"verdict":"rework","findings":"side"}',
+          ),
+        ]),
+        artifactRefs: ["artifact/spec-fidelity.json"],
+        usage: null,
       },
-      async () =>
-        createTarBuffer({
-          "attempts/01/artifact/spec-fidelity.json":
-            '{"verdict":"rework","findings":"AC1 FAIL: remote archive verdict wins."}',
-        }),
-    );
-
-    expect(parsed).toEqual({
-      verdict: "rework",
-      findings: "AC1 FAIL: remote archive verdict wins.",
     });
-  });
-
-  it("extracts the verdict from a remote collect markdown tar artifact ref", async () => {
-    const parsed = await parseSpecFidelityLaneResult(
-      {
-        job: JOB,
-        result: agentResult("fallback message"),
-        evidence: {
-          admission: { status: "accepted", jobId: "job-1" },
-          terminal: null,
-          artifactRefs: ["/tmp/job-1.tar"],
-          usage: null,
-        },
-      },
-      async () =>
-        createTarBuffer({
-          "attempts/01/artifact/spec-fidelity.md":
-            'Final verdict:\n\n```json\n{"verdict":"pass","findings":"AC1 PASS: remote markdown archive verdict wins."}\n```',
-        }),
-    );
 
     expect(parsed).toEqual({
       verdict: "pass",
-      findings: "AC1 PASS: remote markdown archive verdict wins.",
+      findings: "primary",
     });
   });
 
-  it("prefers spec-fidelity JSON over markdown in remote collect tar artifacts", async () => {
-    const parsed = await parseSpecFidelityLaneResult(
-      {
-        job: JOB,
-        result: agentResult("fallback message"),
-        evidence: {
-          admission: { status: "accepted", jobId: "job-1" },
-          terminal: null,
-          artifactRefs: ["/tmp/job-1.tar"],
-          usage: null,
-        },
+  it("extracts the verdict from a materialized spec-fidelity markdown entry", async () => {
+    const parsed = await parseSpecFidelityLaneResult({
+      job: JOB,
+      result: agentResult("fallback message"),
+      evidence: {
+        admission: { status: "accepted", jobId: "job-1" },
+        terminal: null,
+        artifact: readySpecArtifact("# fallback", "artifact/result.md", [
+          artifactEntry(
+            "attempts/01/artifact/spec-fidelity.md",
+            'Final verdict:\n\n```json\n{"verdict":"pass","findings":"AC1 PASS: materialized markdown artifact verdict wins."}\n```',
+          ),
+        ]),
+        artifactRefs: ["attempts/01/artifact/spec-fidelity.md"],
+        usage: null,
       },
-      async () =>
-        createTarBuffer({
-          "attempts/01/artifact/spec-fidelity.md":
+    });
+
+    expect(parsed).toEqual({
+      verdict: "pass",
+      findings: "AC1 PASS: materialized markdown artifact verdict wins.",
+    });
+  });
+
+  it("prefers spec-fidelity JSON over markdown in materialized artifacts", async () => {
+    const parsed = await parseSpecFidelityLaneResult({
+      job: JOB,
+      result: agentResult("fallback message"),
+      evidence: {
+        admission: { status: "accepted", jobId: "job-1" },
+        terminal: null,
+        artifact: readySpecArtifact("# fallback", "artifact/result.md", [
+          artifactEntry(
+            "attempts/01/artifact/spec-fidelity.md",
             '```json\n{"verdict":"rework","findings":"AC1 FAIL: markdown should lose."}\n```',
-          "attempts/01/artifact/spec-fidelity.json":
+          ),
+          artifactEntry(
+            "attempts/01/artifact/spec-fidelity.json",
             '{"verdict":"pass","findings":"AC1 PASS: JSON keeps precedence."}',
-        }),
-    );
+          ),
+        ]),
+        artifactRefs: [
+          "attempts/01/artifact/spec-fidelity.md",
+          "attempts/01/artifact/spec-fidelity.json",
+        ],
+        usage: null,
+      },
+    });
 
     expect(parsed).toEqual({
       verdict: "pass",
@@ -482,6 +485,10 @@ describe("spec-fidelity lane", () => {
                 collectible: true,
               }),
               archive_path: null,
+              materialized: readySpecArtifact(
+                '{"verdict":"pass","findings":"AC1 PASS: artifact verdict returned."}',
+                "artifact/spec-fidelity.json",
+              ),
             }),
           );
         default:
@@ -613,36 +620,28 @@ function agentResult(message: string): AgentRunResult {
   };
 }
 
-function createTarBuffer(entries: Record<string, string>): Buffer {
-  const chunks: Buffer[] = [];
-  for (const [name, contents] of Object.entries(entries)) {
-    const body = Buffer.from(contents, "utf8");
-    const header = Buffer.alloc(512);
-    header.write(name, 0, 100, "utf8");
-    header.write("0000644\0", 100, 8, "ascii");
-    header.write("0000000\0", 108, 8, "ascii");
-    header.write("0000000\0", 116, 8, "ascii");
-    header.write(`${body.length.toString(8).padStart(11, "0")}\0`, 124, 12);
-    header.write("00000000000\0", 136, 12, "ascii");
-    header.fill(" ", 148, 156);
-    header.write("0", 156, 1, "ascii");
-    header.write("ustar\0", 257, 6, "ascii");
-    header.write("00", 263, 2, "ascii");
-    let checksum = 0;
-    for (const byte of header) {
-      checksum += byte;
-    }
-    header.write(checksum.toString(8).padStart(6, "0"), 148, 6, "ascii");
-    header[154] = 0;
-    header[155] = 0x20;
-    chunks.push(header, body);
-    const padding = (512 - (body.length % 512)) % 512;
-    if (padding > 0) {
-      chunks.push(Buffer.alloc(padding));
-    }
-  }
-  chunks.push(Buffer.alloc(1024));
-  return Buffer.concat(chunks);
+function readySpecArtifact(
+  content: string,
+  name = "artifact/spec-fidelity.json",
+  entries: NonNullable<
+    CrabrunnerStageExecutionEvidence["artifact"]
+  >["entries"] = [],
+): NonNullable<CrabrunnerStageExecutionEvidence["artifact"]> {
+  return {
+    status: "ready",
+    jobId: "job-1",
+    primary: { name, content, hash: "primary-sha" },
+    entries,
+  };
+}
+
+function artifactEntry(
+  name: string,
+  content: string,
+): NonNullable<
+  CrabrunnerStageExecutionEvidence["artifact"]
+>["entries"][number] {
+  return { name, content, hash: `${name}:sha` };
 }
 
 function manifestPathFromArgs(args: readonly string[]): string {

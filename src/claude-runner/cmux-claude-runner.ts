@@ -314,7 +314,6 @@ export async function runClaudeCmux(
     await writeJsonFile(resultJsonPath, result);
     return result;
   }
-
   let currentPromptFile = promptFile;
   let currentArtifactName = artifactName;
   let finalStatus: ClaudeRunnerStatus = "failed";
@@ -325,7 +324,7 @@ export async function runClaudeCmux(
   let message = "";
   let validationErrors: string[] = [];
   const maxAttempts = input.retryOnInvalid === true ? 2 : 1;
-
+  const validation = input.validation;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const priorMirror = await removeStaleCmuxMirror({
       artifactDir,
@@ -387,7 +386,11 @@ export async function runClaudeCmux(
       artifactPathValidation.validationErrors.length > 0
         ? artifactPathValidation.validationErrors
         : run.exitCode === 0 && laneState === "complete"
-          ? await validateClaudeArtifact(currentArtifactPath, input.validation)
+          ? await readFile(currentArtifactPath, "utf8")
+              .then((content) => validateClaudeArtifact(content, validation))
+              .catch(() => [
+                `artifact is not readable at ${currentArtifactPath}`,
+              ])
           : [`cmux-spawn lane ended ${laneState}`];
 
     attempts.push({
@@ -469,27 +472,16 @@ export async function runClaudeCmux(
 }
 
 export async function validateClaudeArtifact(
-  artifactPath: string,
+  content: string,
   validation: ClaudeRunnerValidationConfig = {},
 ): Promise<string[]> {
   const errors: string[] = [];
-  let text: string;
-  let bytes = 0;
-  try {
-    const stats = await stat(artifactPath);
-    bytes = stats.size;
-    text = await readFile(artifactPath, "utf8");
-  } catch (error) {
-    return [
-      `artifact is not readable at ${artifactPath}: ${error instanceof Error ? error.message : String(error)}`,
-    ];
-  }
-
+  const text = content;
+  const bytes = Buffer.byteLength(text, "utf8");
   const minBytes = validation.minBytes ?? DEFAULT_MIN_ARTIFACT_BYTES;
   if (bytes < minBytes) {
     errors.push(`artifact is too small (${bytes} bytes < ${minBytes} bytes)`);
   }
-
   const firstHeading = validation.requireFirstHeading;
   if (firstHeading !== undefined) {
     const firstNonEmpty = text
@@ -502,26 +494,25 @@ export async function validateClaudeArtifact(
       errors.push(`artifact first heading must be "${firstHeading}"`);
     }
   }
-
   for (const heading of validation.requiredHeadings ?? []) {
     if (!containsMarkdownHeading(text, heading)) {
       errors.push(`artifact is missing required heading "${heading}"`);
     }
   }
-
   if (
     validation.requireSourceReadStatus === true &&
     !hasSourceReadStatusSection(text)
   ) {
     errors.push("artifact is missing a non-empty Source Read Status section");
   }
-
   const verdictEnums = validation.verdictEnums ?? [];
   if (verdictEnums.length > 0) {
     const verdict = extractVerdictEnum(text);
     if (verdict === null) {
       errors.push("artifact is missing a verdict enum");
-    } else if (!verdictEnums.includes(verdict)) {
+    } else if (
+      !verdictEnums.some((entry) => entry.trim().toLowerCase() === verdict)
+    ) {
       errors.push(
         `artifact verdict "${verdict}" is not one of ${verdictEnums.join(", ")}`,
       );
@@ -570,10 +561,18 @@ export async function validateClaudeArtifact(
 }
 
 export function extractVerdictEnum(text: string): string | null {
-  const match = /verdict(?:\s+enum)?\s*[:：]\s*`?([a-z][a-z0-9_-]+)`?/i.exec(
+  const inline = /verdict(?:\s+enum)?\s*[:：]\s*`?([a-z][a-z0-9_-]+)`?/i.exec(
     text,
-  );
-  return match?.[1] === undefined ? null : match[1].trim().toLowerCase();
+  )?.[1];
+  const candidate =
+    inline ??
+    extractMarkdownSection(text, "Verdict")
+      ?.content.split(/\r?\n/)
+      .map((line) => line.trim().replace(/^`+|`+$/gu, ""))
+      .find((line) => line !== "");
+  return candidate !== undefined && /^[a-z][a-z0-9_-]*$/iu.test(candidate)
+    ? candidate.toLowerCase()
+    : null;
 }
 
 async function inspectSourceVisibility(input: {
@@ -981,7 +980,8 @@ function headingLineMatches(line: string, heading: string): boolean {
 }
 
 function normalizeHeading(value: string): string {
-  return value
+  const headingText = parseMarkdownHeading(value)?.text ?? value;
+  return headingText
     .replaceAll(/[`*_]/g, "")
     .replace(/[:.!?–—-]\s*$/u, "")
     .trim()
