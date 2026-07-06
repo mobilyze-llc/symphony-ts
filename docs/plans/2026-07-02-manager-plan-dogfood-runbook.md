@@ -123,3 +123,45 @@ Root cause of Run 1 exit 3: the planner + review still run on **cmux** (`runClau
 | (substrate) | `src/claude-runner/cmux-claude-runner.ts` + `cmux-artifact-paths.ts` | `runClaudeCmux` itself — retire last |
 
 Target substrate: the generic `CrabrunnerCliSchedulerClient` (`submit`/`collect`/`cancel`, `src/stage-execution/crabrunner-scheduler-client.ts`) already used by stage execution — build a `ClaudeRunnerResult`-shaped adapter over it so caller signatures barely change.
+
+---
+
+## Differential-review data point — 2026-07-06 (SYMPH-1034 facet-1/3 seed)
+
+> **Purpose:** get a real differential tier-2 verdict past `no_baseline` on the substrate that now has the SYMPH-1061 materialization fix, to seed the trust-ramp design session. **Method:** a measurement harness (`scratchpad/diffrun-harness.mjs`, throwaway) drives the real `runManagerPlanCli` once (full candidate load → grounding → one Opus planner pass) and overrides ONLY the `runPlanPostEmitReview` DI seam to call the real `runPlanTier2Review` three times against real crabrunner lanes, varying the diff-gate baseline. **Zero production code changed.** Worktree merged to `origin/main` @ b95d26d2 (has SYMPH-1061) and rebuilt.
+
+### Structural finding (the real deliverable)
+
+**No production code path produces a real `content_hash_changed` verdict today — the diff-gate baseline is never fed.**
+- `manager-plan` CLI runs tier-2 but its `tier2` object (`manager-plan.ts:786`) never passes `lastReviewedContentHash` → `plan-post-emit-review.ts:69` defaults it to `undefined` → gate input `null` → **always `no_baseline`**, no matter how many `--persist` runs. (This is why validity2 degraded to `no_baseline`; it is structural, not a fluke.)
+- The live shadow tick (`standing-plan-shadow.ts:591`) does **not pass `tier2` at all** — only the tier-1 floor runs. The durable journal that could supply a baseline never reaches tier-2.
+- `plan-review-gate.ts:24` says it plainly: *"becomes load-bearing once a durable shadow-tick journal supplies lastReviewedContentHash."*
+
+**Implication:** SYMPH-1034 facet 3 (feed the journal's last-reviewed hash into the shadow-tick tier-2 call) is the **enabling prerequisite**, not a later "extend." Until it lands, production can only ever emit `no_baseline`; the diff-gate's run/skip value is unrealized.
+
+### Results (diffrun3, live crabrunner config)
+
+Planner produced a real plan (4 batches / 5 scheduled issues, `planId=symphony-standing-plan`). Three tier-2 calls:
+
+| Call | Baseline | gateReason | status | verdict | findings | lanes | tokens (in+out) | wall |
+|---|---|---|---|---|---|---|---|---|
+| **A** baseline | `null` | `no_baseline` | reviewed | **fail** | 5 (5/5 grounded) | codex+opus both `passed`, 0 errors | 27,052+7,438 = **34,490** | 110.8s |
+| **B** unchanged | H1 | `content_hash_unchanged` | **skipped** | null | 0 | — | **0** | 0s |
+| **C** changed | H1 | `content_hash_changed` | reviewed | **fail** | 4 (4/4 grounded) | codex+opus both `passed`, 0 errors | 24,546+5,949 = **30,495** | 90.4s |
+
+Perturbation for C: dropped `SYMPH-877` from batch `b-30998cc17ad2` (+ pruned its edges) → H1 `f66310cc…` → H2 `e8fc5830…`. `computePlanContentHash` ignores `rationale` (hashes only `{planId,source,envelope,batches,dependencyEdges,options}`), so the perturbation had to be structural.
+
+**Surrounding cost (recovered from artifacts):** plan generation (Opus planner pass) = 55,369+11,135 = **66,504 tokens** (+90,933 cache-write); grounding = 32 extractor calls, **78.1s** (104,717 rendered chars / 180,760 prompt chars — token usage not captured, separate studio2 path).
+
+### What this proves
+
+1. **SYMPH-1061 materialization fix validated end-to-end on live substrate, independent of the SYMPH-1061 dogfood log.** Both council rounds, both lanes: `status: passed`, `validationErrors: 0`, real aggregate verdicts. validity2 (2026-07-05): both lanes `invalid_artifact`, 4 validation errors each, aggregate `degraded`. Fixed.
+2. **The diff-gate mechanism works against a real baseline** — all three arms: `no_baseline`→run (A), `content_hash_unchanged`→skip/0-cost (B), `content_hash_changed`→run (C). C is the **first real differential verdict** — the decision the manager-plan CLI structurally cannot produce.
+3. **Per-round review cost ≈ 30–35K tokens / ~90–110s** (2 lanes, sequential). The skip (B) saves a full round. This is the "per-run cost" input SYMPH-1034 facet 1 needs.
+4. **Reviews are substantive, not rubber-stamps:** A=5 findings, C=4, both `fail` (CHANGES_REQUESTED-level P1/P2). Finding count tracked the scheduled set (C had one fewer scheduled after the drop).
+
+### Caveats / follow-ups
+
+- **The differential verdict came from a harness driving the DI seam, NOT a production path** — see the structural finding. It proves the gate *works*; it does not mean the gate is *wired*.
+- **Substrate operability wrinkle:** the run required matching the live crabrunner config — `SYMPHONY_CRABRUNNER_ROOT=~/.local/share/crucible/controller` + `SYMPHONY_CRABRUNNER_VERSION=rollout-20260706T114021.621Z`. The `manager-plan` CLI defaults to version `dev`, which is **not staged for symphony targets** → cold `--persist` exits 3 (`staged crabrunner is missing for version dev`). The standalone CLI lacks the version resolution the live orchestrator has. → operability follow-up (below).
+- **Still unmeasured for the ramp (facet 1):** catch-rate on known escapes (superseded SYMPH-942, over-scheduled 906/907) and false-positive rate — both require the *wired* diff-gate running over time, so they are gated on facet 3.
