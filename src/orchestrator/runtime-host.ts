@@ -272,6 +272,7 @@ import type {
   DispatchPageAlertEvent,
   PipelineNotificationSink,
 } from "./pipeline-notifier.js";
+import { buildShadowGroundingDep } from "./planner-grounding.js";
 import {
   getRateLimitSnapshotPath,
   loadPersistedRateLimitSnapshot,
@@ -6504,6 +6505,12 @@ export async function startRuntimeService(
               options: { maxPages?: number },
             ) => linearTracker.fetchIssueComments(issueId, options),
           }),
+      ...buildShadowGroundingDep({
+        workflowConfig: currentConfig,
+        env: process.env,
+        workspaceRoot: workspaceManager.root,
+        checkoutRoot: resolveRuntimeRepoRoot(),
+      }),
       ...(currentConfig.operatorAnchors === undefined
         ? {}
         : { operatorConfig: currentConfig.operatorAnchors }),

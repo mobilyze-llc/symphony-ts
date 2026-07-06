@@ -9,7 +9,6 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import {
-  type PlannerCandidateGroundingEvidence,
   type PlannerContext,
   type PlannerInFlight,
   type PlannerRunResult,
@@ -18,10 +17,6 @@ import {
   runTriagePlanner,
 } from "../agent/triage-planner.js";
 import {
-  DEFAULT_CODE_GROUNDING_BASE_DIR,
-  DEFAULT_CODE_GROUNDING_MATERIALIZATION_TIMEOUT_MS,
-  DEFAULT_CODE_GROUNDING_MAX_CHECKOUTS_PER_REPO,
-  DEFAULT_CODE_GROUNDING_TTL_MS,
   DEFAULT_LINEAR_ENDPOINT,
   DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_CANDIDATES,
   DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_COMMENTS,
@@ -37,17 +32,22 @@ import {
   computeDependencyWaves,
   resolveStandingPlanEnvelope,
 } from "../domain/standing-plan.js";
-import type { CodeGroundingTarget } from "../orchestrator/code-grounding.js";
-import { followGroundingDocs } from "../orchestrator/doc-follower.js";
-import {
-  type GroundingExtractionResult,
-  extractGroundingEvidence,
-} from "../orchestrator/grounding-extractor.js";
 import {
   type PlanPostEmitReviewDeps,
   type PlanPostEmitReviewResult,
   runPlanPostEmitReview,
 } from "../orchestrator/plan-post-emit-review.js";
+import {
+  PLANNER_GROUNDING_COMMIT_ENV,
+  PLANNER_GROUNDING_REPO_SCOPE_ENV,
+  PLANNER_GROUNDING_REPO_URL_ENV,
+  type PlannerContextGroundingInput,
+  type PlannerContextGroundingResult,
+  groundPlannerContext as defaultGroundPlannerContext,
+  inferPlannerGroundingRepoScope,
+  readPlannerGroundingRepoScope,
+  toPlannerCandidateGroundingEvidence,
+} from "../orchestrator/planner-grounding.js";
 import {
   STANDING_PLAN_ID,
   assembleShadowPlannerContext,
@@ -68,7 +68,6 @@ import {
   type LinearProjectReference,
   LinearTrackerClient,
 } from "../tracker/linear-client.js";
-import { fetchLinearDocumentContent } from "../tracker/linear-documents.js";
 
 // ---------------------------------------------------------------------------
 // symphony-manager-plan (SYMPH-837) — run the Queue Triage v2 backlog Manager
@@ -96,11 +95,10 @@ export const MANAGER_PLAN_RUNTIME_STATE_BASE_URL_ENV =
 export const MANAGER_PLAN_GITHUB_REPO_ENV = "GITHUB_REPOSITORY";
 export const MANAGER_PLAN_REPO_URL_ENV = "REPO_URL";
 export const MANAGER_PLAN_GROUNDING_REPO_URL_ENV =
-  "SYMPHONY_MANAGER_PLAN_GROUNDING_REPO_URL";
-export const MANAGER_PLAN_GROUNDING_COMMIT_ENV =
-  "SYMPHONY_MANAGER_PLAN_GROUNDING_COMMIT";
+  PLANNER_GROUNDING_REPO_URL_ENV;
+export const MANAGER_PLAN_GROUNDING_COMMIT_ENV = PLANNER_GROUNDING_COMMIT_ENV;
 export const MANAGER_PLAN_GROUNDING_REPO_SCOPE_ENV =
-  "SYMPHONY_MANAGER_PLAN_GROUNDING_REPO_SCOPE";
+  PLANNER_GROUNDING_REPO_SCOPE_ENV;
 const MANAGER_PLAN_RUNTIME_STATE_FETCH_TIMEOUT_MS = 10_000;
 const MANAGER_PLAN_RECENTLY_MERGED_LIMIT = 20;
 const execFileAsync = promisify(execFile);
@@ -191,19 +189,8 @@ export type CreateManagerPlanPlannerRunner = (
   input: ManagerPlanPlannerRunnerInput,
 ) => (prompt: string) => Promise<PlannerRunResult>;
 
-export interface ManagerPlanGroundingInput {
-  context: PlannerContext;
-  candidates: readonly Issue[];
-  env: NodeJS.ProcessEnv;
-  now: () => Date;
-  repoUrl: string | null;
-  commitSha: string | null;
-  repoScope: "symphony" | "non_symphony" | null;
-}
-
-export interface ManagerPlanGroundingResult {
-  context: PlannerContext;
-}
+export type ManagerPlanGroundingInput = PlannerContextGroundingInput;
+export type ManagerPlanGroundingResult = PlannerContextGroundingResult;
 
 export interface ManagerPlanCliDependencies {
   env?: NodeJS.ProcessEnv;
@@ -728,7 +715,7 @@ export async function runManagerPlanCli(
           null,
         repoScope:
           options.plannerGroundingRepoScope ??
-          readManagerPlanGroundingRepoScope(env) ??
+          readPlannerGroundingRepoScope(env) ??
           null,
       });
       context = grounded.context;
@@ -1203,230 +1190,9 @@ function defaultCreatePlannerRunner(
     });
 }
 
-async function defaultGroundPlannerContext(
-  input: ManagerPlanGroundingInput,
-): Promise<ManagerPlanGroundingResult> {
-  const target = await resolveManagerPlanGroundingTarget(input);
-  const candidatesById = new Map(
-    input.candidates.map((issue) => [issue.id, issue]),
-  );
-  const evidenceByIssueId = new Map<
-    string,
-    PlannerCandidateGroundingEvidence
-  >();
-
-  for (const candidate of input.context.backlog) {
-    const issue = candidatesById.get(candidate.issueId);
-    if (issue === undefined) {
-      continue;
-    }
-    const startedAt = input.now().getTime();
-    const rootSources = [
-      {
-        id: "title",
-        text: candidate.title,
-      },
-      {
-        id: "body",
-        text: candidate.description,
-      },
-      ...(candidate.comments ?? []).map((comment) => ({
-        id: `comment:${comment.id}`,
-        text: comment.body,
-      })),
-    ];
-    const followedDocs = await followGroundingDocs({
-      checkoutRoot: process.cwd(),
-      candidateId: candidate.issueId,
-      candidateIdentifier: candidate.issueIdentifier,
-      rootSources,
-      attachedDocuments: issue.documentAttachments ?? [],
-      ...(input.env.LINEAR_API_KEY === undefined ||
-      input.env.LINEAR_API_KEY.trim() === ""
-        ? {}
-        : {
-            readLinearDocument: async (documentId: string) =>
-              (
-                await fetchLinearDocumentContent(
-                  {
-                    endpoint:
-                      input.env.LINEAR_ENDPOINT ?? DEFAULT_LINEAR_ENDPOINT,
-                    apiKey: input.env.LINEAR_API_KEY ?? "",
-                    fetchFn: fetch,
-                  },
-                  { documentId },
-                )
-              )?.content ?? null,
-          }),
-    });
-    const result = await extractGroundingEvidence({
-      candidateId: candidate.issueId,
-      candidateIdentifier: candidate.issueIdentifier,
-      sources: [
-        {
-          id: "title",
-          kind: "ticket_title",
-          label: "ticket title",
-          text: candidate.title,
-        },
-        {
-          id: "body",
-          kind: "ticket_body",
-          label: "ticket body",
-          text: candidate.description,
-        },
-        ...(candidate.comments ?? []).map((comment) => ({
-          id: `comment:${comment.id}`,
-          kind: "comment" as const,
-          label: `comment ${comment.id}`,
-          text: comment.body,
-        })),
-        ...followedDocs.followedDocs.map((document) => ({
-          id: `document:${document.key}`,
-          kind: "document" as const,
-          label:
-            document.title ?? `${document.kind} document ${document.reference}`,
-          text: document.content,
-        })),
-      ],
-      grounding: {
-        workspaceRoot: process.cwd(),
-        runId: `manager-plan-${input.now().toISOString()}`,
-        config: {
-          enabled: true,
-          baseDir: DEFAULT_CODE_GROUNDING_BASE_DIR,
-          ttlMs: DEFAULT_CODE_GROUNDING_TTL_MS,
-          maxCheckoutsPerRepo: DEFAULT_CODE_GROUNDING_MAX_CHECKOUTS_PER_REPO,
-          materializationTimeoutMs:
-            DEFAULT_CODE_GROUNDING_MATERIALIZATION_TIMEOUT_MS,
-        },
-        target,
-      },
-    });
-    evidenceByIssueId.set(
-      candidate.issueId,
-      toPlannerCandidateGroundingEvidence(
-        result,
-        Math.max(0, input.now().getTime() - startedAt),
-        followedDocs.warnings,
-      ),
-    );
-  }
-
-  return {
-    context: {
-      ...input.context,
-      backlog: input.context.backlog.map((candidate) => {
-        const groundingEvidence = evidenceByIssueId.get(candidate.issueId);
-        return {
-          ...candidate,
-          ...(groundingEvidence === undefined ? {} : { groundingEvidence }),
-        };
-      }),
-    },
-  };
-}
-
-async function resolveManagerPlanGroundingTarget(
-  input: ManagerPlanGroundingInput,
-): Promise<CodeGroundingTarget> {
-  const repoUrl =
-    input.repoUrl?.trim() ||
-    (await readGitValue(["config", "--get", "remote.origin.url"]));
-  if (repoUrl === null || repoUrl.trim() === "") {
-    throw new Error(
-      "planner grounding requires --planner-grounding-repo-url, SYMPHONY_MANAGER_PLAN_GROUNDING_REPO_URL, REPO_URL, or git remote.origin.url",
-    );
-  }
-  const commitSha =
-    input.commitSha?.trim() || (await readGitValue(["rev-parse", "HEAD"]));
-  if (commitSha === null || commitSha.trim() === "") {
-    throw new Error(
-      "planner grounding requires --planner-grounding-commit, SYMPHONY_MANAGER_PLAN_GROUNDING_COMMIT, or git rev-parse HEAD",
-    );
-  }
-  const repoScope =
-    input.repoScope ?? inferManagerPlanGroundingRepoScope(repoUrl);
-  return {
-    repoUrl,
-    commitSha,
-    repoScope,
-  };
-}
-
-export function toPlannerCandidateGroundingEvidence(
-  result: GroundingExtractionResult,
-  wallClockMs: number,
-  docWarnings: readonly string[] = [],
-): PlannerCandidateGroundingEvidence {
-  const reportStatus = result.groundingReport?.status;
-  const ungrounded = reportStatus === "ungrounded";
-  return {
-    status: ungrounded ? "ungrounded" : "grounded",
-    reason: ungrounded
-      ? "Grounding skipped because the repository is outside the v1 Symphony grounding scope."
-      : null,
-    digest: result.digest,
-    claims: result.claims.map((claim) => ({
-      id: claim.id,
-      kind: claim.kind,
-      text: claim.text,
-      summary: claim.summary,
-      status: claim.status,
-      citations: claim.citations.map((citation) => ({
-        path: citation.path,
-        lineRange: citation.lineRange,
-        matchedSpan: citation.matchedSpan,
-      })),
-      missing: claim.missing,
-    })),
-    units: result.units.map((unit) => ({
-      unitId: unit.unitId,
-      title: unit.title,
-      wave: unit.wave,
-      completionState: unit.completionState,
-      rationale: unit.rationale,
-    })),
-    warnings: [
-      ...docWarnings,
-      ...result.warnings,
-      ...(result.groundingReport?.warnings ?? []),
-    ],
-    extractorCallCount: result.extractorCallCount,
-    wallClockMs,
-  };
-}
-
-async function readGitValue(args: readonly string[]): Promise<string | null> {
-  try {
-    const { stdout } = await execFileAsync("git", [...args], {
-      cwd: process.cwd(),
-    });
-    const value = stdout.trim();
-    return value === "" ? null : value;
-  } catch {
-    return null;
-  }
-}
-
-function readManagerPlanGroundingRepoScope(
-  env: NodeJS.ProcessEnv,
-): "symphony" | "non_symphony" | null {
-  const value = env[MANAGER_PLAN_GROUNDING_REPO_SCOPE_ENV];
-  if (value === "symphony" || value === "non_symphony") {
-    return value;
-  }
-  return null;
-}
-
-export function inferManagerPlanGroundingRepoScope(
-  repoUrl: string,
-): "symphony" | "non_symphony" {
-  const normalizedRepoUrl = repoUrl.trim().replace(/\/+$/u, "");
-  return /(?:^|[/:])symphony(?:-ts)?(?:\.git)?$/i.test(normalizedRepoUrl)
-    ? "symphony"
-    : "non_symphony";
-}
+export { toPlannerCandidateGroundingEvidence };
+export const inferManagerPlanGroundingRepoScope =
+  inferPlannerGroundingRepoScope;
 
 function defaultArtifactDir(now: () => Date): string {
   return join(tmpdir(), `symphony-manager-plan-${stamp(now)}`);
