@@ -16,11 +16,8 @@ import type { Issue } from "../../src/domain/model.js";
 import type { PlanEnvelope } from "../../src/domain/standing-plan.js";
 import {
   assembleShadowPlannerContext,
-  buildQueueHealth,
   buildShadowPlannerAuditDispositions,
   buildShadowPlannerSupersessionRelationDispositions,
-  computeResidualShare,
-  computeTriageIntake,
   enrichPlannerContextWithComments,
   runShadowPlanCycle,
   runStandingPlanShadowTick,
@@ -733,6 +730,150 @@ describe("runStandingPlanShadowTick", () => {
     }
   });
 
+  it("injects report-only grounding evidence before the planner runs", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-"));
+    const logs: Array<{ event: string; fields: Record<string, unknown> }> = [];
+    const prompts: string[] = [];
+    let groundingCalls = 0;
+    const sentinel = "SENSITIVE_GROUNDING_SENTINEL";
+    try {
+      const result = await runStandingPlanShadowTick({
+        config: triageConfig(),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        groundPlannerContext: async ({ context }) => {
+          groundingCalls += 1;
+          expect(context.backlog[0]?.groundingEvidence).toBeUndefined();
+          return {
+            context: {
+              ...context,
+              backlog: context.backlog.map((candidate) => ({
+                ...candidate,
+                groundingEvidence: {
+                  ...groundingEvidence(),
+                  digest: {
+                    text: sentinel,
+                    status: "unverified",
+                    truncated: false,
+                  },
+                  claims: [
+                    {
+                      id: "claim-1",
+                      kind: "behavioral",
+                      text: sentinel,
+                      summary: sentinel,
+                      status: "unverified",
+                      citations: [],
+                      missing: [sentinel],
+                    },
+                  ],
+                },
+              })),
+            },
+          };
+        },
+        createPlannerRunner: () => async (nextPrompt) => {
+          prompts.push(nextPrompt);
+          return okPlanner().runClaude();
+        },
+        log: (event, _message, fields) => {
+          logs.push({ event, fields });
+        },
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+      });
+
+      expect(result.status).toBe("ok");
+      expect(groundingCalls).toBe(1);
+      const plannerPrompt = prompts[0] ?? "";
+      expect(plannerPrompt).toContain("grounding evidence (report-only");
+      expect(plannerPrompt).toContain(`digest [unverified]: ${sentinel}`);
+      expect(logs).toContainEqual({
+        event: "queue_triage_planner_grounding_measure",
+        fields: expect.objectContaining({
+          outcome: "shadow",
+          candidate_count: 1,
+          evidence_count: 1,
+          grounded_count: 1,
+          extractor_call_count: 1,
+        }),
+      });
+      const measureLog = logs.find(
+        (log) => log.event === "queue_triage_planner_grounding_measure",
+      );
+      const serializedFields = JSON.stringify(measureLog?.fields);
+      expect(serializedFields).not.toContain("digest");
+      expect(serializedFields).not.toContain("claims");
+      expect(serializedFields).not.toContain(sentinel);
+      expect(JSON.stringify(measureLog?.fields)).not.toContain("Title SYMPH-1");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("continues the report-only planner cycle when grounding fails", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-"));
+    const logs: string[] = [];
+    let plannerCalled = false;
+    try {
+      const result = await runStandingPlanShadowTick({
+        config: triageConfig(),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        groundPlannerContext: async () => {
+          throw new Error("studio unavailable");
+        },
+        createPlannerRunner: () => async () => {
+          plannerCalled = true;
+          return okPlanner().runClaude();
+        },
+        log: (event) => {
+          logs.push(event);
+        },
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+      });
+
+      expect(result.status).toBe("ok");
+      expect(plannerCalled).toBe(true);
+      expect(logs).toContain("queue_triage_planner_grounding_failed");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not emit grounding logs when no grounding dependency is wired", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-"));
+    const logs: string[] = [];
+    const prompts: string[] = [];
+    try {
+      const result = await runStandingPlanShadowTick({
+        config: triageConfig(),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        createPlannerRunner: () => async (nextPrompt) => {
+          prompts.push(nextPrompt);
+          return okPlanner().runClaude();
+        },
+        log: (event) => {
+          logs.push(event);
+        },
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+      });
+
+      expect(result.status).toBe("ok");
+      expect(prompts[0]).not.toContain("grounding evidence");
+      expect(
+        logs.some((event) =>
+          event.startsWith("queue_triage_planner_grounding"),
+        ),
+      ).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("skips on the heartbeat window and never invokes the planner", async () => {
     const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-"));
     let plannerBuilt = false;
@@ -1138,222 +1279,14 @@ function healthIssue(over: Partial<Issue> = {}): Issue {
   return { ...issue("h1", "SYMPH-100"), ...over };
 }
 
-describe("SYMPH-939 health signals", () => {
+describe("runStandingPlanShadowTick queue-health wiring", () => {
   // A fixed "now" the inflow-window math is computed against.
   const NOW = new Date("2026-06-27T00:00:00.000Z");
-  const NOW_MS = NOW.getTime();
   // 1 day before now — inside the 7-day inflow window.
   const RECENT = "2026-06-26T00:00:00.000Z";
   // 30 days before now — outside the 7-day inflow window.
   const STALE = "2026-05-28T00:00:00.000Z";
-  // 1 minute AFTER now — a future-dated createdAt (clock skew / non-server data).
-  const FUTURE = new Date(NOW_MS + 60_000).toISOString();
-
-  describe("computeTriageIntake", () => {
-    it("reports depth and counts only recent createdAt as inflow", () => {
-      // 5 issues; exactly 2 created inside the 7-day window relative to NOW.
-      const issues = [
-        healthIssue({ id: "a", createdAt: RECENT }),
-        healthIssue({ id: "b", createdAt: RECENT }),
-        healthIssue({ id: "c", createdAt: STALE }),
-        healthIssue({ id: "d", createdAt: STALE }),
-        healthIssue({ id: "e", createdAt: STALE }),
-      ];
-      expect(computeTriageIntake(issues, NOW_MS)).toEqual({
-        depth: 5,
-        inflowRate: 2,
-      });
-    });
-
-    it("skips null and unparseable createdAt (never counted as inflow)", () => {
-      const issues = [
-        healthIssue({ id: "a", createdAt: RECENT }),
-        healthIssue({ id: "b", createdAt: null }),
-        healthIssue({ id: "c", createdAt: "not-a-date" }),
-      ];
-      expect(computeTriageIntake(issues, NOW_MS)).toEqual({
-        depth: 3,
-        inflowRate: 1,
-      });
-    });
-
-    it("reads empty Triage as depth 0, inflowRate 0", () => {
-      expect(computeTriageIntake([], NOW_MS)).toEqual({
-        depth: 0,
-        inflowRate: 0,
-      });
-    });
-
-    it("counts a future-dated createdAt in depth but NOT in inflow (negative age is not recent)", () => {
-      // A createdAt AFTER nowMs (clock skew / non-server data) yields a negative age,
-      // which must NOT pass the past-bounded inflow window and inflate the signal.
-      const issues = [
-        healthIssue({ id: "a", createdAt: RECENT }),
-        healthIssue({ id: "b", createdAt: FUTURE }),
-      ];
-      expect(computeTriageIntake(issues, NOW_MS)).toEqual({
-        depth: 2,
-        inflowRate: 1,
-      });
-    });
-  });
-
-  describe("computeResidualShare", () => {
-    it("is the fraction of titles carrying the [track:] marker", () => {
-      // 4 issues, exactly 1 title with the residual marker → 0.25.
-      const issues = [
-        healthIssue({ id: "a", title: "[track:abc] residual follow-up" }),
-        healthIssue({ id: "b", title: "Plain ticket" }),
-        healthIssue({ id: "c", title: "Another plain ticket" }),
-        healthIssue({ id: "d", title: "Yet another" }),
-      ];
-      expect(computeResidualShare(issues)).toBe(0.25);
-    });
-
-    it("reads an empty population as 0 (a valid 'no residual' reading, not null)", () => {
-      expect(computeResidualShare([])).toBe(0);
-    });
-
-    it("REGRESSION GUARD: residual reflects the residual population, not the candidate backlog", () => {
-      // The candidate/activeStates backlog carries NO [track:] markers (it excludes
-      // Backlog/Triage). The state-aware residual fetch DOES. computeResidualShare must
-      // read the population it is handed — proving it cannot be fed the candidate backlog
-      // and silently read ~0.
-      const candidateBacklog = [
-        healthIssue({ id: "c1", title: "active work, no marker" }),
-        healthIssue({ id: "c2", title: "more active work" }),
-      ];
-      const residualPopulation = [
-        healthIssue({ id: "r1", title: "[track:def] residual" }),
-        healthIssue({ id: "r2", title: "plain backlog item" }),
-      ];
-      expect(computeResidualShare(candidateBacklog)).toBe(0);
-      expect(computeResidualShare(residualPopulation)).toBe(0.5);
-    });
-  });
-
-  describe("buildQueueHealth", () => {
-    const HOT: HotFileGrowth = {
-      topFileChurnFraction: 0.7,
-      godFileConcentration: "high",
-    };
-
-    it("returns QueueHealth when the three core signals are non-null", () => {
-      expect(
-        buildQueueHealth({
-          triageIntake: { depth: 5, inflowRate: 2 },
-          residualShare: 0.25,
-          hotFileGrowth: HOT,
-          reviewRoundDepth: 3,
-        }),
-      ).toEqual({
-        triageIntake: { depth: 5, inflowRate: 2 },
-        residualShare: 0.25,
-        hotFileGrowth: HOT,
-        reviewRoundDepth: 3,
-      });
-    });
-
-    it("carries reviewRoundDepth=null as-is (its null is a legitimate reading)", () => {
-      const health = buildQueueHealth({
-        triageIntake: { depth: 0, inflowRate: 0 },
-        residualShare: 0,
-        hotFileGrowth: HOT,
-        reviewRoundDepth: null,
-      });
-      expect(health).toBeDefined();
-      expect(health?.reviewRoundDepth).toBeNull();
-    });
-
-    it("returns undefined when any core signal is null (a tracker error → health absent)", () => {
-      expect(
-        buildQueueHealth({
-          triageIntake: null,
-          residualShare: 0.25,
-          hotFileGrowth: HOT,
-          reviewRoundDepth: 3,
-        }),
-      ).toBeUndefined();
-      expect(
-        buildQueueHealth({
-          triageIntake: { depth: 5, inflowRate: 2 },
-          residualShare: null,
-          hotFileGrowth: HOT,
-          reviewRoundDepth: 3,
-        }),
-      ).toBeUndefined();
-      expect(
-        buildQueueHealth({
-          triageIntake: { depth: 5, inflowRate: 2 },
-          residualShare: 0.25,
-          hotFileGrowth: null,
-          reviewRoundDepth: 3,
-        }),
-      ).toBeUndefined();
-    });
-
-    it("returns undefined when a core numeric is non-finite (NaN/Infinity → health absent, never the trusted block)", () => {
-      // A non-finite numeric would otherwise render into the trusted "## Queue health"
-      // block (R7) and throw renderQueueHealthBlock's .toFixed(3) inside the
-      // fire-and-forget tick. It must degrade to health-absent instead.
-      expect(
-        buildQueueHealth({
-          triageIntake: { depth: 5, inflowRate: 2 },
-          residualShare: Number.NaN,
-          hotFileGrowth: HOT,
-          reviewRoundDepth: 3,
-        }),
-      ).toBeUndefined();
-      expect(
-        buildQueueHealth({
-          triageIntake: { depth: Number.POSITIVE_INFINITY, inflowRate: 2 },
-          residualShare: 0.25,
-          hotFileGrowth: HOT,
-          reviewRoundDepth: 3,
-        }),
-      ).toBeUndefined();
-      // A non-finite hot-file fraction is equally rejected.
-      expect(
-        buildQueueHealth({
-          triageIntake: { depth: 5, inflowRate: 2 },
-          residualShare: 0.25,
-          hotFileGrowth: {
-            topFileChurnFraction: Number.NaN,
-            godFileConcentration: "high",
-          },
-          reviewRoundDepth: 3,
-        }),
-      ).toBeUndefined();
-      // A non-finite (non-null) reviewRoundDepth is rejected; null stays a valid reading.
-      expect(
-        buildQueueHealth({
-          triageIntake: { depth: 5, inflowRate: 2 },
-          residualShare: 0.25,
-          hotFileGrowth: HOT,
-          reviewRoundDepth: Number.POSITIVE_INFINITY,
-        }),
-      ).toBeUndefined();
-    });
-
-    it("empty Triage + empty residual still yields health when core parts are present", () => {
-      // depth 0 / inflowRate 0 / residualShare 0 are all valid readings (not null), so
-      // with a hot-file reading present the bundle is emitted.
-      const health = buildQueueHealth({
-        triageIntake: { depth: 0, inflowRate: 0 },
-        residualShare: 0,
-        hotFileGrowth: HOT,
-        reviewRoundDepth: null,
-      });
-      expect(health).toEqual({
-        triageIntake: { depth: 0, inflowRate: 0 },
-        residualShare: 0,
-        hotFileGrowth: HOT,
-        reviewRoundDepth: null,
-      });
-    });
-  });
-
-  describe("runStandingPlanShadowTick wiring (end-to-end)", () => {
+  describe("end-to-end", () => {
     const fullHealthDeps = (root: string) => ({
       config: triageConfig(),
       workspaceRoot: root,

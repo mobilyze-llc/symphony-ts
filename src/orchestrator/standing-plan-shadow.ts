@@ -30,6 +30,11 @@ import type { LinearIssueComment } from "../tracker/linear-client.js";
 import type { BacklogHygieneProposal } from "./backlog-hygiene.js";
 import { extractGroundingPathHints } from "./code-grounding.js";
 import { runPlanPostEmitReview } from "./plan-post-emit-review.js";
+import {
+  buildQueueHealth,
+  computeResidualShare,
+  computeTriageIntake,
+} from "./standing-plan-queue-health.js";
 import { loadStandingPlan, recordPlanRevision } from "./standing-plan-store.js";
 import type { RecordPlanRevisionResult } from "./standing-plan-store.js";
 import type {
@@ -49,6 +54,14 @@ import type {
 
 /** Stable identity of the single living plan (v2 is single-project, SYMPH). */
 export const STANDING_PLAN_ID = "symphony-standing-plan";
+
+export {
+  RESIDUAL_TRACK_MARKER,
+  TRIAGE_INFLOW_WINDOW_MS,
+  buildQueueHealth,
+  computeResidualShare,
+  computeTriageIntake,
+} from "./standing-plan-queue-health.js";
 
 export interface AssembleShadowPlannerContextInput {
   candidates: Issue[];
@@ -295,132 +308,6 @@ function uniqueNonBlankIdentifiers(identifiers: readonly string[]): string[] {
   return unique;
 }
 
-// ---------------------------------------------------------------------------
-// Per-queue health signals (SYMPH-939)
-//
-// runStandingPlanShadowTick computes a QueueHealth bundle from the injected,
-// best-effort deps on StandingPlanShadowTickDeps and threads it into the assembled
-// planner context. Each read is independently wrapped so a throw degrades to a null
-// part — this tick is fire-and-forget and must NEVER break the poll. The pure
-// shapers below are exported for direct unit testing (deterministic, no I/O).
-// ---------------------------------------------------------------------------
-
-/**
- * Recent-inflow window for Triage-intake (SYMPH-939): a Triage issue counts toward
- * `inflowRate` when its createdAt falls within this many ms before now. v1 bound — a
- * 7-day window; re-tune from observed intake once the signal is calibrated.
- */
-export const TRIAGE_INFLOW_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
-
-/**
- * Residual-fingerprint title marker (SYMPH-939). The tracker stamps `[track:<fingerprint>]`
- * into the TITLE of every residual/tracked issue it auto-files (see
- * src/tracker/linear-client.ts:1163), so the residual share is the fraction of the
- * fetched population whose title contains this prefix.
- */
-export const RESIDUAL_TRACK_MARKER = "[track:";
-
-/**
- * Shape a Triage-intake reading (SYMPH-939) from the Triage-state issue population:
- * `depth` is the total count; `inflowRate` is the count created within
- * TRIAGE_INFLOW_WINDOW_MS before `nowMs`. Issue.createdAt is `string | null` — null /
- * unparseable timestamps are skipped (they never count toward inflow). A FUTURE-dated
- * timestamp (createdMs > nowMs, e.g. clock skew or non-server data) is likewise NOT
- * recent inflow: the window is constrained to the past (ageMs >= 0), so a negative age
- * cannot inflate the trusted queue-health signal. Pure: the caller owns the
- * (best-effort) fetch and degrades a throw to null.
- */
-export function computeTriageIntake(
-  issues: Issue[],
-  nowMs: number,
-): TriageIntakeHealth {
-  let inflowRate = 0;
-  for (const issue of issues) {
-    if (issue.createdAt === null) {
-      continue;
-    }
-    const createdMs = Date.parse(issue.createdAt);
-    if (Number.isNaN(createdMs)) {
-      continue;
-    }
-    const ageMs = nowMs - createdMs;
-    if (ageMs >= 0 && ageMs <= TRIAGE_INFLOW_WINDOW_MS) {
-      inflowRate += 1;
-    }
-  }
-  return { depth: issues.length, inflowRate };
-}
-
-/**
- * Compute the residual share (SYMPH-939): the fraction of the fetched population whose
- * TITLE contains RESIDUAL_TRACK_MARKER. An empty population (0 issues) reads as `0` — a
- * valid "no residual" reading, NOT a degradation; only a fetch FAILURE (handled by the
- * caller) reads as null.
- *
- * REGRESSION GUARD (the original-defect guard): this MUST be fed from the state-aware
- * Backlog/Triage fetch (deps.fetchResidualIssues), NOT from the candidate backlog
- * (deps.fetchCandidates / context.backlog). The candidate backlog is the activeStates
- * set, which excludes Backlog/Triage and would read ~0 residual. Keeping this a pure
- * function over an explicitly-passed population is what makes the wrong source a
- * compile/test-visible choice rather than a silent miswire.
- */
-export function computeResidualShare(issues: Issue[]): number {
-  if (issues.length === 0) {
-    return 0;
-  }
-  const residual = issues.filter((issue) =>
-    issue.title.includes(RESIDUAL_TRACK_MARKER),
-  ).length;
-  return residual / issues.length;
-}
-
-/**
- * Assemble the QueueHealth bundle (SYMPH-939) from the four independently-computed parts.
- * Returns a QueueHealth ONLY when the three CORE signals — triageIntake, residualShare,
- * and hotFileGrowth — are all non-null (the plan's QueueHealth type requires them).
- * `reviewRoundDepth` is carried as-is (its `null` is a legitimate "no recent reviews"
- * reading, not a missing signal). Any core part being null → `undefined` (health absent:
- * a tracker error degrades to no health, and the tick still completes).
- *
- * NON-FINITE DEFENSE (R7 + fire-and-forget never-throws): a `NaN`/`Infinity` in any
- * RENDERED numeric would otherwise reach the TRUSTED `## Queue health` prompt block
- * (e.g. "Residual share: NaN", an R7 leak) and would throw inside renderQueueHealthBlock's
- * `.toFixed(3)` — inside the fire-and-forget tick. Not reachable today, but any non-finite
- * core numeric degrades to health-absent (`undefined`) so it can never reach the trusted
- * block or throw the renderer.
- */
-export function buildQueueHealth(parts: {
-  triageIntake: TriageIntakeHealth | null;
-  residualShare: number | null;
-  hotFileGrowth: HotFileGrowth | null;
-  reviewRoundDepth: number | null;
-}): QueueHealth | undefined {
-  const { triageIntake, residualShare, hotFileGrowth, reviewRoundDepth } =
-    parts;
-  if (
-    triageIntake === null ||
-    residualShare === null ||
-    hotFileGrowth === null
-  ) {
-    return undefined;
-  }
-  if (
-    !Number.isFinite(triageIntake.depth) ||
-    !Number.isFinite(triageIntake.inflowRate) ||
-    !Number.isFinite(residualShare) ||
-    !Number.isFinite(hotFileGrowth.topFileChurnFraction) ||
-    (reviewRoundDepth !== null && !Number.isFinite(reviewRoundDepth))
-  ) {
-    return undefined;
-  }
-  return {
-    triageIntake,
-    residualShare,
-    hotFileGrowth,
-    reviewRoundDepth,
-  };
-}
-
 export interface EnrichPlannerContextWithCommentsDeps {
   context: PlannerContext;
   config: WorkflowQueueTriageCommentEnrichmentConfig;
@@ -515,6 +402,38 @@ export async function enrichPlannerContextWithComments(
       candidatesFailed,
       results,
     }),
+  };
+}
+
+function summarizePlannerGrounding(
+  context: PlannerContext,
+): Record<string, number> {
+  let evidenceCount = 0;
+  let groundedCount = 0;
+  let ungroundedCount = 0;
+  let extractorCallCount = 0;
+  let evidenceWallClockMs = 0;
+  for (const candidate of context.backlog) {
+    const evidence = candidate.groundingEvidence;
+    if (evidence === undefined) {
+      continue;
+    }
+    evidenceCount += 1;
+    if (evidence.status === "grounded") {
+      groundedCount += 1;
+    } else {
+      ungroundedCount += 1;
+    }
+    extractorCallCount += evidence.extractorCallCount;
+    evidenceWallClockMs += evidence.wallClockMs;
+  }
+  return {
+    candidate_count: context.backlog.length,
+    evidence_count: evidenceCount,
+    grounded_count: groundedCount,
+    ungrounded_count: ungroundedCount,
+    extractor_call_count: extractorCallCount,
+    evidence_wall_clock_ms: evidenceWallClockMs,
   };
 }
 
@@ -638,6 +557,16 @@ export type StandingPlanShadowTickResult =
       reason: "disabled" | "heartbeat" | "cadence" | "error";
     };
 
+export interface StandingPlanShadowGroundingInput {
+  context: PlannerContext;
+  candidates: readonly Issue[];
+  now: () => Date;
+}
+
+export interface StandingPlanShadowGroundingResult {
+  context: PlannerContext;
+}
+
 export interface StandingPlanShadowTickDeps {
   config: WorkflowQueueTriageConfig | undefined;
   workspaceRoot: string;
@@ -662,6 +591,15 @@ export interface StandingPlanShadowTickDeps {
     issueId: string,
     options: { maxPages?: number },
   ) => Promise<LinearIssueComment[]>;
+  /**
+   * Report-only code grounding for planner candidates (SYMPH-1065).
+   * Optional and injected by runtime-host only when planner/code grounding are
+   * both enabled; absent preserves the default shadow tick byte-for-byte and
+   * avoids target resolution, cloning, extraction, or telemetry cost.
+   */
+  groundPlannerContext?: (
+    input: StandingPlanShadowGroundingInput,
+  ) => Promise<StandingPlanShadowGroundingResult>;
   /**
    * Operator/service-account sets for comment noise classification (SYMPH-896).
    * Service-account comments (Symphony's own writes) are dropped as noise.
@@ -841,6 +779,32 @@ export async function runStandingPlanShadowTick(
           "queue_triage_comment_enrichment_measure",
           "Planner comment enrichment measured (report-only; topology tuned from this).",
           { outcome: "shadow", ...enriched.measurement },
+        );
+      }
+    }
+    if (deps.groundPlannerContext !== undefined && context.backlog.length > 0) {
+      const startedAt = deps.now().getTime();
+      try {
+        const grounded = await deps.groundPlannerContext({
+          context,
+          candidates,
+          now: deps.now,
+        });
+        context = grounded.context;
+        await deps.log(
+          "queue_triage_planner_grounding_measure",
+          "Planner code grounding measured (report-only; dispatch unaffected).",
+          {
+            outcome: "shadow",
+            wall_clock_ms: Math.max(0, deps.now().getTime() - startedAt),
+            ...summarizePlannerGrounding(context),
+          },
+        );
+      } catch (error) {
+        await deps.log(
+          "queue_triage_planner_grounding_failed",
+          "Planner code grounding failed (report-only; continuing without grounding evidence).",
+          { outcome: "degraded", detail: (error as Error).message },
         );
       }
     }
