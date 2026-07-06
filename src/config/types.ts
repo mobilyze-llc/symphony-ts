@@ -617,6 +617,11 @@ export interface WorkflowQueueTriageConfig {
    * measurement, not guessed (design SYMPH-795 §9 / measure-before-caps).
    */
   commentEnrichment: WorkflowQueueTriageCommentEnrichmentConfig;
+  /**
+   * Report-only tier-2 plan review in the live standing-plan shadow tick.
+   * Default-DISABLED because changed ticks can spend a crabrunner council round.
+   */
+  planReview: WorkflowQueueTriagePlanReviewConfig;
 }
 
 export interface WorkflowQueueTriageControlDocConfig {
@@ -646,6 +651,13 @@ export interface WorkflowQueueTriageCommentEnrichmentConfig {
   maxCommentChars: number;
   /** Max total curated characters per issue. */
   maxTotalChars: number;
+}
+
+export interface WorkflowQueueTriagePlanReviewConfig {
+  /** Master switch for passing tier-2 review into the shadow tick. */
+  enabled: boolean;
+  /** Separately gates council execution on grounded scheduled evidence. */
+  plannerGroundingEnabled: boolean;
 }
 
 export interface ResolvedWorkflowConfig {

@@ -98,6 +98,34 @@ agent:
   max_concurrent_agents_by_state: {}
 
 # ============================================================
+# queue_triage — Standing-plan manager spine (optional)
+# ============================================================
+queue_triage:
+  # Enable the standing-plan manager loop. Default: false
+  enabled: false
+
+  # Keep dispatch on the existing comparator while the standing plan is measured.
+  # Default: true
+  shadow_mode: true
+
+  # Version-floating planner model alias. Default: opus
+  planner_model: opus
+
+  # Re-plan cadence in milliseconds. Default: 900000 (15 min)
+  heartbeat_ms: 900000
+
+  # Report-only tier-2 plan review in the live shadow tick.
+  # Default: both false. Enabling can spend a crabrunner council round on
+  # changed ticks; unchanged ticks are diff-gate skipped.
+  plan_review:
+    enabled: false
+    planner_grounding_enabled: false
+
+  # Curated comment fetch + prompt enrichment. Default: false
+  comment_enrichment:
+    enabled: false
+
+# ============================================================
 # runner — Primary implementation lane
 # ============================================================
 runner:

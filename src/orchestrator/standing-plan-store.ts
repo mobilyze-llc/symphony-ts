@@ -80,6 +80,45 @@ export async function loadStandingPlan(
   return projectStandingPlan(await readStandingPlanJournal(workspaceRoot));
 }
 
+export function projectLastReviewedContentHash(
+  journal: StandingPlanJournal,
+): string | null {
+  let baseline: { sequence: number; contentHash: string } | null = null;
+  for (const entry of journal) {
+    if (entry.kind !== "plan_revision") {
+      continue;
+    }
+    if (
+      !entry.revision.reviewRecords?.some(
+        (record) =>
+          record.tier === "tier-2" &&
+          record.status === "reviewed" &&
+          record.diffHash === entry.revision.contentHash,
+      )
+    ) {
+      continue;
+    }
+    // Only reviewed tier-2 records for this exact persisted content hash are
+    // trusted baselines. Skipped/degraded records and stale reviewed records can
+    // be useful telemetry but must not advance the diff-gate hash.
+    if (baseline === null || entry.sequence >= baseline.sequence) {
+      baseline = {
+        sequence: entry.sequence,
+        contentHash: entry.revision.contentHash,
+      };
+    }
+  }
+  return baseline?.contentHash ?? null;
+}
+
+export async function loadLastReviewedContentHash(
+  workspaceRoot: string,
+): Promise<string | null> {
+  return projectLastReviewedContentHash(
+    await readStandingPlanJournal(workspaceRoot),
+  );
+}
+
 /**
  * Record a planner proposal as a new revision. Carries committed batches
  * forward immutably (via rotateRevision) and rotates the revision id. A body
@@ -176,8 +215,13 @@ function refreshedReportRevision(
     return null;
   }
   const premises = body.premises ?? [];
-  const findings = options.findings ?? [];
   const reviewRecords = options.reviewRecords ?? [];
+  const findings = mergeReportRefreshFindings({
+    prior: latest.revision.findings ?? [],
+    next: options.findings ?? [],
+    persistedContentHash: latest.revision.contentHash,
+    reviewRecords,
+  });
   if (
     planReportHash(latest.revision) ===
     planReportHash({ ...latest.revision, premises, findings, reviewRecords })
@@ -190,6 +234,41 @@ function refreshedReportRevision(
     findings,
     reviewRecords,
   };
+}
+
+function mergeReportRefreshFindings(input: {
+  prior: readonly PlanReviewFinding[];
+  next: readonly PlanReviewFinding[];
+  persistedContentHash: string;
+  reviewRecords: NonNullable<PlanRevision["reviewRecords"]>;
+}): PlanReviewFinding[] {
+  if (
+    !input.reviewRecords.some(
+      (record) =>
+        record.tier === "tier-2" &&
+        record.status === "skipped" &&
+        record.gateReason === "content_hash_unchanged" &&
+        record.diffHash === input.persistedContentHash,
+    )
+  ) {
+    return [...input.next];
+  }
+  const seen = new Set(input.next.map(planFindingKey));
+  const carriedTier2 = input.prior.filter(
+    (finding) =>
+      finding.source === "tier-2" && !seen.has(planFindingKey(finding)),
+  );
+  return [...input.next, ...carriedTier2];
+}
+
+function planFindingKey(finding: PlanReviewFinding): string {
+  return JSON.stringify({
+    source: finding.source ?? null,
+    fingerprint: finding.structuredFingerprint ?? null,
+    title: finding.title,
+    planAnchor: finding.planAnchor,
+    severity: finding.severity,
+  });
 }
 
 function planReportHash(input: {
