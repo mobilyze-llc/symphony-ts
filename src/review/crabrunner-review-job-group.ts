@@ -4,6 +4,10 @@ import type {
   StageExecutionBackendRunner,
   StageExecutionJobSpec,
 } from "../stage-execution/backend.js";
+import {
+  type CollectedArtifact,
+  artifactHashesFromCollectedArtifact,
+} from "../stage-execution/collected-artifact.js";
 import type { CrabrunnerStageExecutionEvidence } from "../stage-execution/crabrunner-backend.js";
 import {
   type StageExecutionLaneDispatch,
@@ -33,39 +37,6 @@ import {
   reviewVerdictWithRoutingGuarantees,
 } from "./review-verdict.js";
 
-/**
- * SYMPH-810 — run a code-review (and optional browser-QA) stage as a crabrunner
- * JOB GROUP and produce the substrate-neutral review artifact contracts.
- *
- * One run group fans out N reviewer lanes plus an optional browser-QA lane, all
- * sharing a single `runGroupId`. Every lane is dispatched ONLY through the
- * resolved `StageExecutionBackendRunner.execute` (the same seam other delegated
- * stages use — SYMPH-835/850), never a direct crabrunner scheduler client, so
- * the scheduler stays an internal swap and this module is fully testable with a
- * fake backend.
- *
- * Each lane's host-owned crabrunner artifact is collected and mapped onto the
- * existing review contracts — `HeadlessLaneResult` /
- * `StructuredReviewerArtifact` for reviewers, `BrowserQaEvidence` for QA — and
- * the verdict is aggregated with the extracted `review-verdict` module. This
- * module reuses those contracts; it does not duplicate them, and it does NOT
- * touch the merge-readiness contract or the review-result validator (those are
- * owned by the orchestrator / council gate).
- *
- * Fail-closed is the rule, never the exception. Any of the following yields an
- * `error` verdict (a clean PASS is impossible when integrity is unprovable):
- *   - a reviewer lane is unavailable (admission rejected, runner failed),
- *   - admission is ambiguous (accepted without a job id),
- *   - a succeeded lane produced no host-owned artifact refs (cross-host
- *     provenance cannot be established),
- *   - the collected artifact is missing or malformed,
- *   - the artifact targets a stale head (freshness: the rerun must assert the
- *     current PR head),
- *   - routing guarantees fail on an otherwise-passing group,
- *   - the browser-QA failure rule is violated, QA evidence is missing/malformed,
- *     or an assertion failed.
- */
-
 export type ReviewJobGroupLaneKind = "reviewer" | "browser-qa";
 
 export interface CrabrunnerReviewLaneSpec {
@@ -91,6 +62,7 @@ export interface ReviewJobGroupLaneEvidence {
   kind: ReviewJobGroupLaneKind;
   spec: CrabrunnerReviewLaneSpec;
   jobId: string | null;
+  artifact?: CollectedArtifact;
   artifactRefs: readonly string[];
   backendResult: StageExecutionBackendResult<CrabrunnerStageExecutionEvidence>;
 }
@@ -305,6 +277,7 @@ async function collectReviewLane(input: {
   const backendResult = input.laneDispatch.backendResult;
   const evidence = backendResult.evidence;
   const jobId = evidence?.admission.jobId ?? null;
+  const artifact = evidence?.artifact;
   const artifactRefs = evidence?.artifactRefs ?? [];
   const provenance: ReviewJobGroupLaneProvenance = {
     laneId: lane.laneId,
@@ -319,6 +292,7 @@ async function collectReviewLane(input: {
     kind: lane.kind,
     spec: lane,
     jobId,
+    ...(artifact === undefined ? {} : { artifact }),
     artifactRefs,
     backendResult,
   };
@@ -328,6 +302,7 @@ async function collectReviewLane(input: {
     lane,
     evidence,
     jobId,
+    artifact,
     artifactRefs,
     runStatus: backendResult.result.runAttempt.status,
   });
@@ -554,10 +529,11 @@ function classifyLaneSubstrate(input: {
   lane: CrabrunnerReviewLaneSpec;
   evidence: CrabrunnerStageExecutionEvidence | undefined;
   jobId: string | null;
+  artifact: CollectedArtifact | undefined;
   artifactRefs: readonly string[];
   runStatus: string;
 }): LaneSubstrateCondition {
-  const { lane, evidence, jobId, artifactRefs, runStatus } = input;
+  const { lane, evidence, jobId, artifact, artifactRefs, runStatus } = input;
 
   if (evidence === undefined) {
     return {
@@ -603,7 +579,11 @@ function classifyLaneSubstrate(input: {
 
   // Cross-host provenance: a succeeded lane MUST carry host-owned artifact refs.
   // Without them the integrity of the result cannot be established.
-  if (artifactRefs.length === 0) {
+  if (
+    artifact === undefined
+      ? artifactRefs.length === 0
+      : artifact.status !== "ready"
+  ) {
     return {
       ok: false,
       condition: `artifact_provenance_missing:${lane.laneId}`,
@@ -1021,6 +1001,9 @@ function collectArtifactHashes(
 ): readonly string[] {
   if (evidence === undefined) {
     return [];
+  }
+  if (evidence.artifact !== undefined) {
+    return artifactHashesFromCollectedArtifact(evidence.artifact);
   }
   if (
     evidence.artifactHashes !== undefined &&

@@ -1,5 +1,3 @@
-import { readFile } from "node:fs/promises";
-
 import { z } from "zod";
 
 import type { StageExecutionProfile } from "../config/types.js";
@@ -9,6 +7,7 @@ import type {
   StageExecutionBackendRunner,
   StageExecutionJobSpec,
 } from "../stage-execution/backend.js";
+import type { CollectedArtifact } from "../stage-execution/collected-artifact.js";
 import type { CrabrunnerStageExecutionEvidence } from "../stage-execution/crabrunner-backend.js";
 import { fenceJudgeBoundaryTags } from "./prompt-fence.js";
 import type { AgentRunInput } from "./runner.js";
@@ -155,14 +154,11 @@ export async function runSpecFidelityLane(
 
 export async function parseSpecFidelityLaneResult(
   dispatch: StageExecutionBackendResult<CrabrunnerStageExecutionEvidence>,
-  readArtifact: SpecFidelityArtifactReader = defaultReadArtifact,
+  _readArtifact?: SpecFidelityArtifactReader,
 ): Promise<SpecFidelityVerdict | null> {
   const candidates: string[] = [];
-  for (const artifactRef of dispatch.evidence?.artifactRefs ?? []) {
-    const artifact = await readArtifact(artifactRef);
-    if (artifact !== null) {
-      candidates.push(...extractArtifactCandidates(artifactRef, artifact));
-    }
+  if (dispatch.evidence?.artifact !== undefined) {
+    candidates.push(...extractArtifactCandidates(dispatch.evidence.artifact));
   }
   if (dispatch.result.lastTurn?.message != null) {
     candidates.push(dispatch.result.lastTurn.message);
@@ -379,115 +375,40 @@ function extractJsonObjectAt(text: string, start: number): string | null {
   return null;
 }
 
-async function defaultReadArtifact(
-  path: string,
-): Promise<SpecFidelityArtifactContent | null> {
-  try {
-    if (isTarArtifactRef(path)) {
-      return await readFile(path);
-    }
-    return await readFile(path, "utf8");
-  } catch {
-    return null;
+function extractArtifactCandidates(artifact: CollectedArtifact): string[] {
+  if (artifact.status !== "ready") {
+    return [];
   }
-}
-
-function extractArtifactCandidates(
-  artifactRef: string,
-  artifact: SpecFidelityArtifactContent,
-): string[] {
-  if (!isTarArtifactRef(artifactRef)) {
-    return [artifactToText(artifact)];
+  const entries = artifact.entries
+    .map((entry) => ({
+      name: entry.name,
+      content: "content" in entry ? entry.content : null,
+    }))
+    .filter(
+      (entry): entry is { name: string; content: string } =>
+        entry.content !== null,
+    );
+  const exactJson = entries
+    .filter(
+      ({ name }) =>
+        name.endsWith("/artifact/spec-fidelity.json") ||
+        name === "artifact/spec-fidelity.json" ||
+        name === "spec-fidelity.json",
+    )
+    .map((entry) => entry.content);
+  if (exactJson.length > 0) {
+    return exactJson;
   }
-  const archive =
-    typeof artifact === "string" ? Buffer.from(artifact, "latin1") : artifact;
-  const entries = findTarEntryTexts(
-    archive,
-    (name) =>
-      name.endsWith("/artifact/spec-fidelity.json") ||
-      name === "artifact/spec-fidelity.json" ||
-      name === "spec-fidelity.json",
-  );
-  if (entries.length > 0) {
-    return entries;
-  }
-  const markdownEntries = findTarEntryTexts(
-    archive,
-    (name) =>
-      name.endsWith("/artifact/spec-fidelity.md") ||
-      name === "artifact/spec-fidelity.md" ||
-      name === "spec-fidelity.md",
-  );
-  const jsonEntries = findTarEntryTexts(
-    archive,
-    (name) => name.includes("/artifact/") && name.endsWith(".json"),
-  );
-  return [...markdownEntries, ...jsonEntries];
-}
-
-function artifactToText(artifact: SpecFidelityArtifactContent): string {
-  return typeof artifact === "string" ? artifact : artifact.toString("utf8");
-}
-
-function isTarArtifactRef(artifactRef: string): boolean {
-  return artifactRef.endsWith(".tar");
-}
-
-function findTarEntryTexts(
-  archive: Buffer,
-  predicate: (name: string) => boolean,
-): string[] {
-  const entries: string[] = [];
-  let offset = 0;
-  while (offset + 512 <= archive.length) {
-    if (isZeroTarBlock(archive, offset)) {
-      return entries;
-    }
-    const size = parseTarEntrySize(archive, offset);
-    if (size === null || offset + 512 + size > archive.length) {
-      return entries;
-    }
-    const name = parseTarEntryName(archive, offset);
-    const typeflag = archive.toString("utf8", offset + 156, offset + 157);
-    const dataStart = offset + 512;
-    if (typeflag !== "5" && predicate(name)) {
-      entries.push(archive.toString("utf8", dataStart, dataStart + size));
-    }
-    offset = dataStart + Math.ceil(size / 512) * 512;
-  }
-  return entries;
-}
-
-function isZeroTarBlock(archive: Buffer, offset: number): boolean {
-  for (let index = offset; index < offset + 512; index += 1) {
-    if (archive[index] !== 0) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function parseTarEntryName(archive: Buffer, offset: number): string {
-  const name = readTarString(archive, offset, 100);
-  const prefix = readTarString(archive, offset + 345, 155);
-  return prefix.length === 0 ? name : `${prefix}/${name}`;
-}
-
-function parseTarEntrySize(archive: Buffer, offset: number): number | null {
-  const raw = readTarString(archive, offset + 124, 12).trim();
-  if (raw.length === 0 || !/^[0-7]+$/.test(raw)) {
-    return null;
-  }
-  const size = Number.parseInt(raw, 8);
-  return Number.isFinite(size) && size >= 0 ? size : null;
-}
-
-function readTarString(
-  archive: Buffer,
-  offset: number,
-  length: number,
-): string {
-  const raw = archive.toString("utf8", offset, offset + length);
-  const nullIndex = raw.indexOf("\0");
-  return (nullIndex === -1 ? raw : raw.slice(0, nullIndex)).trim();
+  const markdownEntries = entries
+    .filter(
+      ({ name }) =>
+        name.endsWith("/artifact/spec-fidelity.md") ||
+        name === "artifact/spec-fidelity.md" ||
+        name === "spec-fidelity.md",
+    )
+    .map((entry) => entry.content);
+  const jsonEntries = entries
+    .filter(({ name }) => name.includes("/artifact/") && name.endsWith(".json"))
+    .map((entry) => entry.content);
+  return [...markdownEntries, artifact.primary.content, ...jsonEntries];
 }

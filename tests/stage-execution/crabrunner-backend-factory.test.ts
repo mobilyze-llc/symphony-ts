@@ -11,6 +11,7 @@ import {
   createCrabrunnerStageExecutionBackends,
 } from "../../src/stage-execution/crabrunner-backend-factory.js";
 import type { CrabrunnerCli } from "../../src/stage-execution/crabrunner-scheduler-client.js";
+import { materializedReady } from "./collected-artifact-fixtures.js";
 
 describe("createCrabrunnerStageExecutionBackend", () => {
   it("builds a backend tagged crabrunner", () => {
@@ -67,6 +68,7 @@ describe("createCrabrunnerStageExecutionBackend", () => {
                 usage_path: usagePath,
               }),
               archive_path: "/tmp/rt.tgz",
+              materialized: materializedReady("rt"),
             }),
           );
         default:
@@ -109,8 +111,6 @@ describe("createCrabrunnerStageExecutionBackends", () => {
     expect(map.get("crabrunner")?.backend).toBe("crabrunner");
   });
 });
-
-// --- helpers ---------------------------------------------------------------
 
 const neverCalledCli: CrabrunnerCli = async () => {
   throw new Error("cli should not be called");

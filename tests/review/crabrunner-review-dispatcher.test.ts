@@ -1,6 +1,6 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
@@ -23,6 +23,10 @@ import type {
   StageExecutionBackendRunner,
 } from "../../src/stage-execution/backend.js";
 import type { CrabrunnerStageExecutionEvidence } from "../../src/stage-execution/crabrunner-backend.js";
+import {
+  artifactEntry,
+  readyCollectedArtifact,
+} from "../stage-execution/collected-artifact-fixtures.js";
 
 const BASE_SHA = "base000000000000000000000000000000000000000";
 const HEAD_SHA = "head000000000000000000000000000000000000000";
@@ -417,33 +421,31 @@ class MarkdownArtifactBackend
     this.inputs.push(input);
     const laneId = input.job.identity.stageName ?? "review-lane";
     const artifactPath = join(this.artifactRoot, `${laneId}.md`);
-    await mkdir(dirname(artifactPath), { recursive: true });
-    await writeFile(
-      artifactPath,
-      [
-        "## Verdict",
-        "PASS",
-        "",
-        "## P1 Must Fix",
-        "None",
-        "",
-        "## P2 Should Fix",
-        "None",
-        "",
-        "## Track",
-        "None",
-        "",
-        "## Dismissed Or Theoretical",
-        "None",
-        "",
-      ].join("\n"),
-      "utf8",
-    );
+    const artifact = [
+      "## Verdict",
+      "PASS",
+      "",
+      "## P1 Must Fix",
+      "None",
+      "",
+      "## P2 Should Fix",
+      "None",
+      "",
+      "## Track",
+      "None",
+      "",
+      "## Dismissed Or Theoretical",
+      "None",
+      "",
+    ].join("\n");
     return {
       job: input.job,
       evidence: {
         admission: { status: "accepted", jobId: `job-${laneId}` },
-        terminal: { state: "succeeded", artifactRefs: [artifactPath] },
+        terminal: { state: "succeeded" },
+        artifact: readyCollectedArtifact(artifactPath, artifact, "job-1", [
+          artifactEntry(`${laneId}.usage.json`, '{"schema":"usage"}'),
+        ]),
         artifactRefs: [artifactPath],
         usage: null,
       },
@@ -464,21 +466,17 @@ class JsonArtifactBackend
   ): Promise<StageExecutionBackendResult<CrabrunnerStageExecutionEvidence>> {
     const laneId = input.job.identity.stageName ?? "review-lane";
     const artifactPath = join(this.artifactRoot, `${laneId}.json`);
-    await mkdir(dirname(artifactPath), { recursive: true });
-    await writeFile(
-      artifactPath,
-      `${JSON.stringify(
-        crabrunnerStructuredReviewerArtifactRecord(laneId),
-        null,
-        2,
-      )}\n`,
-      "utf8",
-    );
+    const artifact = `${JSON.stringify(
+      crabrunnerStructuredReviewerArtifactRecord(laneId),
+      null,
+      2,
+    )}\n`;
     return {
       job: input.job,
       evidence: {
         admission: { status: "accepted", jobId: `job-${laneId}` },
-        terminal: { state: "succeeded", artifactRefs: [artifactPath] },
+        terminal: { state: "succeeded" },
+        artifact: readyCollectedArtifact(artifactPath, artifact),
         artifactRefs: [artifactPath],
         usage: null,
       },
@@ -500,28 +498,26 @@ class MixedArtifactBackend
     const laneId = input.job.identity.stageName ?? "review-lane";
     const markdownPath = join(this.artifactRoot, `${laneId}.md`);
     const jsonPath = join(this.artifactRoot, `${laneId}.json`);
-    await mkdir(dirname(markdownPath), { recursive: true });
-    await writeFile(markdownPath, "## Verdict\nPASS\n", "utf8");
-    await writeFile(
-      jsonPath,
-      `${JSON.stringify(
-        {
-          ...crabrunnerStructuredReviewerArtifactRecord(laneId),
-          rawArtifactPath: "json-artifact",
-        },
-        null,
-        2,
-      )}\n`,
-      "utf8",
-    );
+    const markdownArtifact = "## Verdict\nPASS\n";
+    const jsonArtifact = `${JSON.stringify(
+      {
+        ...crabrunnerStructuredReviewerArtifactRecord(laneId),
+        rawArtifactPath: "json-artifact",
+      },
+      null,
+      2,
+    )}\n`;
     return {
       job: input.job,
       evidence: {
         admission: { status: "accepted", jobId: `job-${laneId}` },
-        terminal: {
-          state: "succeeded",
-          artifactRefs: [markdownPath, jsonPath],
-        },
+        terminal: { state: "succeeded" },
+        artifact: readyCollectedArtifact(
+          markdownPath,
+          markdownArtifact,
+          "job-1",
+          [artifactEntry(jsonPath, jsonArtifact)],
+        ),
         artifactRefs: [markdownPath, jsonPath],
         usage: null,
       },

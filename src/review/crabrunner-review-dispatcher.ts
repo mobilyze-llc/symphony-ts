@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { AgentRunInput } from "../agent/runner.js";
@@ -322,31 +322,38 @@ async function collectReviewerArtifact(input: {
   laneEvidence: ReviewJobGroupLaneEvidence;
   laneConfig: HeadlessReviewerLaneConfig;
 }): Promise<unknown> {
-  let firstMarkdownArtifact: { artifactRef: string; artifact: string } | null =
-    null;
-  for (const artifactRef of input.laneEvidence.artifactRefs) {
-    const artifact = await readArtifactRef(artifactRef);
-    if (artifact === null) {
-      // Unreadable refs are skipped; if no readable reviewer artifact remains,
-      // the job-group validator records `malformed_artifact:<laneId>`.
+  const artifact = input.laneEvidence.artifact;
+  if (artifact === undefined || artifact.status !== "ready") {
+    return null;
+  }
+  const parsedPrimary = parseJsonObject(artifact.primary.content);
+  if (parsedPrimary !== null) {
+    return withStructuredArtifactPath(parsedPrimary, artifact.primary.name);
+  }
+  let firstMarkdownArtifact: { name: string; content: string } | null =
+    artifact.primary.name.endsWith(".md") ||
+    artifact.primary.name.endsWith(".txt")
+      ? { name: artifact.primary.name, content: artifact.primary.content }
+      : null;
+  for (const entry of artifact.entries) {
+    if (!("content" in entry)) {
       continue;
     }
-    const parsed = parseJsonObject(artifact);
-    if (parsed !== null) {
-      // JSON refs are intentionally returned to the validator even when they are
-      // not reviewer artifacts, so lane-aware anti-spoof diagnostics name the
-      // rejected lane instead of hiding the bad ref during collection.
-      return withStructuredArtifactPath(parsed, artifactRef);
+    const parsed = parseJsonObject(entry.content);
+    if (parsed?.kind === "symphony-headless-council-reviewer-artifact") {
+      return withStructuredArtifactPath(parsed, entry.name);
     }
-    firstMarkdownArtifact ??= { artifactRef, artifact };
+    if (entry.name.endsWith(".md") || entry.name.endsWith(".txt")) {
+      firstMarkdownArtifact ??= { name: entry.name, content: entry.content };
+    }
   }
 
   if (firstMarkdownArtifact !== null) {
     return await synthesizeStructuredReviewerArtifactRecord({
       context: input.plan.context,
       lane: input.laneConfig,
-      artifactPath: firstMarkdownArtifact.artifactRef,
-      artifact: firstMarkdownArtifact.artifact,
+      artifactPath: firstMarkdownArtifact.name,
+      artifact: firstMarkdownArtifact.content,
       structuredArtifactPath: structuredArtifactPath(
         input.plan.artifactDir,
         input.laneEvidence.laneId,
@@ -358,14 +365,6 @@ async function collectReviewerArtifact(input: {
     });
   }
   return null;
-}
-
-async function readArtifactRef(path: string): Promise<string | null> {
-  try {
-    return await readFile(path, "utf8");
-  } catch {
-    return null;
-  }
 }
 
 function parseJsonObject(contents: string): Record<string, unknown> | null {

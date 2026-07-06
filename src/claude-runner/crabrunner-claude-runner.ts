@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 import type {
   StageExecutionPhase,
   StageExecutionRole,
 } from "../config/types.js";
+import type { CollectedArtifact } from "../stage-execution/collected-artifact.js";
 import {
   CRABRUNNER_JOB_SPEC_VERSION,
   type CrabrunnerJobSpec,
@@ -306,10 +307,10 @@ export async function runClaudeCrabrunner(
         artifactName,
         payload: { admission, terminal },
       });
-      const artifact = await materializeCrabrunnerArtifact({
+      const artifact = await persistCollectedArtifact({
         artifactDir,
         artifactName,
-        artifactRefs: terminal.artifactRefs ?? [],
+        artifact: terminal.artifact,
       });
       artifactPath = artifact.artifactPath;
       remoteArtifactPath = artifact.remoteArtifactPath;
@@ -322,7 +323,7 @@ export async function runClaudeCrabrunner(
       validationErrors = artifact.validationErrors;
       if (terminal.state === "succeeded" && artifactPath !== null) {
         validationErrors = await validateClaudeArtifact(
-          artifactPath,
+          artifact.content ?? "",
           input.validation,
         );
       } else if (terminal.state === "succeeded") {
@@ -588,116 +589,36 @@ function mapTerminalStateToRunnerStatus(
   return validationErrors.length === 0 ? "passed" : "invalid_artifact";
 }
 
-async function materializeCrabrunnerArtifact(input: {
+async function persistCollectedArtifact(input: {
   artifactDir: string;
   artifactName: string;
-  artifactRefs: readonly string[];
+  artifact: CollectedArtifact | undefined;
 }): Promise<{
   artifactPath: string | null;
   remoteArtifactPath: string | null;
+  content: string | null;
   validationErrors: string[];
 }> {
-  for (const ref of input.artifactRefs) {
-    const artifactRef = ref.trim();
-    if (artifactRef.length === 0) {
-      continue;
-    }
-    if (artifactRef.endsWith(".tar")) {
-      const extracted = await extractArtifactFromTar(artifactRef);
-      if (extracted !== null) {
-        const localPath = resolve(
-          input.artifactDir,
-          `${input.artifactName}.md`,
-        );
-        await writeFile(localPath, extracted.text, "utf8");
-        return {
-          artifactPath: localPath,
-          remoteArtifactPath: `${artifactRef}:${extracted.name}`,
-          validationErrors: [],
-        };
-      }
-      continue;
-    }
-    if (await isReadableTextArtifact(artifactRef)) {
-      return {
-        artifactPath: resolve(artifactRef),
-        remoteArtifactPath: null,
-        validationErrors: [],
-      };
-    }
+  if (input.artifact?.status === "ready") {
+    const localPath = resolve(input.artifactDir, `${input.artifactName}.md`);
+    await writeFile(localPath, input.artifact.primary.content, "utf8");
+    return {
+      artifactPath: localPath,
+      remoteArtifactPath: input.artifact.primary.name,
+      content: input.artifact.primary.content,
+      validationErrors: [],
+    };
   }
+  const reason =
+    input.artifact === undefined
+      ? "crabrunner terminal evidence did not include a materialized artifact"
+      : `crabrunner materialized artifact ${input.artifact.status}: ${input.artifact.reason}`;
   return {
     artifactPath: null,
     remoteArtifactPath: null,
-    validationErrors: [
-      "crabrunner terminal evidence did not include a readable Markdown/text artifact",
-    ],
+    content: null,
+    validationErrors: [reason],
   };
-}
-
-async function isReadableTextArtifact(path: string): Promise<boolean> {
-  const name = basename(path).toLowerCase();
-  if (!name.endsWith(".md") && !name.endsWith(".txt")) {
-    return false;
-  }
-  try {
-    const metadata = await stat(path);
-    if (!metadata.isFile() || metadata.size <= 0) {
-      return false;
-    }
-    const text = await readFile(path, "utf8");
-    return text.trim().length > 0;
-  } catch {
-    return false;
-  }
-}
-
-async function extractArtifactFromTar(
-  archivePath: string,
-): Promise<{ name: string; text: string } | null> {
-  let archive: Buffer;
-  try {
-    archive = await readFile(archivePath);
-  } catch {
-    return null;
-  }
-  let offset = 0;
-  while (offset + 512 <= archive.length) {
-    const header = archive.subarray(offset, offset + 512);
-    if (header.every((byte) => byte === 0)) {
-      return null;
-    }
-    const name = parseTarString(header, 0, 100);
-    const sizeText = parseTarString(header, 124, 12).replace(/\0/g, "").trim();
-    const size = Number.parseInt(sizeText === "" ? "0" : sizeText, 8);
-    if (!Number.isFinite(size) || size < 0) {
-      return null;
-    }
-    const dataStart = offset + 512;
-    const dataEnd = dataStart + size;
-    if (
-      (name.endsWith(".md") || name.endsWith(".txt")) &&
-      name.includes("/artifact/") &&
-      dataEnd <= archive.length
-    ) {
-      return {
-        name,
-        text: archive.toString("utf8", dataStart, dataEnd),
-      };
-    }
-    offset = dataStart + Math.ceil(size / 512) * 512;
-  }
-  return null;
-}
-
-function parseTarString(
-  archive: Buffer,
-  offset: number,
-  length: number,
-): string {
-  const raw = archive.toString("utf8", offset, offset + length);
-  const nullIndex = raw.indexOf("\0");
-  return (nullIndex === -1 ? raw : raw.slice(0, nullIndex)).trim();
 }
 
 async function inspectSourceVisibility(input: {

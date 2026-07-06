@@ -14,12 +14,7 @@ import {
   type CrabrunnerJobSpec,
 } from "../../src/stage-execution/crabrunner-backend.js";
 import type { CrabrunnerCli } from "../../src/stage-execution/crabrunner-scheduler-client.js";
-
-// SYMPH-856 — the default factory resolver renders the stage prompt and threads
-// it into the delegated lane as a temp `prompt_file`, so a real-model delegated
-// run can work. These tests drive the whole path through the real backend +
-// scheduler client, capturing the emitted crabrunner manifest via a fake cli, so
-// nothing spawns a subprocess or calls a model.
+import { materializedReady } from "./collected-artifact-fixtures.js";
 
 describe("crabrunner default prompt resolver (SYMPH-856)", () => {
   it("renders the workflow promptTemplate + issue context into a temp prompt_file and emits a lane-worker.v1 manifest", async () => {
@@ -464,8 +459,6 @@ describe("crabrunner default prompt resolver (SYMPH-856)", () => {
   });
 });
 
-// --- helpers ---------------------------------------------------------------
-
 // Real on-disk artifact/usage files so the collect step resolves a present
 // artifact and reaches a succeeded terminal — without spawning any subprocess.
 let fixtureDir = "";
@@ -560,6 +553,7 @@ function createManifestCaptureCli(): {
               collectible: true,
             }),
             archive_path: "/tmp/j1.tgz",
+            materialized: materializedReady("j1"),
           }),
         );
       default:
