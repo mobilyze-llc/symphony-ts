@@ -178,6 +178,8 @@ describe("plan tier-2 review", () => {
     expect(result.record.status).toBe("skipped");
     expect(result.record.note).toBe("no grounded evidence");
     expect(result.record.aggregateVerdict).toBeNull();
+    // No lanes ran → no per-lane telemetry (SYMPH-1068).
+    expect(result.record.perLane).toEqual([]);
   });
 
   it("aggregates lane artifacts, adapts anchors to plan paths, and tags findings", async () => {
@@ -218,6 +220,115 @@ describe("plan tier-2 review", () => {
       source: "tier-2",
       tags: ["misinterpretation"],
     });
+  });
+
+  it("records per-lane telemetry joining triage verdicts with lane usage tokens (SYMPH-1068)", async () => {
+    const runner: SpineCommandRunner = async (
+      argv,
+    ): Promise<SpineCommandResult> => {
+      if (argv[1] === "council-triage") {
+        return {
+          stdout: JSON.stringify({
+            schema: "crucible.session-orchestrator.council-triage.v1",
+            lanes: [
+              {
+                reviewer: "codex-plan-review",
+                file: "l0.md",
+                verdict: "CHANGES_REQUESTED",
+                parse_quality: "clean",
+                finding_count: 2,
+                none: false,
+                fail_open: false,
+              },
+              {
+                reviewer: "opus-plan-review",
+                file: "l1.md",
+                verdict: "PASS",
+                parse_quality: "clean",
+                finding_count: 0,
+                none: true,
+                fail_open: false,
+              },
+            ],
+            summary: {
+              lanes: 2,
+              track: 0,
+              escalate: 0,
+              unparseable_lanes: 0,
+              blocked_lanes: 0,
+              partial_lanes: 0,
+            },
+            track: [],
+            escalate: [],
+            next_action: "no_findings",
+          }),
+          stderr: "",
+          exitCode: 0,
+        };
+      }
+      return {
+        stdout: JSON.stringify({
+          schema: "crucible.session-orchestrator.cross-exam-select.v1",
+          cross_exam_required: false,
+          reason: "no escalations",
+          fix_diff_changed: false,
+          fix_size_lines: null,
+          fix_trivial: null,
+          parseable_lanes: 2,
+          target_count: 0,
+          targets: [],
+        }),
+        stderr: "",
+        exitCode: 0,
+      };
+    };
+
+    const result = await runPlanTier2Review(
+      {
+        context: context(true),
+        body,
+        planId: "plan-1",
+        artifactDir: "/tmp/unused",
+        workspace: "/tmp/unused",
+        plannerGroundingEnabled: true,
+      },
+      {
+        aggregator: new ReviewAggregator(
+          new CrabboxSpineClient({ runCommand: runner }),
+        ),
+        // Codex lane reports snake_case usage; Opus lane reports camelCase — both
+        // must normalize. Verdict + finding count come from the triage lanes above.
+        runLane: async ({ lane }) =>
+          lane.reviewer === "codex-plan-review"
+            ? {
+                markdown:
+                  "## Verdict\nCHANGES_REQUESTED\n\n## Findings\n- [P2] plan:issue/MOB-1 - x",
+                usage: { input_tokens: 1200, output_tokens: 340 },
+              }
+            : {
+                markdown: "## Verdict\nPASS\n\n## Findings\nNone",
+                usage: { inputTokens: 800, outputTokens: 120 },
+              },
+      },
+    );
+
+    expect(result.record.status).toBe("reviewed");
+    expect(result.record.perLane).toEqual([
+      {
+        reviewer: "codex-plan-review",
+        verdict: "CHANGES_REQUESTED",
+        findingCount: 2,
+        inputTokens: 1200,
+        outputTokens: 340,
+      },
+      {
+        reviewer: "opus-plan-review",
+        verdict: "PASS",
+        findingCount: 0,
+        inputTokens: 800,
+        outputTokens: 120,
+      },
+    ]);
   });
 
   it("logs coverage-gap escapes as post-hoc entries instead of findings", async () => {

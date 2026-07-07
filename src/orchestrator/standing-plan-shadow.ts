@@ -616,6 +616,21 @@ export async function runShadowPlanCycle(
               status: tier2Record.status,
               aggregate_verdict: tier2Record.aggregateVerdict,
               finding_count: tier2Record.findingFingerprints.length,
+              // Skip disambiguation (SYMPH-1068): `note` separates the legitimate
+              // "plan content hash already reviewed" (content_hash_unchanged) skip
+              // from the inert-state "no grounded evidence" skip, which share
+              // status=skipped and can share gate_reason — so the noise does not
+              // pollute the SYMPH-1034 catch/FP math.
+              note: tier2Record.note,
+              // Per-lane telemetry (SYMPH-1068): decorrelation attribution (which
+              // lane caught what) + cost-per-catch. Empty when no lanes ran.
+              per_lane: (tier2Record.perLane ?? []).map((lane) => ({
+                reviewer: lane.reviewer,
+                verdict: lane.verdict,
+                finding_count: lane.findingCount,
+                input_tokens: lane.inputTokens,
+                output_tokens: lane.outputTokens,
+              })),
             },
           }),
     },
