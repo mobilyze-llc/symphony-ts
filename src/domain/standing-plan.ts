@@ -30,6 +30,7 @@ export type {
   PlanReviewFinding,
   PlanReviewRecord,
   PlanReviewFindingSeverity,
+  PlanReviewLaneTelemetry,
 } from "./plan-review-finding.js";
 export type {
   PlanBatch,
@@ -559,7 +560,31 @@ function isPlanReviewRecord(value: unknown): value is PlanReviewRecord {
     Array.isArray(value.findingFingerprints) &&
     value.findingFingerprints.every((item) => typeof item === "string") &&
     Array.isArray(value.postHocEntries) &&
-    value.postHocEntries.every(isPlanReviewPostHocEntry)
+    value.postHocEntries.every(isPlanReviewPostHocEntry) &&
+    // SYMPH-1068: revisions persisted before per-lane telemetry have no `perLane`;
+    // stay tolerant of its absence so legacy rows remain readable (mirrors the
+    // premises / findings / dependencyEdges back-compat guards above).
+    (value.perLane === undefined ||
+      isPlanReviewLaneTelemetryArray(value.perLane))
+  );
+}
+
+function isPlanReviewLaneTelemetryArray(
+  value: unknown,
+): value is PlanReviewRecord["perLane"] {
+  return Array.isArray(value) && value.every(isPlanReviewLaneTelemetry);
+}
+
+function isPlanReviewLaneTelemetry(
+  value: unknown,
+): value is NonNullable<PlanReviewRecord["perLane"]>[number] {
+  return (
+    isRecord(value) &&
+    typeof value.reviewer === "string" &&
+    (value.verdict === null || typeof value.verdict === "string") &&
+    (value.findingCount === null || typeof value.findingCount === "number") &&
+    (value.inputTokens === null || typeof value.inputTokens === "number") &&
+    (value.outputTokens === null || typeof value.outputTokens === "number")
   );
 }
 

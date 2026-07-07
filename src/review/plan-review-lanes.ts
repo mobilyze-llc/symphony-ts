@@ -32,9 +32,20 @@ export interface PlanReviewLaneRunnerInput {
   env?: NodeJS.ProcessEnv;
 }
 
+/**
+ * A lane runner produces the reviewer's `## Verdict` / `## Findings` markdown and,
+ * when the runtime measured it, the lane's usage record (SYMPH-1068). The plain
+ * markdown string is still accepted so injected/test runners that only produce
+ * markdown keep working — a bare string normalizes to `{ markdown, usage: null }`.
+ */
+export interface PlanReviewLaneRunResult {
+  markdown: string;
+  usage?: Record<string, unknown> | null;
+}
+
 export type PlanReviewLaneRunner = (
   input: PlanReviewLaneRunnerInput,
-) => Promise<string>;
+) => Promise<string | PlanReviewLaneRunResult>;
 
 export interface PlanReviewLanesInput {
   context: PlannerContext;
@@ -45,9 +56,21 @@ export interface PlanReviewLanesInput {
   lanes?: readonly PlanReviewLaneConfig[];
 }
 
+/**
+ * Per-lane usage record (SYMPH-1068), keyed by `reviewer` so the tier-2 record
+ * can join it against the aggregator's per-lane verdicts. `usage` is null when the
+ * runtime reported no usage for the lane.
+ */
+export interface PlanReviewLaneUsage {
+  reviewer: string;
+  usage: Record<string, unknown> | null;
+}
+
 export interface PlanReviewLanesResult {
   artifacts: ReviewLaneArtifact[];
   promptHashes: Array<{ reviewer: string; promptHash: string }>;
+  /** One entry per executed lane, in lane order (SYMPH-1068). */
+  laneUsage: PlanReviewLaneUsage[];
 }
 
 export const DEFAULT_PLAN_REVIEW_LANES: readonly PlanReviewLaneConfig[] = [
@@ -76,22 +99,36 @@ export async function runPlanReviewLanes(
   const lanes = input.lanes ?? DEFAULT_PLAN_REVIEW_LANES;
   const artifacts: ReviewLaneArtifact[] = [];
   const promptHashes: Array<{ reviewer: string; promptHash: string }> = [];
+  const laneUsage: PlanReviewLaneUsage[] = [];
   for (const lane of lanes) {
     const prompt = buildPlanReviewLanePrompt(input, lane);
     promptHashes.push({
       reviewer: lane.reviewer,
       promptHash: createHash("sha256").update(prompt, "utf8").digest("hex"),
     });
-    const markdown = await runLane({
-      lane,
-      prompt,
-      artifactDir: input.artifactDir,
-      workspace: input.workspace,
-      ...(input.env === undefined ? {} : { env: input.env }),
-    });
-    artifacts.push({ reviewer: lane.reviewer, markdown });
+    const laneResult = normalizeLaneRunResult(
+      await runLane({
+        lane,
+        prompt,
+        artifactDir: input.artifactDir,
+        workspace: input.workspace,
+        ...(input.env === undefined ? {} : { env: input.env }),
+      }),
+    );
+    artifacts.push({ reviewer: lane.reviewer, markdown: laneResult.markdown });
+    laneUsage.push({ reviewer: lane.reviewer, usage: laneResult.usage });
   }
-  return { artifacts, promptHashes };
+  return { artifacts, promptHashes, laneUsage };
+}
+
+function normalizeLaneRunResult(result: string | PlanReviewLaneRunResult): {
+  markdown: string;
+  usage: Record<string, unknown> | null;
+} {
+  if (typeof result === "string") {
+    return { markdown: result, usage: null };
+  }
+  return { markdown: result.markdown, usage: result.usage ?? null };
 }
 
 export function buildPlanReviewLanePrompt(
@@ -209,7 +246,7 @@ function renderScheduledCandidateEvidence(
 
 async function defaultPlanReviewLaneRunner(
   input: PlanReviewLaneRunnerInput,
-): Promise<string> {
+): Promise<PlanReviewLaneRunResult> {
   await mkdir(input.artifactDir, { recursive: true });
   const artifactName = `tier-2-plan-review-${sanitize(input.lane.laneId)}`;
   const promptFile = join(input.artifactDir, `${artifactName}.prompt.md`);
@@ -245,15 +282,23 @@ async function defaultPlanReviewLaneRunner(
     },
   );
   if (result.status !== "passed" || result.artifactPath === null) {
-    return [
-      "## Verdict",
-      "BLOCKED",
-      "",
-      "## Findings",
-      `- [Track] plan:review/tier-2 - Plan review lane ${input.lane.reviewer} unavailable: ${result.status} ${result.message}`,
-    ].join("\n");
+    return {
+      markdown: [
+        "## Verdict",
+        "BLOCKED",
+        "",
+        "## Findings",
+        `- [Track] plan:review/tier-2 - Plan review lane ${input.lane.reviewer} unavailable: ${result.status} ${result.message}`,
+      ].join("\n"),
+      // A blocked/failed lane can still have measured usage (the run happened,
+      // it just did not pass validation) — carry it so cost-per-catch is honest.
+      usage: result.usage,
+    };
   }
-  return readFile(result.artifactPath, "utf8");
+  return {
+    markdown: await readFile(result.artifactPath, "utf8"),
+    usage: result.usage,
+  };
 }
 
 function sanitize(value: string): string {

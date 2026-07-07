@@ -7,6 +7,7 @@ import type {
 import { renderCandidateGroundingEvidence } from "../agent/triage-planner.js";
 import {
   type PlanReviewFinding,
+  type PlanReviewLaneTelemetry,
   type PlanReviewRecord,
   computePlanContentHash,
 } from "../domain/standing-plan.js";
@@ -18,6 +19,8 @@ import type {
 } from "./headless-council-gate.js";
 import {
   type PlanReviewLaneRunner,
+  type PlanReviewLaneUsage,
+  type PlanReviewLanesResult,
   runPlanReviewLanes,
 } from "./plan-review-lanes.js";
 import { CrabboxSpineClient } from "./spine/crabbox-spine-client.js";
@@ -107,12 +110,13 @@ export async function runPlanTier2Review(
     });
   }
 
+  let laneResult: PlanReviewLanesResult | undefined;
   try {
     const laneDependencies =
       dependencies.runLane === undefined
         ? {}
         : { runLane: dependencies.runLane };
-    const laneResult = await runPlanReviewLanes(
+    laneResult = await runPlanReviewLanes(
       {
         context: input.context,
         body: input.body,
@@ -145,6 +149,13 @@ export async function runPlanTier2Review(
           (finding) => finding.fingerprint,
         ),
         postHocEntries: [],
+        // SYMPH-1068: per-lane verdict + finding count (from the aggregator's
+        // triage lanes) joined with per-lane usage (from the lane runner), keyed
+        // by reviewer. Report-only — nothing reads this into a decision.
+        perLane: buildPerLaneTelemetry(
+          laneResult.laneUsage,
+          aggregate.triage.lanes,
+        ),
       },
     };
   } catch (error) {
@@ -155,6 +166,13 @@ export async function runPlanTier2Review(
       aggregateVerdict: "degraded",
       note: `tier-2 review degraded: ${errorMessage(error)}`,
       coverage,
+      // Lanes may have run and incurred cost before the aggregator threw; carry
+      // usage-only per-lane rows (verdict/findingCount null — no trusted triage)
+      // so a degraded round is not silently recorded as zero cost.
+      perLane:
+        laneResult === undefined
+          ? []
+          : buildPerLaneTelemetry(laneResult.laneUsage, []),
     });
   }
 }
@@ -166,6 +184,7 @@ function emptyResult(input: {
   aggregateVerdict: PlanReviewRecord["aggregateVerdict"];
   note: string;
   coverage: PlanReviewRecord["reviewedGroundingEvidence"];
+  perLane?: PlanReviewLaneTelemetry[];
 }): PlanTier2ReviewResult {
   return {
     findings: [],
@@ -180,8 +199,64 @@ function emptyResult(input: {
       reviewedGroundingEvidence: input.coverage,
       findingFingerprints: [],
       postHocEntries: [],
+      // Skips run no lanes → []. Degraded rounds pass usage-only rows (see catch).
+      perLane: input.perLane ?? [],
     },
   };
+}
+
+/**
+ * SYMPH-1068 — join the per-lane usage (from the lane runner, keyed by reviewer)
+ * with the aggregator's per-lane triage verdicts (also keyed by reviewer) into the
+ * per-lane telemetry rows. Driven by `laneUsage` (the authoritative "which lanes
+ * ran + their cost" set); a lane with no matching triage verdict gets
+ * verdict/findingCount null (used on the degraded path, where no trusted triage
+ * exists). Report-only.
+ */
+function buildPerLaneTelemetry(
+  laneUsage: readonly PlanReviewLaneUsage[],
+  triageLanes: AggregatedReview["triage"]["lanes"],
+): PlanReviewLaneTelemetry[] {
+  const byReviewer = new Map<
+    string,
+    { verdict: string; findingCount: number }
+  >();
+  for (const lane of triageLanes) {
+    byReviewer.set(lane.reviewer, {
+      verdict: lane.verdict,
+      findingCount: lane.finding_count,
+    });
+  }
+  return laneUsage.map((lane) => {
+    const parsed = byReviewer.get(lane.reviewer);
+    const tokens = extractLaneTokens(lane.usage);
+    return {
+      reviewer: lane.reviewer,
+      verdict: parsed?.verdict ?? null,
+      findingCount: parsed?.findingCount ?? null,
+      inputTokens: tokens.inputTokens,
+      outputTokens: tokens.outputTokens,
+    };
+  });
+}
+
+function extractLaneTokens(usage: Record<string, unknown> | null): {
+  inputTokens: number | null;
+  outputTokens: number | null;
+} {
+  if (usage === null) {
+    return { inputTokens: null, outputTokens: null };
+  }
+  // Token fields appear under snake_case (usage v2) or camelCase; prefer whichever
+  // is present (mirrors crabrunner-scheduler-client's usage read).
+  return {
+    inputTokens: normalizeLaneToken(usage.input_tokens ?? usage.inputTokens),
+    outputTokens: normalizeLaneToken(usage.output_tokens ?? usage.outputTokens),
+  };
+}
+
+function normalizeLaneToken(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function collectGroundingCoverage(

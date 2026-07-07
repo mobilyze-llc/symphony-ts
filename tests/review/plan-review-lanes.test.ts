@@ -121,4 +121,29 @@ describe("plan review lanes", () => {
       markdown: "## Verdict\nPASS\n\n## Findings\nNone",
     });
   });
+
+  it("threads per-lane usage into laneUsage, keyed by reviewer, null for markdown-only runners", async () => {
+    const result = await runPlanReviewLanes(
+      { context, body, artifactDir: "/tmp/unused", workspace: "/tmp/unused" },
+      {
+        // The Codex lane returns the structured form (usage measured); the Opus
+        // lane returns a bare string (back-compat) → normalized to usage: null.
+        runLane: async ({ lane }) =>
+          lane.reviewer === "codex-plan-review"
+            ? {
+                markdown: "## Verdict\nPASS\n\n## Findings\nNone",
+                usage: { input_tokens: 111, output_tokens: 22 },
+              }
+            : "## Verdict\nPASS\n\n## Findings\nNone",
+      },
+    );
+
+    expect(result.laneUsage).toEqual([
+      {
+        reviewer: "codex-plan-review",
+        usage: { input_tokens: 111, output_tokens: 22 },
+      },
+      { reviewer: "opus-plan-review", usage: null },
+    ]);
+  });
 });

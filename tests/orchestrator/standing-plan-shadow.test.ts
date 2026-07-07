@@ -1013,6 +1013,88 @@ describe("runStandingPlanShadowTick", () => {
           status: "skipped",
           aggregate_verdict: null,
           finding_count: 0,
+          // Skip disambiguation (SYMPH-1068): distinguishes "no grounded evidence"
+          // from the content_hash_unchanged skip; no lanes ran → per_lane empty.
+          note: "no grounded evidence",
+          per_lane: [],
+        },
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("emits per-lane tier-2 telemetry (verdict, finding count, tokens) in the shadow log (SYMPH-1068)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-"));
+    const logs: Array<{ event: string; fields: Record<string, unknown> }> = [];
+    try {
+      const result = await runStandingPlanShadowTick({
+        config: triageConfig({
+          planReview: { enabled: true, plannerGroundingEnabled: true },
+        }),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        createPlannerRunner: () => okPlanner().runClaude,
+        loadLastReviewedContentHash: async () => null,
+        runPlanPostEmitReview: postEmitStub((deps) => ({
+          findings: [],
+          reviewRecords: [
+            tier2RecordForReview(deps, {
+              status: "reviewed",
+              gateReason: "no_baseline",
+              aggregateVerdict: "fail",
+              note: null,
+              perLane: [
+                {
+                  reviewer: "codex-plan-review",
+                  verdict: "CHANGES_REQUESTED",
+                  findingCount: 2,
+                  inputTokens: 1200,
+                  outputTokens: 340,
+                },
+                {
+                  reviewer: "opus-plan-review",
+                  verdict: "PASS",
+                  findingCount: 0,
+                  inputTokens: 800,
+                  outputTokens: 120,
+                },
+              ],
+            }),
+          ],
+        })),
+        log: (event, _message, fields) => {
+          logs.push({ event, fields });
+        },
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+      });
+
+      expect(result.status).toBe("ok");
+      const shadowLog = logs.find(
+        (entry) => entry.event === "queue_triage_shadow_plan",
+      );
+      expect(shadowLog?.fields).toMatchObject({
+        review_tier2: {
+          status: "reviewed",
+          aggregate_verdict: "fail",
+          note: null,
+          per_lane: [
+            {
+              reviewer: "codex-plan-review",
+              verdict: "CHANGES_REQUESTED",
+              finding_count: 2,
+              input_tokens: 1200,
+              output_tokens: 340,
+            },
+            {
+              reviewer: "opus-plan-review",
+              verdict: "PASS",
+              finding_count: 0,
+              input_tokens: 800,
+              output_tokens: 120,
+            },
+          ],
         },
       });
     } finally {
