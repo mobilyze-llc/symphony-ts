@@ -73,6 +73,8 @@ async function writeWorkflow(enabled: boolean): Promise<string> {
 async function runCrabrunnerPreflight(options: {
   workflowPath: string;
   crabrunnerRoot?: string;
+  crabrunnerVersion?: string;
+  crabrunnerStateRoot?: string;
 }) {
   const source = await deploySource();
   const functions = extractShellFunctions(source, [
@@ -101,6 +103,12 @@ async function runCrabrunnerPreflight(options: {
       ...(options.crabrunnerRoot === undefined
         ? {}
         : { SYMPHONY_CRABRUNNER_ROOT: options.crabrunnerRoot }),
+      ...(options.crabrunnerVersion === undefined
+        ? {}
+        : { SYMPHONY_CRABRUNNER_VERSION: options.crabrunnerVersion }),
+      ...(options.crabrunnerStateRoot === undefined
+        ? {}
+        : { SYMPHONY_CRABRUNNER_STATE_ROOT: options.crabrunnerStateRoot }),
     },
   });
 }
@@ -291,10 +299,38 @@ describe("crabrunner review substrate preflight", () => {
     const result = await runCrabrunnerPreflight({
       workflowPath,
       crabrunnerRoot,
+      crabrunnerVersion: "symph-949-u0",
+      crabrunnerStateRoot: join(crabrunnerRoot, "state"),
     });
 
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain("Crabrunner review preflight passed");
+    expect(result.stdout).toContain("staged version symph-949-u0");
+    expect(result.stdout).toContain(join(crabrunnerRoot, "state"));
+  });
+
+  it("fails closed when the configured Crabrunner version cannot be staged", async () => {
+    const workflowPath = await writeWorkflow(true);
+    const crabrunnerRoot = await makeTempDir("symphony-deploy-crabrunner-");
+    const binDir = join(crabrunnerRoot, "bin");
+    const crabrunnerBin = join(binDir, "crabrunner");
+    await mkdir(binDir, { recursive: true });
+    await writeFile(
+      crabrunnerBin,
+      '#!/usr/bin/env bash\necho \'{"error_code":"staging_build_failed"}\'\nexit 9\n',
+    );
+    await chmod(crabrunnerBin, 0o755);
+
+    const result = await runCrabrunnerPreflight({
+      workflowPath,
+      crabrunnerRoot,
+      crabrunnerVersion: "broken-version",
+      crabrunnerStateRoot: join(crabrunnerRoot, "state"),
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("could not stage version 'broken-version'");
+    expect(result.stderr).toContain("staging_build_failed");
   });
 });
 
