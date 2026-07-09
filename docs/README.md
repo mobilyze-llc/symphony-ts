@@ -26,6 +26,7 @@ Shallow index of `docs/`. Loaded into every session via `@docs/README.md` in `CL
 - `docs/stage-provider-capabilities.md` — Source of truth for stage/provider capability matrix.
 - `docs/stage-usage-measurement.md` — Source of truth for stage usage/token measurement.
 - `docs/conformance-test-matrix.md` — Conformance test coverage matrix.
+- `docs/intake-triage-rubric.md` — Evergreen evidence, clustering, lifecycle, disposition, and state-transition contract for Triage intake.
 
 ## Point-in-time artifacts
 
