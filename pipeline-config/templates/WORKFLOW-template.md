@@ -550,6 +550,7 @@ Do not use Codex app/connector MCP tools for Linear comments or documents in hea
    - [ ] `test:` names a specific test the implementation must add or extend (e.g. `test: tests/codex/rate-limits.test.ts covers expiry at resets_at`)
    - [ ] `check:` a command plus its expected result (e.g. `check: npx tsc --noEmit exits 0`)
    - [ ] `judge:` a falsifiable claim plus the evidence proving it (e.g. `judge: pause reasons report billable and raw tokens — visible in the hard-stop comment`)
+   - [ ] `judge:` flag-gated wiring states the config key that arms the new path and the live workflow file where that key is set.
    Bad (will be bounced): restating the title, untestable opinions ("code is clean"), criteria without tags.
    Never author a bare full-suite `check:` (e.g. `check: pnpm test exits 0`) — the full suite gates in CI on the PR head SHA, never locally (SYMPH-358); the orchestrator rewrites such criteria into the focused-tests-locally + CI-status shape at freeze (SYMPH-402).
 

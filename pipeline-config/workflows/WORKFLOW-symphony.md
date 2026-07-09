@@ -20,9 +20,15 @@ tracker:
 # lock, no escape hatch). shadow_mode keeps dispatch ORDERING on the proven
 # comparator while the planner still persists releasable plans; team-scope forces
 # operator-gated release regardless of shadow. Empty Todo => empty plan => quiescent.
+planner_grounding:
+  enabled: true
+code_grounding:
+  enabled: true
 queue_triage:
   enabled: true
   shadow_mode: true
+  plan_review:
+    enabled: true
   # SYMPH-916: flip the SYMPH-896 curated-comment planner enrichment ON to start
   # the measurement window for the SYMPH-905 topology decision (two-pass vs
   # curated one-pass). Report-only: shadow_mode stays true, so this only enlarges
