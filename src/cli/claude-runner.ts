@@ -10,7 +10,7 @@ import {
   type ClaudeRunnerResult,
   MAX_CLAUDE_RUNNER_DIAGNOSTIC_BYTE_LIMIT,
   isSafeClaudeArtifactName,
-} from "../claude-runner/cmux-claude-runner.js";
+} from "../claude-runner/claude-runner-contract.js";
 import {
   type ClaudeCrabrunnerRunnerInput,
   resolveClaudeCrabrunnerSchedulerOptions,
@@ -25,7 +25,6 @@ interface ParsedArgs {
   artifactName: string;
   model: string | null;
   profile: string | null;
-  cmuxSpawnBin: string | null;
   timeoutSeconds: number | null;
   sourcePaths: string[];
   requiredHeadings: string[];
@@ -67,7 +66,6 @@ function usage(): string {
     "  --artifact-name <name>       Basename for the Claude artifact",
     "  --model <name>               Claude model alias (default: opus)",
     "  --profile <name>             Crabrunner Claude profile (default: read-only)",
-    "  --cmux-spawn-bin <path>      Legacy compatibility flag; ignored by crabrunner execution",
     "  --timeout-seconds <n>        Lane timeout (default: 1800)",
     "  --source <file>              Extra source file that must be readable inside workspace (repeatable)",
     "  --required-heading <text>    Markdown heading required in artifact (repeatable)",
@@ -93,7 +91,6 @@ export function parseClaudeRunnerArgs(
     artifactName: "",
     model: null,
     profile: null,
-    cmuxSpawnBin: null,
     timeoutSeconds: null,
     sourcePaths: [],
     requiredHeadings: [],
@@ -144,10 +141,6 @@ export function parseClaudeRunnerArgs(
     }
     if (token === "--profile") {
       parsed.profile = readValue(argv, ++index, token);
-      continue;
-    }
-    if (token === "--cmux-spawn-bin") {
-      parsed.cmuxSpawnBin = readValue(argv, ++index, token);
       continue;
     }
     if (token === "--timeout-seconds") {

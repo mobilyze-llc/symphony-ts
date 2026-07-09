@@ -18,20 +18,20 @@ import {
   CrabrunnerCliSchedulerClient,
   type CrabrunnerCliSchedulerClientOptions,
 } from "../stage-execution/crabrunner-scheduler-client.js";
-import { isInside, realpathOrSelf } from "./cmux-artifact-paths.js";
 import {
-  type ClaudeCmuxRunnerInput,
   type ClaudeRunnerAttempt,
   type ClaudeRunnerBoundedText,
   type ClaudeRunnerCommandDiagnostics,
   type ClaudeRunnerDiagnostics,
+  type ClaudeRunnerInput,
   type ClaudeRunnerResult,
   type ClaudeRunnerSourceVisibility,
   type ClaudeRunnerStatus,
   MAX_CLAUDE_RUNNER_DIAGNOSTIC_BYTE_LIMIT,
   isSafeClaudeArtifactName,
   validateClaudeArtifact,
-} from "./cmux-claude-runner.js";
+} from "./claude-runner-contract.js";
+import { isInside, realpathOrSelf } from "./path-utils.js";
 
 /**
  * Adapter-facing crabrunner boundary for Claude one-shot lanes.
@@ -73,12 +73,7 @@ export interface ClaudeCrabrunnerIssueIdentity {
   url: string | null;
 }
 
-export interface ClaudeCrabrunnerRunnerInput
-  extends Omit<
-    ClaudeCmuxRunnerInput,
-    "cmuxSpawnBin" | "profile" | "retryOnInvalid"
-  > {
-  profile?: typeof DEFAULT_PROFILE | "write" | string;
+export interface ClaudeCrabrunnerRunnerInput extends ClaudeRunnerInput {
   runnerKind?: string;
   runnerProvider?: string | null;
   reasoningEffort?: string | null;
@@ -236,7 +231,7 @@ export async function runClaudeCrabrunner(
       artifactName,
       artifactPath: null,
       resultJsonPath,
-      cmuxSpawnBin: input.crabrunnerBin ?? DEFAULT_CRABRUNNER_BIN_LABEL,
+      runnerBin: input.crabrunnerBin ?? DEFAULT_CRABRUNNER_BIN_LABEL,
       laneId,
       phase: phaseLabel,
       startedAt,
@@ -393,7 +388,7 @@ export async function runClaudeCrabrunner(
     artifactPath,
     remoteArtifactPath,
     resultJsonPath,
-    cmuxSpawnBin: input.crabrunnerBin ?? DEFAULT_CRABRUNNER_BIN_LABEL,
+    runnerBin: input.crabrunnerBin ?? DEFAULT_CRABRUNNER_BIN_LABEL,
     laneId,
     phase: phaseLabel,
     startedAt,
@@ -777,7 +772,7 @@ function buildResult(input: {
   artifactPath: string | null;
   remoteArtifactPath?: string | null;
   resultJsonPath: string;
-  cmuxSpawnBin: string;
+  runnerBin: string;
   laneId: string;
   phase: string;
   startedAt: string;
@@ -790,7 +785,7 @@ function buildResult(input: {
   message: string;
 }): ClaudeRunnerResult {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: input.status,
     purpose: input.input.purpose,
     model: input.model,
@@ -802,9 +797,8 @@ function buildResult(input: {
     artifactName: input.artifactName,
     artifactPath: input.artifactPath,
     remoteArtifactPath: input.remoteArtifactPath ?? null,
-    mirrorFallback: null,
     resultJsonPath: input.resultJsonPath,
-    cmuxSpawnBin: input.cmuxSpawnBin,
+    runnerBin: input.runnerBin,
     laneId: input.laneId,
     phase: input.phase,
     startedAt: input.startedAt,

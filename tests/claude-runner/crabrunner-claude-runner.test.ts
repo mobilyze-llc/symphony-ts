@@ -138,7 +138,9 @@ describe("Claude crabrunner adapter", () => {
     expect(result.status).toBe("passed");
     expect(result.model).toBe("opus");
     expect(result.profile).toBe("read-only");
-    expect(result.cmuxSpawnBin).toBe("crabrunner");
+    expect(result.schemaVersion).toBe(2);
+    expect(result.runnerBin).toBe("crabrunner");
+    expect(result).not.toHaveProperty("cmuxSpawnBin");
     expect(result.artifactPath).toBe(artifactPath);
     expect(result.message).toBe("done");
     expect(result.usage).toMatchObject({

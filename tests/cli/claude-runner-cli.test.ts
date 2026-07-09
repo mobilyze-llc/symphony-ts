@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
-import type { ClaudeRunnerResult } from "../../src/claude-runner/cmux-claude-runner.js";
+import type { ClaudeRunnerResult } from "../../src/claude-runner/claude-runner-contract.js";
 import type { ClaudeCrabrunnerRunnerInput } from "../../src/claude-runner/crabrunner-claude-runner.js";
 import {
   parseClaudeRunnerArgs,
@@ -164,6 +164,17 @@ describe("claude-runner CLI", () => {
       expect.stringContaining("--retry-on-invalid is not supported"),
     );
     expect(runClaude).not.toHaveBeenCalled();
+
+    await expect(
+      runClaudeRunnerCli(["--cmux-spawn-bin", "/bin/cmux-spawn"], {
+        runClaude,
+        stdout,
+        stderr,
+      }),
+    ).resolves.toBe(2);
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining("Unknown option: --cmux-spawn-bin"),
+    );
   });
 
   it("passes parsed input to the runner and maps runner status to exit code", async () => {
@@ -239,7 +250,7 @@ function makeResult(
   status: ClaudeRunnerResult["status"],
 ): ClaudeRunnerResult {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status,
     purpose: input.purpose,
     model: input.model ?? "opus",
@@ -251,7 +262,7 @@ function makeResult(
     artifactName: input.artifactName,
     artifactPath: `${input.artifactDir}/${input.artifactName}.md`,
     resultJsonPath: `${input.artifactDir}/${input.artifactName}.result.json`,
-    cmuxSpawnBin: input.crabrunnerBin ?? "crabrunner",
+    runnerBin: input.crabrunnerBin ?? "crabrunner",
     laneId: "claude-custom",
     phase: input.purpose,
     startedAt: "2026-06-14T00:00:00.000Z",

@@ -39,7 +39,6 @@ interface ParsedArgs {
   issues: string[];
   directIssues: string[];
   sourceRefs: string[];
-  cmuxSpawnBin: string | null;
   forceReview: boolean;
   dryRun: boolean;
   help: boolean;
@@ -132,7 +131,6 @@ function usage(): string {
     "  --ticket <id>             Alias for --issue-direct",
     "  --force, --review-now     Review targeted issues even when normal selection heuristics would skip them",
     "  --source-ref <path>       Source-of-truth file to include (repeatable, default: SPEC.mobilyze.md)",
-    "  --cmux-spawn-bin <path>   Legacy compatibility flag; ignored by crabrunner execution",
     "  --dry-run                 Select and print candidates without invoking Claude or writing Linear",
     "  --help                    Show this help",
     "",
@@ -155,7 +153,6 @@ export function parseSpecReviewWatchArgs(
   const issues: string[] = [];
   const directIssues: string[] = [];
   const sourceRefs: string[] = [];
-  let cmuxSpawnBin: string | null = null;
   let forceReview = false;
   let dryRun = false;
 
@@ -174,7 +171,6 @@ export function parseSpecReviewWatchArgs(
         issues,
         directIssues,
         sourceRefs,
-        cmuxSpawnBin,
         forceReview,
         dryRun,
         help: true,
@@ -219,10 +215,6 @@ export function parseSpecReviewWatchArgs(
       sourceRefs.push(readValue(argv, ++index, token));
       continue;
     }
-    if (token === "--cmux-spawn-bin") {
-      cmuxSpawnBin = readValue(argv, ++index, token);
-      continue;
-    }
     if (token.startsWith("--")) {
       throw new UsageError(`Unknown option: ${token}\n\n${usage()}`);
     }
@@ -241,7 +233,6 @@ export function parseSpecReviewWatchArgs(
     issues,
     directIssues,
     sourceRefs,
-    cmuxSpawnBin,
     forceReview,
     dryRun,
     help: false,

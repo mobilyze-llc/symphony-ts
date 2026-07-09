@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import type { ClaudeRunnerResult } from "../../src/claude-runner/cmux-claude-runner.js";
+import type { ClaudeRunnerResult } from "../../src/claude-runner/claude-runner-contract.js";
 import type {
   DispatcherRunJournalEntry,
   Issue,
@@ -2058,7 +2058,7 @@ describe("spec review", () => {
         },
       },
       runner: async (runnerInput): Promise<ClaudeRunnerResult> => ({
-        schemaVersion: 1,
+        schemaVersion: 2,
         status: "timed_out",
         purpose: "spec-review",
         model: "opus",
@@ -2070,7 +2070,7 @@ describe("spec review", () => {
         artifactName: "spec-review-opus",
         artifactPath: null,
         resultJsonPath: join(artifactRoot, "spec-review-opus.result.json"),
-        cmuxSpawnBin: "cmux-spawn",
+        runnerBin: "crabrunner",
         laneId: "claude-spec-review",
         phase: "spec-review",
         startedAt: "2026-06-14T00:00:00.000Z",
@@ -2225,7 +2225,7 @@ describe("spec review", () => {
         postComment: async () => undefined,
       },
       runner: async (runnerInput): Promise<ClaudeRunnerResult> => ({
-        schemaVersion: 1,
+        schemaVersion: 2,
         status: "passed",
         purpose: "spec-review",
         model: "opus",
@@ -2237,7 +2237,7 @@ describe("spec review", () => {
         artifactName: "spec-review-opus",
         artifactPath,
         resultJsonPath: join(artifactRoot, "spec-review-opus.result.json"),
-        cmuxSpawnBin: "cmux-spawn",
+        runnerBin: "crabrunner",
         laneId: "claude-spec-review",
         phase: "spec-review",
         startedAt: "2026-06-14T00:00:00.000Z",
@@ -2322,7 +2322,7 @@ describe("spec review", () => {
         postComment: async () => undefined,
       },
       runner: async (runnerInput): Promise<ClaudeRunnerResult> => ({
-        schemaVersion: 1,
+        schemaVersion: 2,
         status: "passed",
         purpose: "spec-review",
         model: "opus",
@@ -2334,7 +2334,7 @@ describe("spec review", () => {
         artifactName: "spec-review-opus",
         artifactPath,
         resultJsonPath: join(artifactRoot, "spec-review-opus.result.json"),
-        cmuxSpawnBin: "cmux-spawn",
+        runnerBin: "crabrunner",
         laneId: "claude-spec-review",
         phase: "spec-review",
         startedAt: "2026-06-14T00:00:00.000Z",
@@ -2398,7 +2398,7 @@ describe("spec review", () => {
         },
       },
       runner: async (runnerInput): Promise<ClaudeRunnerResult> => ({
-        schemaVersion: 1,
+        schemaVersion: 2,
         status: "passed",
         purpose: "spec-review",
         model: "opus",
@@ -2410,7 +2410,7 @@ describe("spec review", () => {
         artifactName: "spec-review-opus",
         artifactPath,
         resultJsonPath: join(artifactRoot, "spec-review-opus.result.json"),
-        cmuxSpawnBin: "cmux-spawn",
+        runnerBin: "crabrunner",
         laneId: "claude-spec-review",
         phase: "spec-review",
         startedAt: "2026-06-14T00:00:00.000Z",
@@ -2500,7 +2500,7 @@ describe("spec review", () => {
         },
       },
       runner: async (runnerInput): Promise<ClaudeRunnerResult> => ({
-        schemaVersion: 1,
+        schemaVersion: 2,
         status: "passed",
         purpose: "spec-review",
         model: "opus",
@@ -2512,7 +2512,7 @@ describe("spec review", () => {
         artifactName: "spec-review-opus",
         artifactPath,
         resultJsonPath: join(artifactRoot, "spec-review-opus.result.json"),
-        cmuxSpawnBin: "cmux-spawn",
+        runnerBin: "crabrunner",
         laneId: "claude-spec-review",
         phase: "spec-review",
         startedAt: "2026-06-14T00:00:00.000Z",
@@ -2597,7 +2597,7 @@ describe("spec review", () => {
         },
       },
       runner: async (runnerInput): Promise<ClaudeRunnerResult> => ({
-        schemaVersion: 1,
+        schemaVersion: 2,
         status: "passed",
         purpose: "spec-review",
         model: "opus",
@@ -2609,7 +2609,7 @@ describe("spec review", () => {
         artifactName: "spec-review-opus",
         artifactPath,
         resultJsonPath: join(artifactRoot, "spec-review-opus.result.json"),
-        cmuxSpawnBin: "cmux-spawn",
+        runnerBin: "crabrunner",
         laneId: "claude-spec-review",
         phase: "spec-review",
         startedAt: "2026-06-14T00:00:00.000Z",
@@ -2722,7 +2722,7 @@ describe("spec review", () => {
         return appendSpecReviewResultJournal(workspaceRoot, input);
       },
       runner: async (runnerInput): Promise<ClaudeRunnerResult> => ({
-        schemaVersion: 1,
+        schemaVersion: 2,
         status: "passed",
         purpose: "spec-review",
         model: "opus",
@@ -2734,7 +2734,7 @@ describe("spec review", () => {
         artifactName: "spec-review-opus",
         artifactPath,
         resultJsonPath: join(artifactRoot, "spec-review-opus.result.json"),
-        cmuxSpawnBin: "cmux-spawn",
+        runnerBin: "crabrunner",
         laneId: "claude-spec-review",
         phase: "spec-review",
         startedAt: "2026-06-14T00:00:00.000Z",
@@ -2821,7 +2821,7 @@ describe("spec review", () => {
         },
       },
       runner: async (runnerInput): Promise<ClaudeRunnerResult> => ({
-        schemaVersion: 1,
+        schemaVersion: 2,
         status: "passed",
         purpose: "spec-review",
         model: "opus",
@@ -2833,7 +2833,7 @@ describe("spec review", () => {
         artifactName: "spec-review-opus",
         artifactPath,
         resultJsonPath: join(artifactRoot, "spec-review-opus.result.json"),
-        cmuxSpawnBin: "cmux-spawn",
+        runnerBin: "crabrunner",
         laneId: "claude-spec-review",
         phase: "spec-review",
         startedAt: "2026-06-14T00:00:00.000Z",
@@ -2920,7 +2920,7 @@ describe("spec review", () => {
         postComment: async () => undefined,
       },
       runner: async (runnerInput): Promise<ClaudeRunnerResult> => ({
-        schemaVersion: 1,
+        schemaVersion: 2,
         status: "passed",
         purpose: "spec-review",
         model: "opus",
@@ -2932,7 +2932,7 @@ describe("spec review", () => {
         artifactName: "spec-review-opus",
         artifactPath,
         resultJsonPath: join(artifactRoot, "spec-review-opus.result.json"),
-        cmuxSpawnBin: "cmux-spawn",
+        runnerBin: "crabrunner",
         laneId: "claude-spec-review",
         phase: "spec-review",
         startedAt: "2026-06-14T00:00:00.000Z",
@@ -3014,7 +3014,7 @@ describe("spec review", () => {
         postComment: async () => undefined,
       },
       runner: async (runnerInput): Promise<ClaudeRunnerResult> => ({
-        schemaVersion: 1,
+        schemaVersion: 2,
         status: "passed",
         purpose: "spec-review",
         model: "opus",
@@ -3026,7 +3026,7 @@ describe("spec review", () => {
         artifactName: "spec-review-opus",
         artifactPath,
         resultJsonPath: join(artifactRoot, "spec-review-opus.result.json"),
-        cmuxSpawnBin: "cmux-spawn",
+        runnerBin: "crabrunner",
         laneId: "claude-spec-review",
         phase: "spec-review",
         startedAt: "2026-06-14T00:00:00.000Z",
