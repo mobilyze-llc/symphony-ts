@@ -50,8 +50,6 @@ describe("symphony-spec-review-watch CLI", () => {
           "SPEC.mobilyze.md",
           "--source-ref",
           "docs/review.md",
-          "--cmux-spawn-bin",
-          "/bin/cmux-spawn",
           "--dry-run",
         ],
         "/tmp",
@@ -65,7 +63,6 @@ describe("symphony-spec-review-watch CLI", () => {
       issues: ["SYMPH-1"],
       directIssues: ["SYMPH-2"],
       sourceRefs: ["SPEC.mobilyze.md", "docs/review.md"],
-      cmuxSpawnBin: "/bin/cmux-spawn",
       forceReview: true,
       dryRun: true,
       help: false,
@@ -86,6 +83,16 @@ describe("symphony-spec-review-watch CLI", () => {
     ).resolves.toBe(2);
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining("--mode must be observe, warn, or enforce"),
+    );
+
+    await expect(
+      runSpecReviewWatchCli(["--cmux-spawn-bin", "/bin/cmux-spawn"], {
+        stdout,
+        stderr,
+      }),
+    ).resolves.toBe(2);
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining("Unknown option: --cmux-spawn-bin"),
     );
   });
 

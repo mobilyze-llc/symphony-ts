@@ -40,7 +40,6 @@ export const HELP_TARGETS = [
     ["symphony-backlog-audit", "dist/src/audit/backlog-audit-cli.js"],
     ["symphony-calibration-digest", "dist/src/calibration/cli.js"],
     ["claude-runner", "dist/src/cli/claude-runner.js"],
-    ["symphony-kimi-council-replay", "dist/src/cli/kimi-council-replay.js"],
     ["symphony-manager-run-import", "dist/src/cli/manager-run-import.js"],
     ["symphony-portfolio-audit", "dist/src/cli/portfolio-audit.js"],
     ["symphony-portfolio-classify", "dist/src/cli/portfolio-classify.js"],

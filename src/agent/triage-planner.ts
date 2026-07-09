@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { z } from "zod";
 
-import type { ClaudeRunnerResult } from "../claude-runner/cmux-claude-runner.js";
+import type { ClaudeRunnerResult } from "../claude-runner/claude-runner-contract.js";
 import {
   type ClaudeCrabrunnerRunnerInput,
   resolveClaudeCrabrunnerSchedulerOptions,
@@ -1595,8 +1595,6 @@ export interface CrabrunnerPlannerRunnerOptions {
   fs?: PlannerFileSystem;
 }
 
-export type CmuxPlannerRunnerOptions = CrabrunnerPlannerRunnerOptions;
-
 export const DEFAULT_PLANNER_MODEL = "opus";
 
 export function createCrabrunnerPlannerRunner(
@@ -1657,5 +1655,3 @@ export function createCrabrunnerPlannerRunner(
     return { status: "ok", markdown };
   };
 }
-
-export const createCmuxPlannerRunner = createCrabrunnerPlannerRunner;

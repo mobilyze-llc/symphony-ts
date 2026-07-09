@@ -76,7 +76,6 @@ Options:
   --artifact-name <name>       Basename for the Claude artifact
   --model <name>               Claude model alias (default: opus)
   --profile <name>             Crabrunner Claude profile (default: read-only)
-  --cmux-spawn-bin <path>      Legacy compatibility flag; ignored by crabrunner execution
   --timeout-seconds <n>        Lane timeout (default: 1800)
   --source <file>              Extra source file that must be readable inside workspace (repeatable)
   --required-heading <text>    Markdown heading required in artifact (repeatable)
@@ -89,25 +88,6 @@ Options:
   --help                       Show this help
 ```
 <!-- AUTOGEN:help:claude-runner END -->
-
-## symphony-kimi-council-replay
-
-<!-- AUTOGEN:help:symphony-kimi-council-replay START — managed by scripts/docs-sync.mjs -->
-```text
-Usage: symphony-kimi-council-replay --source-council-dir DIR --artifact-dir DIR --issue-id ISSUE [options]
-
-Options:
-  --workspace DIR          Workspace path (default: current directory)
-  --repo OWNER/REPO        Optional GitHub repo metadata
-  --pr NUMBER              Optional PR number metadata
-  --base REF               Optional base ref metadata
-  --head REF               Optional head ref metadata
-  --kimi-bin PATH          explicit Kimi CLI path
-  --kimi-model MODEL       Kimi model alias (default: Kimi CLI config)
-
-This diagnostic no longer executes fresh replay runs because the local review lane launcher was removed.
-```
-<!-- AUTOGEN:help:symphony-kimi-council-replay END -->
 
 ## symphony-manager-run-import
 
@@ -185,7 +165,6 @@ Options:
   --ticket <id>             Alias for --issue-direct
   --force, --review-now     Review targeted issues even when normal selection heuristics would skip them
   --source-ref <path>       Source-of-truth file to include (repeatable, default: SPEC.mobilyze.md)
-  --cmux-spawn-bin <path>   Legacy compatibility flag; ignored by crabrunner execution
   --dry-run                 Select and print candidates without invoking Claude or writing Linear
   --help                    Show this help
 

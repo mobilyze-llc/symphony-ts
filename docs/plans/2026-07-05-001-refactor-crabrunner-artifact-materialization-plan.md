@@ -94,6 +94,12 @@ Phase A (crucible) lands first and is **additive/versioned**: `CollectResult` ga
 ### KTD7 — `validateClaudeArtifact` takes content, not a path
 Refactor the validator (defined today in `src/claude-runner/cmux-claude-runner.ts`, imported by `crabrunner-claude-runner.ts:32`) to accept the artifact **string**. This makes validation pure, race-free, and unit-testable, and removes the last place a consumer reads a racing path.
 
+### KTD8 — CMUX mirror integrity is contract-retired; Claude runner results move to v2
+
+The CMUX same-stem mirror/freshness/remote-SHA contract is **retired**, not ported. It protected a transport that returned a remote path and relied on a separately copied local mirror. Crabrunner crosses the boundary through the materialization contract in KTD2: `CollectedArtifact.primary.content` is complete and its producer-owned hash/sha256 metadata is the integrity seam. Recreating the mirror block would duplicate that owner and violate R2–R4.
+
+The persisted `ClaudeRunnerResult` contract is versioned to `schemaVersion: 2` and renames `cmuxSpawnBin` to `runnerBin`. No legacy-name tolerance is carried forward: live execution has already moved to crabrunner, no consumer reads the old field, and preserving it would encode a false transport name in new artifacts. Readers that need to ingest historical v1 result JSON must treat v1 as an archived format rather than reinterpret `cmuxSpawnBin` as a crabrunner path.
+
 ---
 
 ## High-Level Technical Design

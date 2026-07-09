@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import type { BacklogAuditFinding } from "../audit/backlog-audit.js";
-import type { ClaudeRunnerResult } from "../claude-runner/cmux-claude-runner.js";
+import type { ClaudeRunnerResult } from "../claude-runner/claude-runner-contract.js";
 import {
   type ClaudeCrabrunnerRunnerInput,
   resolveClaudeCrabrunnerSchedulerOptions,
@@ -204,8 +204,6 @@ export interface SpecReviewRunIssueInput {
   workspaceRoot: string;
   artifactRoot: string;
   mode: SpecReviewMode;
-  /** Legacy compatibility; crabrunner-backed spec review ignores this value. */
-  cmuxSpawnBin?: string;
   sourceOfTruthRefs?: SpecReviewSourceOfTruthRef[];
   sourceOfTruthExcerpt?: string | null;
   fetchIssueComments?: (

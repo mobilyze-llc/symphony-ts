@@ -11,7 +11,7 @@ import {
   parsePlannerOutput,
   runTriagePlanner,
 } from "../../src/agent/triage-planner.js";
-import type { ClaudeRunnerResult } from "../../src/claude-runner/cmux-claude-runner.js";
+import type { ClaudeRunnerResult } from "../../src/claude-runner/claude-runner-contract.js";
 import type { PlanEnvelope } from "../../src/domain/standing-plan.js";
 
 const ENVELOPE: PlanEnvelope = {
