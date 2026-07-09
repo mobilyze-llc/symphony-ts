@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { extname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { z } from "zod";
@@ -12,15 +12,25 @@ import {
   type CollectedArtifact,
   readCollectedArtifact,
 } from "./collected-artifact.js";
-import type {
-  CrabrunnerAdmissionResult,
-  CrabrunnerCancellationRequest,
-  CrabrunnerJobSpec,
-  CrabrunnerSchedulerClient,
-  CrabrunnerTerminalEvidence,
-  CrabrunnerTerminalState,
-  CrabrunnerUsage,
+import {
+  type CrabrunnerAdmissionResult,
+  type CrabrunnerCancellationRequest,
+  type CrabrunnerJobSpec,
+  type CrabrunnerProgressEvidence,
+  type CrabrunnerSchedulerClient,
+  CrabrunnerStatusPollError,
+  type CrabrunnerTerminalEvidence,
+  type CrabrunnerTerminalState,
+  type CrabrunnerUsage,
 } from "./crabrunner-backend.js";
+import {
+  type CrabrunnerRunResult,
+  type CrabrunnerStatus,
+  parseCrabrunnerCollect,
+  parseCrabrunnerRunResult,
+  parseCrabrunnerStatus,
+} from "./crabrunner-contract.js";
+import { fileSha256 } from "./file-sha256.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -92,7 +102,10 @@ export interface CrabrunnerCliSchedulerClientOptions {
   cli?: CrabrunnerCli;
   /** Status poll interval in ms (default 1000). */
   pollIntervalMs?: number;
-  /** Maximum number of status polls before failing closed (default 1800). */
+  /**
+   * Explicit maximum status polls. When absent, the client derives the budget
+   * from each submitted lane's timeout.
+   */
   maxPolls?: number;
   /** When true, pass `--no-stage` to submit. */
   noStage?: boolean;
@@ -138,9 +151,6 @@ function appendOptionalArg(
 }
 
 const CRABRUNNER_MANIFEST_SCHEMA = "crucible.crabrunner.job.v1";
-const CRABRUNNER_STATUS_SCHEMA = "crucible.crabrunner.status.v1";
-const CRABRUNNER_COLLECT_SCHEMA = "crucible.crabrunner.collect.v1";
-const CRABRUNNER_RUN_RESULT_SCHEMA = "crucible.crabrunner.run-result.v1";
 // Job-kind-dependent lane-worker protocol selector. A prompt_file+model manifest
 // uses "lane-worker.v1"; a worker_argv manifest uses "worker-argv.v1". This
 // client emits a prompt_file/model lane (the worker_argv path is not sourced
@@ -167,60 +177,10 @@ const CRABRUNNER_ADMITTED_STATES = new Set([
   "complete",
 ]);
 
-const crabrunnerStatusSchema = z
-  .object({
-    schema: z.string(),
-    job_id: z.string(),
-    state: z.string(),
-    message: z.string().nullish(),
-    host: z.string().nullish(),
-    worker_pid: z.number().nullish(),
-    worker_pgid: z.number().nullish(),
-    started_at: z.string().nullish(),
-    updated_at: z.string().nullish(),
-    artifact_path: z.string().nullish(),
-    usage_path: z.string().nullish(),
-    collect_archive: z.string().nullish(),
-    workspace: z.string().nullish(),
-    collectible: z.boolean().nullish(),
-    error_code: z.string().nullish(),
-    heartbeat_seq: z.number().nullish(),
-  })
-  .passthrough();
-
-type CrabrunnerStatus = z.infer<typeof crabrunnerStatusSchema>;
-
-const crabrunnerCollectSchema = z
-  .object({
-    schema: z.string(),
-    job_id: z.string(),
-    state: z.string(),
-    status: crabrunnerStatusSchema,
-    archive_path: z.string().nullish(),
-    materialized: z.unknown().nullish(),
-  })
-  .passthrough();
-
-const crabrunnerWorkspaceSyncArtifactRefSchema = z
-  .object({
-    schema: z.string(),
-    path: z.string(),
-    sha256: z.string().nullish(),
-  })
-  .passthrough();
-
-const crabrunnerRunResultSchema = z
-  .object({
-    schema: z.string(),
-    job_id: z.string(),
-    state: z.string(),
-    status: crabrunnerStatusSchema,
-    collect: crabrunnerCollectSchema.nullish(),
-    workspace_sync_artifact: crabrunnerWorkspaceSyncArtifactRefSchema.nullish(),
-  })
-  .passthrough();
-
-type CrabrunnerRunResult = z.infer<typeof crabrunnerRunResultSchema>;
+interface ObservedCrabrunnerLiveness {
+  lastHeartbeatAt?: string;
+  lastProgressAt?: string;
+}
 
 // Two on-disk usage shapes both map here. The real model shape is the
 // `crucible.lane-worker.usage.v2` contract keyed by canonical
@@ -309,11 +269,16 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
   private readonly now: () => Date;
   private readonly cli: CrabrunnerCli;
   private readonly pollIntervalMs: number;
-  private readonly maxPolls: number;
+  private readonly configuredMaxPolls: number | null;
   private readonly noStage: boolean;
   private readonly cliTimeoutMs: number;
   private readonly maxBufferBytes: number;
   private readonly remoteRunResults = new Map<string, CrabrunnerRunResult>();
+  private readonly maxPollsByJob = new Map<string, number>();
+  private readonly livenessByJob = new Map<
+    string,
+    ObservedCrabrunnerLiveness
+  >();
 
   constructor(options: CrabrunnerCliSchedulerClientOptions) {
     this.crucibleRoot = options.crucibleRoot;
@@ -344,7 +309,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
         maxBufferBytes: this.maxBufferBytes,
       });
     this.pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
-    this.maxPolls = options.maxPolls ?? DEFAULT_MAX_POLLS;
+    this.configuredMaxPolls = options.maxPolls ?? null;
     this.noStage = options.noStage ?? false;
   }
 
@@ -391,7 +356,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
         ],
         signal,
       );
-      const status = this.parseStatus(result, "submit");
+      const status = parseCrabrunnerStatus(result, "submit");
       if (!CRABRUNNER_ADMITTED_STATES.has(status.state)) {
         return {
           status: "rejected",
@@ -400,6 +365,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
             status.message ?? status.error_code ?? status.state ?? "rejected",
         };
       }
+      this.maxPollsByJob.set(status.job_id, this.maxPollsForSpec(spec));
       return { status: "accepted", jobId: status.job_id };
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -407,52 +373,75 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
   }
 
   async status(jobId: string, signal?: AbortSignal): Promise<void> {
-    throwIfAborted(signal);
-    if (this.remoteRunResults.has(jobId)) {
-      return;
-    }
-    if (this.requiresRemoteRun()) {
-      throw new Error(
-        `crabrunner remote job ${jobId} has no cached run result; provider=ssh uses crabrunner run and cannot poll split status`,
-      );
-    }
-    // Count consecutive terminal-but-not-collectible polls. The daemon can
-    // write a terminal lifecycle state before flipping `collectible` (write
-    // race); grace-retry a few polls before failing closed (DeepSeek P2-1).
-    let terminalNotCollectiblePolls = 0;
-    for (let attempt = 0; attempt < this.maxPolls; attempt += 1) {
+    let latestStatus: CrabrunnerStatus | undefined;
+    try {
       throwIfAborted(signal);
-      const result = await this.run(
-        ["status", "--job-id", jobId, ...this.stateRootArgs()],
-        signal,
-      );
-      const status = this.parseStatus(result, "status", jobId);
-
-      if (status.collectible === true) {
+      if (this.remoteRunResults.has(jobId)) {
         return;
       }
+      if (this.requiresRemoteRun()) {
+        throw new Error(
+          `crabrunner remote job ${jobId} has no cached run result; provider=ssh uses crabrunner run and cannot poll split status`,
+        );
+      }
+      // Count consecutive terminal-but-not-collectible polls. The daemon can
+      // write a terminal lifecycle state before flipping `collectible` (write
+      // race); grace-retry a few polls before failing closed (DeepSeek P2-1).
+      let terminalNotCollectiblePolls = 0;
+      const maxPolls =
+        this.maxPollsByJob.get(jobId) ??
+        this.configuredMaxPolls ??
+        DEFAULT_MAX_POLLS;
+      for (let attempt = 0; attempt < maxPolls; attempt += 1) {
+        throwIfAborted(signal);
+        const result = await this.run(
+          ["status", "--job-id", jobId, ...this.stateRootArgs()],
+          signal,
+        );
+        const status = parseCrabrunnerStatus(result, "status", jobId);
+        latestStatus = status;
+        await this.observeLiveness(jobId, status);
 
-      if (CRABRUNNER_TERMINAL_LIFECYCLE_STATES.has(status.state)) {
-        terminalNotCollectiblePolls += 1;
-        if (terminalNotCollectiblePolls > STATUS_TERMINAL_GRACE_POLLS) {
-          throw new Error(
-            `crabrunner job ${jobId} reached terminal state "${status.state}" but is not collectible after ${STATUS_TERMINAL_GRACE_POLLS} grace polls: ${
-              status.message ?? status.error_code ?? "no detail"
-            }`,
-          );
+        if (status.collectible === true) {
+          return;
         }
-      } else {
-        terminalNotCollectiblePolls = 0;
+
+        if (CRABRUNNER_TERMINAL_LIFECYCLE_STATES.has(status.state)) {
+          terminalNotCollectiblePolls += 1;
+          if (terminalNotCollectiblePolls > STATUS_TERMINAL_GRACE_POLLS) {
+            throw new Error(
+              `crabrunner job ${jobId} reached terminal state "${status.state}" but is not collectible after ${STATUS_TERMINAL_GRACE_POLLS} grace polls: ${
+                status.message ?? status.error_code ?? "no detail"
+              }`,
+            );
+          }
+        } else {
+          terminalNotCollectiblePolls = 0;
+        }
+
+        if (attempt < maxPolls - 1) {
+          await this.sleep(this.pollIntervalMs, signal);
+        }
       }
 
-      if (attempt < this.maxPolls - 1) {
-        await this.sleep(this.pollIntervalMs, signal);
-      }
+      throw new Error(
+        `crabrunner job ${jobId} did not become collectible within ${maxPolls} status polls`,
+      );
+    } catch (error) {
+      const observed = this.livenessByJob.get(jobId);
+      const progress =
+        latestStatus === undefined
+          ? buildObservedProgress(observed)
+          : buildProgress(latestStatus, observed);
+      const statusError =
+        error instanceof CrabrunnerStatusPollError
+          ? error
+          : new CrabrunnerStatusPollError(error, progress);
+      // Copy the diagnostic snapshot into the typed error before releasing the
+      // scheduler's per-job state. The backend consumes and persists it.
+      this.forgetLocalJob(jobId);
+      throw statusError;
     }
-
-    throw new Error(
-      `crabrunner job ${jobId} did not become collectible within ${this.maxPolls} status polls`,
-    );
   }
 
   async collect(
@@ -471,39 +460,43 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
         `crabrunner remote job ${jobId} has no cached run result to collect`,
       );
     }
-    const result = await this.run(
-      ["collect", "--job-id", jobId, ...this.stateRootArgs()],
-      signal,
-    );
-    const collect = this.parseCollect(result, jobId);
-    const status = collect.status;
+    try {
+      const result = await this.run(
+        ["collect", "--job-id", jobId, ...this.stateRootArgs()],
+        signal,
+      );
+      const collect = parseCrabrunnerCollect(result, jobId);
+      const status = collect.status;
+      await this.observeLiveness(jobId, status);
 
-    const lifecycleState = collect.state;
-    let terminalState = mapLifecycleToTerminalState(lifecycleState, status);
-    const artifact = readCollectedArtifact(collect);
+      const lifecycleState = collect.state;
+      let terminalState = mapLifecycleToTerminalState(lifecycleState, status);
+      const artifact = readCollectedArtifact(collect);
 
-    // usage_path in CrabrunnerStatus is RELATIVE to <stateRoot>/jobs/<jobId>/.
-    // It remains a pre-materialization fallback during the additive rollout.
-    const usageAbsPath = this.resolveJobPath(jobId, status.usage_path);
+      // usage_path in CrabrunnerStatus is RELATIVE to <stateRoot>/jobs/<jobId>/.
+      // It remains a pre-materialization fallback during the additive rollout.
+      const usageAbsPath = this.resolveJobPath(jobId, status.usage_path);
 
-    if (terminalState === "succeeded" && artifact.status !== "ready") {
-      terminalState = "artifact_parse_failed";
+      if (terminalState === "succeeded" && artifact.status !== "ready") {
+        terminalState = "artifact_parse_failed";
+      }
+
+      const usage =
+        (await this.readUsageFromCollectedArtifact(artifact)) ??
+        (await this.readUsage(usageAbsPath));
+
+      return {
+        state: terminalState,
+        artifact,
+        workspacePath: status.workspace ?? null,
+        usage,
+        message: status.message ?? null,
+        progress: buildProgress(status, this.livenessByJob.get(jobId)),
+        process: buildProcess(status),
+      };
+    } finally {
+      this.forgetLocalJob(jobId);
     }
-
-    const usage =
-      (await this.readUsageFromCollectedArtifact(artifact)) ??
-      (await this.readUsage(usageAbsPath));
-
-    const evidence: CrabrunnerTerminalEvidence = {
-      state: terminalState,
-      artifact,
-      workspacePath: status.workspace ?? null,
-      usage,
-      message: status.message ?? null,
-      progress: buildProgress(status),
-      process: buildProcess(status),
-    };
-    return evidence;
   }
 
   async cancel(
@@ -514,40 +507,45 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     // does not take --signal/--process-group. request.signal/processGroup are
     // therefore diagnostics-only in the cancellation block for this phase.
     // TODO(SYMPH-853-followup): forward signal/process-group once the CLI supports it.
-    const result = await this.run([
-      "cancel",
-      "--job-id",
-      jobId,
-      ...this.stateRootArgs(),
-    ]);
-    const status = this.parseStatus(result, "cancel", jobId);
-    // Only a TERMINAL "stopped" counts as killed. "stopping" is non-terminal
-    // (still shutting down) and must NOT be reported as canceled, or consumers
-    // misread an in-flight job as killed (Codex P2 / DeepSeek P2-6).
-    const killed = status.state === "stopped";
-    const terminalState: CrabrunnerTerminalState = killed
-      ? "canceled"
-      : "kill_failed";
-    const failure = killed
-      ? null
-      : status.state === "stopping"
-        ? "cancel_incomplete"
-        : (status.message ?? "cancel_incomplete");
+    try {
+      const result = await this.run([
+        "cancel",
+        "--job-id",
+        jobId,
+        ...this.stateRootArgs(),
+      ]);
+      const status = parseCrabrunnerStatus(result, "cancel", jobId);
+      await this.observeLiveness(jobId, status);
+      // Only a TERMINAL "stopped" counts as killed. "stopping" is non-terminal
+      // (still shutting down) and must NOT be reported as canceled, or consumers
+      // misread an in-flight job as killed (Codex P2 / DeepSeek P2-6).
+      const killed = status.state === "stopped";
+      const terminalState: CrabrunnerTerminalState = killed
+        ? "canceled"
+        : "kill_failed";
+      const failure = killed
+        ? null
+        : status.state === "stopping"
+          ? "cancel_incomplete"
+          : (status.message ?? "cancel_incomplete");
 
-    return {
-      state: terminalState,
-      workspacePath: status.workspace ?? null,
-      message: status.message ?? null,
-      progress: buildProgress(status),
-      process: buildProcess(status),
-      cancellation: {
-        requested: true,
-        signal: request.signal,
-        processGroup: request.processGroup,
-        killed,
-        failure,
-      },
-    };
+      return {
+        state: terminalState,
+        workspacePath: status.workspace ?? null,
+        message: status.message ?? null,
+        progress: buildProgress(status, this.livenessByJob.get(jobId)),
+        process: buildProcess(status),
+        cancellation: {
+          requested: true,
+          signal: request.signal,
+          processGroup: request.processGroup,
+          killed,
+          failure,
+        },
+      };
+    } finally {
+      this.forgetLocalJob(jobId);
+    }
   }
 
   private buildManifest(spec: CrabrunnerJobSpec): Record<string, unknown> {
@@ -596,6 +594,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
       timeout_seconds: timeoutSeconds,
       lane_worker_protocol: laneWorkerProtocol,
       lane_key: jobId,
+      workspace_identity: workspaceIdentity(spec),
     };
   }
 
@@ -644,7 +643,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
       signal,
       this.remoteRunCliTimeoutMs(spec),
     );
-    const runResult = this.parseRunResult(result, jobId);
+    const runResult = parseCrabrunnerRunResult(result, jobId);
     this.remoteRunResults.set(runResult.job_id, runResult);
     return { status: "accepted", jobId: runResult.job_id };
   }
@@ -682,6 +681,8 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
       jobId,
       "--issue-ids-json",
       JSON.stringify([spec.issue.identifier]),
+      "--workspace-identity-json",
+      JSON.stringify(workspaceIdentity(spec)),
       "--closeout-policy",
       "disabled",
       "--workspace",
@@ -699,7 +700,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
       "--poll-interval-ms",
       String(this.pollIntervalMs),
       "--max-polls",
-      String(this.maxPolls),
+      String(this.maxPollsForSpec(spec)),
     ];
     appendOptionalArg(args, "--port", this.remotePort);
     appendOptionalArg(args, "--work-root", this.remoteWorkRoot);
@@ -710,7 +711,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
 
   private remoteRunCliTimeoutMs(spec: CrabrunnerJobSpec): number {
     const laneTimeoutMs = this.laneTimeoutMs(spec);
-    const pollBudgetMs = this.maxPolls * this.pollIntervalMs;
+    const pollBudgetMs = this.maxPollsForSpec(spec) * this.pollIntervalMs;
     return Math.max(this.cliTimeoutMs, laneTimeoutMs + pollBudgetMs + 60_000);
   }
 
@@ -720,6 +721,21 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
 
   private laneTimeoutSeconds(spec: CrabrunnerJobSpec): number {
     return Math.max(1, Math.ceil(this.laneTimeoutMs(spec) / 1_000));
+  }
+
+  private maxPollsForSpec(spec: CrabrunnerJobSpec): number {
+    if (this.configuredMaxPolls !== null) {
+      return this.configuredMaxPolls;
+    }
+    if (this.pollIntervalMs <= 0) {
+      return DEFAULT_MAX_POLLS;
+    }
+    return Math.max(
+      1,
+      Math.ceil(this.laneTimeoutMs(spec) / this.pollIntervalMs) +
+        STATUS_TERMINAL_GRACE_POLLS +
+        1,
+    );
   }
 
   private async collectRemoteRunEvidence(
@@ -754,7 +770,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
       | NonNullable<CrabrunnerTerminalEvidence["workspaceSyncRef"]>
       | undefined;
     if (await this.isFilePresent(workspaceSyncPath)) {
-      const workspaceSyncHash = await hashFile(workspaceSyncPath);
+      const workspaceSyncHash = await fileSha256(workspaceSyncPath);
       if (
         crabrunnerWorkspaceSyncHash !== null &&
         crabrunnerWorkspaceSyncHash !== workspaceSyncHash
@@ -808,117 +824,6 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     });
   }
 
-  private parseStatus(
-    result: { stdout: string; stderr: string; exitCode: number },
-    command: string,
-    expectedJobId?: string,
-  ): CrabrunnerStatus {
-    if (result.exitCode !== 0) {
-      throw new Error(
-        `crabrunner ${command} exited with code ${result.exitCode}: ${
-          result.stderr.trim() || "no stderr"
-        }`,
-      );
-    }
-    const parsed = parseJson(result.stdout, command);
-    const status = crabrunnerStatusSchema.safeParse(parsed);
-    if (!status.success) {
-      throw new Error(
-        `crabrunner ${command} returned an invalid status payload: ${status.error.message}`,
-      );
-    }
-    if (status.data.schema !== CRABRUNNER_STATUS_SCHEMA) {
-      throw new Error(
-        `crabrunner ${command} returned unexpected schema "${status.data.schema}" (expected ${CRABRUNNER_STATUS_SCHEMA})`,
-      );
-    }
-    if (status.data.job_id.trim().length === 0) {
-      throw new Error(`crabrunner ${command} status is missing a job_id`);
-    }
-    assertJobIdMatches(command, expectedJobId, status.data.job_id);
-    return status.data;
-  }
-
-  private parseCollect(
-    result: {
-      stdout: string;
-      stderr: string;
-      exitCode: number;
-    },
-    expectedJobId?: string,
-  ): z.infer<typeof crabrunnerCollectSchema> {
-    if (result.exitCode !== 0) {
-      throw new Error(
-        `crabrunner collect exited with code ${result.exitCode}: ${
-          result.stderr.trim() || "no stderr"
-        }`,
-      );
-    }
-    const parsed = parseJson(result.stdout, "collect");
-    const collect = crabrunnerCollectSchema.safeParse(parsed);
-    if (!collect.success) {
-      throw new Error(
-        `crabrunner collect returned an invalid payload: ${collect.error.message}`,
-      );
-    }
-    if (collect.data.schema !== CRABRUNNER_COLLECT_SCHEMA) {
-      throw new Error(
-        `crabrunner collect returned unexpected schema "${collect.data.schema}" (expected ${CRABRUNNER_COLLECT_SCHEMA})`,
-      );
-    }
-    // Guard both the envelope and the nested status job_id so a stale/misrouted
-    // response can never be attributed to the wrong Symphony job (Codex Track).
-    assertJobIdMatches("collect", expectedJobId, collect.data.job_id);
-    assertJobIdMatches("collect", expectedJobId, collect.data.status.job_id);
-    return collect.data;
-  }
-
-  private parseRunResult(
-    result: {
-      stdout: string;
-      stderr: string;
-      exitCode: number;
-    },
-    expectedJobId: string,
-  ): CrabrunnerRunResult {
-    if (result.exitCode !== 0) {
-      throw new Error(
-        `crabrunner run exited with code ${result.exitCode}: ${
-          result.stderr.trim() || "no stderr"
-        }`,
-      );
-    }
-    const parsed = parseJson(result.stdout, "run");
-    const runResult = crabrunnerRunResultSchema.safeParse(parsed);
-    if (!runResult.success) {
-      throw new Error(
-        `crabrunner run returned an invalid payload: ${runResult.error.message}`,
-      );
-    }
-    if (runResult.data.schema !== CRABRUNNER_RUN_RESULT_SCHEMA) {
-      throw new Error(
-        `crabrunner run returned unexpected schema "${runResult.data.schema}" (expected ${CRABRUNNER_RUN_RESULT_SCHEMA})`,
-      );
-    }
-    if (runResult.data.job_id.trim().length === 0) {
-      throw new Error("crabrunner run result is missing a job_id");
-    }
-    assertJobIdMatches("run", expectedJobId, runResult.data.job_id);
-    assertJobIdMatches("run", expectedJobId, runResult.data.status.job_id);
-    if (
-      runResult.data.collect !== null &&
-      runResult.data.collect !== undefined
-    ) {
-      assertJobIdMatches("run", expectedJobId, runResult.data.collect.job_id);
-      assertJobIdMatches(
-        "run",
-        expectedJobId,
-        runResult.data.collect.status.job_id,
-      );
-    }
-    return runResult.data;
-  }
-
   /**
    * Resolve a CrabrunnerStatus artifact/usage path. These are RELATIVE to the
    * job dir `<stateRoot>/jobs/<jobId>/`; absolute values are returned as-is.
@@ -947,6 +852,52 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     } catch {
       return false;
     }
+  }
+
+  private forgetLocalJob(jobId: string): void {
+    this.maxPollsByJob.delete(jobId);
+    this.livenessByJob.delete(jobId);
+  }
+
+  private async observeLiveness(
+    jobId: string,
+    status: CrabrunnerStatus,
+  ): Promise<void> {
+    const artifactPath = this.resolveJobPath(jobId, status.artifact_path);
+    if (artifactPath === null) {
+      return;
+    }
+    const extension = extname(artifactPath);
+    const basePath =
+      extension.length === 0
+        ? artifactPath
+        : artifactPath.slice(0, -extension.length);
+    const [heartbeatMtime, progressMtime] = await Promise.all([
+      fileMtimeIso(`${basePath}.heartbeat.json`),
+      fileMtimeIso(`${basePath}.progress.jsonl`),
+    ]);
+    if (heartbeatMtime === null && progressMtime === null) {
+      return;
+    }
+    const prior = this.livenessByJob.get(jobId) ?? {};
+    const lastHeartbeatAt =
+      heartbeatMtime === null
+        ? prior.lastHeartbeatAt
+        : latestIso(prior.lastHeartbeatAt, heartbeatMtime);
+    const lastProgressAt =
+      progressMtime === null
+        ? prior.lastProgressAt
+        : latestIso(prior.lastProgressAt, progressMtime);
+    if (
+      lastHeartbeatAt === prior.lastHeartbeatAt &&
+      lastProgressAt === prior.lastProgressAt
+    ) {
+      return;
+    }
+    this.livenessByJob.set(jobId, {
+      ...(lastHeartbeatAt === undefined ? {} : { lastHeartbeatAt }),
+      ...(lastProgressAt === undefined ? {} : { lastProgressAt }),
+    });
   }
 
   private async readUsage(
@@ -1238,23 +1189,60 @@ function normalizeToken(value: number | null | undefined): number | null {
   return Math.floor(value);
 }
 
-async function hashFile(path: string): Promise<string> {
-  const content = await readFile(path);
-  return createHash("sha256").update(content).digest("hex");
+async function fileMtimeIso(path: string): Promise<string | null> {
+  try {
+    const metadata = await stat(path);
+    return metadata.isFile() ? metadata.mtime.toISOString() : null;
+  } catch {
+    return null;
+  }
 }
 
-type CrabrunnerProgress = NonNullable<CrabrunnerTerminalEvidence["progress"]>;
+function latestIso(prior: string | undefined, observed: string): string {
+  return prior === undefined || observed > prior ? observed : prior;
+}
+
+type CrabrunnerProgress = CrabrunnerProgressEvidence;
 type CrabrunnerProcess = NonNullable<CrabrunnerTerminalEvidence["process"]>;
 
-function buildProgress(status: CrabrunnerStatus): CrabrunnerProgress | null {
-  if (status.heartbeat_seq === null || status.heartbeat_seq === undefined) {
+function buildProgress(
+  status: CrabrunnerStatus,
+  observed?: ObservedCrabrunnerLiveness,
+): CrabrunnerProgress | null {
+  const heartbeatCount = status.heartbeat_seq ?? undefined;
+  const lastHeartbeatAt =
+    observed?.lastHeartbeatAt ??
+    (heartbeatCount === undefined
+      ? undefined
+      : (status.updated_at ?? undefined));
+  const lastProgressAt = observed?.lastProgressAt;
+  if (
+    heartbeatCount === undefined &&
+    lastHeartbeatAt === undefined &&
+    lastProgressAt === undefined
+  ) {
     return null;
   }
   return {
-    heartbeatCount: status.heartbeat_seq,
-    ...(status.updated_at === null || status.updated_at === undefined
+    ...(heartbeatCount === undefined ? {} : { heartbeatCount }),
+    ...(lastHeartbeatAt === undefined ? {} : { lastHeartbeatAt }),
+    ...(lastProgressAt === undefined ? {} : { lastProgressAt }),
+  };
+}
+
+function buildObservedProgress(
+  observed: ObservedCrabrunnerLiveness | undefined,
+): CrabrunnerProgress | null {
+  if (observed === undefined) {
+    return null;
+  }
+  return {
+    ...(observed.lastHeartbeatAt === undefined
       ? {}
-      : { lastHeartbeatAt: status.updated_at }),
+      : { lastHeartbeatAt: observed.lastHeartbeatAt }),
+    ...(observed.lastProgressAt === undefined
+      ? {}
+      : { lastProgressAt: observed.lastProgressAt }),
   };
 }
 
@@ -1285,41 +1273,15 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   }
 }
 
-/**
- * Fail closed if a crabrunner response is for a different job than requested,
- * so a stale or misrouted response is never attributed to the wrong Symphony
- * job (Codex Track). No-op when no expected id is supplied (e.g. submit, where
- * the daemon assigns the id).
- */
-function assertJobIdMatches(
-  command: string,
-  expectedJobId: string | undefined,
-  actualJobId: string,
-): void {
-  if (expectedJobId === undefined) {
-    return;
-  }
-  if (actualJobId !== expectedJobId) {
-    throw new Error(
-      `crabrunner ${command} returned job_id "${actualJobId}" but expected "${expectedJobId}"`,
-    );
-  }
-}
-
-function parseJson(stdout: string, command: string): unknown {
-  const trimmed = stdout.trim();
-  if (trimmed.length === 0) {
-    throw new Error(`crabrunner ${command} produced empty stdout`);
-  }
-  try {
-    return JSON.parse(trimmed);
-  } catch (error) {
-    throw new Error(
-      `crabrunner ${command} produced unparseable stdout: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-  }
+function workspaceIdentity(spec: CrabrunnerJobSpec): Record<string, unknown> {
+  return {
+    runGroupId: spec.identity.runGroupId,
+    stageAttempt: spec.identity.stageAttempt,
+    idempotencyKey: spec.identity.idempotencyKey,
+    ...(spec.promptSha256 === undefined
+      ? {}
+      : { promptSha256: spec.promptSha256 }),
+  };
 }
 
 function buildJobId(spec: CrabrunnerJobSpec): string {

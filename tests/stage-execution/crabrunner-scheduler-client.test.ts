@@ -166,7 +166,12 @@ describe("CrabrunnerCliSchedulerClient.submit", () => {
       },
     );
 
-    await client.submit(createSpec({ promptFile: "/tmp/render/prompt.md" }));
+    await client.submit(
+      createSpec({
+        promptFile: "/tmp/render/prompt.md",
+        promptSha256: "rendered-prompt-sha256",
+      }),
+    );
 
     expect(manifestPath).not.toBeNull();
     expect(manifestContent).not.toBeNull();
@@ -185,6 +190,13 @@ describe("CrabrunnerCliSchedulerClient.submit", () => {
       workspace: TARGET_REPO_ROOT,
       prompt_file: "/tmp/render/prompt.md",
       thinking: "high",
+      workspace_identity: {
+        runGroupId: "rg-807",
+        stageAttempt: 0,
+        idempotencyKey:
+          "stage-execution:SYMPH-807:implement:0:crabrunner:1234567890abcdef1234",
+        promptSha256: "rendered-prompt-sha256",
+      },
     });
     expect(manifest.issue_ids).toEqual(["SYMPH-807"]);
     expect(typeof manifest.job_id).toBe("string");
@@ -362,6 +374,16 @@ describe("CrabrunnerCliSchedulerClient.submit", () => {
     expect(runCall.args[runCall.args.indexOf("--issue-ids-json") + 1]).toBe(
       JSON.stringify(["SYMPH-807"]),
     );
+    expect(
+      JSON.parse(
+        runCall.args[runCall.args.indexOf("--workspace-identity-json") + 1]!,
+      ),
+    ).toEqual({
+      runGroupId: "rg-807",
+      stageAttempt: 0,
+      idempotencyKey:
+        "stage-execution:SYMPH-807:implement:0:crabrunner:1234567890abcdef1234",
+    });
     expect(runCall.args[runCall.args.indexOf("--port") + 1]).toBe("2222");
     expect(runCall.args[runCall.args.indexOf("--work-root") + 1]).toBe(
       "/Users/ericlitman/.crabbox-static-work",
@@ -631,6 +653,41 @@ describe("CrabrunnerCliSchedulerClient.status", () => {
     await expect(client.status("j")).rejects.toThrow(/poll/i);
   });
 
+  it("derives the local status poll budget from the submitted lane timeout", async () => {
+    let statusCalls = 0;
+    const client = createClient(
+      staticCli({
+        submit: () =>
+          cliOk(
+            statusJson({
+              state: "queued",
+              job_id: "derived-budget",
+              collectible: false,
+            }),
+          ),
+        status: () => {
+          statusCalls += 1;
+          return cliOk(
+            statusJson({
+              state: "running",
+              job_id: "derived-budget",
+              collectible: false,
+            }),
+          );
+        },
+      }),
+      { pollIntervalMs: 1 },
+    );
+    const spec = createSpec();
+    spec.enforcement.timing.timeoutMs = 3;
+
+    await client.submit(spec);
+    await expect(client.status("derived-budget")).rejects.toThrow(
+      /within 7 status polls/,
+    );
+    expect(statusCalls).toBe(7);
+  });
+
   it("throws on non-zero status exit", async () => {
     const client = createClient(
       staticCli({ status: () => ({ stdout: "", stderr: "x", exitCode: 2 }) }),
@@ -638,6 +695,108 @@ describe("CrabrunnerCliSchedulerClient.status", () => {
     );
 
     await expect(client.status("j")).rejects.toThrow(/exit/i);
+  });
+
+  it("parses structured crabrunner error payloads from stdout on non-zero exit", async () => {
+    const client = createClient(
+      staticCli({
+        status: () => ({
+          stdout: JSON.stringify({
+            schema: "crucible.crabrunner.error.v1",
+            error_code: "admission_lock_timeout",
+            message: "admission lock remained held",
+            lock_path: "/tmp/admission.lock",
+          }),
+          stderr: "crabrunner: admission lock remained held",
+          exitCode: 1,
+        }),
+      }),
+      { pollIntervalMs: 0 },
+    );
+
+    await expect(client.status("j")).rejects.toThrow(
+      /admission_lock_timeout.*admission lock remained held.*lock_path/,
+    );
+  });
+
+  it("observes heartbeat and progress mtimes during polling and returns them as terminal evidence", async () => {
+    const { mkdtemp, mkdir, rm, utimes, writeFile } = await import(
+      "node:fs/promises"
+    );
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const stateRoot = await mkdtemp(join(tmpdir(), "crabrunner-liveness-"));
+    const artifactDir = join(
+      stateRoot,
+      "jobs",
+      "liveness-job",
+      "attempts",
+      "0",
+      "artifact",
+    );
+    await mkdir(artifactDir, { recursive: true });
+    const heartbeatPath = join(artifactDir, "implement.heartbeat.json");
+    const progressPath = join(artifactDir, "implement.progress.jsonl");
+    await writeFile(heartbeatPath, '{"seq":2}\n', "utf8");
+    await writeFile(progressPath, '{"seq":1}\n{"seq":2}\n', "utf8");
+    await utimes(
+      heartbeatPath,
+      new Date("2026-07-09T12:00:00.000Z"),
+      new Date("2026-07-09T12:00:00.000Z"),
+    );
+    await utimes(
+      progressPath,
+      new Date("2026-07-09T12:00:01.000Z"),
+      new Date("2026-07-09T12:00:01.000Z"),
+    );
+    const relativeArtifactPath = "attempts/0/artifact/implement.md";
+    const terminalStatus = statusObject({
+      state: "complete",
+      job_id: "liveness-job",
+      collectible: true,
+    });
+    let statusCalls = 0;
+    const client = createClient(
+      staticCli({
+        status: async () => {
+          statusCalls += 1;
+          if (statusCalls === 1) {
+            return cliOk(
+              statusJson({
+                state: "running",
+                job_id: "liveness-job",
+                collectible: false,
+                artifact_path: relativeArtifactPath,
+              }),
+            );
+          }
+          await rm(heartbeatPath, { force: true });
+          await rm(progressPath, { force: true });
+          return cliOk(JSON.stringify(terminalStatus));
+        },
+        collect: () =>
+          cliOk(
+            collectJson({
+              state: "complete",
+              status: terminalStatus,
+              archive_path: "/tmp/liveness-job.tgz",
+            }),
+          ),
+      }),
+      { pollIntervalMs: 0, stateRoot },
+    );
+
+    try {
+      await client.status("liveness-job");
+      const evidence = await client.collect("liveness-job");
+      expect(statusCalls).toBe(2);
+      expect(evidence.progress).toMatchObject({
+        lastHeartbeatAt: "2026-07-09T12:00:00.000Z",
+        lastProgressAt: "2026-07-09T12:00:01.000Z",
+      });
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+    }
   });
 
   it("throws on unparseable status stdout", async () => {
@@ -1648,6 +1807,84 @@ describe("CrabrunnerCliSchedulerClient end-to-end through the backend", () => {
     expect(recorder.invocations).toEqual([]);
   });
 
+  it("persists poll liveness when the local status budget is exhausted", async () => {
+    const { mkdtemp, mkdir, rm, utimes, writeFile } = await import(
+      "node:fs/promises"
+    );
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const stateRoot = await mkdtemp(join(tmpdir(), "crabrunner-timeout-"));
+    const artifactDir = join(
+      stateRoot,
+      "jobs",
+      "poll-timeout",
+      "attempts",
+      "0",
+      "artifact",
+    );
+    await mkdir(artifactDir, { recursive: true });
+    const heartbeatPath = join(artifactDir, "implement.heartbeat.json");
+    const progressPath = join(artifactDir, "implement.progress.jsonl");
+    await writeFile(heartbeatPath, '{"seq":1}\n', "utf8");
+    await writeFile(progressPath, '{"seq":1}\n', "utf8");
+    await utimes(
+      heartbeatPath,
+      new Date("2026-07-09T12:00:00.000Z"),
+      new Date("2026-07-09T12:00:00.000Z"),
+    );
+    await utimes(
+      progressPath,
+      new Date("2026-07-09T12:00:01.000Z"),
+      new Date("2026-07-09T12:00:01.000Z"),
+    );
+    const client = createClient(
+      staticCli({
+        submit: () =>
+          cliOk(
+            statusJson({
+              state: "queued",
+              job_id: "poll-timeout",
+              collectible: false,
+            }),
+          ),
+        status: () =>
+          cliOk(
+            statusJson({
+              state: "running",
+              job_id: "poll-timeout",
+              collectible: false,
+              artifact_path: "attempts/0/artifact/implement.md",
+            }),
+          ),
+      }),
+      { pollIntervalMs: 0, maxPolls: 1, stateRoot },
+    );
+    const backend = new CrabrunnerStageExecutionBackend({
+      client,
+      resolvePromptFile: () => "/tmp/prompt.md",
+    });
+
+    try {
+      const result = await backend.execute({
+        job: createJob(),
+        runnerInput: createRunnerInput(),
+      });
+
+      expect(result.evidence?.terminal).toMatchObject({
+        state: "runner_failed",
+        progress: {
+          lastHeartbeatAt: "2026-07-09T12:00:00.000Z",
+          lastProgressAt: "2026-07-09T12:00:01.000Z",
+        },
+      });
+      expect(result.result.liveSession.lastCodexMessage).toContain(
+        '"lastProgressAt":"2026-07-09T12:00:01.000Z"',
+      );
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
   it("produces a failed AgentRunResult when the lane reports a failed terminal", async () => {
     const fixture = await writeArtifactFixtures({ artifact: { ok: true } });
     const client = createClient(
@@ -1703,6 +1940,7 @@ function createClient(
     maxPolls?: number;
     now?: () => Date;
     crabrunnerVersion?: string;
+    stateRoot?: string;
   } = {},
 ): CrabrunnerCliSchedulerClient {
   return new CrabrunnerCliSchedulerClient({
@@ -1717,6 +1955,9 @@ function createClient(
     ...(overrides.crabrunnerVersion === undefined
       ? {}
       : { crabrunnerVersion: overrides.crabrunnerVersion }),
+    ...(overrides.stateRoot === undefined
+      ? {}
+      : { stateRoot: overrides.stateRoot }),
   });
 }
 
@@ -1894,6 +2135,7 @@ function cancelRequest(): CrabrunnerCancellationRequest {
 function createSpec(
   overrides: {
     promptFile?: string | null;
+    promptSha256?: string;
     reasoningEffort?: StageExecutionJobSpec["runner"]["reasoningEffort"];
   } = {},
 ): CrabrunnerJobSpec {
@@ -1917,7 +2159,13 @@ function createSpec(
   if (overrides.promptFile === null) {
     return base;
   }
-  return { ...base, promptFile: overrides.promptFile ?? "/tmp/prompt.md" };
+  return {
+    ...base,
+    promptFile: overrides.promptFile ?? "/tmp/prompt.md",
+    ...(overrides.promptSha256 === undefined
+      ? {}
+      : { promptSha256: overrides.promptSha256 }),
+  };
 }
 
 function nullTimeout(spec: CrabrunnerJobSpec): CrabrunnerJobSpec {

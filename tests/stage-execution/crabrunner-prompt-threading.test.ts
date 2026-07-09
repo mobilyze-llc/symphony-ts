@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -49,6 +50,14 @@ describe("crabrunner default prompt resolver (SYMPH-856)", () => {
     const contents = capture.promptContents() ?? "";
     expect(contents).toContain("Work on SYMPH-1: Thread the stage prompt");
     expect(contents).toContain("State: In Progress");
+    const promptSha256 = createHash("sha256").update(contents).digest("hex");
+    expect(manifest.workspace_identity).toMatchObject({
+      runGroupId: "rg-1",
+      stageAttempt: 0,
+      idempotencyKey: "stage-execution:SYMPH-1:implement:0:crabrunner:abcd",
+      promptSha256,
+    });
+    expect(result.evidence?.promptSha256).toBe(promptSha256);
   });
 
   it("renders the SUB-STAGE/stage prompt when runnerInput.stage.prompt is set, overriding the workflow promptTemplate", async () => {
@@ -456,6 +465,40 @@ describe("crabrunner default prompt resolver (SYMPH-856)", () => {
     expect(createdDirs.length).toBe(1);
     // The temp dir created by mkdtemp must have been removed despite the throw.
     expect(await pathExists(createdDirs[0] as string)).toBe(false);
+  });
+
+  it("fails closed and cleans up the rendered prompt when sha256 persistence fails", async () => {
+    const createdDirs: string[] = [];
+    const capture = createManifestCaptureCli();
+    const backend = createCrabrunnerStageExecutionBackend({
+      crucibleRoot: "/tmp/crucible",
+      targetRepoRoot: "/tmp/repo",
+      pollIntervalMs: 0,
+      cli: capture.cli,
+      promptRendering: {
+        promptTemplate: "Work on {{ issue.identifier }}",
+        workflowPath: "/tmp/workflow/WORKFLOW.md",
+      },
+      writePromptFile: async (path, contents) => {
+        createdDirs.push(dirname(path));
+        await writeFile(path, contents, "utf8");
+      },
+      hashPromptFile: async () => {
+        throw new Error("prompt hash unavailable");
+      },
+    });
+
+    const result = await backend.execute({
+      job: createJob(),
+      runnerInput: createRunnerInput(),
+    });
+
+    expect(result.result.runAttempt.error).toContain(
+      "crabrunner_prompt_hash_failed",
+    );
+    expect(capture.submitted()).toBe(false);
+    expect(createdDirs).toHaveLength(1);
+    expect(await pathExists(createdDirs[0]!)).toBe(false);
   });
 });
 

@@ -26,9 +26,11 @@ describe("createCrabrunnerStageExecutionBackend", () => {
 
   it("round-trips submit -> status -> collect through an injected fake cli", async () => {
     const usageDir = await mkdtemp(join(tmpdir(), "crabrunner-factory-"));
+    const promptPath = join(usageDir, "prompt.md");
     const artifactPath = join(usageDir, "artifact.json");
     const usagePath = join(usageDir, "usage.json");
     await writeFile(artifactPath, JSON.stringify({ ok: true }), "utf8");
+    await writeFile(promptPath, "factory round-trip prompt", "utf8");
     await writeFile(
       usagePath,
       JSON.stringify({
@@ -80,7 +82,7 @@ describe("createCrabrunnerStageExecutionBackend", () => {
       crucibleRoot: "/tmp/crucible",
       targetRepoRoot: "/tmp/repo",
       pollIntervalMs: 0,
-      resolvePromptFile: () => "/tmp/prompt.md",
+      resolvePromptFile: () => promptPath,
       cli,
     });
 
@@ -96,6 +98,7 @@ describe("createCrabrunnerStageExecutionBackend", () => {
       outputTokens: 4,
       totalTokens: 11,
     });
+    expect(result.evidence?.promptSha256).toHaveLength(64);
   });
 });
 

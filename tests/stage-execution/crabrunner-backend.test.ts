@@ -9,6 +9,7 @@ import {
   type CrabrunnerJobSpec,
   type CrabrunnerSchedulerClient,
   CrabrunnerStageExecutionBackend,
+  CrabrunnerStatusPollError,
   type CrabrunnerTerminalEvidence,
   createCrabrunnerJobSpec,
   validateCrabrunnerLaneEnforcementContract,
@@ -699,6 +700,39 @@ describe("CrabrunnerStageExecutionBackend", () => {
     );
     expect(result.evidence?.admission.reason).toContain(
       "crabrunner_unavailable",
+    );
+  });
+
+  it("persists the last poll liveness snapshot when status fails", async () => {
+    const client = createClient({
+      admission: { status: "accepted", jobId: "job-poll-timeout" },
+      terminal: { state: "succeeded" },
+    });
+    client.status = vi.fn(async () => {
+      throw new CrabrunnerStatusPollError(
+        new Error("did not become collectible within 7 status polls"),
+        {
+          lastHeartbeatAt: "2026-07-09T12:00:00.000Z",
+          lastProgressAt: "2026-07-09T12:00:01.000Z",
+        },
+      );
+    });
+    const backend = new CrabrunnerStageExecutionBackend({ client });
+
+    const result = await backend.execute({
+      job: createJob(),
+      runnerInput: createRunnerInput(),
+    });
+
+    expect(result.evidence?.terminal).toMatchObject({
+      state: "runner_failed",
+      progress: {
+        lastHeartbeatAt: "2026-07-09T12:00:00.000Z",
+        lastProgressAt: "2026-07-09T12:00:01.000Z",
+      },
+    });
+    expect(result.result.liveSession.lastCodexMessage).toContain(
+      '"lastHeartbeatAt":"2026-07-09T12:00:00.000Z"',
     );
   });
 

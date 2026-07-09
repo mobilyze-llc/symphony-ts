@@ -23,6 +23,7 @@ import {
   type CrabrunnerCli,
   CrabrunnerCliSchedulerClient,
 } from "./crabrunner-scheduler-client.js";
+import { fileSha256 } from "./file-sha256.js";
 
 /**
  * The minimal slice of {@link ResolvedWorkflowConfig} the default prompt
@@ -102,6 +103,8 @@ export interface CreateCrabrunnerStageExecutionBackendOptions {
    * consulted by the default resolver.
    */
   writePromptFile?: (path: string, contents: string) => Promise<void>;
+  /** Injected prompt hasher (tests); defaults to sha256 over the file bytes. */
+  hashPromptFile?: (path: string) => Promise<string> | string;
   /**
    * Explicit override for prompt-path resolution (SYMPH-856). Takes precedence
    * over the default renderer; pass undefined to use the default (rendering)
@@ -116,7 +119,10 @@ export interface CreateCrabrunnerStageExecutionBackendOptions {
   cli?: CrabrunnerCli;
   /** Status poll interval in ms (default 1000). */
   pollIntervalMs?: number;
-  /** Maximum number of status polls before failing closed (default 1800). */
+  /**
+   * Explicit maximum status-poll override. When absent, local polling derives
+   * its bounded budget from the submitted lane timeout.
+   */
   maxPolls?: number;
   /** Pass `--no-stage` to submit. */
   noStage?: boolean;
@@ -178,6 +184,7 @@ export function createCrabrunnerStageExecutionBackend(
     ...(prompt.cleanupPromptFile === undefined
       ? {}
       : { cleanupPromptFile: prompt.cleanupPromptFile }),
+    resolvePromptSha256: options.hashPromptFile ?? fileSha256,
     ...(options.now === undefined ? {} : { now: options.now }),
   });
 }
