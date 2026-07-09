@@ -198,6 +198,7 @@ describe("CrabrunnerStageExecutionBackend", () => {
   it.each([
     ["timed_out", "timed_out"],
     ["budget_exceeded", "failed"],
+    ["turn_cap_reached", "failed"],
     ["stalled", "stalled"],
     ["canceled", "canceled_by_reconciliation"],
     ["kill_failed", "failed"],

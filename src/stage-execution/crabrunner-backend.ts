@@ -26,6 +26,7 @@ export type CrabrunnerTerminalState =
   | "succeeded"
   | "timed_out"
   | "budget_exceeded"
+  | "turn_cap_reached"
   | "stalled"
   | "canceled"
   | "kill_failed"
@@ -613,6 +614,7 @@ function mapCrabrunnerTerminalStateToRunAttemptPhase(
     case "usage_unavailable":
       return "succeeded";
     case "budget_exceeded":
+    case "turn_cap_reached":
     case "kill_failed":
     case "enforcement_contract_missing":
     case "runner_failed":

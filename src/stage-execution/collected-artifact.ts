@@ -17,7 +17,7 @@ export type CollectedArtifact =
       reason: string;
     }
   | {
-      status: "missing" | "empty";
+      status: "missing" | "empty" | "invalid";
       jobId: string;
       entries: CollectedEntry[];
       reason: string;
@@ -68,7 +68,7 @@ export function readCollectedArtifact(
     }
     return malformed(jobId, entries);
   }
-  if (status === "empty" || status === "missing") {
+  if (status === "empty" || status === "missing" || status === "invalid") {
     return {
       status,
       jobId: stringOr(materialized.jobId ?? materialized.job_id, jobId),

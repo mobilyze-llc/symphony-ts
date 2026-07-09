@@ -1068,6 +1068,51 @@ describe("CrabrunnerCliSchedulerClient.collect", () => {
     });
   });
 
+  it("prefers canonical measurement_quality and ingests reasoning_output_tokens", async () => {
+    const client = createClient(
+      staticCli({
+        collect: () =>
+          cliOk(
+            collectJson({
+              state: "complete",
+              status: statusObject({
+                state: "complete",
+                job_id: "canonical-usage",
+                collectible: true,
+              }),
+              archive_path: "/tmp/canonical-usage.tgz",
+              materialized: materializedReady(
+                "canonical-usage",
+                "artifact/result.md",
+                "{}",
+                [
+                  usageEntry("attempts/01/artifact/result.usage.json", {
+                    schema: "crucible.lane-worker.usage.v2",
+                    measurement_quality: "true",
+                    measurement_kind: "proxy",
+                    input_tokens: 25,
+                    output_tokens: 10,
+                    total_tokens: 35,
+                    reasoning_output_tokens: 7,
+                  }),
+                ],
+              ),
+            }),
+          ),
+      }),
+    );
+
+    const evidence = await client.collect("canonical-usage");
+
+    expect(evidence.usage).toEqual({
+      status: "available",
+      inputTokens: 25,
+      outputTokens: 10,
+      totalTokens: 35,
+      reasoningTokens: 7,
+    });
+  });
+
   it("maps timed_out, stopped, and stopping states", async () => {
     for (const [state, expected] of [
       ["timed_out", "timed_out"],
@@ -1098,14 +1143,19 @@ describe("CrabrunnerCliSchedulerClient.collect", () => {
     }
   });
 
-  it("inspects error_code for failed jobs (budget/stall/kill)", async () => {
+  it("maps documented named failure and terminal codes without substring collisions", async () => {
     for (const [errorCode, expected] of [
       ["budget_exceeded", "budget_exceeded"],
-      ["stall_timeout", "stalled"],
-      ["kill_failed", "kill_failed"],
+      ["timeout", "timed_out"],
+      ["turn_cap_reached", "turn_cap_reached"],
+      ["cancellation", "canceled"],
+      ["artifact_parse_failure", "artifact_parse_failed"],
+      ["admission_lock_timeout", "runner_failed"],
+      ["staging_lock_timeout", "runner_failed"],
+      ["stall_timeout", "runner_failed"],
+      ["kill_failed", "runner_failed"],
       ["something_else", "runner_failed"],
     ] as const) {
-      const fixture = await writeArtifactFixtures({ artifact: { ok: true } });
       const client = createClient(
         staticCli({
           collect: () =>
@@ -1116,7 +1166,6 @@ describe("CrabrunnerCliSchedulerClient.collect", () => {
                   state: "failed",
                   job_id: "j",
                   collectible: true,
-                  artifact_path: fixture.artifactPath,
                   error_code: errorCode,
                 }),
                 archive_path: "/tmp/a.tgz",
