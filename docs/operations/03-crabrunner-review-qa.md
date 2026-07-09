@@ -15,6 +15,9 @@ work during that interval.
 ## Runtime Requirements
 
 - `SYMPHONY_CRABRUNNER_ROOT` points to the Crucible checkout with `bin/crabrunner`.
+- `SYMPHONY_CRABRUNNER_VERSION` names the exact staged runtime and defaults to
+  `dev`. `SYMPHONY_CRABRUNNER_STATE_ROOT` selects the readiness root and
+  defaults to `~/.crucible/crabrunner`.
 - `SYMPHONY_CRABRUNNER_TARGET_REPO` points to the product checkout when it
   differs from the process cwd or `REPO_URL`.
 - `SYMPHONY_CRABRUNNER_HOST`, `SYMPHONY_CRABRUNNER_REMOTE_USER`, and related
@@ -22,6 +25,21 @@ work during that interval.
 - The workflow has `review_execution.crabrunner_job_group.enabled: true`.
 - A `crabrunner` stage backend and review dispatcher are both wired. If either
   is missing, review fails closed and must not fall back to local review.
+
+`ops/symphony-deploy` runs the readiness phase before service activation:
+
+```bash
+"$SYMPHONY_CRABRUNNER_ROOT/bin/crabrunner" stage \
+  --version "${SYMPHONY_CRABRUNNER_VERSION:-dev}" \
+  --state-root "${SYMPHONY_CRABRUNNER_STATE_ROOT:-$HOME/.crucible/crabrunner}" \
+  --repo-root "$SYMPHONY_CRABRUNNER_ROOT"
+```
+
+Do not replace this phase with an executable-file check. A fresh state root
+rejects every normal submit with `staged_runtime_not_ready` until the exact
+version, binary path, and Crucible repo root have a readiness proof. Treat a
+staging failure as a deploy failure; do not start Symphony and wait for a worker
+submit to discover it.
 
 For the Claude crabrunner adapter, `input.workspace` is the authoritative target
 repo checkout. Production `schedulerOptions.targetRepoRoot` must resolve to the
