@@ -30,6 +30,8 @@ export function globToRegExp(glob) {
       out += char.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
     }
   }
+  // Repo-owned glob syntax is escaped above; no user-controlled regex reaches RegExp.
+  // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp
   return new RegExp(`${out}$`);
 }
 
@@ -188,6 +190,8 @@ export function evaluateGodFile({
   }
   for (const line of addedLines(oldContent, newContent)) {
     for (const pattern of pin.forbidden_new_patterns ?? []) {
+      // Patterns are code-reviewed architecture config, not runtime/user input.
+      // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp
       if (new RegExp(pattern.pattern).test(line)) {
         results.push(
           verdict({
