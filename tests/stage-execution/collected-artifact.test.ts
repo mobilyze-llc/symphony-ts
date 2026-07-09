@@ -52,6 +52,25 @@ describe("readCollectedArtifact", () => {
     });
   });
 
+  it("preserves producer-declared invalid materialization evidence", () => {
+    expect(
+      readCollectedArtifact({
+        job_id: "job-1",
+        materialized: {
+          status: "invalid",
+          jobId: "job-1",
+          reason: "entry_size_mismatch:artifact/result.md",
+          entries: [],
+        },
+      }),
+    ).toEqual({
+      status: "invalid",
+      jobId: "job-1",
+      entries: [],
+      reason: "entry_size_mismatch:artifact/result.md",
+    });
+  });
+
   it("preserves non-ready entries and oversize primary metadata", () => {
     expect(
       readCollectedArtifact({

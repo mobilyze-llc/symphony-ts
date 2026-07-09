@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 
 import { z } from "zod";
 
+import type { StageUsageMeasurementQuality } from "../domain/stage-usage.js";
 import {
   type CollectedArtifact,
   readCollectedArtifact,
@@ -222,7 +223,8 @@ const crabrunnerRunResultSchema = z
 type CrabrunnerRunResult = z.infer<typeof crabrunnerRunResultSchema>;
 
 // Two on-disk usage shapes both map here. The real model shape is the
-// `crucible.lane-worker.usage.v2` contract keyed by `measurement_kind` with
+// `crucible.lane-worker.usage.v2` contract keyed by canonical
+// `measurement_quality` (with `measurement_kind` as a compatibility alias) and
 // snake_case token fields. The simple/smoke shape is `{available:boolean,
 // reason?, inputTokens?, outputTokens?, totalTokens?}` (camelCase) used by
 // non-model smoke jobs. Both must map and must never produce a zero-token
@@ -231,6 +233,7 @@ type CrabrunnerRunResult = z.infer<typeof crabrunnerRunResultSchema>;
 const laneWorkerUsageSchema = z
   .object({
     schema: z.string().nullish(),
+    measurement_quality: z.string().nullish(),
     measurement_kind: z.string().nullish(),
     available: z.boolean().nullish(),
     reason: z.string().nullish(),
@@ -241,6 +244,7 @@ const laneWorkerUsageSchema = z
     cache_read_tokens: z.number().nullish(),
     cache_write_tokens: z.number().nullish(),
     no_cache_tokens: z.number().nullish(),
+    reasoning_output_tokens: z.number().nullish(),
     reasoning_tokens: z.number().nullish(),
     // simple/smoke camelCase token fields
     inputTokens: z.number().nullish(),
@@ -253,8 +257,41 @@ const laneWorkerUsageSchema = z
   })
   .passthrough();
 
-/** Measurement kinds that carry real (summable) token counts. */
-const SUMMABLE_MEASUREMENT_KINDS = new Set(["true", "estimated", "partial"]);
+/** Measurement qualities that carry real (summable) token counts. */
+const SUMMABLE_MEASUREMENT_QUALITIES = new Set<string>([
+  "true",
+  "estimated",
+  "partial",
+] satisfies readonly StageUsageMeasurementQuality[]);
+
+/**
+ * Named classes from Crucible's crabrunner execution contract. Keep this an
+ * exact lookup: substrate codes such as `admission_lock_timeout` are runner
+ * failures, not lane timeouts, while worker `timeout` is a terminal lane class.
+ */
+const CRABRUNNER_ERROR_CODE_TERMINAL_STATES: Readonly<
+  Record<string, CrabrunnerTerminalState>
+> = {
+  staged_runtime_not_ready: "runner_failed",
+  staging_lock_timeout: "runner_failed",
+  staging_build_failed: "runner_failed",
+  admission_lock_timeout: "runner_failed",
+  submit_or_worker_failure: "runner_failed",
+  timeout: "timed_out",
+  cancellation: "canceled",
+  artifact_parse_failure: "artifact_parse_failed",
+  workspace_materialization_failed: "runner_failed",
+  workspace_sync_apply_failed: "runner_failed",
+  workspace_sync_empty: "runner_failed",
+  worker_failure: "runner_failed",
+  dependency_failed: "runner_failed",
+  workspace_sync_missing: "runner_failed",
+  workspace_sync_unsupported: "runner_failed",
+  codex_stream_timeout_after_diff: "runner_failed",
+  provider_stream_error_after_diff: "runner_failed",
+  budget_exceeded: "budget_exceeded",
+  turn_cap_reached: "turn_cap_reached",
+};
 
 export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
   private readonly crucibleRoot: string;
@@ -1074,20 +1111,8 @@ function mapErrorCodeToTerminalState(
   if (errorCode === null || errorCode === undefined) {
     return "runner_failed";
   }
-  const normalized = errorCode.toLowerCase();
-  if (normalized.includes("budget")) {
-    return "budget_exceeded";
-  }
-  if (normalized.includes("stall")) {
-    return "stalled";
-  }
-  if (normalized.includes("timeout") || normalized.includes("timed_out")) {
-    return "timed_out";
-  }
-  if (normalized.includes("kill")) {
-    return "kill_failed";
-  }
-  return "runner_failed";
+  const normalized = errorCode.trim().toLowerCase();
+  return CRABRUNNER_ERROR_CODE_TERMINAL_STATES[normalized] ?? "runner_failed";
 }
 
 function mapLaneWorkerUsage(
@@ -1103,7 +1128,7 @@ function mapLaneWorkerUsage(
     };
   }
 
-  // v2 shape: schema-tagged with a measurement_kind that gates summability.
+  // v2 shape: schema-tagged with a measurement quality that gates summability.
   if (usage.schema !== undefined && usage.schema !== null) {
     if (usage.schema !== LANE_WORKER_USAGE_SCHEMA) {
       return {
@@ -1111,29 +1136,29 @@ function mapLaneWorkerUsage(
         reason: `unexpected usage schema "${usage.schema}"`,
       };
     }
-    const kind = usage.measurement_kind ?? "unknown";
-    if (!SUMMABLE_MEASUREMENT_KINDS.has(kind)) {
+    const quality = measurementQuality(usage) ?? "unknown";
+    if (!SUMMABLE_MEASUREMENT_QUALITIES.has(quality)) {
       // proxy / unsupported / unavailable / unknown — never sum diagnostics.
       return {
-        status: kind === "unknown" ? "unknown" : "unavailable",
-        reason: `usage measurement_kind "${kind}" is not a summable token count`,
+        status: quality === "unknown" ? "unknown" : "unavailable",
+        reason: `usage measurement quality "${quality}" is not a summable token count`,
       };
     }
   } else if (usage.available !== true) {
     // No schema tag and not an explicit available:true smoke payload: only
-    // treat as available when a measurement_kind explicitly permits it.
-    const kind = usage.measurement_kind;
-    if (kind === null || kind === undefined) {
+    // treat as available when a measurement quality explicitly permits it.
+    const quality = measurementQuality(usage);
+    if (quality === null || quality === undefined) {
       return {
         status: "unknown",
         reason:
-          "usage artifact had no schema, measurement_kind, or availability flag",
+          "usage artifact had no schema, measurement_quality/measurement_kind, or availability flag",
       };
     }
-    if (!SUMMABLE_MEASUREMENT_KINDS.has(kind)) {
+    if (!SUMMABLE_MEASUREMENT_QUALITIES.has(quality)) {
       return {
         status: "unavailable",
-        reason: `usage measurement_kind "${kind}" is not a summable token count`,
+        reason: `usage measurement quality "${quality}" is not a summable token count`,
       };
     }
   }
@@ -1176,9 +1201,17 @@ function mapLaneWorkerUsage(
     ),
     ...optionalUsageToken(
       "reasoningTokens",
-      usage.reasoning_tokens ?? usage.reasoningTokens,
+      usage.reasoning_output_tokens ??
+        usage.reasoning_tokens ??
+        usage.reasoningTokens,
     ),
   };
+}
+
+function measurementQuality(
+  usage: z.infer<typeof laneWorkerUsageSchema>,
+): string | null | undefined {
+  return usage.measurement_quality ?? usage.measurement_kind;
 }
 
 function optionalUsageToken(
