@@ -122,7 +122,6 @@ import type {
   ResolvedWorkflowConfig,
   ReviewerDefinition,
   StageDefinition,
-  StageTransitions,
   StageType,
   StagesConfig,
   WorkflowContinuousFeedbackEvent,

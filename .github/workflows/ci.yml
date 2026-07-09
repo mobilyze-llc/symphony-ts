@@ -34,6 +34,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Guard implementation correctness is blocking even while the measured
+      # architecture findings remain report-only (SYMPH-1073).
+      - name: Architecture guard self-tests
+        run: pnpm architecture:test
+
       - name: Lint
         run: pnpm lint
 
@@ -56,6 +61,52 @@ jobs:
 
       - name: Verify npm package contents
         run: npm pack --dry-run
+
+  # SYMPH-1073: mechanical anti-sprawl measurements opened 2026-07-09.
+  # Keep report-only through 2026-07-23, then inspect the actual PR stream and
+  # propose enforcement only for gates whose thresholds show no false positives.
+  architecture-report:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check generated CLI help blocks
+        run: pnpm build && pnpm docs:check
+
+      - name: Run anti-sprawl report
+        env:
+          ARCHITECTURE_CHECK_BASE_REF: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          BASE_REF="$ARCHITECTURE_CHECK_BASE_REF"
+          if [ -z "$BASE_REF" ] || [ "$BASE_REF" = "0000000000000000000000000000000000000000" ]; then
+            BASE_REF="HEAD^"
+          fi
+          node scripts/architecture/check-file-size-ratchet.mjs --base "$BASE_REF"
+          node scripts/architecture/check-god-files.mjs --base "$BASE_REF"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            node scripts/architecture/check-god-files.mjs --full-set
+          fi
+          node scripts/architecture/check-env-registry.mjs
+          node scripts/architecture/check-dead-exports.mjs
 
   # Warn-only during calibration (SYMPH-356): new/changed lines in src/ must
   # be exercised by tests (>= 70%). Flip to enforcing by removing

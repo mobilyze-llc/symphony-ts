@@ -12,9 +12,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
-  readdirSync,
   rmSync,
-  statSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -56,31 +54,6 @@ function runExtract(
     stdio: ["pipe", "pipe", "pipe"],
     timeout: EXTRACT_COMMAND_TIMEOUT_MS,
   });
-}
-
-function runExtractWithStderr(
-  symphonyHome: string,
-  logDir: string,
-  extraEnv: Record<string, string> = {},
-) {
-  const env = {
-    ...process.env,
-    SYMPHONY_HOME: symphonyHome,
-    SYMPHONY_LOG_DIR: logDir,
-    LINEAR_API_KEY: "", // Disable Linear for tests
-    ...extraEnv,
-  };
-  try {
-    const stdout = execFileSync(NODE_BIN, [SCRIPT_PATH, "extract"], {
-      env,
-      encoding: "utf-8",
-      timeout: EXTRACT_COMMAND_TIMEOUT_MS,
-    });
-    return { stdout, stderr: "" };
-  } catch (err: unknown) {
-    const e = err as { stdout?: string; stderr?: string };
-    return { stdout: e.stdout || "", stderr: e.stderr || "" };
-  }
 }
 
 function makeStageEvent(overrides: Record<string, unknown> = {}) {
@@ -1542,7 +1515,7 @@ describe("token-report.mjs slack", () => {
 
     const env: Record<string, string> = {};
     vi.stubEnv("SLACK_BOT_TOKEN", "");
-    const { exitCode, stderr } = runSlack(symphonyHome, env);
+    const { exitCode } = runSlack(symphonyHome, env);
 
     expect(exitCode).toBe(0);
     // stderr should contain warning (captured by parent process)

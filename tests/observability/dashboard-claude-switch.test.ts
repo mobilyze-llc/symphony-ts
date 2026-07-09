@@ -1,4 +1,4 @@
-import { type IncomingMessage, request as httpRequest } from "node:http";
+import { request as httpRequest } from "node:http";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -6,8 +6,6 @@ import type { RuntimeSnapshot } from "../../src/logging/runtime-snapshot.js";
 import type {
   DashboardServerHost,
   ExecCommandFn,
-  IssueDetailResponse,
-  RefreshResponse,
 } from "../../src/observability/dashboard-server.js";
 
 // Mock the claude-usage CLI helper so GET /api/v1/claude/usage works in tests

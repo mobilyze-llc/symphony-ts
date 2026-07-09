@@ -41,7 +41,6 @@ export type {
 } from "./plan-batch-contract.js";
 import {
   PLAN_BATCH_MODES,
-  PLAN_BATCH_STATUSES,
   type PlanBatch,
   type PlanBatchMode,
   type PlanBatchStatus,

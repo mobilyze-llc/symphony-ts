@@ -59,7 +59,7 @@ interface LinearGraphqlPageInfo {
   endCursor?: unknown;
 }
 
-interface LinearGraphqlConnection<TNode> {
+interface LinearGraphqlConnection<_TNode> {
   nodes?: unknown;
   pageInfo?: LinearGraphqlPageInfo | null;
 }
@@ -99,8 +99,6 @@ interface LinearCandidateData {
 }
 
 const TICKET_FEATURE_NESTED_CONNECTION_FIRST = 250;
-
-type LinearStatesData = LinearCandidateData;
 
 interface LinearIssueStatesData {
   issues?: {

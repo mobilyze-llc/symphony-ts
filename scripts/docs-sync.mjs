@@ -2,9 +2,8 @@
 // docs-sync (SYMPH-870): regenerate AUTOGEN blocks in operations docs from their
 // generated sources so the docs can never silently drift from the code.
 //
-// Today it syncs the `symphony-manager-plan` usage block in
-// docs/operations/02-symphony-manager-plan.md from the built CLI's `--help`
-// output (which is exactly `renderUsage()`).
+// It syncs every registered package CLI usage block from the built binary's
+// `--help` output. Add new package bins to HELP_TARGETS with their doc marker.
 //
 //   pnpm docs:sync     rewrite the block in place (after `pnpm build`)
 //   pnpm docs:check    exit non-zero if the block is stale (CI / gate helper)
@@ -19,12 +18,47 @@ import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** AUTOGEN markers delimiting the managed usage block. Edit `renderUsage()`, not the block. */
+/** Legacy manager-plan markers retained for the direct Vitest sync gate. */
 export const AUTOGEN = {
   start:
     "<!-- AUTOGEN:help START — managed by scripts/docs-sync.mjs; edit src/cli/manager-plan.ts renderUsage() -->",
   end: "<!-- AUTOGEN:help END -->",
 };
+
+const CLI_REFERENCE_DOC = "docs/operations/06-cli-reference.md";
+
+export const HELP_TARGETS = [
+  {
+    name: "symphony-manager-plan",
+    doc: "docs/operations/02-symphony-manager-plan.md",
+    cli: "dist/src/cli/manager-plan.js",
+    start: AUTOGEN.start,
+    end: AUTOGEN.end,
+  },
+  ...[
+    ["symphony", "dist/src/cli/main.js"],
+    ["symphony-backlog-audit", "dist/src/audit/backlog-audit-cli.js"],
+    ["symphony-calibration-digest", "dist/src/calibration/cli.js"],
+    ["claude-runner", "dist/src/cli/claude-runner.js"],
+    ["symphony-kimi-council-replay", "dist/src/cli/kimi-council-replay.js"],
+    ["symphony-manager-run-import", "dist/src/cli/manager-run-import.js"],
+    ["symphony-portfolio-audit", "dist/src/cli/portfolio-audit.js"],
+    ["symphony-portfolio-classify", "dist/src/cli/portfolio-classify.js"],
+    ["symphony-linear-portfolio", "dist/src/cli/linear-portfolio-write.js"],
+    [
+      "symphony-investigate-productivity-report",
+      "dist/src/cli/investigate-productivity-report.js",
+    ],
+    ["symphony-spec-review-watch", "dist/src/cli/spec-review-watch.js"],
+    ["symphonyctl", "dist/src/cli/symphonyctl.js"],
+  ].map(([name, cli]) => ({
+    name,
+    doc: CLI_REFERENCE_DOC,
+    cli,
+    start: `<!-- AUTOGEN:help:${name} START — managed by scripts/docs-sync.mjs -->`,
+    end: `<!-- AUTOGEN:help:${name} END -->`,
+  })),
+];
 
 /**
  * Replace the body between `start` and `end` markers (markers themselves are
@@ -49,38 +83,48 @@ export function helpBlock(helpText) {
 }
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const DOC = join(ROOT, "docs/operations/02-symphony-manager-plan.md");
-const CLI = join(ROOT, "dist/src/cli/manager-plan.js");
-
-function currentHelp() {
-  return execFileSync(process.execPath, [CLI, "--help"], { encoding: "utf8" });
+function currentHelp(target) {
+  return execFileSync(process.execPath, [join(ROOT, target.cli), "--help"], {
+    encoding: "utf8",
+  });
 }
 
 function run() {
   const check = process.argv.includes("--check");
-  const original = readFileSync(DOC, "utf8");
-  const updated = replaceAutogenRegion(
-    original,
-    AUTOGEN.start,
-    AUTOGEN.end,
-    helpBlock(currentHelp()),
-  );
-  if (updated === original) {
+  const documents = new Map();
+  for (const target of HELP_TARGETS) {
+    const path = join(ROOT, target.doc);
+    const original = documents.get(path) ?? readFileSync(path, "utf8");
+    documents.set(
+      path,
+      replaceAutogenRegion(
+        original,
+        target.start,
+        target.end,
+        helpBlock(currentHelp(target)),
+      ),
+    );
+  }
+  const stale = [];
+  for (const [path, updated] of documents) {
+    const original = readFileSync(path, "utf8");
+    if (updated === original) continue;
+    stale.push(path.slice(ROOT.length + 1));
+    if (!check) writeFileSync(path, updated);
+  }
+  if (stale.length === 0) {
     process.stdout.write(
-      "docs-sync: docs/operations/02-symphony-manager-plan.md is up to date\n",
+      `docs-sync: ${HELP_TARGETS.length} registered help blocks are up to date\n`,
     );
     return 0;
   }
   if (check) {
     process.stderr.write(
-      "docs-sync --check: docs/operations/02-symphony-manager-plan.md usage block is STALE.\nRun: pnpm build && pnpm docs:sync\n",
+      `docs-sync --check: stale help blocks in ${stale.join(", ")}\nRun: pnpm build && pnpm docs:sync\n`,
     );
     return 1;
   }
-  writeFileSync(DOC, updated);
-  process.stdout.write(
-    "docs-sync: updated docs/operations/02-symphony-manager-plan.md\n",
-  );
+  process.stdout.write(`docs-sync: updated ${stale.join(", ")}\n`);
   return 0;
 }
 

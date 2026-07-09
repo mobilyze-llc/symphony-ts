@@ -37,7 +37,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -1815,7 +1815,7 @@ function renderHtml(analysis) {
 
   // WoW deltas for KPIs
   const tokensDelta = es.total_tokens?.wow_delta_pct;
-  const stagesDelta = es.total_stages?.wow_delta_pct;
+  const _stagesDelta = es.total_stages?.wow_delta_pct;
 
   // Compute tokens-per-issue WoW delta
   const tokPerIssueWow = (() => {

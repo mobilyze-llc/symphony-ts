@@ -17,11 +17,13 @@ Shallow index of `docs/`. Loaded into every session via `@docs/README.md` in `CL
 - `docs/operations/03-crabrunner-review-qa.md` [CANONICAL] — Operator runbook for crabrunner-backed Symphony review and QA gates.
 - `docs/operations/04-symphony-worktree-reaper.md` [CANONICAL] — Operator runbook for safe stable-root `.worktrees/` and `.claude/worktrees/` cleanup via `ops/symphony-ctl prune-worktrees`.
 - `docs/operations/05-deploy.md` [CANONICAL] — Canonical map of the two deploy flows (`symphony-deploy` in-place vs `deploy-train.sh` detached) + the `symphony-ctl` root model and worktree guard. Records the SYMPH-708 decision.
+- `docs/operations/06-cli-reference.md` — Generated `--help` reference for every CLI shipped in `package.json#bin`.
 - `docs/operations/_TEMPLATE.md` — The operations-doc template. Source for every numbered operations doc.
 
 ## Reference specs (`docs/`)
 
 - `docs/DEV_GUIDE.md` — Developer onboarding/setup reference.
+- `docs/architecture-guardrails.md` — Mechanical anti-sprawl guard configuration, report-only ramp, and baseline-update rules.
 - `docs/WORKFLOW.template.md` — Canonical template for per-product `WORKFLOW.md` configs.
 - `docs/stage-provider-capabilities.md` — Source of truth for stage/provider capability matrix.
 - `docs/stage-usage-measurement.md` — Source of truth for stage usage/token measurement.

@@ -1,0 +1,18 @@
+{
+  "$schema": "./file-size-ratchet.schema.json",
+  "schema": "symphony.architecture.file-size-ratchet.v1",
+  "notes": [
+    "SYMPH-1073 report-only window opened 2026-07-09. On 2026-07-23, inspect the actual Symphony PR stream, validate the 350/600 thresholds against observed false positives, and only then propose blocking enforcement.",
+    "Only src/ is measured. Tests and generated declarations are exempt. Source modules at or above 600 lines may shrink or stay flat, but may not grow."
+  ],
+  "new_file_line_cap": 350,
+  "no_growth_line_threshold": 600,
+  "exempt_path_globs": [
+    "**/*.test.*",
+    "**/*.d.ts",
+    "**/__generated__/**",
+    "**/generated/**",
+    "**/*.generated.*"
+  ],
+  "waivers": []
+}

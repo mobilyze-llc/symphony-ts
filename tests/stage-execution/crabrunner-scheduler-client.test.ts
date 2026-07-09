@@ -146,7 +146,7 @@ describe("CrabrunnerCliSchedulerClient.submit", () => {
     let manifestPath: string | null = null;
     let manifestContent: string | null = null;
     const client = createClient(
-      async (args, opts) => {
+      async (args, _opts) => {
         const index = args.indexOf("--manifest-file");
         manifestPath = args[index + 1] ?? null;
         if (manifestPath !== null) {

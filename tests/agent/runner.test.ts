@@ -2471,7 +2471,7 @@ describe("AgentRunner", () => {
       createCodexClient: (input) => {
         let turn = 0;
         return {
-          async startSession({ prompt }: { prompt: string; title: string }) {
+          async startSession() {
             turn += 1;
             input.onEvent({
               event: "session_started",
@@ -2491,7 +2491,7 @@ describe("AgentRunner", () => {
               message: "Done with investigation.\n[STAGE_COMPLETE]",
             };
           },
-          async continueTurn(prompt: string) {
+          async continueTurn(_prompt: string) {
             turn += 1;
             input.onEvent({
               event: "session_started",
@@ -2671,7 +2671,7 @@ describe("AgentRunner", () => {
       createCodexClient: (input) => {
         let turn = 0;
         return {
-          async startSession({ prompt }: { prompt: string; title: string }) {
+          async startSession() {
             turn += 1;
             input.onEvent({
               event: "session_started",
@@ -2691,7 +2691,7 @@ describe("AgentRunner", () => {
               message: "Tests failed.\n[STAGE_FAILED: verify]\nSee logs.",
             };
           },
-          async continueTurn(prompt: string) {
+          async continueTurn(_prompt: string) {
             turn += 1;
             input.onEvent({
               event: "session_started",
