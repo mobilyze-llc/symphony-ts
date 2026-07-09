@@ -10,7 +10,6 @@ import type {
   CodeGroundingEvidenceEntry,
   CodeGroundingReport,
   CodeGroundingVerificationStatus,
-  RunCodeGroundingInput,
 } from "./code-grounding.js";
 import { extractExplicitGroundingClaims } from "./grounding-claims.js";
 import {

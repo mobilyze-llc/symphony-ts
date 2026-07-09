@@ -1,11 +1,10 @@
-import { type IncomingMessage, request as httpRequest } from "node:http";
+import { request as httpRequest } from "node:http";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { RuntimeSnapshot } from "../../src/logging/runtime-snapshot.js";
 import {
   type DashboardServerHost,
-  type PipelineStatusResponse,
   startDashboardServer,
 } from "../../src/observability/dashboard-server.js";
 

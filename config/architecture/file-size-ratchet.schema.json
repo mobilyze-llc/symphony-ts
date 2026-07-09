@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://symphony.local/architecture/file-size-ratchet.schema.json",
+  "title": "Architecture file-size ratchet",
+  "type": "object",
+  "required": [
+    "$schema",
+    "schema",
+    "new_file_line_cap",
+    "no_growth_line_threshold",
+    "exempt_path_globs",
+    "waivers"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "schema": { "const": "symphony.architecture.file-size-ratchet.v1" },
+    "notes": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "new_file_line_cap": { "type": "integer", "minimum": 1 },
+    "no_growth_line_threshold": { "type": "integer", "minimum": 1 },
+    "exempt_path_globs": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "waivers": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/waiver" }
+    }
+  },
+  "$defs": {
+    "waiver": {
+      "type": "object",
+      "required": ["path", "reason", "expires"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "rule": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "minLength": 1 },
+        "expires": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" }
+      }
+    }
+  }
+}

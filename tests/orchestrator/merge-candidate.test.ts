@@ -2689,7 +2689,7 @@ describe("merge actuator late-rework dequeue + reconciliation (SYMPH-766)", () =
   });
 
   it("parks as cannot_dequeue when disable_auto_merge fails to the ceiling", async () => {
-    const { journal, candidate } = enqueuedCandidateJournal();
+    const { journal } = enqueuedCandidateJournal();
     const harness = makeJournalHarness(journal);
     const limits = { maxLiveStateFailures: 3, maxSideEffectFailures: 2 };
     let lastResult: MergeActuatorCycleResult | null = null;

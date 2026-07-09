@@ -9190,7 +9190,7 @@ describe("pipeline notifications", () => {
     tracker.setStateSnapshots([
       { id: "1", identifier: "ISSUE-1", state: "In Progress" },
     ]);
-    const reconcileTick = await host.pollOnce();
+    const _reconcileTick = await host.pollOnce();
 
     // Manually mark this as a stall_timeout stop request to simulate the flow
     // biome-ignore lint/suspicious/noExplicitAny: accessing private field for test setup

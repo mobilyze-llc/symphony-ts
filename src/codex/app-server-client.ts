@@ -1972,7 +1972,7 @@ function isStringArray(value: unknown): value is string[] {
 }
 
 function isApprovalRequest(
-  message: JsonObject,
+  _message: JsonObject,
   method: string | null,
 ): boolean {
   if (method === null) {
@@ -1984,7 +1984,7 @@ function isApprovalRequest(
 }
 
 function isToolCallRequest(
-  message: JsonObject,
+  _message: JsonObject,
   method: string | null,
 ): boolean {
   if (method === null) {

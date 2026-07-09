@@ -8,11 +8,9 @@ import type {
 } from "../../src/config/types.js";
 import type { ExecutionHistory, Issue } from "../../src/domain/model.js";
 import {
-  type AggregateVerdict,
   type CreateReviewerClient,
   type EnsembleGateResult,
   type PostComment,
-  RATE_LIMIT_PATTERNS,
   type ReviewerResult,
   aggregateVerdicts,
   formatExecutionReport,
@@ -544,7 +542,7 @@ describe("ensemble gate orchestrator integration", () => {
         workerHandle: { pid: 1 },
         monitorHandle: { ref: "m" },
       }),
-      runEnsembleGate: async ({ issue, stage }) => {
+      runEnsembleGate: async () => {
         const result: EnsembleGateResult = {
           aggregate: "pass",
           results: [],

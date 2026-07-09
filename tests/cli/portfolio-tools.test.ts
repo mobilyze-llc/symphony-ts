@@ -6,10 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import { runPortfolioAuditCli } from "../../src/cli/portfolio-audit.js";
 import { runPortfolioClassifyCli } from "../../src/cli/portfolio-classify.js";
-import {
-  PORTFOLIO_INTAKE_PROJECT,
-  PORTFOLIO_TAXONOMY_PROJECTS,
-} from "../../src/portfolio/taxonomy.js";
+import { PORTFOLIO_TAXONOMY_PROJECTS } from "../../src/portfolio/taxonomy.js";
 
 describe("portfolio CLI tools", () => {
   const taxonomyProject = PORTFOLIO_TAXONOMY_PROJECTS.find(

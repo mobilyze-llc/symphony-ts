@@ -59,13 +59,16 @@
     "lint": "biome check .",
     "format": "biome format --write .",
     "docs:sync": "node scripts/docs-sync.mjs",
-    "docs:check": "node scripts/docs-sync.mjs --check"
+    "docs:check": "node scripts/docs-sync.mjs --check",
+    "architecture:test": "node --test scripts/architecture/index.js",
+    "architecture:check": "node scripts/architecture/check-file-size-ratchet.mjs && node scripts/architecture/check-god-files.mjs && node scripts/architecture/check-env-registry.mjs && node scripts/architecture/check-dead-exports.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
     "@types/node": "^22.13.14",
     "@vitest/coverage-v8": "4.1.8",
     "jsdom": "^29.0.1",
+    "knip": "^6.25.0",
     "typescript": "^5.8.2",
     "vitest": "^4.1.8"
   },

@@ -1,0 +1,533 @@
+{
+  "$schema": "./env-registry.schema.json",
+  "schema": "symphony.architecture.env-registry.v1",
+  "notes": [
+    "SYMPH-1073 report-only window opened 2026-07-09. Review new-read findings on 2026-07-23; propose blocking only if the registry captures legitimate read-site moves without false positives.",
+    "This is a baseline, not an allowlist of approved configuration design. New named process.env read sites must be registered explicitly."
+  ],
+  "reads": [
+    {
+      "name": "ARCHITECTURE_CHECK_BASE_REF",
+      "read_sites": [
+        "scripts/architecture/check-file-size-ratchet.mjs",
+        "scripts/architecture/check-god-files.mjs"
+      ]
+    },
+    {
+      "name": "ARCHITECTURE_CHECK_BASE_SHA",
+      "read_sites": [
+        "scripts/architecture/check-file-size-ratchet.mjs",
+        "scripts/architecture/check-god-files.mjs"
+      ]
+    },
+    {
+      "name": "BASE_URL",
+      "read_sites": ["ops/token-report.mjs"]
+    },
+    {
+      "name": "CHANNEL_PROJECT_MAP",
+      "read_sites": ["src/slack-bot/server.ts"]
+    },
+    {
+      "name": "CLAUDE_MODEL",
+      "read_sites": ["src/slack-bot/server.ts"]
+    },
+    {
+      "name": "CMUX_SPAWN_BIN",
+      "read_sites": ["src/claude-runner/cmux-claude-runner.ts"]
+    },
+    {
+      "name": "CODEX_HOME",
+      "read_sites": [
+        "scripts/probe-codex-skills.mjs",
+        "src/codex/app-server-client.ts"
+      ]
+    },
+    {
+      "name": "DRY_RUN",
+      "read_sites": ["ops/token-report.mjs"]
+    },
+    {
+      "name": "GITHUB_OUTPUT",
+      "read_sites": ["scripts/post-merge-gate.mjs"]
+    },
+    {
+      "name": "GITHUB_STEP_SUMMARY",
+      "read_sites": [
+        "scripts/ci/diff-coverage.mjs",
+        "scripts/post-merge-gate.mjs"
+      ]
+    },
+    {
+      "name": "KIMI_CLI_BIN",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "LINEAR_API_KEY",
+      "read_sites": [
+        "ops/token-report.mjs",
+        "src/cli/manager-plan.ts",
+        "src/orchestrator/planner-grounding.ts"
+      ]
+    },
+    {
+      "name": "LINEAR_ENDPOINT",
+      "read_sites": [
+        "scripts/post-merge-gate.mjs",
+        "src/cli/manager-plan.ts",
+        "src/orchestrator/planner-grounding.ts"
+      ]
+    },
+    {
+      "name": "LINEAR_PIPELINE_HALT_LABEL",
+      "read_sites": ["scripts/post-merge-gate.mjs"]
+    },
+    {
+      "name": "LINEAR_TEAM_KEY",
+      "read_sites": ["scripts/post-merge-gate.mjs"]
+    },
+    {
+      "name": "LOCAL_LLM_API_KEY",
+      "read_sites": ["src/orchestrator/grounding-extractor.ts"]
+    },
+    {
+      "name": "NODE_ENV",
+      "read_sites": ["src/domain/plan-batch.ts"]
+    },
+    {
+      "name": "POST_MERGE_GATE_PR_NUMBER",
+      "read_sites": ["scripts/post-merge-gate.mjs"]
+    },
+    {
+      "name": "POST_MERGE_GATE_TODAY",
+      "read_sites": ["scripts/post-merge-gate.mjs"]
+    },
+    {
+      "name": "REPO_URL",
+      "read_sites": [
+        "src/claude-runner/crabrunner-claude-runner.ts",
+        "src/cli/main.ts",
+        "src/observability/dashboard-server.ts"
+      ]
+    },
+    {
+      "name": "SLACK_APP_TOKEN",
+      "read_sites": ["src/slack-bot/server.ts"]
+    },
+    {
+      "name": "SLACK_BOT_TOKEN",
+      "read_sites": [
+        "ops/token-report.mjs",
+        "src/cli/main.ts",
+        "src/slack-bot/server.ts"
+      ]
+    },
+    {
+      "name": "SLACK_CHANNEL_ID",
+      "read_sites": ["ops/token-report.mjs"]
+    },
+    {
+      "name": "STEP_BUILD_OUTCOME",
+      "read_sites": ["scripts/post-merge-gate.mjs"]
+    },
+    {
+      "name": "STEP_CALVER_OUTCOME",
+      "read_sites": ["scripts/post-merge-gate.mjs"]
+    },
+    {
+      "name": "STEP_LINT_OUTCOME",
+      "read_sites": ["scripts/post-merge-gate.mjs"]
+    },
+    {
+      "name": "STEP_TEST_OUTCOME",
+      "read_sites": ["scripts/post-merge-gate.mjs"]
+    },
+    {
+      "name": "STEP_TYPECHECK_OUTCOME",
+      "read_sites": ["scripts/post-merge-gate.mjs"]
+    },
+    {
+      "name": "SYMPHONY_BASE_BRANCH",
+      "read_sites": ["src/agent/runner.ts", "src/orchestrator/runtime-host.ts"]
+    },
+    {
+      "name": "SYMPHONY_CLAUDE_SKILLS_DIR",
+      "read_sites": ["scripts/validate-skill-installs.mjs"]
+    },
+    {
+      "name": "SYMPHONY_CMUX_SPAWN_SKILL_SOURCE",
+      "read_sites": ["scripts/validate-skill-installs.mjs"]
+    },
+    {
+      "name": "SYMPHONY_CODEX_SKILLS_DIR",
+      "read_sites": ["scripts/validate-skill-installs.mjs"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_ACCEPT_NARROW_RISK",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_ACCEPT_NARROWER_RISK",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_AUTHOR_FAMILY",
+      "read_sites": ["src/review/crabrunner-review-dispatcher.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_CLAUDE_ALLOWED_TOOLS",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_CLAUDE_MODEL",
+      "read_sites": [
+        "src/orchestrator/runtime-host.ts",
+        "src/review/headless-council-gate.ts"
+      ]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_CLAUDE_PROFILE",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_CODEX_EXCAVATION_ENABLED",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_CODEX_EXCAVATION_MODEL",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_CODEX_EXCAVATION_MODEL_AUTO_COMPACT_TOKEN_LIMIT",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_CODEX_EXCAVATION_REASONING_EFFORT",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_CODEX_EXCAVATION_SWEEP",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_CODEX_EXCAVATION_TIMEOUT_SECONDS",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_CODEX_EXCAVATION_TOOL_OUTPUT_TOKEN_LIMIT",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_FORCE_LEGACY",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_FORCE_OPUS",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_JUDGE_FAMILY",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_KIMI_LANE_ID",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_KIMI_MODEL",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_KIMI_ROLE",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_KIMI_TIMEOUT_SECONDS",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_LEAD_CONFIDENCE_THRESHOLD",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_OPERATOR_OVERRIDE_REASON",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_PI_MODEL",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_PI_PROVIDER",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_PI_THINKING",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_PI_TOOLS",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_REVIEW_ROUTING_MODE",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_COUNCIL_ROUTING_MODE",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_CRABRUNNER_CRABBOX_BIN",
+      "read_sites": [
+        "src/claude-runner/crabrunner-claude-runner.ts",
+        "src/cli/main.ts"
+      ]
+    },
+    {
+      "name": "SYMPHONY_CRABRUNNER_HOST",
+      "read_sites": [
+        "src/claude-runner/crabrunner-claude-runner.ts",
+        "src/cli/main.ts"
+      ]
+    },
+    {
+      "name": "SYMPHONY_CRABRUNNER_REMOTE_ARTIFACT_DIR",
+      "read_sites": [
+        "src/claude-runner/crabrunner-claude-runner.ts",
+        "src/cli/main.ts"
+      ]
+    },
+    {
+      "name": "SYMPHONY_CRABRUNNER_REMOTE_PORT",
+      "read_sites": [
+        "src/claude-runner/crabrunner-claude-runner.ts",
+        "src/cli/main.ts"
+      ]
+    },
+    {
+      "name": "SYMPHONY_CRABRUNNER_REMOTE_STATE_ROOT",
+      "read_sites": [
+        "src/claude-runner/crabrunner-claude-runner.ts",
+        "src/cli/main.ts"
+      ]
+    },
+    {
+      "name": "SYMPHONY_CRABRUNNER_REMOTE_USER",
+      "read_sites": [
+        "src/claude-runner/crabrunner-claude-runner.ts",
+        "src/cli/main.ts"
+      ]
+    },
+    {
+      "name": "SYMPHONY_CRABRUNNER_REMOTE_WORK_ROOT",
+      "read_sites": [
+        "src/claude-runner/crabrunner-claude-runner.ts",
+        "src/cli/main.ts"
+      ]
+    },
+    {
+      "name": "SYMPHONY_CRABRUNNER_ROOT",
+      "read_sites": [
+        "src/claude-runner/crabrunner-claude-runner.ts",
+        "src/cli/main.ts"
+      ]
+    },
+    {
+      "name": "SYMPHONY_CRABRUNNER_STATE_ROOT",
+      "read_sites": [
+        "src/claude-runner/crabrunner-claude-runner.ts",
+        "src/cli/main.ts"
+      ]
+    },
+    {
+      "name": "SYMPHONY_CRABRUNNER_TARGET_REPO",
+      "read_sites": [
+        "src/claude-runner/crabrunner-claude-runner.ts",
+        "src/cli/main.ts"
+      ]
+    },
+    {
+      "name": "SYMPHONY_CRABRUNNER_VERSION",
+      "read_sites": [
+        "src/claude-runner/crabrunner-claude-runner.ts",
+        "src/cli/main.ts"
+      ]
+    },
+    {
+      "name": "SYMPHONY_GROUNDING_EXTRACTOR_API_KEY",
+      "read_sites": ["src/orchestrator/grounding-extractor.ts"]
+    },
+    {
+      "name": "SYMPHONY_GROUNDING_EXTRACTOR_BASE_URL",
+      "read_sites": ["src/orchestrator/grounding-extractor.ts"]
+    },
+    {
+      "name": "SYMPHONY_GROUNDING_EXTRACTOR_TIMEOUT_MS",
+      "read_sites": ["src/orchestrator/grounding-extractor.ts"]
+    },
+    {
+      "name": "SYMPHONY_HOME",
+      "read_sites": ["ops/token-report.mjs"]
+    },
+    {
+      "name": "SYMPHONY_LEGACY_REVIEW_SPAWN_BIN",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_LINEAR_WEBHOOK_SECRET",
+      "read_sites": ["src/observability/dashboard-server.ts"]
+    },
+    {
+      "name": "SYMPHONY_LOG_DIR",
+      "read_sites": ["ops/token-report.mjs"]
+    },
+    {
+      "name": "SYMPHONY_OPERATOR_TOKEN",
+      "read_sites": [
+        "src/cli/symphonyctl.ts",
+        "src/observability/dashboard-server.ts"
+      ]
+    },
+    {
+      "name": "SYMPHONY_QUEUE_AUDIT_API_KEY",
+      "read_sites": [
+        "src/audit/backlog-audit-cli.ts",
+        "src/orchestrator/runtime-host.ts"
+      ]
+    },
+    {
+      "name": "SYMPHONY_QUEUE_AUDIT_BASE_URL",
+      "read_sites": [
+        "src/audit/backlog-audit-cli.ts",
+        "src/orchestrator/runtime-host.ts"
+      ]
+    },
+    {
+      "name": "SYMPHONY_QUEUE_AUDIT_CHUNK_SIZE",
+      "read_sites": ["src/audit/backlog-audit-cli.ts"]
+    },
+    {
+      "name": "SYMPHONY_QUEUE_AUDIT_MAX_ISSUE_DESCRIPTION_CHARS",
+      "read_sites": [
+        "src/audit/backlog-audit-cli.ts",
+        "src/orchestrator/runtime-host.ts"
+      ]
+    },
+    {
+      "name": "SYMPHONY_QUEUE_AUDIT_MAX_STATE_BYTES",
+      "read_sites": [
+        "src/audit/backlog-audit-cli.ts",
+        "src/orchestrator/runtime-host.ts"
+      ]
+    },
+    {
+      "name": "SYMPHONY_QUEUE_AUDIT_MAX_STATE_DELTA_BYTES",
+      "read_sites": [
+        "src/audit/backlog-audit-cli.ts",
+        "src/orchestrator/runtime-host.ts"
+      ]
+    },
+    {
+      "name": "SYMPHONY_QUEUE_AUDIT_MAX_STATE_DELTA_ENTRIES",
+      "read_sites": [
+        "src/audit/backlog-audit-cli.ts",
+        "src/orchestrator/runtime-host.ts"
+      ]
+    },
+    {
+      "name": "SYMPHONY_QUEUE_AUDIT_MODEL",
+      "read_sites": [
+        "src/audit/backlog-audit-cli.ts",
+        "src/orchestrator/runtime-host.ts"
+      ]
+    },
+    {
+      "name": "SYMPHONY_QUEUE_AUDIT_RELATIONSHIP_CONTEXT_WINDOW_SIZE",
+      "read_sites": ["src/audit/backlog-audit-cli.ts"]
+    },
+    {
+      "name": "SYMPHONY_QUEUE_AUDIT_TIMEOUT_MS",
+      "read_sites": ["src/orchestrator/runtime-host.ts"]
+    },
+    {
+      "name": "SYMPHONY_QUEUE_HYGIENE_HEARTBEAT_MS",
+      "read_sites": ["src/orchestrator/runtime-host.ts"]
+    },
+    {
+      "name": "SYMPHONY_QUEUE_HYGIENE_MAX_PROPOSALS_PER_POLL",
+      "read_sites": ["src/orchestrator/runtime-host.ts"]
+    },
+    {
+      "name": "SYMPHONY_REVIEW_AGGREGATOR_AUTHORITATIVE",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_REVIEW_AGGREGATOR_CAPTURE",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_REVIEW_PARSE_LEGACY_SECTIONS",
+      "read_sites": ["src/review/headless-council-gate.ts"]
+    },
+    {
+      "name": "SYMPHONY_REVIEW_QUALITY_LEDGER",
+      "read_sites": ["src/review/spine/review-quality-ledger-client.ts"]
+    },
+    {
+      "name": "SYMPHONY_REVIEW_QUALITY_LEDGER_PATH",
+      "read_sites": ["src/review/spine/review-quality-ledger-client.ts"]
+    },
+    {
+      "name": "SYMPHONY_REVIEW_SPINE_PATH",
+      "read_sites": [
+        "src/review/spine/crabbox-spine-client.ts",
+        "src/review/spine/gate-aggregator-capture.ts"
+      ]
+    },
+    {
+      "name": "SYMPHONY_SKILL_REPO_ROOT",
+      "read_sites": ["scripts/validate-skill-installs.mjs"]
+    },
+    {
+      "name": "SYMPHONY_SKIP_BRANCH_PRUNE",
+      "read_sites": ["src/orchestrator/runtime-host.ts"]
+    },
+    {
+      "name": "SYMPHONY_SLACK_WEBHOOK_URL",
+      "read_sites": ["src/cli/main.ts"]
+    },
+    {
+      "name": "SYMPHONY_SPEC_FIDELITY_MODEL",
+      "read_sites": ["src/orchestrator/runtime-host.ts"]
+    },
+    {
+      "name": "SYMPHONY_STABLE_ROOT",
+      "read_sites": ["scripts/validate-skill-installs.mjs"]
+    },
+    {
+      "name": "SYMPHONY_USER_SKILLS_DIR",
+      "read_sites": ["scripts/validate-skill-installs.mjs"]
+    },
+    {
+      "name": "SYMPHONY_VALIDATION_LOG_DIR",
+      "read_sites": ["scripts/symphony-run-logged.mjs"]
+    },
+    {
+      "name": "SYMPHONYCTL_BASE_URL",
+      "read_sites": ["src/cli/symphonyctl.ts"]
+    },
+    {
+      "name": "TOKEN_REPORT_LLM",
+      "read_sites": ["ops/token-report.mjs"]
+    },
+    {
+      "name": "TOKEN_REPORT_PORT",
+      "read_sites": ["ops/token-report.mjs"]
+    }
+  ]
+}

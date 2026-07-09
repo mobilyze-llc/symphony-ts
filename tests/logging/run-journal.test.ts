@@ -4,10 +4,7 @@ import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
-import type {
-  DispatcherRunJournal,
-  DispatcherRunJournalEntry,
-} from "../../src/domain/model.js";
+import type { DispatcherRunJournalEntry } from "../../src/domain/model.js";
 import {
   type DispatcherRunJournalEntryDraft,
   appendDispatcherRunJournalEntryToDisk,

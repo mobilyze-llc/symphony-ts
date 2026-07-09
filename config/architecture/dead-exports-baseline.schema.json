@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://symphony.local/architecture/dead-exports-baseline.schema.json",
+  "title": "Knip dead-export baseline",
+  "type": "object",
+  "required": ["$schema", "schema", "issues"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "schema": { "const": "symphony.architecture.dead-exports.v1" },
+    "notes": { "type": "array", "items": { "type": "string" } },
+    "issues": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}
