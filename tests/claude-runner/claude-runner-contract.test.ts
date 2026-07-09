@@ -91,4 +91,10 @@ describe("Claude runner artifact contract", () => {
     );
     expect(extractVerdictEnum("Status: complete")).toBeNull();
   });
+
+  it("parses headings with long whitespace runs", () => {
+    const artifact = `##${" ".repeat(100_000)}Verdict\n\nREADY_AS_WRITTEN`;
+
+    expect(extractVerdictEnum(artifact)).toBe("ready_as_written");
+  });
 });

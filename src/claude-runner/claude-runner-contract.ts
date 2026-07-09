@@ -339,11 +339,22 @@ function nextFenceState(
 function parseMarkdownHeading(
   line: string,
 ): { level: number; text: string } | null {
-  const match = /^(#{1,6})\s+(.+?)\s*$/.exec(line.trim());
-  if (match?.[1] === undefined || match[2] === undefined) {
+  const trimmed = line.trim();
+  let level = 0;
+  while (level < 6 && trimmed[level] === "#") {
+    level += 1;
+  }
+  if (level === 0 || trimmed[level] === "#" || !isWhitespace(trimmed[level])) {
     return null;
   }
-  let text = match[2];
+  let contentStart = level;
+  while (isWhitespace(trimmed[contentStart])) {
+    contentStart += 1;
+  }
+  let text = trimmed.slice(contentStart).trimEnd();
+  if (text === "") {
+    return null;
+  }
   let closingStart = text.length;
   while (closingStart > 0 && text[closingStart - 1] === "#") {
     closingStart -= 1;
@@ -355,7 +366,11 @@ function parseMarkdownHeading(
   ) {
     text = text.slice(0, closingStart).trimEnd();
   }
-  return { level: match[1].length, text };
+  return { level, text };
+}
+
+function isWhitespace(value: string | undefined): boolean {
+  return value !== undefined && /\s/u.test(value);
 }
 
 function parseJsonFenceOpening(line: string): MarkdownFence | null {
