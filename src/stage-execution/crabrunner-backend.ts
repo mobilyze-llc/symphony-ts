@@ -68,6 +68,8 @@ export interface CrabrunnerJobSpec {
     url: string | null;
   };
   promptFile?: string;
+  /** Hash of the rendered prompt bytes retained after the temp file is removed. */
+  promptSha256?: string;
 }
 
 export interface CrabrunnerAdmissionResult {
@@ -85,14 +87,7 @@ export interface CrabrunnerTerminalEvidence {
   workspacePath?: string | null;
   usage?: CrabrunnerUsage | null;
   message?: string | null;
-  progress?: {
-    heartbeatCount?: number;
-    progressEventCount?: number;
-    usageEventCount?: number;
-    lastHeartbeatAt?: string | null;
-    lastProgressAt?: string | null;
-    lastUsageAt?: string | null;
-  } | null;
+  progress?: CrabrunnerProgressEvidence | null;
   process?: {
     pid?: number | null;
     processGroupId?: number | null;
@@ -106,6 +101,33 @@ export interface CrabrunnerTerminalEvidence {
   } | null;
 }
 
+export interface CrabrunnerProgressEvidence {
+  heartbeatCount?: number;
+  progressEventCount?: number;
+  usageEventCount?: number;
+  lastHeartbeatAt?: string | null;
+  lastProgressAt?: string | null;
+  lastUsageAt?: string | null;
+}
+
+/**
+ * A scheduler status failure carrying the last liveness evidence observed
+ * before polling failed. The backend persists this snapshot with runner_failed
+ * evidence, so timeout/debugging signals survive in-memory job cleanup.
+ */
+export class CrabrunnerStatusPollError extends Error {
+  readonly progress: CrabrunnerProgressEvidence | null;
+
+  constructor(cause: unknown, progress: CrabrunnerProgressEvidence | null) {
+    super(formatUnknownError(cause));
+    this.name =
+      cause instanceof Error && cause.name === "AbortError"
+        ? "AbortError"
+        : "CrabrunnerStatusPollError";
+    this.progress = progress;
+  }
+}
+
 export interface CrabrunnerStageExecutionEvidence {
   admission: CrabrunnerAdmissionResult;
   terminal: CrabrunnerTerminalEvidence | null;
@@ -113,6 +135,7 @@ export interface CrabrunnerStageExecutionEvidence {
   artifactRefs: readonly string[];
   artifactHashes?: readonly string[];
   usage: CrabrunnerUsage | null;
+  promptSha256?: string;
 }
 
 export interface CrabrunnerSchedulerClient {
@@ -178,6 +201,8 @@ export interface CrabrunnerStageExecutionBackendOptions {
    * never masks the job result.
    */
   cleanupPromptFile?: (resolvedPath: string) => Promise<void> | void;
+  /** Computes the rendered prompt hash before submit/cleanup. */
+  resolvePromptSha256?: (resolvedPath: string) => Promise<string> | string;
   now?: () => Date;
 }
 
@@ -200,6 +225,10 @@ export class CrabrunnerStageExecutionBackend
     | ((resolvedPath: string) => Promise<void> | void)
     | undefined;
 
+  private readonly resolvePromptSha256:
+    | ((resolvedPath: string) => Promise<string> | string)
+    | undefined;
+
   private readonly now: () => Date;
 
   constructor(options: CrabrunnerStageExecutionBackendOptions) {
@@ -207,6 +236,7 @@ export class CrabrunnerStageExecutionBackend
     this.dryRun = options.dryRun ?? false;
     this.resolvePromptFile = options.resolvePromptFile;
     this.cleanupPromptFile = options.cleanupPromptFile;
+    this.resolvePromptSha256 = options.resolvePromptSha256;
     this.now = options.now ?? (() => new Date());
   }
 
@@ -234,15 +264,38 @@ export class CrabrunnerStageExecutionBackend
         error: `crabrunner_prompt_render_failed: ${formatUnknownError(error)}`,
       });
     }
-    // P2-2 / recheck-2 P2-1: clean up the prompt file (via the factory-supplied
-    // paired cleanup in the finally) after the job is terminal. The lane worker
-    // consumes the file before the job becomes terminal, and this method only
-    // returns after collect() (terminal), so cleanup-after-execute is safe for
-    // the local-host path. (For future REMOTE hosts, materialization copies the
-    // prompt first; cleanup-after-terminal still holds.) Only dirs the default
-    // resolver created are removed; an explicit override path is never touched.
+    let promptSha256: string | undefined;
+    // Hashing and execution share one lifecycle guard so every post-render
+    // return path cleans up a factory-owned temp prompt directory.
     try {
-      const spec = createCrabrunnerJobSpec(input, this.dryRun, promptFile);
+      try {
+        if (
+          promptFile !== undefined &&
+          this.resolvePromptSha256 !== undefined
+        ) {
+          promptSha256 = await this.resolvePromptSha256(promptFile);
+        }
+      } catch (error) {
+        return this.toBackendResult(input, {
+          admission: {
+            status: "rejected",
+            jobId: null,
+            reason: `crabrunner_prompt_hash_failed: ${formatUnknownError(error)}`,
+          },
+          terminal: null,
+          artifactRefs: [],
+          usage: null,
+          status: "failed",
+          error: `crabrunner_prompt_hash_failed: ${formatUnknownError(error)}`,
+        });
+      }
+
+      const spec = createCrabrunnerJobSpec(
+        input,
+        this.dryRun,
+        promptFile,
+        promptSha256,
+      );
       const enforcementFailure =
         validateCrabrunnerLaneEnforcementContract(spec);
       if (enforcementFailure !== null) {
@@ -256,6 +309,7 @@ export class CrabrunnerStageExecutionBackend
           terminal: enforcementFailure,
           artifactRefs: [],
           usage: null,
+          ...(promptSha256 === undefined ? {} : { promptSha256 }),
           status: "failed",
           error: `crabrunner_${enforcementFailure.state}: ${
             enforcementFailure.message ?? enforcementFailure.state
@@ -271,6 +325,7 @@ export class CrabrunnerStageExecutionBackend
           terminal: null,
           artifactRefs: [],
           usage: null,
+          ...(promptSha256 === undefined ? {} : { promptSha256 }),
           status: "failed",
           error: `crabrunner_admission_rejected: ${admission.reason ?? "rejected"}`,
         });
@@ -282,6 +337,7 @@ export class CrabrunnerStageExecutionBackend
           terminal: null,
           artifactRefs: [],
           usage: null,
+          ...(promptSha256 === undefined ? {} : { promptSha256 }),
           status: "failed",
           error: "crabrunner_admission_accepted_without_job_id",
         });
@@ -313,22 +369,32 @@ export class CrabrunnerStageExecutionBackend
           terminal.artifactHashes ??
           artifactHashesFromCollectedArtifact(terminal.artifact),
         usage: terminal.usage ?? null,
+        ...(promptSha256 === undefined ? {} : { promptSha256 }),
         status,
         ...(error === undefined ? {} : { error }),
       });
     } finally {
-      // recheck-2 P2-1: clean up the prompt path via the factory-supplied paired
-      // cleanup, which removes ONLY temp dirs the default resolver created
-      // (explicit ownership). An explicit override has no paired cleanup, so its
-      // path is never touched. Best-effort: a cleanup error must not mask the
-      // job result.
-      if (promptFile !== undefined && this.cleanupPromptFile !== undefined) {
-        try {
-          await this.cleanupPromptFile(promptFile);
-        } catch {
-          // Best-effort: a missing/locked temp dir must not fail the job.
-        }
-      }
+      // The lane has consumed the prompt before execute returns. The paired
+      // factory cleanup owns only renderer-created directories; explicit
+      // overrides are never removed. Cleanup remains best-effort.
+      await this.cleanupResolvedPrompt(promptFile);
+    }
+  }
+
+  private async cleanupResolvedPrompt(
+    promptFile: string | null | undefined,
+  ): Promise<void> {
+    if (
+      promptFile === undefined ||
+      promptFile === null ||
+      this.cleanupPromptFile === undefined
+    ) {
+      return;
+    }
+    try {
+      await this.cleanupPromptFile(promptFile);
+    } catch {
+      // Best-effort: a missing/locked temp dir must not fail the job.
     }
   }
 
@@ -385,9 +451,12 @@ export class CrabrunnerStageExecutionBackend
       if (signal?.aborted) {
         return await this.cancelJob(jobId, spec);
       }
+      const progress =
+        error instanceof CrabrunnerStatusPollError ? error.progress : null;
       return {
         state: "runner_failed",
         message: `crabrunner_status_failed: ${formatUnknownError(error)}`,
+        ...(progress === null ? {} : { progress }),
       };
     }
 
@@ -473,6 +542,9 @@ export class CrabrunnerStageExecutionBackend
         artifactRefs: mapped.artifactRefs,
         artifactHashes: mapped.artifactHashes ?? [],
         usage: mapped.usage,
+        ...(mapped.promptSha256 === undefined
+          ? {}
+          : { promptSha256: mapped.promptSha256 }),
       },
     };
   }
@@ -482,6 +554,7 @@ export function createCrabrunnerJobSpec(
   input: StageExecutionBackendInput,
   dryRun: boolean,
   promptFile?: string | null,
+  promptSha256?: string,
 ): CrabrunnerJobSpec {
   return {
     schema: CRABRUNNER_JOB_SPEC_VERSION,
@@ -502,6 +575,7 @@ export function createCrabrunnerJobSpec(
     // passes its path here; absent (no resolver/render) makes the scheduler
     // client fail closed at submit.
     ...(promptFile === undefined || promptFile === null ? {} : { promptFile }),
+    ...(promptSha256 === undefined ? {} : { promptSha256 }),
   };
 }
 

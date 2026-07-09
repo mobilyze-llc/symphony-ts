@@ -1,0 +1,14 @@
+{
+  "schema": "crucible.crabrunner.status.v1",
+  "job_id": "symph-1071-conformance-live",
+  "attempt_id": "2",
+  "crabrunner_version": "symph-1071-conformance",
+  "state": "complete",
+  "message": "worker complete",
+  "host": "local",
+  "updated_at": "2026-07-09T19:41:41.384Z",
+  "artifact_path": "attempts/2/artifact/execution-seam.md",
+  "usage_path": "attempts/2/artifact/execution-seam.usage.json",
+  "collectible": true,
+  "worker_exit_code": 0
+}

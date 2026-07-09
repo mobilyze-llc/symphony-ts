@@ -1,0 +1,44 @@
+{
+  "schema": "crucible.crabrunner.collect.v1",
+  "job_id": "symph-1071-conformance-live",
+  "attempt_id": "2",
+  "state": "complete",
+  "status": {
+    "schema": "crucible.crabrunner.status.v1",
+    "job_id": "symph-1071-conformance-live",
+    "attempt_id": "2",
+    "crabrunner_version": "symph-1071-conformance",
+    "state": "complete",
+    "message": "worker complete",
+    "host": "local",
+    "updated_at": "2026-07-09T19:41:56.990Z",
+    "artifact_path": "attempts/2/artifact/execution-seam.md",
+    "usage_path": "attempts/2/artifact/execution-seam.usage.json",
+    "collectible": true,
+    "worker_exit_code": 0
+  },
+  "archive_path": "/tmp/symph-1071-conformance-live.tar.gz",
+  "materialized": {
+    "jobId": "symph-1071-conformance-live",
+    "archivePath": "/tmp/symph-1071-conformance-live.tar.gz",
+    "status": "ready",
+    "reason": null,
+    "primary": {
+      "name": "/attempts/2/artifact/execution-seam.md",
+      "content": "deterministic execution seam conformance\n",
+      "hash": "ec52cc65002df7a14090ba3164206d5d6e046feb62044f92e51af1a15cff1a7e"
+    },
+    "entries": [
+      {
+        "name": "/attempts/2/artifact/execution-seam.md",
+        "hash": "ec52cc65002df7a14090ba3164206d5d6e046feb62044f92e51af1a15cff1a7e",
+        "content": "deterministic execution seam conformance\n"
+      },
+      {
+        "name": "/attempts/2/artifact/execution-seam.usage.json",
+        "hash": "09389d78b09c9e15b57db9c4bab79fdb79178eee4616455a7a8a148b3d91f540",
+        "content": "{\"schema\":\"crucible.lane-worker.usage.v2\",\"measurement_quality\":\"true\",\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5,\"reasoning_output_tokens\":1}\n"
+      }
+    ]
+  }
+}

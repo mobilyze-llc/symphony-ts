@@ -1,0 +1,30 @@
+{
+  "schema": "crucible.crabrunner.collect.v1",
+  "job_id": "symph-1071-synthetic-failure",
+  "attempt_id": "3",
+  "state": "failed",
+  "status": {
+    "schema": "crucible.crabrunner.status.v1",
+    "job_id": "symph-1071-synthetic-failure",
+    "attempt_id": "3",
+    "crabrunner_version": "symph-1071-conformance",
+    "state": "failed",
+    "message": "worker stopped after the configured turn cap",
+    "host": "local",
+    "updated_at": "2026-07-09T20:09:59.000Z",
+    "artifact_path": "attempts/3/artifact/implement.md",
+    "usage_path": "attempts/3/artifact/implement.usage.json",
+    "collectible": true,
+    "error_code": "turn_cap_reached",
+    "worker_exit_code": 1
+  },
+  "archive_path": "/tmp/symph-1071-synthetic-failure.tar.gz",
+  "materialized": {
+    "jobId": "symph-1071-synthetic-failure",
+    "archivePath": "/tmp/symph-1071-synthetic-failure.tar.gz",
+    "status": "invalid",
+    "reason": "primary artifact missing after turn-cap termination",
+    "primary": null,
+    "entries": []
+  }
+}
