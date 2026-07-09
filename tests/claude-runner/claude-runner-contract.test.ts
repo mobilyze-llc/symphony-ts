@@ -97,4 +97,14 @@ describe("Claude runner artifact contract", () => {
 
     expect(extractVerdictEnum(artifact)).toBe("ready_as_written");
   });
+
+  it("preserves ATX heading boundary semantics", () => {
+    expect(extractVerdictEnum("#Verdict\n\nREADY_AS_WRITTEN")).toBeNull();
+    expect(
+      extractVerdictEnum("####### Verdict\n\nREADY_AS_WRITTEN"),
+    ).toBeNull();
+    expect(extractVerdictEnum("##\tVerdict\n\nREADY_AS_WRITTEN")).toBe(
+      "ready_as_written",
+    );
+  });
 });
