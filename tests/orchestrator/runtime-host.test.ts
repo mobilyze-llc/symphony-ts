@@ -43,6 +43,7 @@ import {
   SERVICE_SHUTDOWN_ABORT_REASON,
   type StopSignalDelivery,
 } from "../../src/orchestrator/core.js";
+import { recoverEmergencyStopLaneCancellation } from "../../src/orchestrator/emergency-stop-recovery.js";
 import { laneCancellationToStopSignalDelivery } from "../../src/orchestrator/lane-cancellation.js";
 import type { MergeCandidateRecord } from "../../src/orchestrator/merge-candidate.js";
 import type { PipelineNotificationEvent } from "../../src/orchestrator/pipeline-notifier.js";
@@ -10195,6 +10196,48 @@ describe("stage execution backend boundary", () => {
         failure: "Invalid crabrunner cancellation evidence.",
       },
     });
+  });
+
+  it("recovers a persisted lane emergency stop through scheduler cancellation", async () => {
+    const cancel = vi.fn(async (jobId: string) => ({
+      state: "canceled" as const,
+      workspacePath: null,
+      cancellation: {
+        requested: true as const,
+        signal: "SIGTERM" as const,
+        processGroup: true as const,
+        killed: true as const,
+        failure: null,
+      },
+      message: `canceled ${jobId}`,
+    }));
+    const backend = {
+      backend: "crabrunner" as const,
+      execute: async () => {
+        throw new Error("not used");
+      },
+      cancel,
+    } as unknown as StageExecutionBackendRunner & { cancel: typeof cancel };
+
+    await expect(
+      recoverEmergencyStopLaneCancellation({
+        backend,
+        laneJobId: "persisted-lane-7",
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        sourceSequence: 7,
+        now: () => new Date("2026-03-06T00:00:05.000Z"),
+        logger: null,
+      }),
+    ).resolves.toBe(true);
+    expect(cancel).toHaveBeenCalledWith(
+      "persisted-lane-7",
+      expect.objectContaining({
+        reason: "operator_stop",
+        signal: "SIGTERM",
+        processGroup: true,
+      }),
+    );
   });
 
   it("reports PID control for a lane backend that cannot cancel", async () => {

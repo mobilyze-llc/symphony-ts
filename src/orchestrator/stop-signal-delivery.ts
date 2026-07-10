@@ -104,6 +104,14 @@ export function isEmergencyStopTerminationConfirmed(value: unknown): boolean {
   if (value.laneCancellation?.killed === true && value.status === "delivered") {
     return true;
   }
+  if (
+    value.laneCancellation !== undefined &&
+    value.status === "already_exited" &&
+    value.laneCancellation.killed === false &&
+    value.laneCancellation.failure === null
+  ) {
+    return true;
+  }
   return (
     (value.status === "delivered" &&
       value.attempts.length > 0 &&

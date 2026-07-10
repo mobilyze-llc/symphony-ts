@@ -486,14 +486,17 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
       );
       await this.observeLiveness(jobId, settledStatus);
       const killed = settledStatus.state === "stopped";
-      const terminalState: CrabrunnerTerminalState = killed
-        ? "canceled"
-        : "kill_failed";
-      const failure = killed
-        ? null
-        : settledStatus.state === "stopping"
-          ? "cancel_incomplete"
-          : (settledStatus.message ?? "cancel_incomplete");
+      const alreadyExited =
+        CRABRUNNER_TERMINAL_LIFECYCLE_STATES.has(settledStatus.state) &&
+        !killed;
+      const terminalState: CrabrunnerTerminalState =
+        killed || alreadyExited ? "canceled" : "kill_failed";
+      const failure =
+        killed || alreadyExited
+          ? null
+          : settledStatus.state === "stopping"
+            ? "cancel_incomplete"
+            : (settledStatus.message ?? "cancel_incomplete");
 
       return {
         state: terminalState,

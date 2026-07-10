@@ -1227,6 +1227,7 @@ export class OrchestratorCore {
     issueIdentifier: string;
     codexAppServerPid: string | null;
     codexAppServerIdentity: PipelineEmergencyStopState["interruptedIssues"][number]["codexAppServerIdentity"];
+    laneJobId?: string | null;
     sourceSequence: number;
   }): Promise<number | null> {
     try {
@@ -1255,6 +1256,9 @@ export class OrchestratorCore {
           sourceSequence: input.sourceSequence,
           codexAppServerPid: input.codexAppServerPid,
           codexAppServerIdentity: input.codexAppServerIdentity,
+          ...(input.laneJobId === undefined
+            ? {}
+            : { laneJobId: input.laneJobId }),
         },
       });
       this.recoverHardStopTrigger(entry);

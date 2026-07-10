@@ -1676,6 +1676,33 @@ describe("CrabrunnerCliSchedulerClient.cancel", () => {
     });
   });
 
+  it("maps an already-terminal complete status to canceled with killed:false", async () => {
+    const client = createClient(
+      staticCli({
+        cancel: () =>
+          cliOk(
+            statusJson({
+              state: "complete",
+              job_id: "j",
+              collectible: true,
+              message: "completed before cancellation",
+            }),
+          ),
+      }),
+    );
+
+    const evidence = await client.cancel("j", cancelRequest());
+
+    expect(evidence).toMatchObject({
+      state: "canceled",
+      cancellation: {
+        requested: true,
+        killed: false,
+        failure: null,
+      },
+    });
+  });
+
   it("settles an initially stopping cancel response before reporting delivery", async () => {
     const client = createClient(
       staticCli({

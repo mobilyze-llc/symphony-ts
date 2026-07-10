@@ -259,7 +259,12 @@ import {
 } from "./core.js";
 import { executeDecomposedStageDispatch } from "./decomposed-stage-dispatch.js";
 import { projectEmergencyStopInterruptedIssue } from "./emergency-stop-projection.js";
-import { readEmergencyStopInterruptedIssues } from "./emergency-stop-recovery.js";
+import {
+  type EmergencyStopRecoveryCleanupPlan,
+  collectUnconfirmedEmergencyStopCleanupPlans,
+  parseProcessPid,
+  recoverEmergencyStopLaneCancellation,
+} from "./emergency-stop-recovery.js";
 import { getDiff, runEnsembleGate } from "./gate-handler.js";
 import {
   type IntentActor,
@@ -2630,6 +2635,23 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         let targetedCleanupSucceeded = false;
         try {
           if (
+            plan.laneJobId !== null &&
+            plan.laneCancellationSupported === true
+          ) {
+            targetedCleanupSucceeded =
+              (await recoverEmergencyStopLaneCancellation({
+                backend: this.stageExecutionBackends.get("crabrunner"),
+                laneJobId: plan.laneJobId,
+                issueId,
+                issueIdentifier: plan.issueIdentifier,
+                sourceSequence: plan.setBySequence,
+                now: this.now,
+                logger: this.logger,
+              })) === true;
+            if (!targetedCleanupSucceeded) {
+              unconfirmedPlans.push(plan);
+            }
+          } else if (
             parsedPid !== null &&
             parsedPid !== process.pid &&
             plan.codexAppServerIdentity !== null &&
@@ -2702,6 +2724,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
                 issueIdentifier: plan.issueIdentifier,
                 codexAppServerPid: plan.codexAppServerPid,
                 codexAppServerIdentity: plan.codexAppServerIdentity,
+                laneJobId: plan.laneJobId,
                 sourceSequence: plan.setBySequence,
               });
             if (cleanupSequence === null) {
@@ -8243,114 +8266,6 @@ function normalizeDispatcherRunJournalCompactionTailEntries(
   return Number.isInteger(value) && value > 0
     ? value
     : DISPATCHER_RUN_JOURNAL_DEFAULT_COMPACTION_TAIL_ENTRIES;
-}
-
-interface EmergencyStopRecoveryCleanupPlan {
-  issueId: string;
-  issueIdentifier: string;
-  codexAppServerPid: string | null;
-  codexAppServerIdentity: ProcessIdentitySnapshot | null;
-  laneJobId: string | null;
-  setBySequence: number;
-  since: string;
-}
-
-function collectUnconfirmedEmergencyStopCleanupPlans(
-  journal: DispatcherRunJournal,
-): EmergencyStopRecoveryCleanupPlan[] {
-  const pendingPlansByIssue = new Map<
-    string,
-    EmergencyStopRecoveryCleanupPlan[]
-  >();
-  const plansByKey = new Map<string, EmergencyStopRecoveryCleanupPlan>();
-  const provenPlanKeys = new Set<string>();
-
-  for (const entry of [...journal].sort((a, b) => a.sequence - b.sequence)) {
-    if (
-      entry.kind === "intent" &&
-      entry.metadata.status === "applied" &&
-      entry.metadata.verb === "pipeline_stop"
-    ) {
-      for (const issue of readEmergencyStopInterruptedIssues(entry.metadata)) {
-        const plan: EmergencyStopRecoveryCleanupPlan = {
-          issueId: issue.issueId,
-          issueIdentifier: issue.issueIdentifier,
-          codexAppServerPid: issue.codexAppServerPid,
-          codexAppServerIdentity: issue.codexAppServerIdentity,
-          laneJobId: issue.laneJobId ?? null,
-          setBySequence: entry.sequence,
-          since: entry.timestamp,
-        };
-        const plans = pendingPlansByIssue.get(issue.issueId) ?? [];
-        plans.push(plan);
-        pendingPlansByIssue.set(issue.issueId, plans);
-        plansByKey.set(
-          emergencyStopCleanupPlanKey(issue.issueId, entry.sequence),
-          plan,
-        );
-      }
-      continue;
-    }
-
-    if (
-      entry.kind !== "hard_stop_trigger" ||
-      entry.metadata.status !== "completed" ||
-      entry.metadata.reason !== "emergency_stop"
-    ) {
-      continue;
-    }
-
-    const sourceSequence = readEmergencyStopSourceSequence(entry.metadata);
-    if (sourceSequence !== null) {
-      provenPlanKeys.add(
-        emergencyStopCleanupPlanKey(entry.issueId, sourceSequence),
-      );
-      continue;
-    }
-
-    // Legacy completion entries predate sourceSequence. Pair them with the
-    // latest unproven same-issue stop; current entries use the precise key.
-    const pendingPlans = pendingPlansByIssue.get(entry.issueId) ?? [];
-    for (let index = pendingPlans.length - 1; index >= 0; index -= 1) {
-      const plan = pendingPlans[index];
-      if (plan === undefined) {
-        continue;
-      }
-      const key = emergencyStopCleanupPlanKey(plan.issueId, plan.setBySequence);
-      if (!provenPlanKeys.has(key)) {
-        provenPlanKeys.add(key);
-        break;
-      }
-    }
-  }
-
-  return [...plansByKey.entries()].flatMap(([key, plan]) =>
-    provenPlanKeys.has(key) ? [] : [plan],
-  );
-}
-
-function emergencyStopCleanupPlanKey(
-  issueId: string,
-  sourceSequence: number,
-): string {
-  return `${issueId}:${sourceSequence}`;
-}
-
-function readEmergencyStopSourceSequence(
-  metadata: Record<string, unknown>,
-): number | null {
-  const value = metadata.sourceSequence;
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
-    ? value
-    : null;
-}
-
-function parseProcessPid(value: string | null): number | null {
-  if (value === null || !/^\d+$/.test(value)) {
-    return null;
-  }
-  const pid = Number(value);
-  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
 }
 
 function toErrorMessage(error: unknown): string {

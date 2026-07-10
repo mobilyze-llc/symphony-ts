@@ -3956,6 +3956,39 @@ describe("orchestrator core", () => {
     });
   });
 
+  it("confirms already-exited lane emergency-stop proof without PID attempts", async () => {
+    const stopRunningIssue = vi.fn(async () => ({
+      status: "already_exited" as const,
+      reason: "emergency_stop" as const,
+      attemptedAt: "2026-03-06T00:00:05.000Z",
+      workspacePath: null,
+      attempts: [],
+      laneJobId: "lane-complete",
+      laneCancellation: {
+        state: "canceled",
+        killed: false,
+        failure: null,
+      },
+      warning: null,
+    }));
+    const orchestrator = createOrchestrator({ stopRunningIssue });
+
+    await orchestrator.pollTick();
+    const stop = await orchestrator.requestEmergencyStop({
+      actor: { kind: "operator", host: "pro14", session: "symphonyctl" },
+      reason: { class: "operator_emergency_stop", human: "stop now" },
+    });
+
+    expect(stop.stopRequests[0]?.signalDelivery).toMatchObject({
+      status: "already_exited",
+      laneJobId: "lane-complete",
+      laneCancellation: { killed: false, failure: null },
+    });
+    expect(orchestrator.getState().resumeRequiredMarks["1"]).toMatchObject({
+      reason: "killed_mid_run",
+    });
+  });
+
   it("does not record a manual-stop resume guard when the stop lease is already active", async () => {
     const timers = createFakeTimerScheduler();
     const stopRunningIssue = vi.fn();

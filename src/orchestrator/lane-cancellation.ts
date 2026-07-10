@@ -50,9 +50,10 @@ export function laneCancellationToStopSignalDelivery(
   const cancellation = evidence.cancellation;
   const killed = cancellation?.killed === true && evidence.state === "canceled";
   const alreadyStopped =
-    evidence.state === "canceled" &&
     cancellation?.requested === true &&
-    !killed;
+    !killed &&
+    evidence.state !== "kill_failed" &&
+    CRABRUNNER_TERMINAL_STATES.has(evidence.state);
   const delivery = {
     status: killed ? "delivered" : alreadyStopped ? "already_exited" : "failed",
     reason: input.reason,
