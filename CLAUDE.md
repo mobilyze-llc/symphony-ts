@@ -12,19 +12,34 @@ Symphony-ts is a CLI tool (no dev server). It polls a Linear project board for e
 
 ```
 src/
-├── agent/           # Agent runner abstraction, prompt builder (LiquidJS rendering)
-├── cli/             # CLI entrypoint (main.ts) — parses args, bootstraps orchestrator
-├── codex/           # Codex app-server integration
-├── config/          # WORKFLOW.md parsing, config resolution, defaults, file watcher
-├── domain/          # Core domain model (issues, states, transitions)
-├── errors/          # Error types and failure classification
-├── logging/         # Structured logging
-├── observability/   # Dashboard server (SSE), runtime metrics
-├── orchestrator/    # Core loop, gate handler, runtime host — the main scheduling engine
-├── runners/         # Agent runtime implementations (claude-code, gemini, factory)
-├── shared/          # Shared utilities
-├── tracker/         # Linear API client, GraphQL queries, state normalization
-└── workspace/       # Workspace lifecycle (create, hooks, path safety)
+├── agent/             # Agent runners, prompt building, triage planning, health signals
+├── audit/             # Backlog and operational audit tooling
+├── calibration/       # Calibration evidence and digest tooling
+├── claude-runner/     # Claude runner contracts and Crabrunner integration
+├── cli/               # CLI entrypoints and operator tools
+├── codex/             # Codex app-server integration
+├── config/            # WORKFLOW.md parsing, config resolution, defaults, file watcher
+├── domain/            # Core domain model (issues, states, transitions)
+├── errors/            # Error types and failure classification
+├── logging/           # Structured logging and runtime snapshots
+├── observability/     # Dashboard/control server (SSE, metrics, operator intents)
+├── orchestrator/      # Core loop, gates, runtime host, supervision, standing plans
+├── policy/            # Policy models and verification
+├── portfolio/         # Linear portfolio classification and taxonomy
+├── review/            # Review spine, calibration, and Crucible integration
+├── runners/           # Agent runtime implementations and runner factory
+├── shared/            # Shared utilities
+├── slack-bot/         # Slack bot command and interaction handling
+├── spec-review/       # Spec-review watch, dispatch, and artifact handling
+├── stage-execution/   # Stage backend registration and execution contracts
+├── tracker/           # Linear API client, GraphQL queries, state normalization
+├── workspace/         # Workspace lifecycle (create, hooks, path safety)
+├── chunking.ts        # Prompt and payload chunking utilities
+├── reactions.ts       # Reaction/feedback helpers
+├── streaming.ts       # Streaming response helpers
+├── test-alpha.ts      # Upstream alpha helper retained in the current tree
+├── version.ts         # Package/runtime version helpers
+└── index.ts           # Public package barrel
 
 pipeline-config/
 ├── hooks/           # Shell scripts: after-create.sh (clone + install), before-run.sh (git sync)
@@ -87,7 +102,7 @@ No dev server -- this is a CLI tool. The D40 port table does not apply.
 ## Testing
 
 - **Framework**: Vitest
-- **Run tests**: `pnpm test` (runs all 347 tests once via `node scripts/test.mjs`)
+- **Run tests**: `pnpm test` (runs 4,411 passing tests / 5 skipped across 227 files via `node scripts/test.mjs`)
 - **Watch mode**: `pnpm test:watch`
 - **Location**: `tests/` directory, mirrors `src/` structure (e.g., `tests/orchestrator/core.test.ts` covers `src/orchestrator/core.ts`)
 - **Fixtures**: `tests/fixtures/` for shared test data
@@ -115,12 +130,14 @@ No dev server -- this is a CLI tool. The D40 port table does not apply.
 - **`scheduleRetry`** is used for both failures AND continuations -- the max retry limit must only count actual failures, not continuation retries.
 - **Hook scripts** run with `cwd: workspacePath`. Bare path-like hook values such as `./hooks/after-create.sh` are resolved relative to the `WORKFLOW.md` file before execution; inline or multi-line shell snippets run verbatim from the workspace cwd.
 - **`issue.state`** is a string in LiquidJS context (via `toTemplateIssue`), not an object. Template conditionals must compare against string values.
-- **`stall_timeout_ms`** default (5 min) is too short for Claude Code agents. Set to 900000 (15 min) in WORKFLOW configs.
+- **Flag-gated wiring can be production-inert.** When adding a new path, name and set the exact WORKFLOW config key that arms it; code plus tests are not deployment proof while the production flag remains closed.
+- **The dashboard server is an operator-intent control plane, not telemetry only.** `symphonyctl` and `release_batch` use the dashboard write surface, so dashboard changes must preserve authentication, intent validation, and runtime-host routing.
+- **`stall_timeout_ms`** lives at `codex.stall_timeout_ms` in WORKFLOW configs. Keep the timeout appropriate for long agent runs and update this pointer in the same change if timeout policy moves to `policy.json`.
 - **Linear project slug** is the `slugId` UUID, not the team key.
 
 ### Verify commands (must pass before any PR)
 ```bash
-pnpm test             # All 347 tests pass
+pnpm test             # 4,411 tests pass; 5 skipped across 227 files
 pnpm build            # Compiles without errors
 pnpm typecheck        # No type errors
 pnpm lint             # Biome passes
