@@ -150,11 +150,15 @@ build_decision() {
 }
 
 restart_stopped_services_after_error() {
-  # Restart after ordinary pull/build/config errors. Crabrunner review substrate
-  # failures are deploy-time blockers only for workflows that explicitly opt in.
   warn "Deploy failed — restarting services..."
-  "$CTL" start 2>/dev/null || true
-  "$SLACK_CTL" start 2>/dev/null || true
+  if ${SYMPHONY_SERVICE_STOPPED:-false}; then
+    "$CTL" start 2>/dev/null || true
+    SYMPHONY_SERVICE_STOPPED=false
+  fi
+  if ${SLACK_SERVICE_STOPPED:-false}; then
+    "$SLACK_CTL" start 2>/dev/null || true
+    SLACK_SERVICE_STOPPED=false
+  fi
 }
 
 # Check if symphony-ctl service is installed (plist exists)
@@ -191,17 +195,36 @@ dotenv_value() {
   return 1
 }
 
-deploy_config_value() {
+service_config_value() {
+  local key="$1"
+  local env_file="${2:-}"
+
+  if [[ -n "$env_file" ]]; then
+    dotenv_value "$env_file" "$key" || true
+  fi
+}
+
+# Project/workflow select the LaunchAgent label and ProgramArguments; they are
+# deploy controls baked into the plist, not environment inherited by runtime.
+deploy_control_value() {
   local key="$1"
   local env_file="${2:-}"
 
   if [[ -n "${!key+x}" ]]; then
     printf '%s\n' "${!key}"
-    return 0
-  fi
-
-  if [[ -n "$env_file" ]]; then
+  elif [[ -n "$env_file" ]]; then
     dotenv_value "$env_file" "$key" || true
+  fi
+}
+
+reject_ambient_only_service_config() {
+  local key="$1"
+  local env_file="$2"
+  local durable_value
+
+  durable_value="$(service_config_value "$key" "$env_file")"
+  if [[ -n "${!key+x}" && -n "${!key}" && -z "$durable_value" ]]; then
+    die "Crabrunner review preflight failed: $key is set only in the operator shell and will disappear when LaunchAgent restarts. Add $key to $env_file via the durable SOPS source ${env_file}.enc, then rerun deploy."
   fi
 }
 
@@ -210,9 +233,9 @@ resolve_symphony_workflow_path() {
   local workflow_path
   local project
 
-  workflow_path="$(deploy_config_value SYMPHONY_WORKFLOW "$env_file")"
+  workflow_path="$(deploy_control_value SYMPHONY_WORKFLOW "$env_file")"
   if [[ -z "$workflow_path" ]]; then
-    project="$(deploy_config_value SYMPHONY_PROJECT "$env_file")"
+    project="$(deploy_control_value SYMPHONY_PROJECT "$env_file")"
     [[ -n "$project" ]] || project="symphony"
     workflow_path="$SYMPHONY_ROOT/pipeline-config/workflows/WORKFLOW-${project}.md"
   elif [[ "$workflow_path" != /* ]]; then
@@ -222,7 +245,7 @@ resolve_symphony_workflow_path() {
   printf '%s\n' "$workflow_path"
 }
 
-workflow_enables_crabrunner_review() {
+workflow_requires_crabrunner() {
   local workflow_path="$1"
   [[ -f "$workflow_path" ]] || return 1
 
@@ -240,12 +263,20 @@ workflow_enables_crabrunner_review() {
     !in_frontmatter {
       next
     }
+    /^planner_grounding:[[:space:]]*$/ {
+      in_planner_grounding = 1
+      in_review_execution = 0
+      in_crabrunner_group = 0
+      next
+    }
     /^review_execution:[[:space:]]*$/ {
+      in_planner_grounding = 0
       in_review_execution = 1
       in_crabrunner_group = 0
       next
     }
     /^[^[:space:]#][^:]*:[[:space:]]*$/ {
+      in_planner_grounding = 0
       in_review_execution = 0
       in_crabrunner_group = 0
       next
@@ -257,6 +288,9 @@ workflow_enables_crabrunner_review() {
     in_review_execution && /^  [^[:space:]#][^:]*:[[:space:]]*$/ {
       in_crabrunner_group = 0
       next
+    }
+    in_planner_grounding && /^  enabled:[[:space:]]*true([[:space:]#].*)?$/ {
+      found = 1
     }
     in_crabrunner_group && /^    enabled:[[:space:]]*true([[:space:]#].*)?$/ {
       found = 1
@@ -279,25 +313,29 @@ run_crabrunner_review_preflight() {
   local stage_output
 
   workflow_path="$(resolve_symphony_workflow_path "$env_file")"
-  if ! workflow_enables_crabrunner_review "$workflow_path"; then
-    info "Crabrunner review preflight skipped (workflow does not enable crabrunner review)."
+  if ! workflow_requires_crabrunner "$workflow_path"; then
+    info "Crabrunner review preflight skipped (workflow does not enable crabrunner planner/review)."
     return 0
   fi
 
-  crabrunner_root="$(deploy_config_value SYMPHONY_CRABRUNNER_ROOT "$env_file")"
+  reject_ambient_only_service_config SYMPHONY_CRABRUNNER_ROOT "$env_file"
+  reject_ambient_only_service_config SYMPHONY_CRABRUNNER_VERSION "$env_file"
+  reject_ambient_only_service_config SYMPHONY_CRABRUNNER_STATE_ROOT "$env_file"
+
+  crabrunner_root="$(service_config_value SYMPHONY_CRABRUNNER_ROOT "$env_file")"
   if [[ -z "$crabrunner_root" ]]; then
-    die "Crabrunner review preflight failed: the active workflow enables review_execution.crabrunner_job_group.enabled but SYMPHONY_CRABRUNNER_ROOT is not set. Set SYMPHONY_CRABRUNNER_ROOT to the Crucible checkout that owns bin/crabrunner, or disable review_execution.crabrunner_job_group.enabled in $workflow_path."
+    die "Crabrunner review preflight failed: the active workflow enables the Crabrunner planner/review path but SYMPHONY_CRABRUNNER_ROOT is absent from the LaunchAgent environment. Add it to $env_file via the durable SOPS source ${env_file}.enc, or disable the Crabrunner-backed workflow path in $workflow_path."
   fi
 
   if [[ ! -d "$crabrunner_root" ]]; then
-    die "Crabrunner review preflight failed: SYMPHONY_CRABRUNNER_ROOT '$crabrunner_root' does not exist. Set it to the Crucible checkout that owns bin/crabrunner, or disable review_execution.crabrunner_job_group.enabled in $workflow_path."
+    die "Crabrunner review preflight failed: SYMPHONY_CRABRUNNER_ROOT '$crabrunner_root' does not exist. Set it to the Crucible checkout that owns bin/crabrunner, or disable the Crabrunner-backed planner/review path in $workflow_path."
   fi
 
   root_real="$(realpath "$crabrunner_root" 2>/dev/null)" || die "Crabrunner review preflight failed: could not resolve SYMPHONY_CRABRUNNER_ROOT '$crabrunner_root'."
   crabrunner_bin="$crabrunner_root/bin/crabrunner"
 
   if [[ ! -e "$crabrunner_bin" ]]; then
-    die "Crabrunner review preflight failed: missing $crabrunner_bin. Set SYMPHONY_CRABRUNNER_ROOT to the Crucible checkout that owns bin/crabrunner, or disable review_execution.crabrunner_job_group.enabled in $workflow_path."
+    die "Crabrunner review preflight failed: missing $crabrunner_bin. Set SYMPHONY_CRABRUNNER_ROOT to the Crucible checkout that owns bin/crabrunner, or disable the Crabrunner-backed planner/review path in $workflow_path."
   fi
 
   bin_real="$(realpath "$crabrunner_bin" 2>/dev/null)" || die "Crabrunner review preflight failed: could not resolve $crabrunner_bin."
@@ -312,9 +350,9 @@ run_crabrunner_review_preflight() {
     die "Crabrunner review preflight failed: $crabrunner_bin must be an executable file."
   fi
 
-  crabrunner_version="$(deploy_config_value SYMPHONY_CRABRUNNER_VERSION "$env_file")"
+  crabrunner_version="$(service_config_value SYMPHONY_CRABRUNNER_VERSION "$env_file")"
   crabrunner_version="${crabrunner_version:-dev}"
-  crabrunner_state_root="$(deploy_config_value SYMPHONY_CRABRUNNER_STATE_ROOT "$env_file")"
+  crabrunner_state_root="$(service_config_value SYMPHONY_CRABRUNNER_STATE_ROOT "$env_file")"
   crabrunner_state_root="${crabrunner_state_root:-$HOME/.crucible/crabrunner}"
 
   if [[ "${DRY_RUN:-false}" == true ]]; then
@@ -331,6 +369,77 @@ run_crabrunner_review_preflight() {
   fi
 
   ok "Crabrunner review preflight passed ($bin_real; staged version $crabrunner_version in $crabrunner_state_root)"
+}
+
+refresh_service_env() {
+  local env_file="$1"
+  local encrypted_env_file="$2"
+
+  if [[ ! -f "$encrypted_env_file" ]]; then
+    return 0
+  fi
+  if [[ -f "$env_file" && ! "$encrypted_env_file" -nt "$env_file" ]]; then
+    ok ".env is current — skipping decrypt"
+    return 0
+  fi
+
+  info ".env.enc is newer than .env — decrypting..."
+  if $DRY_RUN; then
+    info "[dry-run] sops --decrypt --input-type dotenv --output-type dotenv $encrypted_env_file > $env_file"
+  else
+    sops --decrypt --input-type dotenv --output-type dotenv "$encrypted_env_file" > "$env_file"
+  fi
+  ok ".env decrypted"
+  NEED_ENV_RESTART=true
+}
+
+installed_service_config_value() {
+  local key="$1"
+  local plist="$HOME/Library/LaunchAgents/com.symphony.${SYMPHONY_PROJECT:-symphony}.plist"
+
+  awk -v key="$key" '
+    $0 ~ "<key>" key "</key>" { found = 1; next }
+    found && index($0, "<string>") && index($0, "</string>") {
+      value = $0
+      sub(/^.*<string>/, "", value)
+      sub("</string>.*$", "", value)
+      print value
+      exit
+    }
+    found && /<key>/ { exit }
+  ' "$plist"
+}
+
+plan_service_env_refresh() {
+  local env_file="$1"
+  local workflow_path
+  local durable_root
+  local installed_root
+  local durable_version
+  local installed_version
+  local durable_state_root
+  local installed_state_root
+
+  service_installed || return 0
+  workflow_path="$(resolve_symphony_workflow_path "$env_file")"
+  workflow_requires_crabrunner "$workflow_path" || return 0
+  durable_root="$(service_config_value SYMPHONY_CRABRUNNER_ROOT "$env_file")"
+  installed_root="$(installed_service_config_value SYMPHONY_CRABRUNNER_ROOT || true)"
+  durable_version="$(service_config_value SYMPHONY_CRABRUNNER_VERSION "$env_file")"
+  durable_version="${durable_version:-dev}"
+  installed_version="$(installed_service_config_value SYMPHONY_CRABRUNNER_VERSION || true)"
+  installed_version="${installed_version:-dev}"
+  durable_state_root="$(service_config_value SYMPHONY_CRABRUNNER_STATE_ROOT "$env_file")"
+  durable_state_root="${durable_state_root:-$HOME/.crucible/crabrunner}"
+  installed_state_root="$(installed_service_config_value SYMPHONY_CRABRUNNER_STATE_ROOT || true)"
+  installed_state_root="${installed_state_root:-$HOME/.crucible/crabrunner}"
+  if [[ -z "$installed_root" ||
+        "$installed_root" != "$durable_root" ||
+        "$installed_version" != "$durable_version" ||
+        "$installed_state_root" != "$durable_state_root" ]]; then
+    info "LaunchAgent Crabrunner environment differs from $env_file — service reinstall required."
+    NEED_SERVICE_REINSTALL=true
+  fi
 }
 
 archive_active_cmux_spawn_duplicate() {
@@ -574,6 +683,10 @@ NEED_SERVICE_REINSTALL=false
 SYMPHONY_UPDATED=false
 SYMPH_PRE_SHA=""
 SYMPH_POST_SHA=""
+SLACK_CTL="$SCRIPT_DIR/slack-bridge-ctl"
+SLACK_PLIST="$HOME/Library/LaunchAgents/com.slack-bridge.plist"
+SYMPHONY_SERVICE_STOPPED=false
+SLACK_SERVICE_STOPPED=false
 
 # --- 1. Symphony-ts repo ---
 if $DO_SYMPHONY; then
@@ -583,29 +696,33 @@ if $DO_SYMPHONY; then
   # Pre-deploy version
   info "Pre-deploy version: $(get_version)"
 
+  # Validate durable Crabrunner runtime values before any stop. Ambient-only
+  # runtime values are rejected because launchd will not inherit them.
+  local_env="$SYMPHONY_ROOT/.env"
+  local_enc="$SYMPHONY_ROOT/.env.enc"
+  refresh_service_env "$local_env" "$local_enc"
+  run_crabrunner_review_preflight "$local_env"
+  plan_service_env_refresh "$local_env"
+
   # Stop services before updating to prevent reading mixed old/new files
   # (git pull changes templates/configs while service is running from this directory)
-  SLACK_CTL="$SCRIPT_DIR/slack-bridge-ctl"
-  SLACK_PLIST="$HOME/Library/LaunchAgents/com.slack-bridge.plist"
-  SERVICES_STOPPED=false
+  if ! $DRY_RUN; then
+    # EXIT catches explicit die/exit paths as well as set -e command failures.
+    trap 'status=$?; if [[ $status -ne 0 ]]; then restart_stopped_services_after_error; fi' EXIT
+  fi
 
   if ! $NO_RESTART && service_installed; then
     info "Stopping service before update..."
+    SYMPHONY_SERVICE_STOPPED=true
     run_or_dry "$CTL" stop
     ok "Service stopped"
-    SERVICES_STOPPED=true
   fi
 
   if ! $NO_RESTART && [[ -x "$SLACK_CTL" ]] && [[ -f "$SLACK_PLIST" ]]; then
     info "Stopping slack bridge before update..."
+    SLACK_SERVICE_STOPPED=true
     run_or_dry "$SLACK_CTL" stop
     ok "Slack bridge stopped"
-    SERVICES_STOPPED=true
-  fi
-
-  # Restart services if the script fails mid-deploy (set -e would leave them down)
-  if $SERVICES_STOPPED && ! $DRY_RUN; then
-    trap 'restart_stopped_services_after_error' ERR
   fi
 
   # Ensure clean checkout to main — stash uncommitted changes if needed
@@ -687,25 +804,11 @@ if $DO_SYMPHONY; then
   # Ensure the report-server launchd job that serves the dashboard is running
   ensure_report_server
 
-  # Decrypt .env.enc if it's newer than .env
-  local_env="$SYMPHONY_ROOT/.env"
-  local_enc="$SYMPHONY_ROOT/.env.enc"
-  if [[ -f "$local_enc" ]]; then
-    if [[ ! -f "$local_env" ]] || [[ "$local_enc" -nt "$local_env" ]]; then
-      info ".env.enc is newer than .env — decrypting..."
-      if $DRY_RUN; then
-        info "[dry-run] sops --decrypt --input-type dotenv --output-type dotenv $local_enc > $local_env"
-      else
-        sops --decrypt --input-type dotenv --output-type dotenv "$local_enc" > "$local_env"
-      fi
-      ok ".env decrypted"
-      NEED_ENV_RESTART=true
-    else
-      ok ".env is current — skipping decrypt"
-    fi
-  fi
-
+  # Pull may update the encrypted service environment or workflow, so validate
+  # the resulting checkout as well. The recovery trap is active at this point.
+  refresh_service_env "$local_env" "$local_enc"
   run_crabrunner_review_preflight "$local_env"
+  plan_service_env_refresh "$local_env"
 
   if [[ -f "$local_env" ]]; then
     info "Using service environment from .env; review/QA runs through crabrunner when configured."
@@ -767,10 +870,12 @@ if ! $NO_RESTART && $DO_SYMPHONY; then
     run_or_dry "$CTL" install
     run_or_dry "$CTL" start
     ok "Service reinstalled and started"
+    SYMPHONY_SERVICE_STOPPED=false
   else
     info "Starting service..."
     run_or_dry "$CTL" start
     ok "Service started"
+    SYMPHONY_SERVICE_STOPPED=false
   fi
 
   echo ""
@@ -788,14 +893,18 @@ if ! $NO_RESTART && $DO_SYMPHONY; then
     run_or_dry "$SLACK_CTL" install
     run_or_dry "$SLACK_CTL" start
     ok "Slack bridge reinstalled and started"
+    SLACK_SERVICE_STOPPED=false
   else
     info "Starting slack bridge..."
     run_or_dry "$SLACK_CTL" start
     ok "Slack bridge started"
+    SLACK_SERVICE_STOPPED=false
   fi
 
   echo ""
 fi
+
+trap - EXIT
 
 # --- 4. Summary ---
 info "=== Summary ==="

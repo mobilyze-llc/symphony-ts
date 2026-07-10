@@ -48,6 +48,55 @@ check_workflow() {
   [[ -f "$WORKFLOW_PATH" ]] || die "WORKFLOW.md not found at $WORKFLOW_PATH. Set SYMPHONY_WORKFLOW to override."
 }
 
+workflow_requires_crabrunner() {
+  awk '
+    /^---[[:space:]]*$/ {
+      if (!seen_frontmatter) {
+        seen_frontmatter = 1
+        in_frontmatter = 1
+        next
+      }
+      if (in_frontmatter) {
+        exit
+      }
+    }
+    !in_frontmatter { next }
+    /^planner_grounding:[[:space:]]*$/ {
+      in_planner_grounding = 1
+      in_review_execution = 0
+      in_crabrunner_group = 0
+      next
+    }
+    /^review_execution:[[:space:]]*$/ {
+      in_planner_grounding = 0
+      in_review_execution = 1
+      in_crabrunner_group = 0
+      next
+    }
+    /^[^[:space:]#][^:]*:[[:space:]]*$/ {
+      in_planner_grounding = 0
+      in_review_execution = 0
+      in_crabrunner_group = 0
+      next
+    }
+    in_review_execution && /^  crabrunner_job_group:[[:space:]]*$/ {
+      in_crabrunner_group = 1
+      next
+    }
+    in_review_execution && /^  [^[:space:]#][^:]*:[[:space:]]*$/ {
+      in_crabrunner_group = 0
+      next
+    }
+    in_planner_grounding && /^  enabled:[[:space:]]*true([[:space:]#].*)?$/ {
+      found = 1
+    }
+    in_crabrunner_group && /^    enabled:[[:space:]]*true([[:space:]#].*)?$/ {
+      found = 1
+    }
+    END { exit found ? 0 : 1 }
+  ' "$WORKFLOW_PATH"
+}
+
 check_service_root_not_worktree() {
   [[ "${SYMPHONY_ALLOW_WORKTREE_ROOT:-}" == "1" ]] && return 0
 
@@ -93,6 +142,71 @@ check_installed() {
 }
 
 # --- .env → plist EnvironmentVariables ---
+
+env_file_value() {
+  local key="$1"
+  local line
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    if [[ "$line" =~ ^export[[:space:]]+ ]]; then
+      line="${line#export}"
+      line="${line#"${line%%[![:space:]]*}"}"
+    fi
+    case "$line" in
+      "$key="*)
+        local value="${line#*=}"
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        if [[ ( "$value" == \"*\" && "$value" == *\" ) || ( "$value" == \'*\' && "$value" == *\' ) ]]; then
+          value="${value:1:${#value}-2}"
+        elif [[ "$value" =~ ^(.*)[[:space:]]#.*$ ]]; then
+          value="${BASH_REMATCH[1]}"
+        fi
+        printf '%s\n' "$value"
+        return 0
+        ;;
+    esac
+  done < "$ENV_FILE"
+
+  return 1
+}
+
+check_crabrunner_service_env() {
+  local crabrunner_root
+
+  workflow_requires_crabrunner || return 0
+  crabrunner_root="$(env_file_value SYMPHONY_CRABRUNNER_ROOT || true)"
+  [[ -n "$crabrunner_root" ]] || die "Active workflow requires the Crabrunner planner/review path, but SYMPHONY_CRABRUNNER_ROOT is absent from $ENV_FILE. Update ${ENV_FILE}.enc with SOPS and regenerate the durable service environment before install."
+}
+
+plist_env_value() {
+  local key="$1"
+  awk -v key="$key" '
+    $0 ~ "<key>" key "</key>" { found = 1; next }
+    found && index($0, "<string>") && index($0, "</string>") {
+      value = $0
+      sub(/^.*<string>/, "", value)
+      sub("</string>.*$", "", value)
+      print value
+      exit
+    }
+    found && /<key>/ { exit }
+  ' "$PLIST_PATH"
+}
+
+check_crabrunner_plist_env() {
+  local durable_root
+  local installed_root
+
+  workflow_requires_crabrunner || return 0
+  check_crabrunner_service_env
+  durable_root="$(env_file_value SYMPHONY_CRABRUNNER_ROOT || true)"
+  installed_root="$(plist_env_value SYMPHONY_CRABRUNNER_ROOT || true)"
+  [[ -n "$installed_root" && "$installed_root" == "$durable_root" ]] || die "Installed LaunchAgent does not contain the durable SYMPHONY_CRABRUNNER_ROOT from $ENV_FILE. Run 'symphony-ctl uninstall && symphony-ctl install' before start/restart."
+}
 
 generate_env_dict() {
   local env_dict=""
@@ -205,6 +319,7 @@ cmd_install() {
   check_built
   check_env_file
   check_workflow
+  check_crabrunner_service_env
   check_not_installed
 
   mkdir -p "$LOG_DIR"
@@ -271,7 +386,7 @@ cmd_stop() {
   local waited=0
   while is_running && [[ $waited -lt 15 ]]; do
     sleep 1
-    ((waited++))
+    waited=$((waited + 1))
   done
 
   ok "Service stopped: $SERVICE_LABEL"
@@ -279,6 +394,7 @@ cmd_stop() {
 
 cmd_restart() {
   check_installed
+  check_crabrunner_plist_env
 
   enable_service
 

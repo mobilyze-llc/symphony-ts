@@ -53,16 +53,21 @@ async function makeTempDir(prefix: string): Promise<string> {
   return dir;
 }
 
-async function writeWorkflow(enabled: boolean): Promise<string> {
+async function writeWorkflow(
+  reviewEnabled: boolean,
+  plannerEnabled = false,
+): Promise<string> {
   const dir = await makeTempDir("symphony-deploy-workflow-");
   const path = join(dir, "WORKFLOW.md");
   await writeFile(
     path,
     [
       "---",
+      "planner_grounding:",
+      `  enabled: ${plannerEnabled ? "true" : "false"}`,
       "review_execution:",
       "  crabrunner_job_group:",
-      `    enabled: ${enabled ? "true" : "false"}`,
+      `    enabled: ${reviewEnabled ? "true" : "false"}`,
       "---",
       "",
     ].join("\n"),
@@ -75,40 +80,72 @@ async function runCrabrunnerPreflight(options: {
   crabrunnerRoot?: string;
   crabrunnerVersion?: string;
   crabrunnerStateRoot?: string;
+  ambientCrabrunnerRoot?: string;
+  ambientCrabrunnerVersion?: string;
+  ambientCrabrunnerStateRoot?: string;
+  argvFile?: string;
+  dryRun?: boolean;
+  homeDir?: string;
 }) {
   const source = await deploySource();
   const functions = extractShellFunctions(source, [
     "trim_config_value",
     "dotenv_value",
-    "deploy_config_value",
+    "service_config_value",
+    "deploy_control_value",
+    "reject_ambient_only_service_config",
     "resolve_symphony_workflow_path",
-    "workflow_enables_crabrunner_review",
+    "workflow_requires_crabrunner",
     "run_crabrunner_review_preflight",
   ]);
+  const envDir = await makeTempDir("symphony-deploy-env-");
+  const envFile = join(envDir, ".env");
+  await writeFile(
+    envFile,
+    [
+      `SYMPHONY_WORKFLOW=${options.workflowPath}`,
+      ...(options.crabrunnerRoot === undefined
+        ? []
+        : [`SYMPHONY_CRABRUNNER_ROOT=${options.crabrunnerRoot}`]),
+      ...(options.crabrunnerVersion === undefined
+        ? []
+        : [`SYMPHONY_CRABRUNNER_VERSION=${options.crabrunnerVersion}`]),
+      ...(options.crabrunnerStateRoot === undefined
+        ? []
+        : [`SYMPHONY_CRABRUNNER_STATE_ROOT=${options.crabrunnerStateRoot}`]),
+      "",
+    ].join("\n"),
+  );
   const shell = [
     'info() { echo "INFO $*"; }',
     'ok() { echo "OK $*"; }',
     'warn() { echo "WARN $*" >&2; }',
     'die() { echo "DIE $*" >&2; exit 1; }',
     `SYMPHONY_ROOT=${JSON.stringify(resolve("."))}`,
+    `DRY_RUN=${options.dryRun === true ? "true" : "false"}`,
     functions,
-    'run_crabrunner_review_preflight ""',
+    'run_crabrunner_review_preflight "$1"',
   ].join("\n");
 
-  return spawnSync("/bin/bash", ["-c", shell], {
+  return spawnSync("/bin/bash", ["-c", shell, "bash", envFile], {
     encoding: "utf8",
     env: {
+      HOME: options.homeDir ?? process.env.HOME ?? "/tmp",
       PATH: SAFE_PATH,
-      SYMPHONY_WORKFLOW: options.workflowPath,
-      ...(options.crabrunnerRoot === undefined
+      ...(options.ambientCrabrunnerRoot === undefined
         ? {}
-        : { SYMPHONY_CRABRUNNER_ROOT: options.crabrunnerRoot }),
-      ...(options.crabrunnerVersion === undefined
+        : { SYMPHONY_CRABRUNNER_ROOT: options.ambientCrabrunnerRoot }),
+      ...(options.ambientCrabrunnerVersion === undefined
         ? {}
-        : { SYMPHONY_CRABRUNNER_VERSION: options.crabrunnerVersion }),
-      ...(options.crabrunnerStateRoot === undefined
+        : { SYMPHONY_CRABRUNNER_VERSION: options.ambientCrabrunnerVersion }),
+      ...(options.ambientCrabrunnerStateRoot === undefined
         ? {}
-        : { SYMPHONY_CRABRUNNER_STATE_ROOT: options.crabrunnerStateRoot }),
+        : {
+            SYMPHONY_CRABRUNNER_STATE_ROOT: options.ambientCrabrunnerStateRoot,
+          }),
+      ...(options.argvFile === undefined
+        ? {}
+        : { CRABRUNNER_ARGV_FILE: options.argvFile }),
     },
   });
 }
@@ -209,7 +246,91 @@ it("reinstalls launchd when an env refresh requires it", async () => {
   expect(serviceBlock).toContain('run_or_dry "$CTL" start');
 });
 
+it("validates durable service config and arms recovery before stopping", async () => {
+  const deploy = await deploySource();
+  const main = deploy.slice(deploy.indexOf("# --- Main ---"));
+  const preflight = main.indexOf(
+    'run_crabrunner_review_preflight "$local_env"',
+  );
+  const parity = main.indexOf('plan_service_env_refresh "$local_env"');
+  const trap = main.indexOf(
+    "trap 'status=$?; if [[ $status -ne 0 ]]; then restart_stopped_services_after_error; fi' EXIT",
+  );
+  const stoppedFlag = main.indexOf("SYMPHONY_SERVICE_STOPPED=true");
+  const stop = main.indexOf('run_or_dry "$CTL" stop');
+
+  expect(preflight).toBeGreaterThanOrEqual(0);
+  expect(parity).toBeGreaterThan(preflight);
+  expect(parity).toBeLessThan(main.indexOf("Stopping service before update"));
+  expect(trap).toBeGreaterThan(preflight);
+  expect(trap).toBeLessThan(stoppedFlag);
+  expect(stoppedFlag).toBeLessThan(stop);
+});
+
+it("recovers a service marked stopped when deploy exits with failure", async () => {
+  const root = await makeTempDir("symphony-deploy-recovery-");
+  const ctl = join(root, "ctl");
+  const recoveryLog = join(root, "recovery.log");
+  await writeFile(
+    ctl,
+    '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "$RECOVERY_LOG"\n',
+  );
+  await chmod(ctl, 0o755);
+
+  const deploy = await deploySource();
+  const recovery = extractShellFunction(
+    deploy,
+    "restart_stopped_services_after_error",
+  );
+  const shell = [
+    "warn() { :; }",
+    recovery,
+    'CTL="$1"',
+    'SLACK_CTL="$1"',
+    "SYMPHONY_SERVICE_STOPPED=true",
+    "SLACK_SERVICE_STOPPED=false",
+    "trap 'status=$?; if [[ $status -ne 0 ]]; then restart_stopped_services_after_error; fi' EXIT",
+    "exit 9",
+  ].join("\n");
+  const result = spawnSync("/bin/bash", ["-c", shell, "bash", ctl], {
+    encoding: "utf8",
+    env: {
+      PATH: SAFE_PATH,
+      RECOVERY_LOG: recoveryLog,
+    },
+  });
+
+  expect(result.status).toBe(9);
+  await expect(readFile(recoveryLog, "utf8")).resolves.toBe("start\n");
+});
+
 describe("crabrunner review substrate preflight", () => {
+  it("applies durable-service rules to every preflight config read", async () => {
+    const deploy = await deploySource();
+    const resolver = extractShellFunction(
+      deploy,
+      "resolve_symphony_workflow_path",
+    );
+    const preflight = extractShellFunction(
+      deploy,
+      "run_crabrunner_review_preflight",
+    );
+    const parity = extractShellFunction(deploy, "plan_service_env_refresh");
+
+    expect(resolver).toContain("deploy_control_value SYMPHONY_WORKFLOW");
+    expect(resolver).toContain("deploy_control_value SYMPHONY_PROJECT");
+    for (const key of [
+      "SYMPHONY_CRABRUNNER_ROOT",
+      "SYMPHONY_CRABRUNNER_VERSION",
+      "SYMPHONY_CRABRUNNER_STATE_ROOT",
+    ]) {
+      expect(preflight).toContain(`reject_ambient_only_service_config ${key}`);
+      expect(parity).toContain(`service_config_value ${key}`);
+      expect(parity).toContain(`installed_service_config_value ${key}`);
+    }
+    expect(preflight).not.toContain("deploy_config_value");
+  });
+
   it("fails closed when enabled workflow has no crabrunner root configured", async () => {
     const workflowPath = await writeWorkflow(true);
     const result = await runCrabrunnerPreflight({ workflowPath });
@@ -218,6 +339,29 @@ describe("crabrunner review substrate preflight", () => {
     expect(`${result.stdout}\n${result.stderr}`).toContain(
       "SYMPHONY_CRABRUNNER_ROOT",
     );
+    expect(result.stderr).toContain("durable SOPS source");
+  });
+
+  it("requires crabrunner when planner grounding is enabled independently", async () => {
+    const workflowPath = await writeWorkflow(false, true);
+    const result = await runCrabrunnerPreflight({ workflowPath });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Crabrunner planner/review path");
+  });
+
+  it("rejects an ambient-only root that LaunchAgent would lose", async () => {
+    const workflowPath = await writeWorkflow(true);
+    const ambientRoot = await makeTempDir("symphony-deploy-ambient-root-");
+    const result = await runCrabrunnerPreflight({
+      workflowPath,
+      ambientCrabrunnerRoot: ambientRoot,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("set only in the operator shell");
+    expect(result.stderr).toContain("will disappear when LaunchAgent restarts");
+    expect(result.stderr).toContain(".env.enc");
   });
 
   it("passes as a no-op when the workflow does not enable crabrunner review", async () => {
@@ -230,7 +374,7 @@ describe("crabrunner review substrate preflight", () => {
 
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain(
-      "workflow does not enable crabrunner review",
+      "workflow does not enable crabrunner planner/review",
     );
   });
 
@@ -292,8 +436,12 @@ describe("crabrunner review substrate preflight", () => {
     const crabrunnerRoot = await makeTempDir("symphony-deploy-crabrunner-");
     const binDir = join(crabrunnerRoot, "bin");
     const crabrunnerBin = join(binDir, "crabrunner");
+    const argvFile = join(crabrunnerRoot, "argv.txt");
     await mkdir(binDir, { recursive: true });
-    await writeFile(crabrunnerBin, "#!/usr/bin/env bash\nexit 0\n");
+    await writeFile(
+      crabrunnerBin,
+      '#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" > "$CRABRUNNER_ARGV_FILE"\n',
+    );
     await chmod(crabrunnerBin, 0o755);
 
     const result = await runCrabrunnerPreflight({
@@ -301,12 +449,92 @@ describe("crabrunner review substrate preflight", () => {
       crabrunnerRoot,
       crabrunnerVersion: "symph-949-u0",
       crabrunnerStateRoot: join(crabrunnerRoot, "state"),
+      argvFile,
     });
 
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain("Crabrunner review preflight passed");
     expect(result.stdout).toContain("staged version symph-949-u0");
     expect(result.stdout).toContain(join(crabrunnerRoot, "state"));
+    await expect(readFile(argvFile, "utf8")).resolves.toBe(
+      [
+        "stage",
+        "--version",
+        "symph-949-u0",
+        "--state-root",
+        join(crabrunnerRoot, "state"),
+        "--repo-root",
+        await realpath(crabrunnerRoot),
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("stages the exact default dev argv with HOME-expanded state root", async () => {
+    const workflowPath = await writeWorkflow(true);
+    const crabrunnerRoot = await makeTempDir("symphony-deploy-crabrunner-");
+    const homeDir = await makeTempDir("symphony-deploy-home-");
+    const binDir = join(crabrunnerRoot, "bin");
+    const crabrunnerBin = join(binDir, "crabrunner");
+    const argvFile = join(crabrunnerRoot, "argv.txt");
+    await mkdir(binDir, { recursive: true });
+    await writeFile(
+      crabrunnerBin,
+      '#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" > "$CRABRUNNER_ARGV_FILE"\n',
+    );
+    await chmod(crabrunnerBin, 0o755);
+
+    const result = await runCrabrunnerPreflight({
+      workflowPath,
+      crabrunnerRoot,
+      argvFile,
+      homeDir,
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    await expect(readFile(argvFile, "utf8")).resolves.toBe(
+      [
+        "stage",
+        "--version",
+        "dev",
+        "--state-root",
+        join(homeDir, ".crucible", "crabrunner"),
+        "--repo-root",
+        await realpath(crabrunnerRoot),
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("reports exact dry-run argv without executing crabrunner", async () => {
+    const workflowPath = await writeWorkflow(true);
+    const crabrunnerRoot = await makeTempDir("symphony-deploy-crabrunner-");
+    const homeDir = await makeTempDir("symphony-deploy-home-");
+    const binDir = join(crabrunnerRoot, "bin");
+    const crabrunnerBin = join(binDir, "crabrunner");
+    const argvFile = join(crabrunnerRoot, "executed.txt");
+    await mkdir(binDir, { recursive: true });
+    await writeFile(
+      crabrunnerBin,
+      '#!/usr/bin/env bash\nprintf executed > "$CRABRUNNER_ARGV_FILE"\n',
+    );
+    await chmod(crabrunnerBin, 0o755);
+
+    const result = await runCrabrunnerPreflight({
+      workflowPath,
+      crabrunnerRoot,
+      argvFile,
+      dryRun: true,
+      homeDir,
+    });
+    const rootReal = await realpath(crabrunnerRoot);
+    const binReal = await realpath(crabrunnerBin);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain(
+      `[dry-run] ${binReal} stage --version dev --state-root ${join(homeDir, ".crucible", "crabrunner")} --repo-root ${rootReal}`,
+    );
+    await expect(readFile(argvFile, "utf8")).rejects.toThrow();
   });
 
   it("fails closed when the configured Crabrunner version cannot be staged", async () => {
