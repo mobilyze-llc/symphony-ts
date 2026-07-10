@@ -243,6 +243,49 @@ describe("claude-runner CLI", () => {
       ),
     ).resolves.toBe(1);
   });
+
+  it("passes an explicit environment only to the scheduler resolver boundary", async () => {
+    const env = {
+      SYMPHONY_CRABRUNNER_ROOT: "/crucible",
+      LINEAR_API_KEY: "must-not-reach-runner-input",
+    };
+    const resolveSchedulerOptions = vi.fn(() => ({
+      crucibleRoot: "/crucible",
+      targetRepoRoot: "/repo",
+    }));
+    const runCrabrunner = vi.fn(async (input: ClaudeCrabrunnerRunnerInput) =>
+      makeResult(input, "passed"),
+    );
+
+    const exitCode = await runClaudeRunnerCli(
+      [
+        "--purpose",
+        "custom",
+        "--workspace",
+        "/repo",
+        "--prompt-file",
+        "/repo/prompt.md",
+        "--artifact-dir",
+        "/repo/artifacts",
+        "--artifact-name",
+        "opus",
+      ],
+      {
+        env,
+        resolveSchedulerOptions,
+        runCrabrunner,
+        stdout: vi.fn(),
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    expect(resolveSchedulerOptions).toHaveBeenCalledWith({
+      targetRepoRoot: "/repo",
+      env,
+    });
+    expect(runCrabrunner).toHaveBeenCalledOnce();
+    expect(runCrabrunner.mock.calls[0]?.[0]).not.toHaveProperty("env");
+  });
 });
 
 function makeResult(

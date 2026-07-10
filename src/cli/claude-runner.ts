@@ -43,6 +43,9 @@ export interface ClaudeRunnerCliDependencies {
   ) => Promise<ClaudeRunnerResult>;
   stdout?: (text: string) => void;
   stderr?: (text: string) => void;
+  env?: NodeJS.ProcessEnv;
+  resolveSchedulerOptions?: typeof resolveClaudeCrabrunnerSchedulerOptions;
+  runCrabrunner?: typeof runClaudeCrabrunner;
 }
 
 class UsageError extends Error {
@@ -215,12 +218,17 @@ export async function runClaudeRunnerCli(
     dependencies.stdout ?? ((text: string) => process.stdout.write(text));
   const stderr =
     dependencies.stderr ?? ((text: string) => process.stderr.write(text));
+  const resolveSchedulerOptions =
+    dependencies.resolveSchedulerOptions ??
+    resolveClaudeCrabrunnerSchedulerOptions;
+  const runCrabrunner = dependencies.runCrabrunner ?? runClaudeCrabrunner;
   const runClaude =
     dependencies.runClaude ??
     ((input) =>
-      runClaudeCrabrunner(input, {
-        schedulerOptions: resolveClaudeCrabrunnerSchedulerOptions({
+      runCrabrunner(input, {
+        schedulerOptions: resolveSchedulerOptions({
           targetRepoRoot: input.workspace,
+          env: dependencies.env ?? process.env,
         }),
       }));
   let parsed: ParsedArgs;

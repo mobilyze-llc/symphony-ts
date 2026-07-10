@@ -2,6 +2,16 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
+import {
+  DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
+  DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
+  DEFAULT_HARD_STOP_LIVE_BUDGET_GRACE_RATIO,
+  DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
+  DEFAULT_HARD_STOP_MAX_ITERATIONS,
+  DEFAULT_HARD_STOP_MAX_TOKENS_PER_UNIT,
+  DEFAULT_HARD_STOP_NO_PROGRESS_TURNS,
+  DEFAULT_STALL_TIMEOUT_MS,
+} from "../config/defaults.js";
 import type {
   StageExecutionPhase,
   StageExecutionRole,
@@ -13,6 +23,7 @@ import {
   type CrabrunnerSchedulerClient,
   type CrabrunnerTerminalEvidence,
   type CrabrunnerTerminalState,
+  validateCrabrunnerLaneEnforcementContract,
 } from "../stage-execution/crabrunner-backend.js";
 import {
   CrabrunnerCliSchedulerClient,
@@ -115,7 +126,7 @@ export function resolveClaudeCrabrunnerSchedulerOptions(
     firstNonEmpty(
       input.targetRepoRoot,
       env.SYMPHONY_CRABRUNNER_TARGET_REPO,
-      env.REPO_URL,
+      localRepoUrlPath(env.REPO_URL),
       cwd,
     ) ?? cwd;
   return {
@@ -271,6 +282,12 @@ export async function runClaudeCrabrunner(
       timeoutSeconds,
       promptSha256,
     });
+    const enforcementFailure = validateCrabrunnerLaneEnforcementContract(spec);
+    if (enforcementFailure !== null) {
+      throw new Error(
+        enforcementFailure.message ?? "invalid crabrunner enforcement contract",
+      );
+    }
     const admission = await scheduler.submit(spec);
     if (admission.status !== "accepted" || admission.jobId === null) {
       message = `crabrunner admission rejected: ${admission.reason ?? "rejected"}`;
@@ -500,17 +517,18 @@ function buildCrabrunnerJobSpec(input: {
     enforcement: {
       required: true,
       budget: {
-        maxTokens: null,
-        maxUsd: null,
-        estimatedCostPer1kTokensUsd: null,
-        cachedTokenCostRatio: null,
-        liveBudgetGraceRatio: null,
+        maxTokens: DEFAULT_HARD_STOP_MAX_TOKENS_PER_UNIT,
+        maxUsd: DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
+        estimatedCostPer1kTokensUsd:
+          DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
+        cachedTokenCostRatio: DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
+        liveBudgetGraceRatio: DEFAULT_HARD_STOP_LIVE_BUDGET_GRACE_RATIO,
       },
       timing: {
         timeoutMs: input.timeoutSeconds * 1_000,
-        stallTimeoutMs: null,
-        noProgressTurns: null,
-        maxIterations: null,
+        stallTimeoutMs: DEFAULT_STALL_TIMEOUT_MS,
+        noProgressTurns: DEFAULT_HARD_STOP_NO_PROGRESS_TURNS,
+        maxIterations: DEFAULT_HARD_STOP_MAX_ITERATIONS,
       },
       telemetry: {
         heartbeatIntervalMs: DELEGATED_LANE_HEARTBEAT_INTERVAL_MS,
@@ -865,6 +883,20 @@ function firstNonEmpty(...values: Array<string | undefined>): string | null {
     }
   }
   return null;
+}
+
+function localRepoUrlPath(value: string | undefined): string | undefined {
+  const candidate = value?.trim();
+  if (candidate === undefined || candidate === "") {
+    return undefined;
+  }
+  if (/^(?:https?:\/\/|ssh:\/\/)/iu.test(candidate)) {
+    return undefined;
+  }
+  if (/^(?:[^/@\s]+@)?[^/\\\s]+:[^/\\]/u.test(candidate)) {
+    return undefined;
+  }
+  return candidate;
 }
 
 function formatUnknownError(error: unknown): string {
