@@ -16,11 +16,11 @@ function expectAll(snippets: readonly string[]): void {
 }
 
 describe("claude-runner skill", () => {
-  it("defines the reusable agent-facing Claude CMUX runner entrypoint", () => {
+  it("defines the reusable agent-facing Claude crabrunner entrypoint", () => {
     expect(skillContent).toMatch(/^name: claude-runner$/m);
     expect(skillContent).toContain("# Claude Runner");
     expect(skillContent).toContain("claude-runner");
-    expect(skillContent).toContain("cmux-spawn run --agent claude");
+    expect(skillContent).toContain("crabrunner execution substrate");
     expect(skillContent).toContain("bounded Claude lane");
   });
 
@@ -42,7 +42,7 @@ describe("claude-runner skill", () => {
   it("prohibits unmanaged direct Claude subprocesses", () => {
     expectAll([
       "Do not call `claude -p`, `claude --bg`, or hand-written unmanaged Claude",
-      "do not invent a parallel Claude launch path",
+      "Do not invent a parallel",
     ]);
   });
 
@@ -61,7 +61,7 @@ describe("claude-runner skill", () => {
     }
   });
 
-  it("explains required runner inputs and CMUX override handling", () => {
+  it("explains required runner inputs and crabrunner configuration", () => {
     expectAll([
       "`WORKSPACE_ROOT`",
       "`PROMPT_FILE`",
@@ -71,8 +71,8 @@ describe("claude-runner skill", () => {
       "`SOURCE` files",
       "`MODEL` and `PROFILE`",
       "`TIMEOUT_SECONDS`",
-      "`CMUX_SPAWN_BIN`",
-      '--cmux-spawn-bin "$CMUX_SPAWN_BIN"',
+      "`SYMPHONY_CRABRUNNER_ROOT`",
+      "Crabrunner owns admission",
     ]);
   });
 
@@ -80,7 +80,7 @@ describe("claude-runner skill", () => {
     expectAll([
       "Prompts and sources must be inside the workspace.",
       "checks prompt and",
-      "source visibility before invoking Claude",
+      "source visibility before scheduler submission",
       "sourceVisibility.status",
       "invalid_source_path",
     ]);
@@ -93,7 +93,7 @@ describe("claude-runner skill", () => {
       "--verdict-enum <value>",
       "--required-json-section <heading>",
       "--min-bytes <n>",
-      "--retry-on-invalid",
+      "--diagnostic-byte-limit <n>",
       'Treat only `"status": "passed"` as success.',
       "`validationErrors`",
       "`attempts`",
@@ -105,8 +105,8 @@ describe("claude-runner skill", () => {
     expectAll([
       "Silence is not failure.",
       "Do not kill or restart a lane merely because stdout is idle.",
-      "<ARTIFACT_DIR>/<ARTIFACT_NAME>.status.json",
-      "<ARTIFACT_DIR>/<ARTIFACT_NAME>.cli.json",
+      "<ARTIFACT_DIR>/<ARTIFACT_NAME>.md",
+      "<ARTIFACT_DIR>/<ARTIFACT_NAME>.crabrunner.json",
       "<ARTIFACT_DIR>/<ARTIFACT_NAME>.result.json",
     ]);
   });
@@ -119,12 +119,12 @@ describe("claude-runner skill", () => {
     ]);
   });
 
-  it("records a lightweight prompt-only dogfood note", () => {
+  it("documents one-shot invalid-artifact handling", () => {
     expectAll([
-      "Dogfood Note",
-      "outside-workspace prompt failed before Claude invocation",
-      "validated Opus artifact",
-      "trust the result",
+      "Crabrunner lanes are one-shot.",
+      "deliberately submit a new lane",
+      "invalid_artifact",
+      "terminal evidence",
     ]);
   });
 });

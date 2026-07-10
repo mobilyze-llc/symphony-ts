@@ -1,6 +1,0 @@
-interface:
-  display_name: "Council Review"
-  short_description: "Codex-led Opus+Pi cmux review council."
-  default_prompt: "Use $council-review to run a Codex-led cmux review council for this change."
-policy:
-  allow_implicit_invocation: true
