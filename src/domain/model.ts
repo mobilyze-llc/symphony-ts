@@ -1,7 +1,6 @@
 import type { ErrorSignatureClass } from "../errors/signature.js";
 import type { ProcessIdentitySnapshot } from "../shared/process-tree.js";
 import type { StageUsageMeasurement } from "./stage-usage.js";
-
 export const ORCHESTRATOR_ISSUE_STATUSES = [
   "unclaimed",
   "claimed",
@@ -9,7 +8,6 @@ export const ORCHESTRATOR_ISSUE_STATUSES = [
   "retry_queued",
   "released",
 ] as const;
-
 export type OrchestratorIssueStatus =
   (typeof ORCHESTRATOR_ISSUE_STATUSES)[number];
 
@@ -827,6 +825,7 @@ export interface LiveSession {
   threadId: string | null;
   turnId: string | null;
   codexAppServerPid: string | null;
+  laneJobId?: string | null;
   codexAppServerIdentity: ProcessIdentitySnapshot | null;
   lastCodexEvent: string | null;
   lastCodexTimestamp: string | null;
@@ -1125,8 +1124,9 @@ export interface RunningEntry extends LiveSession {
   workerHandle: unknown;
   monitorHandle: unknown;
   failureReason: string | null;
+  laneCancellationSupported?: boolean;
+  laneJobIds?: string[];
 }
-
 export interface StageRecord {
   stageName: string;
   completedAt?: string;
@@ -1557,9 +1557,11 @@ export interface PipelineEmergencyStopState {
     attempt: number | null;
     codexAppServerPid: string | null;
     codexAppServerIdentity: ProcessIdentitySnapshot | null;
+    laneJobId?: string | null;
+    laneJobIds?: string[];
+    laneCancellationSupported?: boolean;
   }>;
 }
-
 export interface PipelinePauseState {
   active: true;
   since: string;
@@ -1598,7 +1600,6 @@ export const HUMAN_BLOCK_OPERATIONS = [
   "other",
 ] as const;
 export type HumanBlockOperation = (typeof HUMAN_BLOCK_OPERATIONS)[number];
-
 export interface HumanBlockSignal {
   operation: HumanBlockOperation;
   blockers: string | null;
@@ -1612,7 +1613,6 @@ const HUMAN_BLOCK_PREFIX = "[BLOCKED_NEEDS_HUMAN:";
 const HUMAN_BLOCKERS_PREFIX = "[BLOCKED_NEEDS_HUMAN_BLOCKERS:";
 const HUMAN_BLOCK_SUFFIX = "]";
 const LEGACY_HUMAN_BLOCK_MARKER = "BLOCKED-needs-human";
-
 /**
  * Detect the `[STAGE_COMPLETE]` signal at the start of any line in the
  * agent's final message. Workers emit the marker leading or trailing

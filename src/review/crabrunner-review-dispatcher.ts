@@ -141,6 +141,9 @@ export function createCrabrunnerReviewStageDispatcher(
       previousReviewedHeadSha: context.previousReviewedHeadSha ?? null,
       lanes,
       backend: context.backend,
+      ...(context.onLaneJobId === undefined
+        ? {}
+        : { onLaneJobId: context.onLaneJobId }),
       buildJobSpec: (lane) =>
         buildReviewLaneJobSpec({
           context,
@@ -192,6 +195,9 @@ async function maybeRunPreReviewVerifyGate(input: {
     runGroupId: input.runGroupId,
     headSha: input.plan.context.headSha ?? "",
     backend: input.context.backend,
+    ...(input.context.onLaneJobId === undefined
+      ? {}
+      : { onLaneJobId: input.context.onLaneJobId }),
     signal: input.context.signal,
     defaultRunnerKind: input.options.defaultRunnerKind,
     defaultRunnerModel: input.options.defaultRunnerModel,

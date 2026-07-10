@@ -104,6 +104,27 @@ describe("runStageExecutionLanes", () => {
     ]);
   });
 
+  it("forwards admission callbacks for review and decomposed lane shapes", async () => {
+    const admitted: string[] = [];
+    const backend = fakeBackend(async (input) => {
+      input.onLaneJobId?.(`lane-${input.job.identity.stageName}`);
+      return backendResult(input);
+    });
+
+    await runStageExecutionLanes<Lane, string, string[]>({
+      lanes: [{ laneId: "reviewer" }, { laneId: "sub-stage" }],
+      dispatchMode: "parallel",
+      buildJobSpec: laneJob,
+      buildRunnerInput: laneRunnerInput,
+      resolveBackend: () => backend,
+      onLaneJobId: (jobId) => admitted.push(jobId),
+      collectArtifact: (lane) => lane.lane.laneId,
+      aggregate: (lanes) => lanes.map((lane) => lane.artifact ?? "missing"),
+    });
+
+    expect(admitted).toEqual(["lane-reviewer", "lane-sub-stage"]);
+  });
+
   it("isolates per-lane backend failures and still aggregates every lane", async () => {
     const backend = fakeBackend(async (input) => {
       if (input.job.identity.stageName === "bad") {

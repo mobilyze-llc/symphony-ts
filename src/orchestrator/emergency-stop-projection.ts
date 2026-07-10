@@ -30,6 +30,9 @@ export interface PublicEmergencyStopInterruptedIssue {
   stage: string | null;
   attempt: number | null;
   codex_app_server_pid: string | null;
+  lane_job_id: string | null;
+  lane_job_ids?: string[];
+  control_path: "codex_app_server_pid" | "crabrunner_cancel";
   process_identity: PublicEmergencyStopProcessIdentity | null;
   /**
    * Static consistency of the captured identity payload. This is independent
@@ -56,12 +59,24 @@ export function projectEmergencyStopInterruptedIssue(
     stage: issue.stage,
     attempt: issue.attempt,
     codex_app_server_pid: issue.codexAppServerPid,
+    lane_job_id: issue.laneJobId ?? null,
+    ...(issue.laneJobIds === undefined
+      ? {}
+      : { lane_job_ids: [...issue.laneJobIds] }),
+    control_path:
+      issue.laneJobId === undefined ||
+      issue.laneJobId === null ||
+      issue.laneCancellationSupported !== true
+        ? "codex_app_server_pid"
+        : "crabrunner_cancel",
     process_identity: redactProcessIdentity(issue.codexAppServerIdentity),
     identity_status: identityStatus,
     cleanup_status: cleanupStatus,
     cleanup_status_reason: getEmergencyStopCleanupStatusReason(
       cleanupStatus,
       identityStatus,
+      issue.laneJobId ?? null,
+      issue.laneCancellationSupported === true,
     ),
   };
 }
@@ -120,7 +135,14 @@ function getEmergencyStopCleanupStatus(
 function getEmergencyStopCleanupStatusReason(
   cleanupStatus: EmergencyStopCleanupStatus,
   identityStatus: EmergencyStopProcessIdentityStatus,
+  laneJobId: string | null,
+  laneCancellationSupported: boolean,
 ): string {
+  if (laneJobId !== null && laneCancellationSupported) {
+    return cleanupStatus === "confirmed"
+      ? "Cleanup proof is confirmed through crabrunner scheduler cancellation; the lane job id is opaque and is never treated as a PID."
+      : "Cleanup remains unconfirmed for the crabrunner scheduler cancellation; the lane job id is opaque and is never treated as a PID.";
+  }
   switch (cleanupStatus) {
     case "confirmed":
       return identityStatus === "mismatch"

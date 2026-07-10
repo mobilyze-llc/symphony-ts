@@ -11,6 +11,7 @@ import type {
   PauseTriageEvidence,
   PauseTriageVerdict,
 } from "../agent/pause-triage.js";
+import type { AgentRunResult } from "../agent/runner.js";
 import type {
   StuckTriageEvidence,
   StuckTriageParkKind,
@@ -115,6 +116,25 @@ import { buildReviewJournalEntries } from "../review/review-journal-events.js";
 import { normalizeAccountEmail } from "../shared/account-email.js";
 import { sanitizeForLinear } from "../shared/egress.js";
 import { readProcessIdentityMetadata } from "../shared/process-tree.js";
+import {
+  type StopReason,
+  type StopSignalDelivery,
+  isEmergencyStopTerminationConfirmed,
+  isStopReason,
+  isStopSignalDelivery,
+  laneJobIdsMetadata,
+  laneJobMetadata,
+} from "./stop-signal-delivery.js";
+export {
+  type StopReason,
+  type StopSignalDelivery,
+  type StopSignalDeliveryAttempt,
+  type StopSignalDeliveryStatus,
+  type StopSignalStatus,
+  deriveAttemptedStopSignalDeliveryStatus,
+  getFailedStopSignalDeliveryAttempts,
+  isStopSignalDelivery,
+} from "./stop-signal-delivery.js";
 import {
   type TicketFeature,
   extractTicketFeatures,
@@ -317,16 +337,10 @@ export type WorkerExitOutcome =
   | "timed_out"
   | "error";
 
-export type StopReason =
-  | "terminal_state"
-  | "inactive_state"
-  | "stall_timeout"
-  | "manual_stop"
-  | "emergency_stop";
-
 export interface SpawnWorkerResult {
   workerHandle: unknown;
   monitorHandle: unknown;
+  laneCancellationSupported?: boolean;
 }
 
 export interface StopRequest {
@@ -335,40 +349,6 @@ export interface StopRequest {
   cleanupWorkspace: boolean;
   reason: StopReason;
   signalDelivery?: StopSignalDelivery | null;
-}
-
-export type StopSignalDeliveryStatus =
-  | "not_attempted"
-  | "already_exited"
-  | "delivered"
-  | "partial"
-  | "failed";
-
-export type StopSignalStatus =
-  | "delivered"
-  | "already_exited"
-  | "failed"
-  | "not_attempted";
-
-export interface StopSignalDeliveryAttempt {
-  pid: number;
-  processGroupId: number | null;
-  sigterm: Exclude<StopSignalStatus, "not_attempted">;
-  sigkill: StopSignalStatus;
-}
-
-export interface StopSignalDelivery {
-  /**
-   * Aggregate proof status. "delivered" means every target reached a terminal
-   * non-failed state; it can include a failed SIGTERM followed by delivered
-   * SIGKILL, so operator displays must keep per-signal attempts visible.
-   */
-  status: StopSignalDeliveryStatus;
-  reason: StopReason;
-  attemptedAt: string;
-  workspacePath: string | null;
-  attempts: StopSignalDeliveryAttempt[];
-  warning: string | null;
 }
 
 interface IntentWriteInput {
@@ -873,6 +853,15 @@ export class OrchestratorCore {
 
   private readonly stopRunningIssue?: OrchestratorCoreOptions["stopRunningIssue"];
 
+  /** Lane admission can race the RunningEntry insertion during dispatch. */
+  private readonly pendingLaneJobIds = new Map<string, string[]>();
+
+  /** A very fast delegated terminal can race the RunningEntry insertion too. */
+  private readonly pendingCrabrunnerResults = new Map<string, AgentRunResult>();
+
+  /** Prevent a pending result and its completion callback from applying twice. */
+  private readonly appliedCrabrunnerResults = new WeakSet<AgentRunResult>();
+
   private readonly runEnsembleGate?: OrchestratorCoreOptions["runEnsembleGate"];
 
   private readonly postComment?: OrchestratorCoreOptions["postComment"];
@@ -1239,6 +1228,8 @@ export class OrchestratorCore {
     issueIdentifier: string;
     codexAppServerPid: string | null;
     codexAppServerIdentity: PipelineEmergencyStopState["interruptedIssues"][number]["codexAppServerIdentity"];
+    laneJobId?: string | null;
+    laneJobIds?: readonly string[];
     sourceSequence: number;
   }): Promise<number | null> {
     try {
@@ -1267,6 +1258,12 @@ export class OrchestratorCore {
           sourceSequence: input.sourceSequence,
           codexAppServerPid: input.codexAppServerPid,
           codexAppServerIdentity: input.codexAppServerIdentity,
+          ...(input.laneJobId === undefined
+            ? {}
+            : { laneJobId: input.laneJobId }),
+          ...(input.laneJobIds === undefined
+            ? {}
+            : { laneJobIds: [...input.laneJobIds] }),
         },
       });
       this.recoverHardStopTrigger(entry);
@@ -9683,6 +9680,66 @@ export class OrchestratorCore {
     return { applied: true, rateLimitsUpdated: telemetry.rateLimitsUpdated };
   }
 
+  /**
+   * Preserve the scheduler identity while a delegated stage is still running.
+   * A lane job id is opaque remote control data and must never enter the PID
+   * signal path.
+   */
+  recordLaneJobId(issueId: string, laneJobId: string): boolean {
+    const runningEntry = this.state.running[issueId];
+    if (laneJobId.trim() === "") {
+      return false;
+    }
+    if (runningEntry === undefined) {
+      const pending = this.pendingLaneJobIds.get(issueId) ?? [];
+      if (!pending.includes(laneJobId)) {
+        pending.push(laneJobId);
+      }
+      this.pendingLaneJobIds.set(issueId, pending);
+      return true;
+    }
+    const laneJobIds = runningEntry.laneJobIds ?? [];
+    if (!laneJobIds.includes(laneJobId)) {
+      laneJobIds.push(laneJobId);
+    }
+    runningEntry.laneJobIds = laneJobIds;
+    runningEntry.laneJobId = laneJobId;
+    return true;
+  }
+
+  /**
+   * Apply the terminal delegated session to the same RunningEntry consumed by
+   * the stage-record reducer. The in-process runner remains event-driven; this
+   * one final projection is the lane equivalent of its usage event stream.
+   */
+  applyCrabrunnerResult(input: {
+    issueId: string;
+    result: AgentRunResult;
+  }): boolean {
+    if (this.appliedCrabrunnerResults.has(input.result)) {
+      return true;
+    }
+    const runningEntry = this.state.running[input.issueId];
+    if (runningEntry === undefined) {
+      this.pendingCrabrunnerResults.set(input.issueId, input.result);
+      return true;
+    }
+
+    this.appliedCrabrunnerResults.add(input.result);
+    Object.assign(runningEntry, input.result.liveSession);
+    const liveSession = input.result.liveSession;
+    this.state.codexTotals.inputTokens += liveSession.totalStageInputTokens;
+    this.state.codexTotals.outputTokens += liveSession.totalStageOutputTokens;
+    this.state.codexTotals.totalTokens += liveSession.totalStageTotalTokens;
+    this.state.codexTotals.cacheReadTokens +=
+      liveSession.totalStageCacheReadTokens;
+    this.state.codexTotals.cacheWriteTokens +=
+      liveSession.totalStageCacheWriteTokens;
+    this.state.codexTotals.reasoningTokens += liveSession.codexReasoningTokens;
+    this.state.codexTotals.noCacheTokens += liveSession.codexNoCacheTokens;
+    return true;
+  }
+
   async runContinuousFeedbackCheckpoint(input: {
     issueId: string;
     event: ContinuousFeedbackEvent;
@@ -10083,6 +10140,15 @@ export class OrchestratorCore {
       attempt: runningEntry.retryAttempt,
       codexAppServerPid: runningEntry.codexAppServerPid,
       codexAppServerIdentity: runningEntry.codexAppServerIdentity,
+      ...laneJobIdsMetadata(runningEntry.laneJobIds),
+      ...(runningEntry.laneJobId === null
+        ? {}
+        : {
+            laneCancellationSupported:
+              runningEntry.laneCancellationSupported === true,
+            ...laneJobIdsMetadata(runningEntry.laneJobIds),
+            ...laneJobMetadata(runningEntry.laneJobId),
+          }),
     };
   }
 
@@ -12236,8 +12302,11 @@ export class OrchestratorCore {
         budgetMultiplier: this.budgetMultiplierForIssue(issue.id),
         acceptanceCriteria: this.state.issueAcSnapshots[issue.id] ?? null,
       });
+      const laneJobIds = this.pendingLaneJobIds.get(issue.id) ?? [];
       const runEntry: RunningEntry = {
         ...createEmptyLiveSession(),
+        laneJobId: laneJobIds.at(-1) ?? null,
+        ...(laneJobIds.length === 0 ? {} : { laneJobIds: [...laneJobIds] }),
         issue,
         identifier: issue.identifier,
         retryAttempt: normalizeRetryAttempt(attempt),
@@ -12245,8 +12314,20 @@ export class OrchestratorCore {
         workerHandle: spawned.workerHandle,
         monitorHandle: spawned.monitorHandle,
         failureReason: null,
+        laneCancellationSupported: spawned.laneCancellationSupported ?? false,
       };
+      this.pendingLaneJobIds.delete(issue.id);
       this.state.running[issue.id] = runEntry;
+      const pendingCrabrunnerResult = this.pendingCrabrunnerResults.get(
+        issue.id,
+      );
+      if (pendingCrabrunnerResult !== undefined) {
+        this.pendingCrabrunnerResults.delete(issue.id);
+        this.applyCrabrunnerResult({
+          issueId: issue.id,
+          result: pendingCrabrunnerResult,
+        });
+      }
       this.state.claimed.add(issue.id);
       this.clearRetryEntry(issue.id);
       this.recordExistingActiveResumeIfNeeded({
@@ -12850,6 +12931,13 @@ export class OrchestratorCore {
               sourceSequence: options.emergencyStopSourceSequence ?? null,
               codexAppServerPid: runningEntry.codexAppServerPid,
               codexAppServerIdentity: runningEntry.codexAppServerIdentity,
+              ...(runningEntry.laneJobId === null
+                ? {}
+                : {
+                    laneCancellationSupported:
+                      runningEntry.laneCancellationSupported === true,
+                    ...laneJobMetadata(runningEntry.laneJobId),
+                  }),
             }
           : {}),
       },
@@ -12919,6 +13007,8 @@ export class OrchestratorCore {
                 sourceSequence: options.emergencyStopSourceSequence ?? null,
                 codexAppServerPid: runningEntry.codexAppServerPid,
                 codexAppServerIdentity: runningEntry.codexAppServerIdentity,
+                ...laneJobIdsMetadata(runningEntry.laneJobIds),
+                ...laneJobMetadata(runningEntry.laneJobId),
                 emergencyStopTerminationConfirmed,
                 signalDelivery: stopRequest.signalDelivery ?? null,
               }
@@ -14261,16 +14351,6 @@ function parseStoppedAfterReason(
   return isStopReason(rawReason) ? rawReason : null;
 }
 
-function isStopReason(value: unknown): value is StopReason {
-  return (
-    value === "terminal_state" ||
-    value === "inactive_state" ||
-    value === "stall_timeout" ||
-    value === "manual_stop" ||
-    value === "emergency_stop"
-  );
-}
-
 function isDispatcherAdmissionEntry(entry: DispatcherRunJournalEntry): boolean {
   return (
     entry.kind === "admission" &&
@@ -14453,6 +14533,18 @@ function readInterruptedIssues(
     const codexAppServerIdentity = readProcessIdentityMetadata(
       record.codexAppServerIdentity,
     );
+    const laneJobId =
+      typeof record.laneJobId === "string" && record.laneJobId.trim() !== ""
+        ? record.laneJobId
+        : null;
+    const laneJobIds = Array.isArray(record.laneJobIds)
+      ? record.laneJobIds.filter(
+          (value): value is string =>
+            typeof value === "string" && value.trim() !== "",
+        )
+      : laneJobId === null
+        ? []
+        : [laneJobId];
     return [
       {
         issueId,
@@ -14468,6 +14560,14 @@ function readInterruptedIssues(
             ? codexAppServerPid
             : null,
         codexAppServerIdentity,
+        ...(laneJobId === null
+          ? {}
+          : {
+              laneCancellationSupported:
+                record.laneCancellationSupported === true,
+              laneJobId,
+              laneJobIds,
+            }),
       },
     ];
   });
@@ -15256,159 +15356,6 @@ function toClusterMembers(value: unknown): ClusterMember[] | null {
     });
   }
   return members;
-}
-
-export function isStopSignalDelivery(
-  value: unknown,
-): value is StopSignalDelivery {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-  const candidate = value as Partial<StopSignalDelivery>;
-  return (
-    isStopSignalDeliveryStatus(candidate.status) &&
-    isStopReason(candidate.reason) &&
-    isValidTimestamp(candidate.attemptedAt) &&
-    (typeof candidate.workspacePath === "string" ||
-      candidate.workspacePath === null) &&
-    Array.isArray(candidate.attempts) &&
-    candidate.attempts.every(isStopSignalDeliveryAttempt) &&
-    isStopSignalDeliveryStatusConsistent(
-      candidate.status,
-      candidate.attempts,
-      candidate.warning,
-    ) &&
-    (typeof candidate.warning === "string" || candidate.warning === null)
-  );
-}
-
-function isEmergencyStopTerminationConfirmed(value: unknown): boolean {
-  if (!isStopSignalDelivery(value)) {
-    return false;
-  }
-  return (
-    (value.status === "delivered" &&
-      value.attempts.length > 0 &&
-      value.attempts.every(
-        (attempt) =>
-          attempt.sigkill !== "failed" &&
-          (attempt.sigterm === "delivered" || attempt.sigkill === "delivered"),
-      )) ||
-    (value.status === "already_exited" &&
-      value.attempts.length > 0 &&
-      value.attempts.every(
-        (attempt) =>
-          attempt.sigterm === "already_exited" ||
-          attempt.sigkill === "already_exited",
-      ))
-  );
-}
-
-function isStopSignalDeliveryStatus(
-  value: unknown,
-): value is StopSignalDeliveryStatus {
-  return (
-    value === "not_attempted" ||
-    value === "already_exited" ||
-    value === "delivered" ||
-    value === "partial" ||
-    value === "failed"
-  );
-}
-
-function isValidTimestamp(value: unknown): value is string {
-  // Intentionally Date.parse-permissive for persisted/runtime telemetry
-  // compatibility; producers still emit Date#toISOString.
-  return typeof value === "string" && !Number.isNaN(Date.parse(value));
-}
-
-function isStopSignalDeliveryAttempt(
-  value: unknown,
-): value is StopSignalDeliveryAttempt {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-  const candidate = value as Partial<StopSignalDeliveryAttempt>;
-  if (
-    !isSignalTargetId(candidate.pid) ||
-    !(
-      candidate.processGroupId === null ||
-      isSignalTargetId(candidate.processGroupId)
-    ) ||
-    !isAttemptedStopSignalStatus(candidate.sigterm) ||
-    !isStopSignalStatus(candidate.sigkill)
-  ) {
-    return false;
-  }
-  return candidate.sigterm === "delivered" ||
-    candidate.sigterm === "already_exited"
-    ? true
-    : candidate.sigkill !== "not_attempted";
-}
-
-function isSignalTargetId(value: unknown): value is number {
-  // Signal telemetry only accepts process targets that are safe to address:
-  // pid 1 is the system init/launchd target and pid 0 has process-group
-  // semantics, so both are invalid proof targets.
-  return Number.isInteger(value) && Number(value) > 1;
-}
-
-function isAttemptedStopSignalStatus(
-  value: unknown,
-): value is Exclude<StopSignalStatus, "not_attempted"> {
-  return (
-    value === "delivered" || value === "already_exited" || value === "failed"
-  );
-}
-
-function isStopSignalStatus(value: unknown): value is StopSignalStatus {
-  return (
-    value === "delivered" ||
-    value === "already_exited" ||
-    value === "failed" ||
-    value === "not_attempted"
-  );
-}
-
-function isStopSignalDeliveryStatusConsistent(
-  status: StopSignalDeliveryStatus,
-  attempts: StopSignalDeliveryAttempt[],
-  warning: StopSignalDelivery["warning"] | undefined,
-): boolean {
-  if (attempts.length === 0) {
-    return (
-      status === "not_attempted" ||
-      (status === "failed" && typeof warning === "string")
-    );
-  }
-  return status === deriveAttemptedStopSignalDeliveryStatus(attempts);
-}
-
-export function deriveAttemptedStopSignalDeliveryStatus(
-  attempts: readonly StopSignalDeliveryAttempt[],
-): Exclude<StopSignalDeliveryStatus, "not_attempted"> | null {
-  // Empty attempts do not distinguish "not attempted" from "failed before
-  // attempts were recorded"; callers must choose that transport status from
-  // their warning/context and only use this helper for attempted targets.
-  if (attempts.length === 0) {
-    return null;
-  }
-  const failedAttempts = getFailedStopSignalDeliveryAttempts(attempts);
-  if (failedAttempts.length === 0) {
-    return attempts.some(
-      (attempt) =>
-        attempt.sigterm === "delivered" || attempt.sigkill === "delivered",
-    )
-      ? "delivered"
-      : "already_exited";
-  }
-  return failedAttempts.length === attempts.length ? "failed" : "partial";
-}
-
-export function getFailedStopSignalDeliveryAttempts(
-  attempts: readonly StopSignalDeliveryAttempt[],
-): StopSignalDeliveryAttempt[] {
-  return attempts.filter((attempt) => attempt.sigkill === "failed");
 }
 
 function isReviewSubstrateDegradationMessage(

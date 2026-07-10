@@ -86,6 +86,24 @@ describe("CrabrunnerStageExecutionBackend", () => {
     ]);
   });
 
+  it("publishes the admitted lane id before waiting for terminal evidence", async () => {
+    const laneJobIds: string[] = [];
+    const backend = new CrabrunnerStageExecutionBackend({
+      client: createClient({
+        admission: { status: "accepted", jobId: "job-admitted" },
+        terminal: { state: "succeeded" },
+      }),
+    });
+
+    await backend.execute({
+      job: createJob(),
+      runnerInput: createRunnerInput(),
+      onLaneJobId: (jobId) => laneJobIds.push(jobId),
+    });
+
+    expect(laneJobIds).toEqual(["job-admitted"]);
+  });
+
   it("preserves the lane final artifact as the agent message for existing signal parsers", async () => {
     const finalMessage = "Investigation complete.\n[STAGE_COMPLETE]";
     const backend = new CrabrunnerStageExecutionBackend({

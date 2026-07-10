@@ -148,7 +148,6 @@ import {
   type PipelineStatusResponse,
   type RefreshResponse,
   type StopIssueResponse,
-  type StopSignalDeliveryResponse,
   startDashboardServer,
 } from "../observability/dashboard-server.js";
 import {
@@ -181,7 +180,6 @@ import { sanitizeForLinear } from "../shared/egress.js";
 import {
   processTreeTerminationConfirmed,
   readProcessIdentity as readProcessIdentityDefault,
-  readProcessIdentityMetadata,
   terminateDetachedPidTree as terminateDetachedPidTreeDefault,
   terminateDetachedProcessGroupTree as terminateDetachedProcessGroupTreeDefault,
 } from "../shared/process-tree.js";
@@ -200,7 +198,11 @@ import {
   type StageExecutionJobSpec,
   UnsupportedStageExecutionBackendError,
 } from "../stage-execution/backend.js";
-import type { CrabrunnerStageExecutionEvidence } from "../stage-execution/crabrunner-backend.js";
+import type {
+  CrabrunnerCancellationRequest,
+  CrabrunnerStageExecutionEvidence,
+  CrabrunnerTerminalEvidence,
+} from "../stage-execution/crabrunner-backend.js";
 import { createStageExecutionJobSpec } from "../stage-execution/job-spec.js";
 import * as stageExecutionResult from "../stage-execution/result-metadata.js";
 import { serializeTrackerErrorDetails } from "../tracker/errors.js";
@@ -257,6 +259,12 @@ import {
 } from "./core.js";
 import { executeDecomposedStageDispatch } from "./decomposed-stage-dispatch.js";
 import { projectEmergencyStopInterruptedIssue } from "./emergency-stop-projection.js";
+import {
+  type EmergencyStopRecoveryCleanupPlan,
+  collectUnconfirmedEmergencyStopCleanupPlans,
+  parseProcessPid,
+  recoverEmergencyStopLaneCancellation,
+} from "./emergency-stop-recovery.js";
 import { getDiff, runEnsembleGate } from "./gate-handler.js";
 import {
   type IntentActor,
@@ -265,6 +273,11 @@ import {
   isPipelineSentinelValue,
   isPlanControlVerb,
 } from "./intent.js";
+import {
+  isCancellableCrabrunnerBackend,
+  normalizeAndAggregateLaneCancellations,
+  toStopSignalDeliveryResponse,
+} from "./lane-cancellation.js";
 import { reduceManagerRunJournal } from "./manager-run.js";
 import type {
   MergeActuatorLiveState,
@@ -556,6 +569,14 @@ interface WorkerExecution {
   codexAppServerPid: number | null;
   codexAppServerIdentity: ProcessIdentitySnapshot | null;
   laneJobId: string | null;
+  laneJobIds: string[];
+  laneKillGraceMs: number;
+  cancelLane:
+    | ((
+        jobId: string,
+        request: CrabrunnerCancellationRequest,
+      ) => Promise<CrabrunnerTerminalEvidence>)
+    | null;
   controller: AbortController;
   completion: Promise<void>;
   stopRequest: StopRequest | null;
@@ -2614,6 +2635,23 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         let targetedCleanupSucceeded = false;
         try {
           if (
+            plan.laneJobIds.length > 0 &&
+            plan.laneCancellationSupported === true
+          ) {
+            targetedCleanupSucceeded =
+              (await recoverEmergencyStopLaneCancellation({
+                backend: this.stageExecutionBackends.get("crabrunner"),
+                laneJobIds: plan.laneJobIds,
+                issueId,
+                issueIdentifier: plan.issueIdentifier,
+                sourceSequence: plan.setBySequence,
+                now: this.now,
+                logger: this.logger,
+              })) === true;
+            if (!targetedCleanupSucceeded) {
+              unconfirmedPlans.push(plan);
+            }
+          } else if (
             parsedPid !== null &&
             parsedPid !== process.pid &&
             plan.codexAppServerIdentity !== null &&
@@ -2686,6 +2724,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
                 issueIdentifier: plan.issueIdentifier,
                 codexAppServerPid: plan.codexAppServerPid,
                 codexAppServerIdentity: plan.codexAppServerIdentity,
+                laneJobIds: plan.laneJobIds,
                 sourceSequence: plan.setBySequence,
               });
             if (cleanupSequence === null) {
@@ -4717,6 +4756,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   ): Promise<{
     workerHandle: WorkerExecution;
     monitorHandle: Promise<void>;
+    laneCancellationSupported: boolean;
   }> {
     await this.logger?.info("worker_spawned", "Worker spawned for issue.", {
       outcome: "started",
@@ -4735,6 +4775,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       codexAppServerPid: null,
       codexAppServerIdentity: null,
       laneJobId: null,
+      laneJobIds: [],
+      laneKillGraceMs: 0,
+      cancelLane: null,
       controller,
       stopRequest: null,
       lastResult: null,
@@ -4757,6 +4800,12 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     });
     const stageExecutionBackend =
       this.resolveStageExecutionBackend(executionJob);
+    if (isCancellableCrabrunnerBackend(stageExecutionBackend)) {
+      execution.cancelLane = (jobId, request) =>
+        stageExecutionBackend.cancel(jobId, request);
+    }
+    execution.laneKillGraceMs =
+      executionJob.enforcement.cancellation.killGraceMs ?? 0;
 
     await this.logger?.info(
       "agent_runner_starting",
@@ -4802,6 +4851,13 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           effectiveHardStops.maxDollarBudgetUsd * Math.max(1, budgetMultiplier),
       }),
     };
+    const onLaneJobId = (laneJobId: string): void => {
+      execution.laneJobId = laneJobId;
+      if (!execution.laneJobIds.includes(laneJobId)) {
+        execution.laneJobIds.push(laneJobId);
+      }
+      this.orchestrator.recordLaneJobId(issue.id, laneJobId);
+    };
     // Review and decomposed stages keep their existing dispatch contracts;
     // every branch feeds one result into the single finalization below.
     const resultPromise: Promise<StageExecutionBackendResult> =
@@ -4821,6 +4877,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
                 executionJob.identity.baseRef ?? resolveStageExecutionBaseRef(),
               artifactRoot: executionJob.identity.artifactRoot,
               backend: crabrunnerReviewBackend,
+              onLaneJobId,
             }),
           };
         }
@@ -4841,21 +4898,33 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
               baseRef:
                 executionJob.identity.baseRef ?? resolveStageExecutionBaseRef(),
               artifactRoot: executionJob.identity.artifactRoot,
+              onLaneJobId,
             }),
           };
         }
         return await stageExecutionBackend.execute({
           job: executionJob,
           runnerInput,
+          onLaneJobId,
         });
       });
     const completion = resultPromise
       .then(async ({ result, evidence }) => {
         execution.lastResult = result;
-        execution.laneJobId = stageExecutionResult.readStageExecutionLaneJobId(
-          result,
-          evidence,
-        );
+        const resultLaneJobId =
+          stageExecutionResult.readStageExecutionLaneJobId(result, evidence);
+        if (resultLaneJobId !== null) {
+          execution.laneJobId = resultLaneJobId;
+          if (!execution.laneJobIds.includes(resultLaneJobId)) {
+            execution.laneJobIds.push(resultLaneJobId);
+          }
+        }
+        if (executionJob.backend === "crabrunner") {
+          this.orchestrator.applyCrabrunnerResult({
+            issueId: execution.issueId,
+            result,
+          });
+        }
         const finalization =
           stageExecutionResult.resolveStageExecutionFinalization(
             executionJob.backend,
@@ -4895,6 +4964,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     return {
       workerHandle: execution,
       monitorHandle: completion,
+      laneCancellationSupported: execution.cancelLane !== null,
     };
   }
 
@@ -4917,6 +4987,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     signal: AbortSignal;
     baseRef: string;
     artifactRoot: string;
+    onLaneJobId: (jobId: string) => void;
   }): Promise<AgentRunResult> {
     return executeDecomposedStageDispatch({
       issue: input.issue,
@@ -4927,6 +4998,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       baseRef: input.baseRef,
       artifactRoot: input.artifactRoot,
       signal: input.signal,
+      onLaneJobId: input.onLaneJobId,
       resolveBackend: this.resolveStageExecutionBackend.bind(this),
       createStageExecutionJobSpec: ({ execution, stageName }) =>
         this.createStageExecutionJobSpec({
@@ -5024,6 +5096,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     baseRef: string;
     artifactRoot: string;
     backend: StageExecutionBackendRunner;
+    onLaneJobId: (jobId: string) => void;
   }): Promise<AgentRunResult> {
     if (this.reviewStageDispatcher === null) {
       // Unreachable: resolveCrabrunnerReviewBackend already guarded this. Kept
@@ -5049,6 +5122,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       previousReviewedHeadSha: priorReview.previousReviewedHeadSha,
       priorStructuredArtifacts: priorReview.priorStructuredArtifacts,
       signal: input.signal,
+      onLaneJobId: input.onLaneJobId,
       backend:
         input.backend as StageExecutionBackendRunner<CrabrunnerStageExecutionEvidence>,
     };
@@ -5484,6 +5558,21 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       workspacePath = null;
     }
 
+    const laneCancellationPromise =
+      execution.laneJobIds.length > 0 && execution.cancelLane !== null
+        ? normalizeAndAggregateLaneCancellations({
+            cancel: execution.cancelLane,
+            laneJobIds: execution.laneJobIds,
+            request: input,
+            cancellationRequest: {
+              reason: "operator_stop",
+              signal: "SIGTERM",
+              processGroup: true,
+              killGraceMs: execution.laneKillGraceMs,
+            },
+            attemptedAt: this.now(),
+          })
+        : null;
     execution.controller.abort(`Stopped due to ${input.reason}.`);
 
     await this.logger?.info(
@@ -5499,6 +5588,12 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         ...(workspacePath === null ? {} : { workspace_path: workspacePath }),
       },
     );
+
+    if (laneCancellationPromise !== null) {
+      const delivery = await laneCancellationPromise;
+      await this.logStopSignalDelivery(delivery, execution);
+      return delivery;
+    }
 
     const delivery = await this.deliverWorkerStopSignalSafe({
       issueId: execution.issueId,
@@ -8188,152 +8283,6 @@ function normalizeDispatcherRunJournalCompactionTailEntries(
     : DISPATCHER_RUN_JOURNAL_DEFAULT_COMPACTION_TAIL_ENTRIES;
 }
 
-interface EmergencyStopRecoveryCleanupPlan {
-  issueId: string;
-  issueIdentifier: string;
-  codexAppServerPid: string | null;
-  codexAppServerIdentity: ProcessIdentitySnapshot | null;
-  setBySequence: number;
-  since: string;
-}
-
-function collectUnconfirmedEmergencyStopCleanupPlans(
-  journal: DispatcherRunJournal,
-): EmergencyStopRecoveryCleanupPlan[] {
-  const pendingPlansByIssue = new Map<
-    string,
-    EmergencyStopRecoveryCleanupPlan[]
-  >();
-  const plansByKey = new Map<string, EmergencyStopRecoveryCleanupPlan>();
-  const provenPlanKeys = new Set<string>();
-
-  for (const entry of [...journal].sort((a, b) => a.sequence - b.sequence)) {
-    if (
-      entry.kind === "intent" &&
-      entry.metadata.status === "applied" &&
-      entry.metadata.verb === "pipeline_stop"
-    ) {
-      for (const issue of readEmergencyStopInterruptedIssues(entry.metadata)) {
-        const plan: EmergencyStopRecoveryCleanupPlan = {
-          issueId: issue.issueId,
-          issueIdentifier: issue.issueIdentifier,
-          codexAppServerPid: issue.codexAppServerPid,
-          codexAppServerIdentity: issue.codexAppServerIdentity,
-          setBySequence: entry.sequence,
-          since: entry.timestamp,
-        };
-        const plans = pendingPlansByIssue.get(issue.issueId) ?? [];
-        plans.push(plan);
-        pendingPlansByIssue.set(issue.issueId, plans);
-        plansByKey.set(
-          emergencyStopCleanupPlanKey(issue.issueId, entry.sequence),
-          plan,
-        );
-      }
-      continue;
-    }
-
-    if (
-      entry.kind !== "hard_stop_trigger" ||
-      entry.metadata.status !== "completed" ||
-      entry.metadata.reason !== "emergency_stop"
-    ) {
-      continue;
-    }
-
-    const sourceSequence = readEmergencyStopSourceSequence(entry.metadata);
-    if (sourceSequence !== null) {
-      provenPlanKeys.add(
-        emergencyStopCleanupPlanKey(entry.issueId, sourceSequence),
-      );
-      continue;
-    }
-
-    // Legacy completion entries predate sourceSequence. Pair them with the
-    // latest unproven same-issue stop; current entries use the precise key.
-    const pendingPlans = pendingPlansByIssue.get(entry.issueId) ?? [];
-    for (let index = pendingPlans.length - 1; index >= 0; index -= 1) {
-      const plan = pendingPlans[index];
-      if (plan === undefined) {
-        continue;
-      }
-      const key = emergencyStopCleanupPlanKey(plan.issueId, plan.setBySequence);
-      if (!provenPlanKeys.has(key)) {
-        provenPlanKeys.add(key);
-        break;
-      }
-    }
-  }
-
-  return [...plansByKey.entries()].flatMap(([key, plan]) =>
-    provenPlanKeys.has(key) ? [] : [plan],
-  );
-}
-
-function emergencyStopCleanupPlanKey(
-  issueId: string,
-  sourceSequence: number,
-): string {
-  return `${issueId}:${sourceSequence}`;
-}
-
-function readEmergencyStopInterruptedIssues(
-  metadata: Record<string, unknown>,
-): Array<{
-  issueId: string;
-  issueIdentifier: string;
-  codexAppServerPid: string | null;
-  codexAppServerIdentity: ProcessIdentitySnapshot | null;
-}> {
-  const value = metadata.interruptedIssues;
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.flatMap((item) => {
-    if (!isRecord(item)) {
-      return [];
-    }
-    const issueId = item.issueId;
-    const issueIdentifier = item.issueIdentifier;
-    if (typeof issueId !== "string" || typeof issueIdentifier !== "string") {
-      return [];
-    }
-    const codexAppServerPid = item.codexAppServerPid;
-    const codexAppServerIdentity = readProcessIdentityMetadata(
-      item.codexAppServerIdentity,
-    );
-    return [
-      {
-        issueId,
-        issueIdentifier,
-        codexAppServerPid:
-          typeof codexAppServerPid === "string" &&
-          codexAppServerPid.trim() !== ""
-            ? codexAppServerPid
-            : null,
-        codexAppServerIdentity,
-      },
-    ];
-  });
-}
-
-function readEmergencyStopSourceSequence(
-  metadata: Record<string, unknown>,
-): number | null {
-  const value = metadata.sourceSequence;
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
-    ? value
-    : null;
-}
-
-function parseProcessPid(value: string | null): number | null {
-  if (value === null || !/^\d+$/.test(value)) {
-    return null;
-  }
-  const pid = Number(value);
-  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
-}
-
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message.trim().length > 0) {
     return error.message;
@@ -8353,29 +8302,6 @@ function createFailedStopSignalDelivery(
     workspacePath: input.workspacePath,
     attempts: [],
     warning,
-  };
-}
-
-function toStopSignalDeliveryResponse(
-  delivery: StopSignalDelivery | null,
-): StopSignalDeliveryResponse | null {
-  if (delivery === null) {
-    return null;
-  }
-  return {
-    status: delivery.status,
-    reason: delivery.reason,
-    attempted_at: delivery.attemptedAt,
-    workspace_path: delivery.workspacePath,
-    attempts: delivery.attempts.map((attempt) => ({
-      pid: attempt.pid,
-      ...(attempt.processGroupId === null
-        ? {}
-        : { process_group_id: attempt.processGroupId }),
-      sigterm: attempt.sigterm,
-      sigkill: attempt.sigkill,
-    })),
-    warning: delivery.warning,
   };
 }
 

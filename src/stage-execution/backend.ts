@@ -69,6 +69,8 @@ export interface StageExecutionJobSpec {
 export interface StageExecutionBackendInput {
   job: StageExecutionJobSpec;
   runnerInput: AgentRunInput;
+  /** Called as soon as a delegated scheduler accepts the stage job. */
+  onLaneJobId?: (jobId: string) => void;
 }
 
 export interface StageExecutionResultMetadata {

@@ -97,6 +97,7 @@ export function createCrabrunnerAgentResult(input: {
     },
     liveSession: {
       ...createEmptyLiveSession(),
+      laneJobId: input.laneJobId,
       lastCodexEvent: "crabrunner_terminal",
       lastCodexTimestamp: input.now().toISOString(),
       lastCodexMessage:

@@ -130,6 +130,9 @@ function fakeBackend(
           status: "accepted" as const,
           jobId: `job-${laneId}`,
         };
+        if (admission.status === "accepted" && admission.jobId !== null) {
+          input.onLaneJobId?.(admission.jobId);
+        }
         const terminal = scripted.terminal;
         const runStatus =
           scripted.runStatus ??
@@ -226,6 +229,7 @@ function runInput(): AgentRunInput {
 function baseInput(overrides: {
   lanes: CrabrunnerReviewLaneSpec[];
   backend: StageExecutionBackendRunner<CrabrunnerStageExecutionEvidence>;
+  onLaneJobId?: (jobId: string) => void;
   routingGuaranteeConditions?: readonly string[];
 }) {
   return {
@@ -234,6 +238,9 @@ function baseInput(overrides: {
     currentHeadSha: CURRENT_HEAD,
     lanes: overrides.lanes,
     backend: overrides.backend,
+    ...(overrides.onLaneJobId === undefined
+      ? {}
+      : { onLaneJobId: overrides.onLaneJobId }),
     routingGuaranteeConditions: overrides.routingGuaranteeConditions ?? [],
     buildJobSpec: (lane: CrabrunnerReviewLaneSpec): StageExecutionJobSpec => ({
       backend: "crabrunner" as const,
@@ -320,7 +327,6 @@ describe("runCrabrunnerReviewJobGroup", () => {
         }),
       },
     });
-
     const result = await runCrabrunnerReviewJobGroup({
       ...baseInput({
         lanes: [
@@ -387,7 +393,6 @@ describe("runCrabrunnerReviewJobGroup", () => {
         runStatus: "failed",
       },
     });
-
     const result = await runCrabrunnerReviewJobGroup({
       ...baseInput({
         lanes: [
@@ -725,6 +730,7 @@ describe("runCrabrunnerReviewJobGroup", () => {
         }),
       },
     });
+    const admitted: string[] = [];
 
     const result = await runCrabrunnerReviewJobGroup({
       ...baseInput({
@@ -736,12 +742,14 @@ describe("runCrabrunnerReviewJobGroup", () => {
           }),
         ],
         backend,
+        onLaneJobId: (jobId) => admitted.push(jobId),
       }),
       collectArtifact: async (lane: ReviewJobGroupLaneEvidence) =>
         backendArtifactFor(backend, lane),
     });
 
     expect(backend.execute).toHaveBeenCalledTimes(1);
+    expect(admitted).toEqual(["job-codex-high-lead"]);
     expect(result.provenance.lanes[0]?.backendResult.job.backend).toBe(
       "crabrunner",
     );

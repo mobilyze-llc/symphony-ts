@@ -67,6 +67,8 @@ export interface RunPreReviewVerifyGateInput {
   runGroupId: string;
   headSha: string;
   backend: StageExecutionBackendRunner<CrabrunnerStageExecutionEvidence>;
+  /** Called as soon as a pre-review repair lane is admitted. */
+  onLaneJobId?: (jobId: string) => void;
   signal: AbortSignal;
   defaultRunnerKind: string;
   defaultRunnerModel: string | null;
@@ -235,6 +237,9 @@ async function dispatchRepairLane(
       stage,
       stageName,
     }),
+    ...(input.onLaneJobId === undefined
+      ? {}
+      : { onLaneJobId: input.onLaneJobId }),
   });
 }
 

@@ -126,6 +126,8 @@ export interface RunDecomposedStageInput {
   buildJobSpec: (ctx: DecomposedSubStageContext) => StageExecutionJobSpec;
   /** Build the runner input from capsule paths only (never a prior transcript). */
   buildRunnerInput: (ctx: DecomposedSubStageContext) => AgentRunInput;
+  /** Called as soon as any delegated sub-stage lane is admitted. */
+  onLaneJobId?: ((jobId: string) => void) | undefined;
   /** Tokens a completed sub-stage spent, read from its backend result. */
   spendTokensOf: (result: StageExecutionBackendResult) => number;
   /**
@@ -248,6 +250,9 @@ export async function runDecomposedStage(
       buildJobSpec,
       buildRunnerInput,
       resolveBackend: (job) => resolveBackend(job),
+      ...(input.onLaneJobId === undefined
+        ? {}
+        : { onLaneJobId: input.onLaneJobId }),
       collectArtifact: (laneDispatch) => laneDispatch.backendResult,
       aggregate: (lanes) => {
         const lane = lanes[0];

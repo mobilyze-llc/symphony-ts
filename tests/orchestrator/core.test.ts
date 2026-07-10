@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
+import type { AgentRunResult } from "../../src/agent/runner.js";
 import type {
   ResolvedWorkflowConfig,
   ReviewerDefinition,
@@ -14,6 +15,7 @@ import type {
   DispatcherRunJournalEntry,
   Issue,
 } from "../../src/domain/model.js";
+import { createEmptyLiveSession } from "../../src/domain/model.js";
 import { mapCodexAppServerUsageToStageUsage } from "../../src/domain/stage-usage.js";
 import { ERROR_CODES } from "../../src/errors/codes.js";
 import { normalizeErrorSignature } from "../../src/errors/signature.js";
@@ -52,6 +54,53 @@ import type {
 } from "../../src/tracker/tracker.js";
 
 describe("orchestrator core", () => {
+  it("applies a pending delegated result only once after the running entry appears", () => {
+    const orchestrator = createOrchestrator({
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+    });
+    const issue = createIssue({ id: "1", identifier: "ISSUE-1" });
+    const result = {
+      issue,
+      liveSession: {
+        ...createEmptyLiveSession(),
+        codexInputTokens: 11,
+        codexOutputTokens: 7,
+        codexTotalTokens: 18,
+        totalStageInputTokens: 11,
+        totalStageOutputTokens: 7,
+        totalStageTotalTokens: 18,
+      },
+    } as AgentRunResult;
+
+    expect(
+      orchestrator.applyCrabrunnerResult({ issueId: issue.id, result }),
+    ).toBe(true);
+    orchestrator.getState().running[issue.id] = {
+      ...createEmptyLiveSession(),
+      issue,
+      identifier: issue.identifier,
+      retryAttempt: null,
+      startedAt: "2026-03-06T00:00:05.000Z",
+      workerHandle: {},
+      monitorHandle: {},
+      failureReason: null,
+    };
+
+    expect(
+      orchestrator.applyCrabrunnerResult({ issueId: issue.id, result }),
+    ).toBe(true);
+    expect(
+      orchestrator.applyCrabrunnerResult({ issueId: issue.id, result }),
+    ).toBe(true);
+    expect(orchestrator.getState().codexTotals.totalTokens).toBe(18);
+    expect(
+      orchestrator.getState().running[issue.id]?.totalStageTotalTokens,
+    ).toBe(18);
+  });
+
   it("parks review completion before merge when the canonical review result artifact is missing", async () => {
     const spawnedStages: Array<string | null> = [];
     const orchestrator = createOrchestrator({
@@ -3904,6 +3953,39 @@ describe("orchestrator core", () => {
     ).toMatchObject({
       emergencyStopTerminationConfirmed: true,
       signalDelivery: expect.objectContaining({ status: "already_exited" }),
+    });
+  });
+
+  it("confirms already-exited lane emergency-stop proof without PID attempts", async () => {
+    const stopRunningIssue = vi.fn(async () => ({
+      status: "already_exited" as const,
+      reason: "emergency_stop" as const,
+      attemptedAt: "2026-03-06T00:00:05.000Z",
+      workspacePath: null,
+      attempts: [],
+      laneJobId: "lane-complete",
+      laneCancellation: {
+        state: "canceled",
+        killed: false,
+        failure: null,
+      },
+      warning: null,
+    }));
+    const orchestrator = createOrchestrator({ stopRunningIssue });
+
+    await orchestrator.pollTick();
+    const stop = await orchestrator.requestEmergencyStop({
+      actor: { kind: "operator", host: "pro14", session: "symphonyctl" },
+      reason: { class: "operator_emergency_stop", human: "stop now" },
+    });
+
+    expect(stop.stopRequests[0]?.signalDelivery).toMatchObject({
+      status: "already_exited",
+      laneJobId: "lane-complete",
+      laneCancellation: { killed: false, failure: null },
+    });
+    expect(orchestrator.getState().resumeRequiredMarks["1"]).toMatchObject({
+      reason: "killed_mid_run",
     });
   });
 
