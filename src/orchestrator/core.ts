@@ -122,6 +122,7 @@ import {
   isEmergencyStopTerminationConfirmed,
   isStopReason,
   isStopSignalDelivery,
+  laneJobIdsMetadata,
   laneJobMetadata,
 } from "./stop-signal-delivery.js";
 export {
@@ -853,7 +854,7 @@ export class OrchestratorCore {
   private readonly stopRunningIssue?: OrchestratorCoreOptions["stopRunningIssue"];
 
   /** Lane admission can race the RunningEntry insertion during dispatch. */
-  private readonly pendingLaneJobIds = new Map<string, string>();
+  private readonly pendingLaneJobIds = new Map<string, string[]>();
 
   /** A very fast delegated terminal can race the RunningEntry insertion too. */
   private readonly pendingCrabrunnerResults = new Map<string, AgentRunResult>();
@@ -1228,6 +1229,7 @@ export class OrchestratorCore {
     codexAppServerPid: string | null;
     codexAppServerIdentity: PipelineEmergencyStopState["interruptedIssues"][number]["codexAppServerIdentity"];
     laneJobId?: string | null;
+    laneJobIds?: readonly string[];
     sourceSequence: number;
   }): Promise<number | null> {
     try {
@@ -1259,6 +1261,9 @@ export class OrchestratorCore {
           ...(input.laneJobId === undefined
             ? {}
             : { laneJobId: input.laneJobId }),
+          ...(input.laneJobIds === undefined
+            ? {}
+            : { laneJobIds: [...input.laneJobIds] }),
         },
       });
       this.recoverHardStopTrigger(entry);
@@ -9686,9 +9691,18 @@ export class OrchestratorCore {
       return false;
     }
     if (runningEntry === undefined) {
-      this.pendingLaneJobIds.set(issueId, laneJobId);
+      const pending = this.pendingLaneJobIds.get(issueId) ?? [];
+      if (!pending.includes(laneJobId)) {
+        pending.push(laneJobId);
+      }
+      this.pendingLaneJobIds.set(issueId, pending);
       return true;
     }
+    const laneJobIds = runningEntry.laneJobIds ?? [];
+    if (!laneJobIds.includes(laneJobId)) {
+      laneJobIds.push(laneJobId);
+    }
+    runningEntry.laneJobIds = laneJobIds;
     runningEntry.laneJobId = laneJobId;
     return true;
   }
@@ -10126,11 +10140,13 @@ export class OrchestratorCore {
       attempt: runningEntry.retryAttempt,
       codexAppServerPid: runningEntry.codexAppServerPid,
       codexAppServerIdentity: runningEntry.codexAppServerIdentity,
+      ...laneJobIdsMetadata(runningEntry.laneJobIds),
       ...(runningEntry.laneJobId === null
         ? {}
         : {
             laneCancellationSupported:
               runningEntry.laneCancellationSupported === true,
+            ...laneJobIdsMetadata(runningEntry.laneJobIds),
             ...laneJobMetadata(runningEntry.laneJobId),
           }),
     };
@@ -12286,9 +12302,11 @@ export class OrchestratorCore {
         budgetMultiplier: this.budgetMultiplierForIssue(issue.id),
         acceptanceCriteria: this.state.issueAcSnapshots[issue.id] ?? null,
       });
+      const laneJobIds = this.pendingLaneJobIds.get(issue.id) ?? [];
       const runEntry: RunningEntry = {
         ...createEmptyLiveSession(),
-        laneJobId: this.pendingLaneJobIds.get(issue.id) ?? null,
+        laneJobId: laneJobIds.at(-1) ?? null,
+        ...(laneJobIds.length === 0 ? {} : { laneJobIds: [...laneJobIds] }),
         issue,
         identifier: issue.identifier,
         retryAttempt: normalizeRetryAttempt(attempt),
@@ -12989,6 +13007,7 @@ export class OrchestratorCore {
                 sourceSequence: options.emergencyStopSourceSequence ?? null,
                 codexAppServerPid: runningEntry.codexAppServerPid,
                 codexAppServerIdentity: runningEntry.codexAppServerIdentity,
+                ...laneJobIdsMetadata(runningEntry.laneJobIds),
                 ...laneJobMetadata(runningEntry.laneJobId),
                 emergencyStopTerminationConfirmed,
                 signalDelivery: stopRequest.signalDelivery ?? null,
@@ -14518,6 +14537,14 @@ function readInterruptedIssues(
       typeof record.laneJobId === "string" && record.laneJobId.trim() !== ""
         ? record.laneJobId
         : null;
+    const laneJobIds = Array.isArray(record.laneJobIds)
+      ? record.laneJobIds.filter(
+          (value): value is string =>
+            typeof value === "string" && value.trim() !== "",
+        )
+      : laneJobId === null
+        ? []
+        : [laneJobId];
     return [
       {
         issueId,
@@ -14539,6 +14566,7 @@ function readInterruptedIssues(
               laneCancellationSupported:
                 record.laneCancellationSupported === true,
               laneJobId,
+              laneJobIds,
             }),
       },
     ];

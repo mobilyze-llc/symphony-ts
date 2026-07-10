@@ -275,8 +275,7 @@ import {
 } from "./intent.js";
 import {
   isCancellableCrabrunnerBackend,
-  laneCancellationToStopSignalDelivery,
-  normalizeLaneCancellation,
+  normalizeAndAggregateLaneCancellations,
   toStopSignalDeliveryResponse,
 } from "./lane-cancellation.js";
 import { reduceManagerRunJournal } from "./manager-run.js";
@@ -570,6 +569,7 @@ interface WorkerExecution {
   codexAppServerPid: number | null;
   codexAppServerIdentity: ProcessIdentitySnapshot | null;
   laneJobId: string | null;
+  laneJobIds: string[];
   laneKillGraceMs: number;
   cancelLane:
     | ((
@@ -2635,13 +2635,13 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         let targetedCleanupSucceeded = false;
         try {
           if (
-            plan.laneJobId !== null &&
+            plan.laneJobIds.length > 0 &&
             plan.laneCancellationSupported === true
           ) {
             targetedCleanupSucceeded =
               (await recoverEmergencyStopLaneCancellation({
                 backend: this.stageExecutionBackends.get("crabrunner"),
-                laneJobId: plan.laneJobId,
+                laneJobIds: plan.laneJobIds,
                 issueId,
                 issueIdentifier: plan.issueIdentifier,
                 sourceSequence: plan.setBySequence,
@@ -2724,7 +2724,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
                 issueIdentifier: plan.issueIdentifier,
                 codexAppServerPid: plan.codexAppServerPid,
                 codexAppServerIdentity: plan.codexAppServerIdentity,
-                laneJobId: plan.laneJobId,
+                laneJobIds: plan.laneJobIds,
                 sourceSequence: plan.setBySequence,
               });
             if (cleanupSequence === null) {
@@ -4775,6 +4775,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       codexAppServerPid: null,
       codexAppServerIdentity: null,
       laneJobId: null,
+      laneJobIds: [],
       laneKillGraceMs: 0,
       cancelLane: null,
       controller,
@@ -4852,6 +4853,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     };
     const onLaneJobId = (laneJobId: string): void => {
       execution.laneJobId = laneJobId;
+      if (!execution.laneJobIds.includes(laneJobId)) {
+        execution.laneJobIds.push(laneJobId);
+      }
       this.orchestrator.recordLaneJobId(issue.id, laneJobId);
     };
     // Review and decomposed stages keep their existing dispatch contracts;
@@ -4907,10 +4911,14 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     const completion = resultPromise
       .then(async ({ result, evidence }) => {
         execution.lastResult = result;
-        execution.laneJobId = stageExecutionResult.readStageExecutionLaneJobId(
-          result,
-          evidence,
-        );
+        const resultLaneJobId =
+          stageExecutionResult.readStageExecutionLaneJobId(result, evidence);
+        if (resultLaneJobId !== null) {
+          execution.laneJobId = resultLaneJobId;
+          if (!execution.laneJobIds.includes(resultLaneJobId)) {
+            execution.laneJobIds.push(resultLaneJobId);
+          }
+        }
         if (executionJob.backend === "crabrunner") {
           this.orchestrator.applyCrabrunnerResult({
             issueId: execution.issueId,
@@ -5551,12 +5559,18 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     }
 
     const laneCancellationPromise =
-      execution.laneJobId !== null && execution.cancelLane !== null
-        ? normalizeLaneCancellation(execution.cancelLane, execution.laneJobId, {
-            reason: "operator_stop",
-            signal: "SIGTERM",
-            processGroup: true,
-            killGraceMs: execution.laneKillGraceMs,
+      execution.laneJobIds.length > 0 && execution.cancelLane !== null
+        ? normalizeAndAggregateLaneCancellations({
+            cancel: execution.cancelLane,
+            laneJobIds: execution.laneJobIds,
+            request: input,
+            cancellationRequest: {
+              reason: "operator_stop",
+              signal: "SIGTERM",
+              processGroup: true,
+              killGraceMs: execution.laneKillGraceMs,
+            },
+            attemptedAt: this.now(),
           })
         : null;
     execution.controller.abort(`Stopped due to ${input.reason}.`);
@@ -5576,13 +5590,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     );
 
     if (laneCancellationPromise !== null) {
-      const evidence = await laneCancellationPromise;
-      const delivery = laneCancellationToStopSignalDelivery(
-        execution.laneJobId,
-        input,
-        evidence,
-        this.now(),
-      );
+      const delivery = await laneCancellationPromise;
       await this.logStopSignalDelivery(delivery, execution);
       return delivery;
     }

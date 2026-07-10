@@ -31,6 +31,7 @@ export interface PublicEmergencyStopInterruptedIssue {
   attempt: number | null;
   codex_app_server_pid: string | null;
   lane_job_id: string | null;
+  lane_job_ids?: string[];
   control_path: "codex_app_server_pid" | "crabrunner_cancel";
   process_identity: PublicEmergencyStopProcessIdentity | null;
   /**
@@ -59,6 +60,9 @@ export function projectEmergencyStopInterruptedIssue(
     attempt: issue.attempt,
     codex_app_server_pid: issue.codexAppServerPid,
     lane_job_id: issue.laneJobId ?? null,
+    ...(issue.laneJobIds === undefined
+      ? {}
+      : { lane_job_ids: [...issue.laneJobIds] }),
     control_path:
       issue.laneJobId === undefined ||
       issue.laneJobId === null ||

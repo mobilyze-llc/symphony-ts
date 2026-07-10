@@ -6,7 +6,10 @@ import type {
   CrabrunnerTerminalEvidence,
 } from "../stage-execution/crabrunner-backend.js";
 import type { StopRequest, StopSignalDelivery } from "./core.js";
-import { isStopSignalDelivery } from "./stop-signal-delivery.js";
+import {
+  type LaneCancellationDelivery,
+  isStopSignalDelivery,
+} from "./stop-signal-delivery.js";
 
 const CRABRUNNER_TERMINAL_STATES = new Set([
   "succeeded",
@@ -142,7 +145,7 @@ function isValidCrabrunnerTerminalEvidence(
   );
 }
 
-export function normalizeLaneCancellation(
+function normalizeLaneCancellation(
   cancel: (
     jobId: string,
     request: CrabrunnerCancellationRequest,
@@ -171,6 +174,84 @@ export function normalizeLaneCancellation(
   }
 }
 
+export async function normalizeAndAggregateLaneCancellations(input: {
+  cancel: (
+    jobId: string,
+    request: CrabrunnerCancellationRequest,
+  ) => Promise<CrabrunnerTerminalEvidence>;
+  laneJobIds: readonly string[];
+  request: StopRequest;
+  cancellationRequest: CrabrunnerCancellationRequest;
+  attemptedAt: Date;
+}): Promise<StopSignalDelivery> {
+  const deliveries = await Promise.all(
+    input.laneJobIds.map(async (laneJobId) => {
+      const evidence = await normalizeLaneCancellation(
+        input.cancel,
+        laneJobId,
+        input.cancellationRequest,
+      );
+      return laneCancellationToStopSignalDelivery(
+        laneJobId,
+        input.request,
+        evidence,
+        input.attemptedAt,
+      );
+    }),
+  );
+  const laneCancellations: LaneCancellationDelivery[] = deliveries.flatMap(
+    (delivery) => {
+      if (
+        typeof delivery.laneJobId !== "string" ||
+        delivery.laneCancellation === undefined
+      ) {
+        return [];
+      }
+      return [
+        {
+          laneJobId: delivery.laneJobId,
+          status:
+            delivery.status === "delivered" ||
+            delivery.status === "already_exited"
+              ? delivery.status
+              : "failed",
+          ...delivery.laneCancellation,
+        },
+      ];
+    },
+  );
+  const failed = laneCancellations.filter((lane) => lane.status === "failed");
+  const status =
+    failed.length === 0
+      ? laneCancellations.some((lane) => lane.status === "delivered")
+        ? "delivered"
+        : "already_exited"
+      : failed.length === laneCancellations.length
+        ? "failed"
+        : "partial";
+  const first = deliveries[0];
+  const warning = failed
+    .map((lane) => lane.failure)
+    .filter((failure): failure is string => failure !== null)
+    .join("; ");
+  return {
+    status,
+    reason: input.request.reason,
+    attemptedAt: input.attemptedAt.toISOString(),
+    workspacePath: first?.workspacePath ?? null,
+    attempts: [],
+    warning: warning === "" ? null : warning,
+    laneJobId:
+      laneCancellations.length === 1
+        ? (laneCancellations[0]?.laneJobId ?? null)
+        : null,
+    ...(laneCancellations.length === 1
+      ? { laneCancellation: laneCancellations[0] }
+      : {}),
+    laneCancellations,
+  } satisfies StopSignalDelivery;
+}
+
 export function toStopSignalDeliveryResponse(
   delivery: StopSignalDelivery | null,
 ): StopSignalDeliveryResponse | null {
@@ -196,6 +277,17 @@ export function toStopSignalDeliveryResponse(
     ...(delivery.laneCancellation === undefined
       ? {}
       : { lane_cancellation: delivery.laneCancellation }),
+    ...(delivery.laneCancellations === undefined
+      ? {}
+      : {
+          lane_cancellations: delivery.laneCancellations.map((lane) => ({
+            lane_job_id: lane.laneJobId,
+            status: lane.status,
+            state: lane.state,
+            killed: lane.killed,
+            failure: lane.failure,
+          })),
+        }),
     warning: delivery.warning,
   };
 }

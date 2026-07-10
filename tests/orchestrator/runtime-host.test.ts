@@ -10065,28 +10065,29 @@ describe("stage execution backend boundary", () => {
     expect(host.getState().codexTotals.totalTokens).toBe(18);
   });
 
-  it("cancels a running lane from emergency stop and parks without retry", async () => {
+  it("cancels every admitted lane and stays unconfirmed when one lane fails", async () => {
     const cancelCalls: Array<{ jobId: string; reason: string }> = [];
     const backend: StageExecutionBackendRunner & {
       cancel: (
         jobId: string,
         request: { reason: string },
       ) => Promise<{
-        state: "canceled";
+        state: "canceled" | "kill_failed";
         workspacePath: string;
         message: string;
         cancellation: {
           requested: true;
           signal: "SIGTERM";
           processGroup: true;
-          killed: true;
-          failure: null;
+          killed: boolean;
+          failure: string | null;
         };
       }>;
     } = {
       backend: "crabrunner",
       async execute(input) {
         input.onLaneJobId?.("remote-job-42");
+        input.onLaneJobId?.("remote-job-43");
         const base = createNormalResult();
         return await new Promise((resolve) => {
           input.runnerInput.signal?.addEventListener(
@@ -10118,6 +10119,20 @@ describe("stage execution backend boundary", () => {
       },
       async cancel(jobId, request) {
         cancelCalls.push({ jobId, reason: request.reason });
+        if (jobId === "remote-job-43") {
+          return {
+            state: "kill_failed",
+            workspacePath: "/tmp/workspaces/1",
+            message: "lane remained active",
+            cancellation: {
+              requested: true,
+              signal: "SIGTERM",
+              processGroup: true,
+              killed: false,
+              failure: "lane remained active",
+            },
+          };
+        }
         return {
           state: "canceled",
           workspacePath: "/tmp/workspaces/1",
@@ -10150,11 +10165,14 @@ describe("stage execution backend boundary", () => {
 
     expect(cancelCalls).toEqual([
       { jobId: "remote-job-42", reason: "operator_stop" },
+      { jobId: "remote-job-43", reason: "operator_stop" },
     ]);
     expect(stopResponse.interrupted_issues).toEqual([
       expect.objectContaining({
-        lane_job_id: "remote-job-42",
+        lane_job_id: "remote-job-43",
+        lane_job_ids: ["remote-job-42", "remote-job-43"],
         control_path: "crabrunner_cancel",
+        cleanup_status_reason: expect.stringContaining("unconfirmed"),
       }),
     ]);
     expect(host.getState().resumeRequired.has("1")).toBe(true);

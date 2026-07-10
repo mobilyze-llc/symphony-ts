@@ -7,8 +7,7 @@ import type { CrabrunnerCancellationRequest } from "../stage-execution/crabrunne
 import type { StopRequest } from "./core.js";
 import {
   isCancellableCrabrunnerBackend,
-  laneCancellationToStopSignalDelivery,
-  normalizeLaneCancellation,
+  normalizeAndAggregateLaneCancellations,
 } from "./lane-cancellation.js";
 import { isEmergencyStopTerminationConfirmed } from "./stop-signal-delivery.js";
 
@@ -18,6 +17,7 @@ interface EmergencyStopInterruptedIssue {
   codexAppServerPid: string | null;
   codexAppServerIdentity: ProcessIdentitySnapshot | null;
   laneJobId: string | null;
+  laneJobIds: string[];
   laneCancellationSupported: boolean;
 }
 
@@ -27,6 +27,7 @@ export interface EmergencyStopRecoveryCleanupPlan {
   codexAppServerPid: string | null;
   codexAppServerIdentity: ProcessIdentitySnapshot | null;
   laneJobId: string | null;
+  laneJobIds: string[];
   laneCancellationSupported: boolean;
   setBySequence: number;
   since: string;
@@ -55,6 +56,7 @@ export function collectUnconfirmedEmergencyStopCleanupPlans(
           codexAppServerPid: issue.codexAppServerPid,
           codexAppServerIdentity: issue.codexAppServerIdentity,
           laneJobId: issue.laneJobId ?? null,
+          laneJobIds: issue.laneJobIds,
           laneCancellationSupported: issue.laneCancellationSupported,
           setBySequence: entry.sequence,
           since: entry.timestamp,
@@ -138,7 +140,8 @@ function readEmergencyStopSourceSequence(
 
 export async function recoverEmergencyStopLaneCancellation(input: {
   backend: StageExecutionBackendRunner | undefined;
-  laneJobId: string;
+  laneJobId?: string;
+  laneJobIds?: readonly string[];
   issueId: string;
   issueIdentifier: string;
   sourceSequence: number;
@@ -156,7 +159,9 @@ export async function recoverEmergencyStopLaneCancellation(input: {
         outcome: "degraded",
         issue_id: input.issueId,
         issue_identifier: input.issueIdentifier,
-        lane_job_id: input.laneJobId,
+        lane_job_ids:
+          input.laneJobIds ??
+          (input.laneJobId === undefined ? [] : [input.laneJobId]),
         source_sequence: input.sourceSequence,
       },
     );
@@ -170,22 +175,22 @@ export async function recoverEmergencyStopLaneCancellation(input: {
     processGroup: true,
     killGraceMs: 1_000,
   };
-  const evidence = await normalizeLaneCancellation(
-    (jobId, cancellationRequest) => backend.cancel(jobId, cancellationRequest),
-    input.laneJobId,
-    request,
-  );
-  const delivery = laneCancellationToStopSignalDelivery(
-    input.laneJobId,
-    {
+  const laneJobIds =
+    input.laneJobIds ??
+    (input.laneJobId === undefined ? [] : [input.laneJobId]);
+  const delivery = await normalizeAndAggregateLaneCancellations({
+    cancel: (jobId, cancellationRequest) =>
+      backend.cancel(jobId, cancellationRequest),
+    laneJobIds,
+    request: {
       issueId: input.issueId,
       issueIdentifier: input.issueIdentifier,
       cleanupWorkspace: false,
       reason: "emergency_stop",
     } satisfies StopRequest,
-    evidence,
-    input.now(),
-  );
+    cancellationRequest: request,
+    attemptedAt: input.now(),
+  });
   const confirmed = isEmergencyStopTerminationConfirmed(delivery);
   if (confirmed) {
     await input.logger?.log(
@@ -195,7 +200,7 @@ export async function recoverEmergencyStopLaneCancellation(input: {
       {
         issue_id: input.issueId,
         issue_identifier: input.issueIdentifier,
-        lane_job_id: input.laneJobId,
+        lane_job_ids: laneJobIds,
         source_sequence: input.sourceSequence,
         signal_delivery_status: delivery.status,
       },
@@ -208,7 +213,7 @@ export async function recoverEmergencyStopLaneCancellation(input: {
         outcome: "degraded",
         issue_id: input.issueId,
         issue_identifier: input.issueIdentifier,
-        lane_job_id: input.laneJobId,
+        lane_job_ids: laneJobIds,
         source_sequence: input.sourceSequence,
         signal_delivery_status: delivery.status,
         warning: delivery.warning,
@@ -235,6 +240,15 @@ function readEmergencyStopInterruptedIssues(
       return [];
     }
     const codexAppServerPid = item.codexAppServerPid;
+    const laneJobId = nonBlankString(item.laneJobId);
+    const laneJobIds = Array.isArray(item.laneJobIds)
+      ? item.laneJobIds.flatMap((value) => {
+          const jobId = nonBlankString(value);
+          return jobId === null ? [] : [jobId];
+        })
+      : laneJobId === null
+        ? []
+        : [laneJobId];
     return [
       {
         issueId,
@@ -247,7 +261,8 @@ function readEmergencyStopInterruptedIssues(
         codexAppServerIdentity: readProcessIdentityMetadata(
           item.codexAppServerIdentity,
         ),
-        laneJobId: nonBlankString(item.laneJobId),
+        laneJobId: laneJobIds.at(-1) ?? laneJobId,
+        laneJobIds,
         laneCancellationSupported: item.laneCancellationSupported === true,
       },
     ];

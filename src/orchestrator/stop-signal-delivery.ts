@@ -35,6 +35,14 @@ export interface StopSignalDeliveryAttempt {
   sigkill: StopSignalStatus;
 }
 
+export interface LaneCancellationDelivery {
+  laneJobId: string;
+  status: "already_exited" | "delivered" | "failed";
+  state: string;
+  killed: boolean;
+  failure: string | null;
+}
+
 export interface StopSignalDelivery {
   /**
    * Aggregate proof status. "delivered" means every target reached a terminal
@@ -53,12 +61,20 @@ export interface StopSignalDelivery {
     killed: boolean;
     failure: string | null;
   };
+  laneCancellations?: LaneCancellationDelivery[];
 }
 
 export function laneJobMetadata(
   laneJobId: string | null | undefined,
 ): Record<string, string> {
   return laneJobId === undefined || laneJobId === null ? {} : { laneJobId };
+}
+
+export function laneJobIdsMetadata(
+  laneJobIds: readonly string[] | undefined,
+): Record<string, string[]> {
+  const ids = laneJobIds?.filter((laneJobId) => laneJobId.trim() !== "") ?? [];
+  return ids.length === 0 ? {} : { laneJobIds: [...new Set(ids)] };
 }
 
 export function isStopSignalDelivery(
@@ -81,6 +97,7 @@ export function isStopSignalDelivery(
       candidate.attempts,
       candidate.warning,
       candidate.laneCancellation,
+      candidate.laneCancellations,
     ) &&
     (typeof candidate.warning === "string" || candidate.warning === null) &&
     (candidate.laneJobId === undefined ||
@@ -93,13 +110,22 @@ export function isStopSignalDelivery(
         typeof candidate.laneCancellation.state === "string" &&
         typeof candidate.laneCancellation.killed === "boolean" &&
         (candidate.laneCancellation.failure === null ||
-          typeof candidate.laneCancellation.failure === "string")))
+          typeof candidate.laneCancellation.failure === "string"))) &&
+    (candidate.laneCancellations === undefined ||
+      (Array.isArray(candidate.laneCancellations) &&
+        candidate.laneCancellations.length > 0 &&
+        candidate.laneCancellations.every(isLaneCancellationDelivery)))
   );
 }
 
 export function isEmergencyStopTerminationConfirmed(value: unknown): boolean {
   if (!isStopSignalDelivery(value)) {
     return false;
+  }
+  if (value.laneCancellations !== undefined) {
+    return value.laneCancellations.every(
+      (lane) => lane.status === "already_exited" || lane.status === "delivered",
+    );
   }
   if (value.laneCancellation?.killed === true && value.status === "delivered") {
     return true;
@@ -127,6 +153,25 @@ export function isEmergencyStopTerminationConfirmed(value: unknown): boolean {
           attempt.sigterm === "already_exited" ||
           attempt.sigkill === "already_exited",
       ))
+  );
+}
+
+function isLaneCancellationDelivery(
+  value: unknown,
+): value is LaneCancellationDelivery {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const candidate = value as Partial<LaneCancellationDelivery>;
+  return (
+    typeof candidate.laneJobId === "string" &&
+    candidate.laneJobId.trim() !== "" &&
+    (candidate.status === "already_exited" ||
+      candidate.status === "delivered" ||
+      candidate.status === "failed") &&
+    typeof candidate.state === "string" &&
+    typeof candidate.killed === "boolean" &&
+    (candidate.failure === null || typeof candidate.failure === "string")
   );
 }
 
@@ -196,8 +241,22 @@ function isStopSignalDeliveryStatusConsistent(
   attempts: StopSignalDeliveryAttempt[],
   warning: StopSignalDelivery["warning"] | undefined,
   laneCancellation: StopSignalDelivery["laneCancellation"] | undefined,
+  laneCancellations: StopSignalDelivery["laneCancellations"] | undefined,
 ): boolean {
   if (attempts.length === 0) {
+    if (laneCancellations !== undefined) {
+      const failed = laneCancellations.filter(
+        (lane) => lane.status === "failed",
+      ).length;
+      const succeeded = laneCancellations.length - failed;
+      return failed === 0
+        ? status ===
+            (succeeded > 0 &&
+            laneCancellations.some((lane) => lane.status === "delivered")
+              ? "delivered"
+              : "already_exited")
+        : status === (succeeded > 0 ? "partial" : "failed");
+    }
     if (laneCancellation !== undefined) {
       return (
         status === "delivered" ||

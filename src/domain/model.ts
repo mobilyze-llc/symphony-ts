@@ -1,7 +1,6 @@
 import type { ErrorSignatureClass } from "../errors/signature.js";
 import type { ProcessIdentitySnapshot } from "../shared/process-tree.js";
 import type { StageUsageMeasurement } from "./stage-usage.js";
-
 export const ORCHESTRATOR_ISSUE_STATUSES = [
   "unclaimed",
   "claimed",
@@ -9,7 +8,6 @@ export const ORCHESTRATOR_ISSUE_STATUSES = [
   "retry_queued",
   "released",
 ] as const;
-
 export type OrchestratorIssueStatus =
   (typeof ORCHESTRATOR_ISSUE_STATUSES)[number];
 
@@ -1127,6 +1125,7 @@ export interface RunningEntry extends LiveSession {
   monitorHandle: unknown;
   failureReason: string | null;
   laneCancellationSupported?: boolean;
+  laneJobIds?: string[];
 }
 export interface StageRecord {
   stageName: string;
@@ -1559,6 +1558,7 @@ export interface PipelineEmergencyStopState {
     codexAppServerPid: string | null;
     codexAppServerIdentity: ProcessIdentitySnapshot | null;
     laneJobId?: string | null;
+    laneJobIds?: string[];
     laneCancellationSupported?: boolean;
   }>;
 }
