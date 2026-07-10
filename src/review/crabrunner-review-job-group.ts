@@ -38,7 +38,6 @@ import {
 } from "./review-verdict.js";
 
 export type ReviewJobGroupLaneKind = "reviewer" | "browser-qa";
-
 export interface CrabrunnerReviewLaneSpec {
   laneId: string;
   kind: ReviewJobGroupLaneKind;
@@ -50,7 +49,6 @@ export interface CrabrunnerReviewLaneSpec {
   independentReviewer: boolean;
   mergeAuthoritative: boolean;
 }
-
 /**
  * The per-lane crabrunner evidence handed to the artifact collector — the lane
  * spec, its dispatch result, and the host-owned crabrunner artifact refs. The
@@ -113,7 +111,6 @@ export interface RunCrabrunnerReviewJobGroupInput {
   lanes: readonly CrabrunnerReviewLaneSpec[];
   /** The crabrunner backend — the only dispatch surface (seam insulation). */
   backend: StageExecutionBackendRunner<CrabrunnerStageExecutionEvidence>;
-  /** Called as soon as any reviewer lane is admitted by crabrunner. */
   onLaneJobId?: (jobId: string) => void;
   buildJobSpec: (lane: CrabrunnerReviewLaneSpec) => StageExecutionJobSpec;
   buildRunnerInput: (lane: CrabrunnerReviewLaneSpec) => AgentRunInput;
@@ -220,9 +217,7 @@ export async function runCrabrunnerReviewJobGroup(
     buildJobSpec: (lane) => input.buildJobSpec(lane),
     buildRunnerInput: (lane) => input.buildRunnerInput(lane),
     resolveBackend: () => input.backend,
-    ...(input.onLaneJobId === undefined
-      ? {}
-      : { onLaneJobId: input.onLaneJobId }),
+    onLaneJobId: input.onLaneJobId,
     expectedIdentity: {
       issueId: input.issueId,
       runGroupId: input.runGroupId,

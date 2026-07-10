@@ -77,7 +77,6 @@ import { buildDelegatedStageAttemptJournalEntry } from "../stage-execution/deleg
  * is acceptable and keeps config alone from satisfying the fail-closed handoff.
  */
 export type CapsuleFileExistsFn = (absolutePath: string) => boolean;
-
 export interface ExecuteDecomposedStageDispatchInput {
   /** The issue the parent stage is running for. */
   issue: Issue;
@@ -95,7 +94,6 @@ export interface ExecuteDecomposedStageDispatchInput {
   artifactRoot: string;
   /** Abort signal threaded into each sub-stage runner input. */
   signal?: AbortSignal;
-  /** Called as soon as any delegated sub-stage lane is admitted. */
   onLaneJobId?: (jobId: string) => void;
   /** Capsule paths available before the first sub-stage (rarely set). */
   initialCapsulePaths?: readonly string[];
@@ -131,7 +129,6 @@ const DEFAULT_FILE_EXISTS: CapsuleFileExistsFn = (absolutePath) => {
     return false;
   }
 };
-
 export async function executeDecomposedStageDispatch(
   input: ExecuteDecomposedStageDispatchInput,
 ): Promise<AgentRunResult> {
@@ -182,9 +179,7 @@ export async function executeDecomposedStageDispatch(
           ctx,
         }),
       ),
-    ...(input.onLaneJobId === undefined
-      ? {}
-      : { onLaneJobId: input.onLaneJobId }),
+    onLaneJobId: input.onLaneJobId,
     spendTokensOf: (result) => readStageTotalTokens(result.result.liveSession),
     resolveProducedCapsules: ({ ctx }) =>
       // Fail-closed handoff: a declared produced capsule counts only when the
