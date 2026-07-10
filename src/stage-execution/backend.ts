@@ -71,9 +71,18 @@ export interface StageExecutionBackendInput {
   runnerInput: AgentRunInput;
 }
 
+export interface StageExecutionResultMetadata {
+  agentMessage?: string;
+  laneJobId?: string;
+}
+
+export type StageExecutionAgentRunResult = AgentRunResult & {
+  metadata?: StageExecutionResultMetadata;
+};
+
 export interface StageExecutionBackendResult<Evidence = unknown> {
   job: StageExecutionJobSpec;
-  result: AgentRunResult;
+  result: StageExecutionAgentRunResult;
   evidence?: Evidence;
 }
 

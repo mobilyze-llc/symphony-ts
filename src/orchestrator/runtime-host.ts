@@ -202,6 +202,7 @@ import {
 } from "../stage-execution/backend.js";
 import type { CrabrunnerStageExecutionEvidence } from "../stage-execution/crabrunner-backend.js";
 import { createStageExecutionJobSpec } from "../stage-execution/job-spec.js";
+import * as stageExecutionResult from "../stage-execution/result-metadata.js";
 import { serializeTrackerErrorDetails } from "../tracker/errors.js";
 import {
   type LinearIssueComment,
@@ -554,7 +555,6 @@ interface WorkerExecution {
   stageName: string | null;
   codexAppServerPid: number | null;
   codexAppServerIdentity: ProcessIdentitySnapshot | null;
-  laneJobId: string | null;
   controller: AbortController;
   completion: Promise<void>;
   stopRequest: StopRequest | null;
@@ -4733,7 +4733,6 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       stageName,
       codexAppServerPid: null,
       codexAppServerIdentity: null,
-      laneJobId: null,
       controller,
       stopRequest: null,
       lastResult: null,
@@ -4801,21 +4800,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           effectiveHardStops.maxDollarBudgetUsd * Math.max(1, budgetMultiplier),
       }),
     };
-    // SYMPH-855/SYMPH-812: a review stage runs its reviewer (+ optional
-    // browser-QA) lanes as a crabrunner job group when the per-workflow gate is
-    // on. Once enabled, missing crabrunner wiring fails closed instead of
-    // silently falling back to the pre-cutover local review path. The
-    // dispatcher produces the SAME review-result.json +
-    // [REVIEW_GATE_RESULT_PATH:] marker the legacy path emitted, surfaced here
-    // as an AgentRunResult whose final message carries the marker — so the
-    // orchestrator's unchanged finalization extracts/validates it and
-    // rework/merge-readiness stay journal-derived.
-    //
-    // SYMPH-852: a stage that declares execution.subStages runs its sub-stages
-    // in sequence through the StageExecutionBackend seam and folds them into ONE
-    // aggregate result; otherwise dispatch the single execution unchanged.
-    // Every branch resolves to one AgentRunResult fed into the SAME finalization
-    // below, so the orchestrator still performs exactly one stage transition.
+    // Review and decomposed stages keep their existing dispatch contracts;
+    // every branch feeds one result into the single finalization below.
     const resultPromise: Promise<StageExecutionBackendResult> =
       Promise.resolve().then(async () => {
         const crabrunnerReviewBackend =
@@ -4862,23 +4848,19 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         });
       });
     const completion = resultPromise
-      .then(async ({ result, evidence }) => {
+      .then(async ({ result }) => {
         execution.lastResult = result;
-        execution.laneJobId =
-          result.metadata?.laneJobId ?? readLaneJobId(evidence);
-        const crabrunnerTerminalFailure =
-          executionJob.backend === "crabrunner" &&
-          result.runAttempt.status !== "succeeded";
+        const finalization =
+          stageExecutionResult.resolveStageExecutionFinalization(
+            executionJob.backend,
+            result,
+          );
         await this.enqueue(async () => {
           await this.finalizeWorkerExecution(execution, {
-            outcome: crabrunnerTerminalFailure ? "abnormal" : "normal",
-            ...(crabrunnerTerminalFailure
-              ? {
-                  reason:
-                    result.runAttempt.error ??
-                    `crabrunner_run_attempt_${result.runAttempt.status}`,
-                }
-              : {}),
+            outcome: finalization.outcome,
+            ...(finalization.reason === undefined
+              ? {}
+              : { reason: finalization.reason }),
             endedAt: this.now(),
           });
         });
@@ -5723,7 +5705,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         input_tokens: liveSession?.codexInputTokens ?? 0,
         output_tokens: liveSession?.codexOutputTokens ?? 0,
         total_tokens: liveSession?.codexTotalTokens ?? 0,
-        lane_job_id: execution.laneJobId,
+        lane_job_id: stageExecutionResult.readStageExecutionLaneJobId(
+          execution.lastResult,
+        ),
         ...(liveSession?.codexCacheReadTokens
           ? { cache_read_tokens: liveSession.codexCacheReadTokens }
           : {}),
@@ -5768,23 +5752,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       this.pruneLocalBranches();
     }
 
-    const metadataAgentMessage = execution.lastResult?.metadata?.agentMessage;
-    const lastTurnMessage = execution.lastResult?.lastTurn?.message;
-    const fallbackMessage = execution.lastResult?.liveSession?.lastCodexMessage;
-    const agentMessage =
-      (metadataAgentMessage !== null &&
-      metadataAgentMessage !== undefined &&
-      metadataAgentMessage !== ""
-        ? metadataAgentMessage
-        : lastTurnMessage !== null &&
-            lastTurnMessage !== undefined &&
-            lastTurnMessage !== ""
-          ? lastTurnMessage
-          : fallbackMessage !== null &&
-              fallbackMessage !== undefined &&
-              fallbackMessage !== ""
-            ? fallbackMessage
-            : undefined) ?? undefined;
+    const agentMessage = stageExecutionResult.readStageExecutionAgentMessage(
+      execution.lastResult,
+    );
 
     // Capture remaining state data
     const preHistory: ExecutionHistory = [
@@ -7941,14 +7911,6 @@ function truncateTraceText(text: string, maxLength = 200): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function readLaneJobId(evidence: unknown): string | null {
-  if (!isRecord(evidence) || !isRecord(evidence.admission)) {
-    return null;
-  }
-  const jobId = evidence.admission.jobId;
-  return typeof jobId === "string" && jobId.trim() !== "" ? jobId : null;
 }
 
 interface PriorCrabrunnerReviewState {
