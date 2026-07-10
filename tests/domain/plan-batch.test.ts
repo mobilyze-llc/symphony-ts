@@ -398,4 +398,20 @@ describe("normalizePlanBatch", () => {
       ).toEqual({ ok: false, rejection: "invalid canary" });
     }
   });
+
+  it("rejects an audit-annotated member at the batch eligibility boundary", () => {
+    expect(
+      normalizePlanBatch(
+        {
+          mode: "parallel-isolated",
+          rationale: "must not dispatch advisory kill",
+        },
+        MEMBERS,
+        { ineligibleIssueIdentifiers: ["SYMPH-2"] },
+      ),
+    ).toEqual({
+      ok: false,
+      rejection: "dispatch-ineligible batch member",
+    });
+  });
 });

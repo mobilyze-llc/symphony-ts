@@ -176,11 +176,35 @@ describe("buildPlannerPrompt", () => {
     const prompt = buildPlannerPrompt(ctx);
 
     expect(prompt).toContain(
-      "## Backlog (eligible, newest-first upstream; priority shown inline)",
+      "## Backlog candidates (eligible unless annotated; newest-first upstream; priority shown inline)",
     );
     expect(prompt).not.toContain("priority-ordered upstream");
     expect(prompt.indexOf("SYMPH-846 [Backlog, priority 4]")).toBeLessThan(
       prompt.indexOf("SYMPH-845 [Backlog, priority 1]"),
+    );
+  });
+
+  it("renders root-cause audit annotations separately from dispatch exclusion", () => {
+    const ctx = context();
+    ctx.backlog[0]!.auditAnnotations = [
+      {
+        classification: "symptomatic_of_root",
+        rootIssueIdentifier: "SYMPH-ROOT",
+      },
+    ];
+    ctx.backlog[1]!.auditAnnotations = [
+      { classification: "kill", rootIssueIdentifier: null },
+    ];
+    ctx.backlog[1]!.dispatchExclusionReasons = ["audit:kill"];
+
+    const prompt = buildPlannerPrompt(ctx);
+
+    expect(prompt).toContain(
+      "audit classification: symptomatic_of_root; root issue: SYMPH-ROOT",
+    );
+    expect(prompt).toContain("audit classification: kill");
+    expect(prompt).toContain(
+      "DISPATCH-INELIGIBLE audit annotation: audit:kill",
     );
   });
 
@@ -1344,6 +1368,33 @@ describe("parsePlannerOutput", () => {
 });
 
 describe("buildPlanBody", () => {
+  it("never emits a batch containing a dispatch-ineligible annotated candidate", () => {
+    const ctx = context();
+    ctx.backlog[1]!.dispatchExclusionReasons = ["audit:kill"];
+    const body = buildPlanBody(
+      {
+        rationale: "plan",
+        batches: [
+          {
+            mode: "parallel-isolated",
+            issueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+            rationale: "model ignored the annotation",
+          },
+          {
+            mode: "parallel-isolated",
+            issueIdentifiers: ["SYMPH-1"],
+            rationale: "eligible fallback",
+          },
+        ],
+      },
+      ctx,
+    );
+    expect(body.batches).toHaveLength(1);
+    expect(
+      body.batches[0]?.members.map((member) => member.issueIdentifier),
+    ).toEqual(["SYMPH-1"]);
+  });
+
   it("resolves identifiers, assigns batch ids + [opt-N] options + release intents", () => {
     const body = buildPlanBody(
       {

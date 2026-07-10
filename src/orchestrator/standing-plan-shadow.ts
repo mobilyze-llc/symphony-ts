@@ -32,13 +32,16 @@ import type {
   StandingPlan,
 } from "../domain/standing-plan.js";
 import type { LinearIssueComment } from "../tracker/linear-client.js";
-import type { BacklogHygieneProposal } from "./backlog-hygiene.js";
 import { extractGroundingPathHints } from "./code-grounding.js";
 import {
   type PlanPostEmitReviewDeps,
   type PlanPostEmitReviewResult,
   runPlanPostEmitReview,
 } from "./plan-post-emit-review.js";
+import {
+  type ShadowPlannerAuditDisposition,
+  buildShadowPlannerAuditDispositionIndex,
+} from "./standing-plan-audit-dispositions.js";
 import {
   buildQueueHealth,
   computeResidualShare,
@@ -58,6 +61,11 @@ import {
   type TriageIntakePublisher,
   collectTriageIntakeHealth,
 } from "./triage-intake-reporting.js";
+
+export {
+  buildShadowPlannerAuditDispositions,
+  buildShadowPlannerSupersessionRelationDispositions,
+} from "./standing-plan-audit-dispositions.js";
 
 // ---------------------------------------------------------------------------
 // Shadow plan cycle (SYMPH-784 PR1)
@@ -99,73 +107,18 @@ export interface AssembleShadowPlannerContextInput {
     | Readonly<Record<string, PlannerCandidateGroundingEvidence>>;
 }
 
-export type ShadowPlannerAuditDispositionType =
-  | "kill"
-  | "stale"
-  | "duplicate"
-  | "supersession";
-
-export interface ShadowPlannerAuditDisposition {
-  type: ShadowPlannerAuditDispositionType;
-  issueIdentifiers: readonly string[];
-}
-
-export function buildShadowPlannerAuditDispositions(
-  proposals: readonly BacklogHygieneProposal[],
-): ShadowPlannerAuditDisposition[] {
-  const dispositions: ShadowPlannerAuditDisposition[] = [];
-  for (const proposal of proposals) {
-    const issueIdentifiers = uniqueNonBlankIdentifiers(
-      proposal.issueIdentifiers,
-    );
-    if (issueIdentifiers.length === 0) {
-      continue;
-    }
-    if (proposal.cull?.classification === "kill") {
-      dispositions.push({ type: "kill", issueIdentifiers });
-      continue;
-    }
-    if (proposal.findingType === "stale") {
-      dispositions.push({ type: "stale", issueIdentifiers });
-      continue;
-    }
-    if (proposal.findingType === "supersession") {
-      dispositions.push({ type: "supersession", issueIdentifiers });
-      continue;
-    }
-    if (proposal.findingType === "duplicate") {
-      dispositions.push({ type: "duplicate", issueIdentifiers });
-    }
-  }
-  return dispositions;
-}
-
-export function buildShadowPlannerSupersessionRelationDispositions(
-  issues: readonly Issue[],
-): ShadowPlannerAuditDisposition[] {
-  const dispositions: ShadowPlannerAuditDisposition[] = [];
-  for (const issue of issues) {
-    const supersededBy = issue.supersededBy ?? [];
-    if (
-      supersededBy.some((ref) => isCompletedSupersedingIssueState(ref.state))
-    ) {
-      dispositions.push({
-        type: "supersession",
-        issueIdentifiers: [issue.identifier],
-      });
-    }
-  }
-  return dispositions;
-}
-
 export function assembleShadowPlannerContext(
   input: AssembleShadowPlannerContextInput,
 ): PlannerContext {
   const inFlightIdentifiers = new Set(
     input.inFlight.map((entry) => entry.issueIdentifier),
   );
-  const { excludedIdentifiers, duplicateClustersByIdentifier } =
-    buildAuditDispositionIndex(input.auditDispositions ?? []);
+  const {
+    excludedIdentifiers,
+    duplicateClustersByIdentifier,
+    auditAnnotationsByIdentifier,
+    dispatchExclusionsByIdentifier,
+  } = buildShadowPlannerAuditDispositionIndex(input.auditDispositions ?? []);
   const backlog = input.candidates
     .filter((issue) => !inFlightIdentifiers.has(issue.identifier))
     .filter((issue) => !excludedIdentifiers.has(issue.identifier))
@@ -219,6 +172,18 @@ export function assembleShadowPlannerContext(
                 duplicateClustersByIdentifier.get(issue.identifier) ?? [],
             }
           : {}),
+        ...(auditAnnotationsByIdentifier.has(issue.identifier)
+          ? {
+              auditAnnotations:
+                auditAnnotationsByIdentifier.get(issue.identifier) ?? [],
+            }
+          : {}),
+        ...(dispatchExclusionsByIdentifier.has(issue.identifier)
+          ? {
+              dispatchExclusionReasons:
+                dispatchExclusionsByIdentifier.get(issue.identifier) ?? [],
+            }
+          : {}),
       };
     });
   return {
@@ -259,70 +224,6 @@ function isGroundingEvidenceMap(
     | Readonly<Record<string, PlannerCandidateGroundingEvidence>>,
 ): evidence is ReadonlyMap<string, PlannerCandidateGroundingEvidence> {
   return typeof (evidence as { get?: unknown }).get === "function";
-}
-
-function buildAuditDispositionIndex(
-  dispositions: readonly ShadowPlannerAuditDisposition[],
-): {
-  excludedIdentifiers: Set<string>;
-  duplicateClustersByIdentifier: Map<string, string[]>;
-} {
-  const excludedIdentifiers = new Set<string>();
-  const duplicateClustersByIdentifier = new Map<string, string[]>();
-  for (const disposition of dispositions) {
-    const identifiers = uniqueNonBlankIdentifiers(disposition.issueIdentifiers);
-    if (identifiers.length === 0) {
-      continue;
-    }
-    if (
-      disposition.type === "kill" ||
-      disposition.type === "stale" ||
-      disposition.type === "supersession"
-    ) {
-      for (const identifier of identifiers) {
-        excludedIdentifiers.add(identifier);
-      }
-      continue;
-    }
-    for (const identifier of identifiers) {
-      const existing = duplicateClustersByIdentifier.get(identifier) ?? [];
-      duplicateClustersByIdentifier.set(
-        identifier,
-        uniqueNonBlankIdentifiers([...existing, ...identifiers]),
-      );
-    }
-  }
-  return { excludedIdentifiers, duplicateClustersByIdentifier };
-}
-
-function isCompletedSupersedingIssueState(state: string | null): boolean {
-  if (state === null) {
-    return false;
-  }
-  const normalized = state.trim().toLowerCase();
-  return (
-    normalized === "done" ||
-    normalized === "complete" ||
-    normalized === "completed" ||
-    normalized === "closed" ||
-    normalized === "merged" ||
-    normalized === "released" ||
-    normalized === "shipped"
-  );
-}
-
-function uniqueNonBlankIdentifiers(identifiers: readonly string[]): string[] {
-  const seen = new Set<string>();
-  const unique: string[] = [];
-  for (const identifier of identifiers) {
-    const normalized = identifier.trim();
-    if (normalized === "" || seen.has(normalized)) {
-      continue;
-    }
-    seen.add(normalized);
-    unique.push(normalized);
-  }
-  return unique;
 }
 
 export interface EnrichPlannerContextWithCommentsDeps {
