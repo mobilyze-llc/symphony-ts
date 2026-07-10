@@ -70,6 +70,106 @@ it("renders export-style dotenv keys as launchd environment keys", async () => {
   expect(result.stdout).not.toContain("not a dotenv assignment");
 });
 
+it("fails restart when the active plist lacks durable crabrunner env", async () => {
+  const root = await createTempDir("symphony-ctl-crabrunner-env-");
+  const workflowPath = join(root, "WORKFLOW.md");
+  const envFile = join(root, ".env");
+  const plistPath = join(root, "service.plist");
+  await writeFile(
+    workflowPath,
+    ["---", "planner_grounding:", "  enabled: true", "---", ""].join("\n"),
+  );
+  await writeFile(envFile, "SYMPHONY_CRABRUNNER_ROOT=/opt/crucible\n");
+  await writeFile(
+    plistPath,
+    [
+      "<plist><dict>",
+      "<key>EnvironmentVariables</key>",
+      "<dict>",
+      "<key>SYMPHONY_CRABRUNNER_ROOT</key>",
+      "<string>/opt/crucible</string>",
+      "</dict>",
+      "</dict></plist>",
+      "",
+    ].join("\n"),
+  );
+
+  const ctl = await readFile("ops/symphony-ctl", "utf8");
+  const functions = [
+    "workflow_requires_crabrunner",
+    "env_file_value",
+    "check_crabrunner_service_env",
+    "plist_env_value",
+    "check_crabrunner_plist_env",
+  ]
+    .map((name) => extractShellFunction(ctl, name))
+    .join("\n");
+  const shell = [
+    'die() { echo "$*" >&2; exit 1; }',
+    functions,
+    'WORKFLOW_PATH="$1"',
+    'ENV_FILE="$2"',
+    'PLIST_PATH="$3"',
+    "check_crabrunner_plist_env",
+  ].join("\n");
+
+  const matching = spawnSync(
+    "/bin/bash",
+    ["-c", shell, "bash", workflowPath, envFile, plistPath],
+    { encoding: "utf8" },
+  );
+  expect(matching.status, matching.stderr).toBe(0);
+
+  await writeFile(
+    plistPath,
+    "<plist><dict><key>EnvironmentVariables</key><dict/></dict></plist>\n",
+  );
+  const missing = spawnSync(
+    "/bin/bash",
+    ["-c", shell, "bash", workflowPath, envFile, plistPath],
+    { encoding: "utf8" },
+  );
+  expect(missing.status).toBe(1);
+  expect(missing.stderr).toContain(
+    "Installed LaunchAgent does not contain the durable SYMPHONY_CRABRUNNER_ROOT",
+  );
+
+  const install = extractShellFunction(ctl, "cmd_install");
+  const start = extractShellFunction(ctl, "cmd_start");
+  const restart = extractShellFunction(ctl, "cmd_restart");
+  expect(install).toContain("check_crabrunner_service_env");
+  expect(start).not.toContain("check_crabrunner_plist_env");
+  expect(restart).toContain("check_crabrunner_plist_env");
+});
+
+it("completes the first stop wait-loop iteration under set -e", async () => {
+  const ctl = await readFile("ops/symphony-ctl", "utf8");
+  const stop = extractShellFunction(ctl, "cmd_stop");
+  const shell = [
+    "set -e",
+    "check_installed() { :; }",
+    "info() { :; }",
+    "warn() { :; }",
+    'ok() { echo "$*"; }',
+    "launchctl() { :; }",
+    "sleep() { :; }",
+    "running_checks=0",
+    "is_running() { running_checks=$((running_checks + 1)); [[ $running_checks -lt 3 ]]; }",
+    'SERVICE_LABEL="com.symphony.test"',
+    stop,
+    "cmd_stop",
+  ].join("\n");
+
+  const result = spawnSync("/bin/bash", ["-c", shell], {
+    encoding: "utf8",
+  });
+
+  expect(result.status, result.stderr).toBe(0);
+  expect(result.stdout).toContain("Service stopped: com.symphony.test");
+  expect(stop).toContain("waited=$((waited + 1))");
+  expect(stop).not.toContain("((waited++))");
+});
+
 it("defaults the service root to the checkout containing symphony-ctl", async () => {
   const root = await createTempDir("symphony-ctl-default-root-");
   const home = join(root, "home");

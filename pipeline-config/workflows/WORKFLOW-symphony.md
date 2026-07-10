@@ -29,6 +29,7 @@ queue_triage:
   shadow_mode: true
   plan_review:
     enabled: true
+    planner_grounding_enabled: true
   # SYMPH-916: flip the SYMPH-896 curated-comment planner enrichment ON to start
   # the measurement window for the SYMPH-905 topology decision (two-pass vs
   # curated one-pass). Report-only: shadow_mode stays true, so this only enlarges
