@@ -72,6 +72,8 @@ describe("createStageExecutionJobSpec", () => {
         model: "gpt-5.3-codex",
         provider: "openai",
         reasoningEffort: "medium",
+        runtime: "openai-codex",
+        modelId: "gpt-5.3-codex",
       },
       enforcement: {
         required: true,
@@ -106,6 +108,110 @@ describe("createStageExecutionJobSpec", () => {
     );
     expect(job.identity.idempotencyKey).not.toContain("feature/SYMPH-807:refs");
     expect(job.identity.idempotencyKey).not.toContain("rg:807");
+  });
+
+  it("preserves the existing multi-lane review runtime identities", () => {
+    const job = createStageExecutionJobSpec({
+      issue: createIssue({ id: "issue-review", identifier: "SYMPH-REVIEW" }),
+      attempt: 1,
+      stage: createStage({
+        execution: {
+          role: "reviewer",
+          phase: "review",
+          backend: "crabrunner",
+          controlNeeding: false,
+          provider: "deepseek",
+          model: "deepseek-chat",
+          reasoningEffort: null,
+          profile: "crabrunner-review.pi",
+          artifacts: { requires: [], produces: [] },
+          timeoutMs: null,
+          budget: { maxTokens: null, maxUsd: null },
+          dependencies: { stages: [], capsules: [], missingCapsule: "fail" },
+          runGroup: { id: "review-group", key: null },
+          capsules: { consume: [], produce: [] },
+          subStages: [],
+        },
+      }),
+      stageName: "review/pi",
+      runnerKind: "pi",
+      runnerModel: "deepseek-chat",
+      runnerReasoningEffort: null,
+      defaultRunnerKind: "codex",
+      defaultRunnerModel: null,
+      effectiveHardStops: createHardStops(),
+      defaultTurnTimeoutMs: 600_000,
+      defaultStallTimeoutMs: 120_000,
+      baseRef: "origin/main",
+      artifactRoot: "/tmp/artifacts/review",
+    });
+
+    expect(job.runner).toEqual({
+      runnerKind: "pi",
+      model: "deepseek-chat",
+      provider: "deepseek",
+      reasoningEffort: null,
+    });
+  });
+
+  it("preserves the parent job identity for decomposed dispatch", () => {
+    const subStageExecution = {
+      role: "investigator" as const,
+      phase: "investigate" as const,
+      backend: "crabrunner" as const,
+      controlNeeding: false,
+      provider: "openai",
+      model: "gpt-5.3-codex",
+      reasoningEffort: null,
+      profile: "decomposed.sub-stage",
+      artifacts: { requires: [], produces: [] },
+      timeoutMs: null,
+      budget: { maxTokens: null, maxUsd: null },
+      dependencies: {
+        stages: [],
+        capsules: [],
+        missingCapsule: "fail" as const,
+      },
+      runGroup: { id: "decomposed-group", key: null },
+      capsules: { consume: [], produce: [] },
+      subStages: [],
+    };
+    const job = createStageExecutionJobSpec({
+      issue: createIssue({
+        id: "issue-decomposed",
+        identifier: "SYMPH-DECOMP",
+      }),
+      attempt: 1,
+      stage: createStage({
+        runner: "pi",
+        model: null,
+        execution: {
+          ...subStageExecution,
+          role: "investigator",
+          phase: "investigate",
+          provider: "deepseek",
+          model: null,
+          profile: "decomposed.parent",
+          runGroup: { id: "decomposed-parent", key: null },
+          subStages: [{ name: "sub-a", execution: subStageExecution }],
+        },
+      }),
+      stageName: "investigate",
+      defaultRunnerKind: "codex",
+      defaultRunnerModel: "gpt-5.3-codex",
+      effectiveHardStops: createHardStops(),
+      defaultTurnTimeoutMs: 600_000,
+      defaultStallTimeoutMs: 120_000,
+      baseRef: "origin/main",
+      artifactRoot: "/tmp/artifacts/decomposed",
+    });
+
+    expect(job.runner).toEqual({
+      runnerKind: "pi",
+      model: "gpt-5.3-codex",
+      provider: "deepseek",
+      reasoningEffort: null,
+    });
   });
 
   it("derives delegated enforcement from stage profile and effective hard stops", () => {

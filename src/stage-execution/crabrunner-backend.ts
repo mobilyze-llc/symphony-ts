@@ -1,12 +1,4 @@
-import type { AgentRunResult } from "../agent/runner.js";
-import {
-  type RunAttemptPhase,
-  createEmptyLiveSession,
-} from "../domain/model.js";
-import {
-  coerceLegacyCounterValue,
-  mapCrabrunnerUsageToStageUsage,
-} from "../domain/stage-usage.js";
+import type { RunAttemptPhase } from "../domain/model.js";
 import type {
   StageExecutionBackendInput,
   StageExecutionBackendResult,
@@ -17,6 +9,7 @@ import {
   artifactHashesFromCollectedArtifact,
   artifactRefsFromCollectedArtifact,
 } from "./collected-artifact.js";
+import { createCrabrunnerAgentResult } from "./crabrunner-agent-result.js";
 
 export const CRABRUNNER_JOB_SPEC_VERSION = "symphony.crabrunner.job.v1";
 
@@ -528,6 +521,7 @@ export class CrabrunnerStageExecutionBackend
       input,
       status: mapped.status,
       terminal: mapped.terminal,
+      laneJobId: mapped.admission.jobId,
       now: this.now,
       ...(mapped.error === undefined ? {} : { error: mapped.error }),
     };
@@ -698,106 +692,6 @@ function mapCrabrunnerTerminalStateToRunAttemptPhase(
   }
   const exhaustive: never = state;
   return exhaustive;
-}
-
-function createCrabrunnerAgentResult(input: {
-  input: StageExecutionBackendInput;
-  status: RunAttemptPhase;
-  terminal: CrabrunnerTerminalEvidence | null;
-  error?: string;
-  now: () => Date;
-}): AgentRunResult {
-  const terminal = input.terminal;
-  const artifactRefs =
-    terminal?.artifactRefs ??
-    artifactRefsFromCollectedArtifact(terminal?.artifact);
-  const terminalUsage = terminal?.usage;
-  const usageMeasurement = mapCrabrunnerUsageToStageUsage({
-    usage: terminalUsage,
-    runnerKind: input.input.job.runner.runnerKind,
-    provider: input.input.job.runner.provider,
-    model: input.input.job.runner.model,
-    profile: input.input.job.identity.profileId,
-  });
-  const legacyInputTokens = coerceLegacyCounterValue(
-    usageMeasurement.tokens.inputTokens,
-  );
-  const legacyOutputTokens = coerceLegacyCounterValue(
-    usageMeasurement.tokens.outputTokens,
-  );
-  const legacyTotalTokens = coerceLegacyCounterValue(
-    usageMeasurement.tokens.totalTokens,
-  );
-  const legacyCacheReadTokens = coerceLegacyCounterValue(
-    usageMeasurement.tokens.cacheReadTokens,
-  );
-  const legacyCacheWriteTokens = coerceLegacyCounterValue(
-    usageMeasurement.tokens.cacheWriteTokens,
-  );
-  const legacyNoCacheTokens = coerceLegacyCounterValue(
-    usageMeasurement.tokens.noCacheTokens,
-  );
-  const legacyReasoningTokens = coerceLegacyCounterValue(
-    usageMeasurement.tokens.reasoningTokens,
-  );
-  return {
-    issue: input.input.runnerInput.issue,
-    workspace: {
-      path: terminal?.workspacePath ?? input.input.job.identity.artifactRoot,
-      workspaceKey: input.input.runnerInput.issue.id,
-      createdNow: false,
-    },
-    runAttempt: {
-      issueId: input.input.runnerInput.issue.id,
-      issueIdentifier: input.input.runnerInput.issue.identifier,
-      attempt: input.input.runnerInput.attempt,
-      workspacePath:
-        terminal?.workspacePath ?? input.input.job.identity.artifactRoot,
-      startedAt: input.now().toISOString(),
-      status: input.status,
-      ...(input.error === undefined ? {} : { error: input.error }),
-    },
-    liveSession: {
-      ...createEmptyLiveSession(),
-      lastCodexEvent: "crabrunner_terminal",
-      lastCodexTimestamp: input.now().toISOString(),
-      lastCodexMessage:
-        terminal === null
-          ? (input.error ?? null)
-          : JSON.stringify({
-              terminalState: terminal.state,
-              terminalMessage: terminal.message ?? null,
-              usageStatus: terminal.usage?.status ?? "unknown",
-              artifactRefs,
-              progress: terminal.progress ?? null,
-              process: terminal.process ?? null,
-              cancellation: terminal.cancellation ?? null,
-            }),
-      codexInputTokens: legacyInputTokens,
-      codexOutputTokens: legacyOutputTokens,
-      codexTotalTokens: legacyTotalTokens,
-      codexCacheReadTokens: legacyCacheReadTokens,
-      codexCacheWriteTokens: legacyCacheWriteTokens,
-      codexNoCacheTokens: legacyNoCacheTokens,
-      codexReasoningTokens: legacyReasoningTokens,
-      codexTotalInputTokens: legacyInputTokens,
-      codexTotalOutputTokens: legacyOutputTokens,
-      totalStageInputTokens: legacyInputTokens,
-      totalStageOutputTokens: legacyOutputTokens,
-      totalStageTotalTokens: legacyTotalTokens,
-      totalStageCacheReadTokens: legacyCacheReadTokens,
-      totalStageCacheWriteTokens: legacyCacheWriteTokens,
-      usageMeasurement,
-      codexSessionLogs: artifactRefs.map((path, index) => ({
-        label: `crabrunner-artifact-${index + 1}`,
-        path,
-        url: null,
-      })),
-    },
-    turnsCompleted: 0,
-    lastTurn: null,
-    rateLimits: null,
-  };
 }
 
 function formatUnknownError(error: unknown): string {

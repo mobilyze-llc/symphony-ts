@@ -9985,6 +9985,44 @@ describe("stage execution backend boundary", () => {
     expect(fakeRunner.runInputs).toHaveLength(1);
   });
 
+  it("routes a non-success crabrunner terminal through abnormal retry handling", async () => {
+    const backend: StageExecutionBackendRunner = {
+      backend: "crabrunner",
+      async execute(input) {
+        const result = createNormalResult();
+        return {
+          job: input.job,
+          result: {
+            ...result,
+            runAttempt: {
+              ...result.runAttempt,
+              status: "failed",
+              error: "turn_cap_reached",
+            },
+          },
+        };
+      },
+    };
+    const fakeRunner = new FakeAgentRunner();
+    const host = new OrchestratorRuntimeHost({
+      config: createCrabrunnerStagedConfig(),
+      tracker: createTracker(),
+      agentRunner: fakeRunner,
+      stageExecutionBackends: new Map([["crabrunner", backend]]),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    await host.waitForIdle();
+
+    expect(fakeRunner.runInputs).toHaveLength(0);
+    expect(host.getState().completed.has("1")).toBe(false);
+    expect(host.getState().retryAttempts["1"]?.error).toContain(
+      "turn_cap_reached",
+    );
+    expect(host.getState().issueStages["1"]).toBe("investigate");
+  });
+
   it("keeps the built-in current-runner backend when custom backends are injected", async () => {
     const fakeRunner = new FakeAgentRunner();
     const crabrunnerBackend = new RecordingStageExecutionBackend(

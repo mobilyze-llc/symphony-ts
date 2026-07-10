@@ -195,12 +195,14 @@ import {
 } from "../spec-review/spec-review.js";
 import {
   CurrentRunnerStageExecutionBackend,
+  type StageExecutionBackendResult,
   type StageExecutionBackendRunner,
   type StageExecutionJobSpec,
   UnsupportedStageExecutionBackendError,
 } from "../stage-execution/backend.js";
 import type { CrabrunnerStageExecutionEvidence } from "../stage-execution/crabrunner-backend.js";
 import { createStageExecutionJobSpec } from "../stage-execution/job-spec.js";
+import * as stageExecutionResult from "../stage-execution/result-metadata.js";
 import { serializeTrackerErrorDetails } from "../tracker/errors.js";
 import {
   type LinearIssueComment,
@@ -553,6 +555,7 @@ interface WorkerExecution {
   stageName: string | null;
   codexAppServerPid: number | null;
   codexAppServerIdentity: ProcessIdentitySnapshot | null;
+  laneJobId: string | null;
   controller: AbortController;
   completion: Promise<void>;
   stopRequest: StopRequest | null;
@@ -4731,6 +4734,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       stageName,
       codexAppServerPid: null,
       codexAppServerIdentity: null,
+      laneJobId: null,
       controller,
       stopRequest: null,
       lastResult: null,
@@ -4798,68 +4802,71 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           effectiveHardStops.maxDollarBudgetUsd * Math.max(1, budgetMultiplier),
       }),
     };
-    // SYMPH-855/SYMPH-812: a review stage runs its reviewer (+ optional
-    // browser-QA) lanes as a crabrunner job group when the per-workflow gate is
-    // on. Once enabled, missing crabrunner wiring fails closed instead of
-    // silently falling back to the pre-cutover local review path. The
-    // dispatcher produces the SAME review-result.json +
-    // [REVIEW_GATE_RESULT_PATH:] marker the legacy path emitted, surfaced here
-    // as an AgentRunResult whose final message carries the marker — so the
-    // orchestrator's unchanged finalization extracts/validates it and
-    // rework/merge-readiness stay journal-derived.
-    //
-    // SYMPH-852: a stage that declares execution.subStages runs its sub-stages
-    // in sequence through the StageExecutionBackend seam and folds them into ONE
-    // aggregate result; otherwise dispatch the single execution unchanged.
-    // Every branch resolves to one AgentRunResult fed into the SAME finalization
-    // below, so the orchestrator still performs exactly one stage transition.
-    const resultPromise: Promise<AgentRunResult> = Promise.resolve().then(
-      async () => {
+    // Review and decomposed stages keep their existing dispatch contracts;
+    // every branch feeds one result into the single finalization below.
+    const resultPromise: Promise<StageExecutionBackendResult> =
+      Promise.resolve().then(async () => {
         const crabrunnerReviewBackend =
           this.resolveCrabrunnerReviewBackend(stageName);
         if (crabrunnerReviewBackend !== null) {
-          return this.executeCrabrunnerReviewStageDispatch({
-            issue,
-            attempt,
-            stage,
-            stageName,
-            signal: controller.signal,
-            baseRef:
-              executionJob.identity.baseRef ?? resolveStageExecutionBaseRef(),
-            artifactRoot: executionJob.identity.artifactRoot,
-            backend: crabrunnerReviewBackend,
-          });
+          return {
+            job: executionJob,
+            result: await this.executeCrabrunnerReviewStageDispatch({
+              issue,
+              attempt,
+              stage,
+              stageName,
+              signal: controller.signal,
+              baseRef:
+                executionJob.identity.baseRef ?? resolveStageExecutionBaseRef(),
+              artifactRoot: executionJob.identity.artifactRoot,
+              backend: crabrunnerReviewBackend,
+            }),
+          };
         }
         if (
           stage?.execution?.subStages &&
           stage.execution.subStages.length > 0
         ) {
-          return this.executeDecomposedStageDispatch({
-            issue,
-            attempt,
-            stage,
-            stageName,
-            subStages: stage.execution.subStages,
-            effectiveHardStops,
-            signal: controller.signal,
-            baseRef:
-              executionJob.identity.baseRef ?? resolveStageExecutionBaseRef(),
-            artifactRoot: executionJob.identity.artifactRoot,
-          });
+          return {
+            job: executionJob,
+            result: await this.executeDecomposedStageDispatch({
+              issue,
+              attempt,
+              stage,
+              stageName,
+              subStages: stage.execution.subStages,
+              effectiveHardStops,
+              signal: controller.signal,
+              baseRef:
+                executionJob.identity.baseRef ?? resolveStageExecutionBaseRef(),
+              artifactRoot: executionJob.identity.artifactRoot,
+            }),
+          };
         }
-        const { result } = await stageExecutionBackend.execute({
+        return await stageExecutionBackend.execute({
           job: executionJob,
           runnerInput,
         });
-        return result;
-      },
-    );
+      });
     const completion = resultPromise
-      .then(async (result) => {
+      .then(async ({ result, evidence }) => {
         execution.lastResult = result;
+        execution.laneJobId = stageExecutionResult.readStageExecutionLaneJobId(
+          result,
+          evidence,
+        );
+        const finalization =
+          stageExecutionResult.resolveStageExecutionFinalization(
+            executionJob.backend,
+            result,
+          );
         await this.enqueue(async () => {
           await this.finalizeWorkerExecution(execution, {
-            outcome: "normal",
+            outcome: finalization.outcome,
+            ...(finalization.reason === undefined
+              ? {}
+              : { reason: finalization.reason }),
             endedAt: this.now(),
           });
         });
@@ -5704,6 +5711,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         input_tokens: liveSession?.codexInputTokens ?? 0,
         output_tokens: liveSession?.codexOutputTokens ?? 0,
         total_tokens: liveSession?.codexTotalTokens ?? 0,
+        lane_job_id: execution.laneJobId,
         ...(liveSession?.codexCacheReadTokens
           ? { cache_read_tokens: liveSession.codexCacheReadTokens }
           : {}),
@@ -5748,18 +5756,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       this.pruneLocalBranches();
     }
 
-    const lastTurnMessage = execution.lastResult?.lastTurn?.message;
-    const fallbackMessage = execution.lastResult?.liveSession?.lastCodexMessage;
-    const agentMessage =
-      (lastTurnMessage !== null &&
-      lastTurnMessage !== undefined &&
-      lastTurnMessage !== ""
-        ? lastTurnMessage
-        : fallbackMessage !== null &&
-            fallbackMessage !== undefined &&
-            fallbackMessage !== ""
-          ? fallbackMessage
-          : undefined) ?? undefined;
+    const agentMessage = stageExecutionResult.readStageExecutionAgentMessage(
+      execution.lastResult,
+    );
 
     // Capture remaining state data
     const preHistory: ExecutionHistory = [

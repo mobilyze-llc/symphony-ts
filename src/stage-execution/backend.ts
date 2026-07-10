@@ -23,6 +23,10 @@ export interface StageExecutionRunnerProfile {
   model: string | null;
   provider: string | null;
   reasoningEffort: string | null;
+  /** Resolved Crabrunner runtime, when this job uses the delegated backend. */
+  runtime?: string | null;
+  /** Provider registry model id after stage/default resolution. */
+  modelId?: string | null;
 }
 
 export interface StageExecutionEnforcementContract {
@@ -67,9 +71,18 @@ export interface StageExecutionBackendInput {
   runnerInput: AgentRunInput;
 }
 
+export interface StageExecutionResultMetadata {
+  agentMessage?: string;
+  laneJobId?: string;
+}
+
+export type StageExecutionAgentRunResult = AgentRunResult & {
+  metadata?: StageExecutionResultMetadata;
+};
+
 export interface StageExecutionBackendResult<Evidence = unknown> {
   job: StageExecutionJobSpec;
-  result: AgentRunResult;
+  result: StageExecutionAgentRunResult;
   evidence?: Evidence;
 }
 

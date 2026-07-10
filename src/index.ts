@@ -58,4 +58,5 @@ export * from "./stage-execution/crabrunner-scheduler-client.js";
 export * from "./stage-execution/decomposed-stage.js";
 export * from "./stage-execution/delegated-stage-projection.js";
 export * from "./stage-execution/job-spec.js";
+export * from "./stage-execution/runner-to-lane.js";
 export * from "./version.js";
