@@ -108,13 +108,11 @@ jobs:
           node scripts/architecture/check-env-registry.mjs
           node scripts/architecture/check-dead-exports.mjs
 
-  # Warn-only during calibration (SYMPH-356): new/changed lines in src/ must
-  # be exercised by tests (>= 70%). Flip to enforcing by removing
-  # continue-on-error after the calibration week, then mark it required.
+  # Enforced after the SYMPH-362 calibration review: new/changed lines in src/
+  # must be exercised by tests (>= 70%).
   diff-coverage:
     if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     runs-on: ubuntu-latest
-    continue-on-error: true
 
     steps:
       - name: Checkout
