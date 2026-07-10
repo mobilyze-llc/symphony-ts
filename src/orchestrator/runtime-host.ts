@@ -148,7 +148,6 @@ import {
   type PipelineStatusResponse,
   type RefreshResponse,
   type StopIssueResponse,
-  type StopSignalDeliveryResponse,
   startDashboardServer,
 } from "../observability/dashboard-server.js";
 import {
@@ -181,7 +180,6 @@ import { sanitizeForLinear } from "../shared/egress.js";
 import {
   processTreeTerminationConfirmed,
   readProcessIdentity as readProcessIdentityDefault,
-  readProcessIdentityMetadata,
   terminateDetachedPidTree as terminateDetachedPidTreeDefault,
   terminateDetachedProcessGroupTree as terminateDetachedProcessGroupTreeDefault,
 } from "../shared/process-tree.js";
@@ -201,7 +199,6 @@ import {
   UnsupportedStageExecutionBackendError,
 } from "../stage-execution/backend.js";
 import type {
-  CancellableCrabrunnerStageExecutionBackend,
   CrabrunnerCancellationRequest,
   CrabrunnerStageExecutionEvidence,
   CrabrunnerTerminalEvidence,
@@ -262,6 +259,7 @@ import {
 } from "./core.js";
 import { executeDecomposedStageDispatch } from "./decomposed-stage-dispatch.js";
 import { projectEmergencyStopInterruptedIssue } from "./emergency-stop-projection.js";
+import { readEmergencyStopInterruptedIssues } from "./emergency-stop-recovery.js";
 import { getDiff, runEnsembleGate } from "./gate-handler.js";
 import {
   type IntentActor,
@@ -270,6 +268,12 @@ import {
   isPipelineSentinelValue,
   isPlanControlVerb,
 } from "./intent.js";
+import {
+  isCancellableCrabrunnerBackend,
+  laneCancellationToStopSignalDelivery,
+  normalizeLaneCancellation,
+  toStopSignalDeliveryResponse,
+} from "./lane-cancellation.js";
 import { reduceManagerRunJournal } from "./manager-run.js";
 import type {
   MergeActuatorLiveState,
@@ -4729,6 +4733,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   ): Promise<{
     workerHandle: WorkerExecution;
     monitorHandle: Promise<void>;
+    laneCancellationSupported: boolean;
   }> {
     await this.logger?.info("worker_spawned", "Worker spawned for issue.", {
       outcome: "started",
@@ -4925,6 +4930,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     return {
       workerHandle: execution,
       monitorHandle: completion,
+      laneCancellationSupported: execution.cancelLane !== null,
     };
   }
 
@@ -5516,7 +5522,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
     const laneCancellationPromise =
       execution.laneJobId !== null && execution.cancelLane !== null
-        ? execution.cancelLane(execution.laneJobId, {
+        ? normalizeLaneCancellation(execution.cancelLane, execution.laneJobId, {
             reason: "operator_stop",
             signal: "SIGTERM",
             processGroup: true,
@@ -8330,49 +8336,6 @@ function emergencyStopCleanupPlanKey(
   return `${issueId}:${sourceSequence}`;
 }
 
-function readEmergencyStopInterruptedIssues(
-  metadata: Record<string, unknown>,
-): Array<{
-  issueId: string;
-  issueIdentifier: string;
-  codexAppServerPid: string | null;
-  codexAppServerIdentity: ProcessIdentitySnapshot | null;
-  laneJobId: string | null;
-}> {
-  const value = metadata.interruptedIssues;
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.flatMap((item) => {
-    if (!isRecord(item)) {
-      return [];
-    }
-    const issueId = item.issueId;
-    const issueIdentifier = item.issueIdentifier;
-    if (typeof issueId !== "string" || typeof issueIdentifier !== "string") {
-      return [];
-    }
-    const codexAppServerPid = item.codexAppServerPid;
-    const codexAppServerIdentity = readProcessIdentityMetadata(
-      item.codexAppServerIdentity,
-    );
-    const laneJobId = item.laneJobId;
-    return [
-      {
-        issueId,
-        issueIdentifier,
-        codexAppServerPid:
-          typeof codexAppServerPid === "string" &&
-          codexAppServerPid.trim() !== ""
-            ? codexAppServerPid
-            : null,
-        codexAppServerIdentity,
-        laneJobId: stringMetadata(laneJobId),
-      },
-    ];
-  });
-}
-
 function readEmergencyStopSourceSequence(
   metadata: Record<string, unknown>,
 ): number | null {
@@ -8398,16 +8361,6 @@ function toErrorMessage(error: unknown): string {
   return "worker failed";
 }
 
-function isCancellableCrabrunnerBackend(
-  backend: StageExecutionBackendRunner,
-): backend is CancellableCrabrunnerStageExecutionBackend {
-  return (
-    backend.backend === "crabrunner" &&
-    typeof (backend as Partial<CancellableCrabrunnerStageExecutionBackend>)
-      .cancel === "function"
-  );
-}
-
 function createFailedStopSignalDelivery(
   input: WorkerStopSignalDeliveryInput,
   warning: string,
@@ -8419,65 +8372,6 @@ function createFailedStopSignalDelivery(
     workspacePath: input.workspacePath,
     attempts: [],
     warning,
-  };
-}
-
-function toStopSignalDeliveryResponse(
-  delivery: StopSignalDelivery | null,
-): StopSignalDeliveryResponse | null {
-  if (delivery === null) {
-    return null;
-  }
-  return {
-    status: delivery.status,
-    reason: delivery.reason,
-    attempted_at: delivery.attemptedAt,
-    workspace_path: delivery.workspacePath,
-    attempts: delivery.attempts.map((attempt) => ({
-      pid: attempt.pid,
-      ...(attempt.processGroupId === null
-        ? {}
-        : { process_group_id: attempt.processGroupId }),
-      sigterm: attempt.sigterm,
-      sigkill: attempt.sigkill,
-    })),
-    ...(delivery.laneJobId === undefined
-      ? {}
-      : { lane_job_id: delivery.laneJobId }),
-    ...(delivery.laneCancellation === undefined
-      ? {}
-      : { lane_cancellation: delivery.laneCancellation }),
-    warning: delivery.warning,
-  };
-}
-
-function laneCancellationToStopSignalDelivery(
-  laneJobId: string | null,
-  input: StopRequest,
-  evidence: CrabrunnerTerminalEvidence,
-  attemptedAt: Date,
-): StopSignalDelivery {
-  const cancellation = evidence.cancellation;
-  const killed = cancellation?.killed === true && evidence.state === "canceled";
-  const alreadyStopped = evidence.state === "canceled" && !killed;
-  return {
-    status: killed ? "delivered" : alreadyStopped ? "already_exited" : "failed",
-    reason: input.reason,
-    attemptedAt: attemptedAt.toISOString(),
-    workspacePath: evidence.workspacePath ?? null,
-    attempts: [],
-    laneJobId,
-    laneCancellation: {
-      state: evidence.state,
-      killed: cancellation?.killed === true,
-      failure: cancellation?.failure ?? null,
-    },
-    warning:
-      killed || alreadyStopped
-        ? null
-        : (cancellation?.failure ??
-          evidence.message ??
-          `crabrunner cancellation ended in ${evidence.state}`),
   };
 }
 

@@ -10160,6 +10160,159 @@ describe("stage execution backend boundary", () => {
     expect(host.getState().completed.has("1")).toBe(false);
   });
 
+  it("reports PID control for a lane backend that cannot cancel", async () => {
+    let pidFallbackUsed = false;
+    const backend: StageExecutionBackendRunner = {
+      backend: "crabrunner",
+      async execute(input) {
+        input.onLaneJobId?.("non-cancellable-job");
+        const base = createNormalResult();
+        return await new Promise((resolve) => {
+          input.runnerInput.signal?.addEventListener(
+            "abort",
+            () =>
+              resolve({
+                job: input.job,
+                result: {
+                  ...base,
+                  issue: input.runnerInput.issue,
+                  runAttempt: {
+                    ...base.runAttempt,
+                    issueId: input.runnerInput.issue.id,
+                    issueIdentifier: input.runnerInput.issue.identifier,
+                    status: "canceled_by_reconciliation",
+                    error: "crabrunner_canceled: operator stop",
+                  },
+                  liveSession: {
+                    ...base.liveSession,
+                    codexAppServerPid: null,
+                    laneJobId: "non-cancellable-job",
+                  },
+                  metadata: { laneJobId: "non-cancellable-job" },
+                },
+              }),
+            { once: true },
+          );
+        });
+      },
+    };
+    const host = new OrchestratorRuntimeHost({
+      config: createCrabrunnerStagedConfig(),
+      tracker: createTracker(),
+      agentRunner: new FakeAgentRunner(),
+      stageExecutionBackends: new Map([["crabrunner", backend]]),
+      writeDispatcherRunJournalEntry: async () => {},
+      deliverWorkerStopSignal: async (input) => {
+        pidFallbackUsed = true;
+        return {
+          status: "failed",
+          reason: input.reason,
+          attemptedAt: input.attemptedAt.toISOString(),
+          workspacePath: input.workspacePath,
+          attempts: [],
+          warning: "no PID is available for this non-cancellable lane",
+        };
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    const stopResponse = await host.requestEmergencyStop();
+    await host.waitForIdle();
+
+    expect(pidFallbackUsed).toBe(true);
+    expect(stopResponse.interrupted_issues).toEqual([
+      expect.objectContaining({
+        lane_job_id: "non-cancellable-job",
+        control_path: "codex_app_server_pid",
+      }),
+    ]);
+  });
+
+  it("turns a rejected lane cancellation into failed stop evidence", async () => {
+    const backend: StageExecutionBackendRunner & {
+      cancel: (jobId: string, request: { reason: string }) => Promise<never>;
+    } = {
+      backend: "crabrunner",
+      async execute(input) {
+        input.onLaneJobId?.("rejected-cancel-job");
+        const base = createNormalResult();
+        return await new Promise((resolve) => {
+          input.runnerInput.signal?.addEventListener(
+            "abort",
+            () =>
+              resolve({
+                job: input.job,
+                result: {
+                  ...base,
+                  issue: input.runnerInput.issue,
+                  runAttempt: {
+                    ...base.runAttempt,
+                    issueId: input.runnerInput.issue.id,
+                    issueIdentifier: input.runnerInput.issue.identifier,
+                    status: "canceled_by_reconciliation",
+                    error: "crabrunner_canceled: operator stop",
+                  },
+                  liveSession: {
+                    ...base.liveSession,
+                    codexAppServerPid: null,
+                    laneJobId: "rejected-cancel-job",
+                  },
+                  metadata: { laneJobId: "rejected-cancel-job" },
+                },
+              }),
+            { once: true },
+          );
+        });
+      },
+      async cancel() {
+        throw new Error("scheduler transport unavailable");
+      },
+    };
+    const host = new OrchestratorRuntimeHost({
+      config: createCrabrunnerStagedConfig(),
+      tracker: createTracker(),
+      agentRunner: new FakeAgentRunner(),
+      stageExecutionBackends: new Map([["crabrunner", backend]]),
+      writeDispatcherRunJournalEntry: async () => {},
+      deliverWorkerStopSignal: async () => {
+        throw new Error("rejected lane cancellation must not signal a PID");
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    await expect(host.requestEmergencyStop()).resolves.toMatchObject({
+      interrupted_issues: [
+        expect.objectContaining({
+          lane_job_id: "rejected-cancel-job",
+          control_path: "crabrunner_cancel",
+        }),
+      ],
+    });
+    await host.waitForIdle();
+
+    const hardStop = host
+      .getState()
+      .dispatcherRunJournal.find(
+        (entry) =>
+          entry.kind === "hard_stop_trigger" &&
+          entry.metadata.reason === "emergency_stop" &&
+          entry.metadata.status === "completed",
+      );
+    expect(hardStop?.metadata.signalDelivery).toMatchObject({
+      status: "failed",
+      laneJobId: "rejected-cancel-job",
+      laneCancellation: {
+        state: "kill_failed",
+        killed: false,
+        failure: "scheduler transport unavailable",
+      },
+    });
+    expect(host.getState().resumeRequired.has("1")).toBe(true);
+    expect(host.getState().retryAttempts["1"]).toBeUndefined();
+  });
+
   it("routes a non-success crabrunner terminal through abnormal retry handling", async () => {
     const backend: StageExecutionBackendRunner = {
       backend: "crabrunner",

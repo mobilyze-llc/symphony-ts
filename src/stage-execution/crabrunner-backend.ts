@@ -3,8 +3,16 @@ import type { StageUsageMeasurementQuality } from "../domain/stage-usage.js";
 import type {
   StageExecutionBackendInput,
   StageExecutionBackendResult,
-  StageExecutionBackendRunner,
 } from "./backend.js";
+import {
+  type CancellableCrabrunnerStageExecutionBackend,
+  CrabrunnerCancellationController,
+  type CrabrunnerCancellationRequest,
+} from "./crabrunner-cancellation.js";
+export type {
+  CancellableCrabrunnerStageExecutionBackend,
+  CrabrunnerCancellationRequest,
+} from "./crabrunner-cancellation.js";
 import {
   type CollectedArtifact,
   artifactHashesFromCollectedArtifact,
@@ -149,21 +157,6 @@ export interface CrabrunnerSchedulerClient {
   ): Promise<CrabrunnerTerminalEvidence>;
 }
 
-export interface CancellableCrabrunnerStageExecutionBackend
-  extends StageExecutionBackendRunner<CrabrunnerStageExecutionEvidence> {
-  cancel(
-    jobId: string,
-    request: CrabrunnerCancellationRequest,
-  ): Promise<CrabrunnerTerminalEvidence>;
-}
-
-export interface CrabrunnerCancellationRequest {
-  reason: "abort_signal" | "operator_stop";
-  signal: "SIGTERM";
-  processGroup: true;
-  killGraceMs: number;
-}
-
 export interface CrabrunnerStageExecutionBackendOptions {
   client: CrabrunnerSchedulerClient;
   /**
@@ -234,10 +227,7 @@ export class CrabrunnerStageExecutionBackend
 
   private readonly now: () => Date;
 
-  private readonly cancellationsInFlight = new Map<
-    string,
-    Promise<CrabrunnerTerminalEvidence>
-  >();
+  private readonly cancellationController: CrabrunnerCancellationController;
 
   constructor(options: CrabrunnerStageExecutionBackendOptions) {
     this.client = options.client;
@@ -246,6 +236,9 @@ export class CrabrunnerStageExecutionBackend
     this.cleanupPromptFile = options.cleanupPromptFile;
     this.resolvePromptSha256 = options.resolvePromptSha256;
     this.now = options.now ?? (() => new Date());
+    this.cancellationController = new CrabrunnerCancellationController(
+      this.client,
+    );
   }
 
   async execute(
@@ -503,53 +496,14 @@ export class CrabrunnerStageExecutionBackend
     jobId: string,
     request: CrabrunnerCancellationRequest,
   ): Promise<CrabrunnerTerminalEvidence> {
-    const existing = this.cancellationsInFlight.get(jobId);
-    if (existing !== undefined) {
-      return await existing;
-    }
-
-    const cancellation = this.performCancel(jobId, request);
-    this.cancellationsInFlight.set(jobId, cancellation);
-    try {
-      return await cancellation;
-    } finally {
-      this.cancellationsInFlight.delete(jobId);
-    }
+    return await this.cancellationController.cancel(jobId, request);
   }
 
   private async performCancel(
     jobId: string,
     request: CrabrunnerCancellationRequest,
   ): Promise<CrabrunnerTerminalEvidence> {
-    if (this.client.cancel === undefined) {
-      return {
-        state: "kill_failed",
-        message: "crabrunner_cancel_unavailable",
-        cancellation: {
-          requested: true,
-          signal: request.signal,
-          processGroup: request.processGroup,
-          killed: false,
-          failure: "cancel_not_supported",
-        },
-      };
-    }
-
-    try {
-      return await this.client.cancel(jobId, request);
-    } catch (error) {
-      return {
-        state: "kill_failed",
-        message: `crabrunner_cancel_failed: ${formatUnknownError(error)}`,
-        cancellation: {
-          requested: true,
-          signal: request.signal,
-          processGroup: request.processGroup,
-          killed: false,
-          failure: formatUnknownError(error),
-        },
-      };
-    }
+    return await this.cancellationController.cancel(jobId, request);
   }
 
   private toBackendResult(

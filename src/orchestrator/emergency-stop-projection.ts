@@ -60,7 +60,9 @@ export function projectEmergencyStopInterruptedIssue(
     codex_app_server_pid: issue.codexAppServerPid,
     lane_job_id: issue.laneJobId ?? null,
     control_path:
-      issue.laneJobId === undefined || issue.laneJobId === null
+      issue.laneJobId === undefined ||
+      issue.laneJobId === null ||
+      issue.laneCancellationSupported !== true
         ? "codex_app_server_pid"
         : "crabrunner_cancel",
     process_identity: redactProcessIdentity(issue.codexAppServerIdentity),
@@ -70,6 +72,7 @@ export function projectEmergencyStopInterruptedIssue(
       cleanupStatus,
       identityStatus,
       issue.laneJobId ?? null,
+      issue.laneCancellationSupported === true,
     ),
   };
 }
@@ -129,8 +132,9 @@ function getEmergencyStopCleanupStatusReason(
   cleanupStatus: EmergencyStopCleanupStatus,
   identityStatus: EmergencyStopProcessIdentityStatus,
   laneJobId: string | null,
+  laneCancellationSupported: boolean,
 ): string {
-  if (laneJobId !== null) {
+  if (laneJobId !== null && laneCancellationSupported) {
     return cleanupStatus === "confirmed"
       ? "Cleanup proof is confirmed through crabrunner scheduler cancellation; the lane job id is opaque and is never treated as a PID."
       : "Cleanup remains unconfirmed for the crabrunner scheduler cancellation; the lane job id is opaque and is never treated as a PID.";

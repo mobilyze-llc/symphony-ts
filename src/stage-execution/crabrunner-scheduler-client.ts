@@ -5,9 +5,6 @@ import { homedir, tmpdir } from "node:os";
 import { extname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { z } from "zod";
-
-import type { StageUsageMeasurementQuality } from "../domain/stage-usage.js";
 import {
   type CollectedArtifact,
   readCollectedArtifact,
@@ -30,6 +27,10 @@ import {
   parseCrabrunnerRunResult,
   parseCrabrunnerStatus,
 } from "./crabrunner-contract.js";
+import {
+  laneWorkerUsageSchema,
+  mapLaneWorkerUsage,
+} from "./crabrunner-usage.js";
 import { fileSha256 } from "./file-sha256.js";
 
 const execFileAsync = promisify(execFile);
@@ -158,7 +159,6 @@ const CRABRUNNER_MANIFEST_SCHEMA = "crucible.crabrunner.job.v1";
 // from the spec yet — see TODO(SYMPH-853-followup)).
 const LANE_WORKER_PROTOCOL = "lane-worker.v1";
 const WORKER_ARGV_PROTOCOL = "worker-argv.v1";
-const LANE_WORKER_USAGE_SCHEMA = "crucible.lane-worker.usage.v2";
 
 /** Crabrunner lifecycle states (mirrors crucible/crabrunner/src). */
 const CRABRUNNER_TERMINAL_LIFECYCLE_STATES = new Set([
@@ -182,48 +182,6 @@ interface ObservedCrabrunnerLiveness {
   lastHeartbeatAt?: string;
   lastProgressAt?: string;
 }
-
-// Two on-disk usage shapes both map here. The real model shape is the
-// `crucible.lane-worker.usage.v2` contract keyed by canonical
-// `measurement_quality` (with `measurement_kind` as a compatibility alias) and
-// snake_case token fields. The simple/smoke shape is `{available:boolean,
-// reason?, inputTokens?, outputTokens?, totalTokens?}` (camelCase) used by
-// non-model smoke jobs. Both must map and must never produce a zero-token
-// "available". passthrough() keeps unknown diagnostic fields (e.g. char_count)
-// out of the way.
-const laneWorkerUsageSchema = z
-  .object({
-    schema: z.string().nullish(),
-    measurement_quality: z.string().nullish(),
-    measurement_kind: z.string().nullish(),
-    available: z.boolean().nullish(),
-    reason: z.string().nullish(),
-    // v2 snake_case token fields
-    input_tokens: z.number().nullish(),
-    output_tokens: z.number().nullish(),
-    total_tokens: z.number().nullish(),
-    cache_read_tokens: z.number().nullish(),
-    cache_write_tokens: z.number().nullish(),
-    no_cache_tokens: z.number().nullish(),
-    reasoning_output_tokens: z.number().nullish(),
-    reasoning_tokens: z.number().nullish(),
-    // simple/smoke camelCase token fields
-    inputTokens: z.number().nullish(),
-    outputTokens: z.number().nullish(),
-    totalTokens: z.number().nullish(),
-    cacheReadTokens: z.number().nullish(),
-    cacheWriteTokens: z.number().nullish(),
-    noCacheTokens: z.number().nullish(),
-    reasoningTokens: z.number().nullish(),
-  })
-  .passthrough();
-
-/** Measurement qualities that carry real (summable) token counts. */
-const SUMMABLE_MEASUREMENT_QUALITIES = new Set<string>([
-  "true",
-  "estimated",
-  "partial",
-] satisfies readonly StageUsageMeasurementQuality[]);
 
 /**
  * Named classes from Crucible's crabrunner execution contract. Keep this an
@@ -1113,144 +1071,6 @@ function mapErrorCodeToTerminalState(
   }
   const normalized = errorCode.trim().toLowerCase();
   return CRABRUNNER_ERROR_CODE_TERMINAL_STATES[normalized] ?? "runner_failed";
-}
-
-function mapLaneWorkerUsage(
-  usage: z.infer<typeof laneWorkerUsageSchema>,
-): CrabrunnerUsage {
-  // Simple/smoke shape: explicit { available: boolean, reason? }.
-  if (usage.available === false) {
-    return {
-      status: "unavailable",
-      ...(usage.reason === null || usage.reason === undefined
-        ? {}
-        : { reason: usage.reason }),
-    };
-  }
-
-  // v2 shape: schema-tagged with a measurement quality that gates summability.
-  if (usage.schema !== undefined && usage.schema !== null) {
-    if (usage.schema !== LANE_WORKER_USAGE_SCHEMA) {
-      return {
-        status: "unavailable",
-        reason: `unexpected usage schema "${usage.schema}"`,
-      };
-    }
-    const quality = measurementQuality(usage) ?? "unknown";
-    if (!SUMMABLE_MEASUREMENT_QUALITIES.has(quality)) {
-      // proxy / unsupported / unavailable / unknown — never sum diagnostics.
-      return {
-        status: quality === "unknown" ? "unknown" : "unavailable",
-        reason: `usage measurement quality "${quality}" is not a summable token count`,
-      };
-    }
-  } else if (usage.available !== true) {
-    // No schema tag and not an explicit available:true smoke payload: only
-    // treat as available when a measurement quality explicitly permits it.
-    const quality = measurementQuality(usage);
-    if (quality === null || quality === undefined) {
-      return {
-        status: "unknown",
-        reason:
-          "usage artifact had no schema, measurement_quality/measurement_kind, or availability flag",
-      };
-    }
-    if (!SUMMABLE_MEASUREMENT_QUALITIES.has(quality)) {
-      return {
-        status: "unavailable",
-        reason: `usage measurement quality "${quality}" is not a summable token count`,
-      };
-    }
-  }
-
-  // Token fields appear under snake_case (v2) or camelCase (smoke); prefer
-  // whichever is present.
-  const inputTokens = normalizeToken(usage.input_tokens ?? usage.inputTokens);
-  const outputTokens = normalizeToken(
-    usage.output_tokens ?? usage.outputTokens,
-  );
-  const totalTokens =
-    normalizeToken(usage.total_tokens ?? usage.totalTokens) ??
-    (inputTokens !== null && outputTokens !== null
-      ? inputTokens + outputTokens
-      : null);
-
-  if (inputTokens === null && outputTokens === null && totalTokens === null) {
-    return {
-      status: "unavailable",
-      reason: "usage artifact carried no numeric token counts",
-    };
-  }
-
-  const summableQuality = summableMeasurementQuality(measurementQuality(usage));
-  return {
-    status: "available",
-    inputTokens: inputTokens ?? 0,
-    outputTokens: outputTokens ?? 0,
-    totalTokens: totalTokens ?? (inputTokens ?? 0) + (outputTokens ?? 0),
-    ...(summableQuality === undefined
-      ? {}
-      : { measurementQuality: summableQuality }),
-    ...optionalUsageToken(
-      "cacheReadTokens",
-      usage.cache_read_tokens ?? usage.cacheReadTokens,
-    ),
-    ...optionalUsageToken(
-      "cacheWriteTokens",
-      usage.cache_write_tokens ?? usage.cacheWriteTokens,
-    ),
-    ...optionalUsageToken(
-      "noCacheTokens",
-      usage.no_cache_tokens ?? usage.noCacheTokens,
-    ),
-    ...optionalUsageToken(
-      "reasoningTokens",
-      usage.reasoning_output_tokens ??
-        usage.reasoning_tokens ??
-        usage.reasoningTokens,
-    ),
-  };
-}
-
-function summableMeasurementQuality(
-  value: string | null | undefined,
-): StageUsageMeasurementQuality | undefined {
-  return value !== undefined &&
-    value !== null &&
-    value !== "true" &&
-    SUMMABLE_MEASUREMENT_QUALITIES.has(value)
-    ? (value as StageUsageMeasurementQuality)
-    : undefined;
-}
-
-function measurementQuality(
-  usage: z.infer<typeof laneWorkerUsageSchema>,
-): string | null | undefined {
-  return usage.measurement_quality ?? usage.measurement_kind;
-}
-
-function optionalUsageToken(
-  key:
-    | "cacheReadTokens"
-    | "cacheWriteTokens"
-    | "noCacheTokens"
-    | "reasoningTokens",
-  value: number | null | undefined,
-): Partial<Record<typeof key, number>> {
-  const normalized = normalizeToken(value);
-  return normalized === null ? {} : { [key]: normalized };
-}
-
-function normalizeToken(value: number | null | undefined): number | null {
-  if (
-    value === null ||
-    value === undefined ||
-    !Number.isFinite(value) ||
-    value < 0
-  ) {
-    return null;
-  }
-  return Math.floor(value);
 }
 
 async function fileMtimeIso(path: string): Promise<string | null> {
