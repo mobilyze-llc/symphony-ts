@@ -154,6 +154,66 @@ describe("createStageExecutionJobSpec", () => {
     });
   });
 
+  it("preserves the parent job identity for decomposed dispatch", () => {
+    const subStageExecution = {
+      role: "investigator" as const,
+      phase: "investigate" as const,
+      backend: "crabrunner" as const,
+      controlNeeding: false,
+      provider: "openai",
+      model: "gpt-5.3-codex",
+      reasoningEffort: null,
+      profile: "decomposed.sub-stage",
+      artifacts: { requires: [], produces: [] },
+      timeoutMs: null,
+      budget: { maxTokens: null, maxUsd: null },
+      dependencies: {
+        stages: [],
+        capsules: [],
+        missingCapsule: "fail" as const,
+      },
+      runGroup: { id: "decomposed-group", key: null },
+      capsules: { consume: [], produce: [] },
+      subStages: [],
+    };
+    const job = createStageExecutionJobSpec({
+      issue: createIssue({
+        id: "issue-decomposed",
+        identifier: "SYMPH-DECOMP",
+      }),
+      attempt: 1,
+      stage: createStage({
+        runner: "pi",
+        model: null,
+        execution: {
+          ...subStageExecution,
+          role: "investigator",
+          phase: "investigate",
+          provider: "deepseek",
+          model: null,
+          profile: "decomposed.parent",
+          runGroup: { id: "decomposed-parent", key: null },
+          subStages: [{ name: "sub-a", execution: subStageExecution }],
+        },
+      }),
+      stageName: "investigate",
+      defaultRunnerKind: "codex",
+      defaultRunnerModel: "gpt-5.3-codex",
+      effectiveHardStops: createHardStops(),
+      defaultTurnTimeoutMs: 600_000,
+      defaultStallTimeoutMs: 120_000,
+      baseRef: "origin/main",
+      artifactRoot: "/tmp/artifacts/decomposed",
+    });
+
+    expect(job.runner).toEqual({
+      runnerKind: "pi",
+      model: "gpt-5.3-codex",
+      provider: "deepseek",
+      reasoningEffort: null,
+    });
+  });
+
   it("derives delegated enforcement from stage profile and effective hard stops", () => {
     const job = createStageExecutionJobSpec({
       issue: createIssue({ id: "issue-832", identifier: "SYMPH-832" }),

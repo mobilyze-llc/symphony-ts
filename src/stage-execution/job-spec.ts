@@ -83,8 +83,10 @@ export function createStageExecutionJobSpec(
         ? (input.stage?.timeoutMs ?? null)
         : input.stageTimeoutMs,
   });
+  const hasSubStages = (execution?.subStages?.length ?? 0) > 0;
   const lane =
     backend === "crabrunner" &&
+    !hasSubStages &&
     execution?.role !== "reviewer" &&
     execution?.phase !== "review"
       ? runnerToLane({
