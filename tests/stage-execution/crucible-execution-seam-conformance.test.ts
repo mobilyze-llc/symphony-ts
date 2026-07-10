@@ -12,6 +12,7 @@ import type {
 } from "../../src/stage-execution/backend.js";
 import {
   type CrabrunnerJobSpec,
+  type CrabrunnerSchedulerClient,
   CrabrunnerStageExecutionBackend,
   createCrabrunnerJobSpec,
 } from "../../src/stage-execution/crabrunner-backend.js";
@@ -27,6 +28,8 @@ const FIXTURE_DIR = join(
 );
 const LIVE_CRUCIBLE_ROOT =
   process.env.SYMPHONY_CRABRUNNER_ROOT ?? join(homedir(), "projects/crucible");
+const LIVE_TARGET_REPO =
+  process.env.SYMPHONY_CRABRUNNER_TARGET_REPO ?? process.cwd();
 const LIVE_CRABRUNNER_BIN = join(LIVE_CRUCIBLE_ROOT, "bin/crabrunner");
 
 describe("Crucible execution seam frozen real-output fixtures", () => {
@@ -51,7 +54,7 @@ describe("Crucible execution seam frozen real-output fixtures", () => {
     };
     const client = new CrabrunnerCliSchedulerClient({
       crucibleRoot: LIVE_CRUCIBLE_ROOT,
-      targetRepoRoot: process.cwd(),
+      targetRepoRoot: LIVE_TARGET_REPO,
       cli,
       pollIntervalMs: 0,
       maxPolls: 3,
@@ -83,6 +86,125 @@ describe("Crucible execution seam frozen real-output fixtures", () => {
         totalTokens: 5,
         reasoningTokens: 1,
       },
+    });
+  });
+
+  it("maps usage.v2 through the delegated result consumer with lane identity", async () => {
+    const laneJobIds: string[] = [];
+    const cli: CrabrunnerCli = async (args) => {
+      switch (args[0]) {
+        case "submit":
+          return ok(await fixture("live-submit.json"));
+        case "status":
+          return ok(await fixture("live-status.json"));
+        case "collect":
+          return ok(await fixture("live-collect.json"));
+        default:
+          throw new Error(`unexpected crabrunner subcommand: ${args[0]}`);
+      }
+    };
+    const client = new CrabrunnerCliSchedulerClient({
+      crucibleRoot: LIVE_CRUCIBLE_ROOT,
+      targetRepoRoot: process.cwd(),
+      cli,
+      pollIntervalMs: 0,
+      maxPolls: 1,
+      crabrunnerVersion: "symph-1086-conformance",
+    });
+    const backend = new CrabrunnerStageExecutionBackend({
+      client,
+      resolvePromptFile: () => "/sanitized/prompt.md",
+    });
+
+    const execution = await backend.execute({
+      job: createStageExecutionJob(),
+      runnerInput: createRunnerInput(),
+      onLaneJobId: (jobId) => laneJobIds.push(jobId),
+    });
+
+    expect(laneJobIds).toEqual(["symph-1071-conformance-live"]);
+    expect(execution.result.metadata).toEqual({
+      agentMessage: "deterministic execution seam conformance",
+      laneJobId: "symph-1071-conformance-live",
+    });
+    expect(execution.result.liveSession.usageMeasurement).toMatchObject({
+      source: "crabrunner",
+      measurementQuality: "true",
+      tokens: {
+        inputTokens: 3,
+        outputTokens: 2,
+        totalTokens: 5,
+        reasoningTokens: 1,
+      },
+    });
+  });
+
+  it("routes an operator cancellation terminal through the lane conformance seam", async () => {
+    const controller = new AbortController();
+    const laneJobIds: string[] = [];
+    const calls: string[] = [];
+    let releaseStatus: (() => void) | null = null;
+    const client: CrabrunnerSchedulerClient = {
+      submit: async () => {
+        calls.push("submit");
+        return { status: "accepted", jobId: "symph-1086-cancel" };
+      },
+      status: async (_jobId, signal) => {
+        calls.push("status:symph-1086-cancel");
+        await new Promise<void>((_resolve, reject) => {
+          releaseStatus = () => reject(new Error("status aborted"));
+          signal?.addEventListener("abort", () => releaseStatus?.(), {
+            once: true,
+          });
+        });
+      },
+      collect: async () => {
+        calls.push("collect");
+        throw new Error("collect must not run after operator cancellation");
+      },
+      cancel: async (jobId, request) => {
+        calls.push(`cancel:${jobId}`);
+        expect(request.reason).toBe("abort_signal");
+        return {
+          state: "canceled",
+          workspacePath: "/tmp/workspaces/symph-1086-cancel",
+          message: "operator cancellation applied",
+          cancellation: {
+            requested: true,
+            signal: request.signal,
+            processGroup: request.processGroup,
+            killed: true,
+            failure: null,
+          },
+        };
+      },
+    };
+    const backend = new CrabrunnerStageExecutionBackend({
+      client,
+      resolvePromptFile: () => "/sanitized/prompt.md",
+    });
+    const executionPromise = backend.execute({
+      job: createStageExecutionJob(),
+      runnerInput: { ...createRunnerInput(), signal: controller.signal },
+      onLaneJobId: (jobId) => laneJobIds.push(jobId),
+    });
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    controller.abort("operator stop");
+    const execution = await executionPromise;
+
+    expect(laneJobIds).toEqual(["symph-1086-cancel"]);
+    expect(calls).toEqual([
+      "submit",
+      "status:symph-1086-cancel",
+      "cancel:symph-1086-cancel",
+    ]);
+    expect(execution.result.runAttempt.status).toBe(
+      "canceled_by_reconciliation",
+    );
+    expect(execution.evidence?.terminal).toMatchObject({
+      state: "canceled",
+      cancellation: { killed: true },
     });
   });
 
@@ -222,7 +344,7 @@ describe.skipIf(!existsSync(LIVE_CRABRUNNER_BIN))(
         };
         const client = new CrabrunnerCliSchedulerClient({
           crucibleRoot: LIVE_CRUCIBLE_ROOT,
-          targetRepoRoot: process.cwd(),
+          targetRepoRoot: LIVE_TARGET_REPO,
           stateRoot,
           crabrunnerVersion: version,
           pollIntervalMs: 50,
@@ -283,6 +405,135 @@ describe.skipIf(!existsSync(LIVE_CRABRUNNER_BIN))(
           agentMessage: "deterministic execution seam conformance",
           laneJobId: admission.jobId,
         });
+      } finally {
+        await Promise.all([
+          rm(stateRoot, { recursive: true, force: true }),
+          rm(promptDir, { recursive: true, force: true }),
+        ]);
+      }
+    }, 120_000);
+  },
+);
+
+describe.skipIf(!existsSync(LIVE_CRABRUNNER_BIN))(
+  "Crucible execution seam live cancellation",
+  () => {
+    it("cancels a running deterministic lane in the Symphony product workspace", async () => {
+      const stateRoot = await mkdtemp(
+        join(tmpdir(), "symph-1086-live-cancel-"),
+      );
+      const promptDir = await mkdtemp(join(tmpdir(), "symph-1086-prompt-"));
+      const promptPath = join(promptDir, "prompt.md");
+      await writeFile(
+        promptPath,
+        "deterministic SYMPH-1086 cancellation conformance\n",
+        "utf8",
+      );
+      const realCli = execFileCrabrunnerCli({
+        crucibleRoot: LIVE_CRUCIBLE_ROOT,
+      });
+      const version = "symph-1086-cancel-conformance";
+      const workerArgv = [
+        process.execPath,
+        "-e",
+        [
+          'const { mkdirSync, writeFileSync } = require("node:fs");',
+          'const { join } = require("node:path");',
+          "const dir = process.env.CRABRUNNER_ARTIFACT_DIR;",
+          "const name = process.env.CRABRUNNER_ARTIFACT_NAME;",
+          "mkdirSync(dir, { recursive: true });",
+          'writeFileSync(join(dir, name + ".progress.jsonl"), JSON.stringify({seq:1,ts:new Date().toISOString(),phase:"implement",type:"started",detail:null}) + "\\n");',
+          'writeFileSync(join(dir, name + ".heartbeat.json"), JSON.stringify({seq:1,ts:new Date().toISOString(),phase:"implement",last_event:"started",detail:null}) + "\\n");',
+          "setTimeout(() => {}, 60_000);",
+        ].join("\n"),
+      ];
+
+      try {
+        const staged = await realCli(
+          [
+            "stage",
+            "--version",
+            version,
+            "--state-root",
+            stateRoot,
+            "--repo-root",
+            LIVE_CRUCIBLE_ROOT,
+          ],
+          { cwd: LIVE_CRUCIBLE_ROOT, timeoutMs: 120_000 },
+        );
+        expect(staged.exitCode, staged.stderr).toBe(0);
+
+        const cli: CrabrunnerCli = async (args, opts) => {
+          if (args[0] !== "submit") {
+            return await realCli(args, opts);
+          }
+          const manifestIndex = args.indexOf("--manifest-file");
+          const generated = JSON.parse(
+            await readFile(args[manifestIndex + 1]!, "utf8"),
+          ) as Record<string, unknown>;
+          const deterministic = {
+            ...generated,
+            lane_worker_protocol: "worker-argv.v1",
+            worker_argv: workerArgv,
+            prompt_file: undefined,
+            model: undefined,
+            thinking: undefined,
+            closeout_policy: undefined,
+          };
+          const deterministicManifestPath = join(
+            stateRoot,
+            "symphony-cancel-manifest.json",
+          );
+          await writeFile(
+            deterministicManifestPath,
+            JSON.stringify(deterministic),
+            "utf8",
+          );
+          const liveArgs = [...args];
+          liveArgs[manifestIndex + 1] = deterministicManifestPath;
+          return await realCli(liveArgs, opts);
+        };
+        const client = new CrabrunnerCliSchedulerClient({
+          crucibleRoot: LIVE_CRUCIBLE_ROOT,
+          targetRepoRoot: LIVE_TARGET_REPO,
+          stateRoot,
+          crabrunnerVersion: version,
+          pollIntervalMs: 50,
+          cli,
+        });
+
+        const admission = await client.submit(
+          createSpec({ promptFile: promptPath }),
+        );
+        expect(admission.status).toBe("accepted");
+        expect(admission.jobId).toBeTruthy();
+        const cancelStartedAt = Date.now();
+        const evidence = await client.cancel(admission.jobId!, {
+          reason: "operator_stop",
+          signal: "SIGTERM",
+          processGroup: true,
+          killGraceMs: 1_000,
+        });
+        const cancelLatencyMs = Date.now() - cancelStartedAt;
+
+        expect(evidence).toMatchObject({
+          state: "canceled",
+          cancellation: {
+            requested: true,
+            signal: "SIGTERM",
+            processGroup: true,
+            killed: true,
+            failure: null,
+          },
+        });
+        const persistedManifest = JSON.parse(
+          await readFile(
+            join(stateRoot, "jobs", admission.jobId!, "manifest.json"),
+            "utf8",
+          ),
+        ) as Record<string, unknown>;
+        expect(persistedManifest.workspace).toBe(LIVE_TARGET_REPO);
+        expect(cancelLatencyMs).toBeLessThan(15_000);
       } finally {
         await Promise.all([
           rm(stateRoot, { recursive: true, force: true }),

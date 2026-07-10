@@ -1247,7 +1247,7 @@ describe("CrabrunnerCliSchedulerClient.collect", () => {
                 [
                   usageEntry("attempts/01/artifact/result.usage.json", {
                     schema: "crucible.lane-worker.usage.v2",
-                    measurement_quality: "true",
+                    measurement_quality: "estimated",
                     measurement_kind: "proxy",
                     input_tokens: 25,
                     output_tokens: 10,
@@ -1269,6 +1269,7 @@ describe("CrabrunnerCliSchedulerClient.collect", () => {
       outputTokens: 10,
       totalTokens: 35,
       reasoningTokens: 7,
+      measurementQuality: "estimated",
     });
   });
 
@@ -1670,6 +1671,39 @@ describe("CrabrunnerCliSchedulerClient.cancel", () => {
       requested: true,
       signal: "SIGTERM",
       processGroup: true,
+      killed: true,
+      failure: null,
+    });
+  });
+
+  it("settles an initially stopping cancel response before reporting delivery", async () => {
+    const client = createClient(
+      staticCli({
+        cancel: () =>
+          cliOk(
+            statusJson({
+              state: "stopping",
+              job_id: "j",
+              collectible: false,
+              message: "cancel requested",
+            }),
+          ),
+        status: () =>
+          cliOk(
+            statusJson({
+              state: "stopped",
+              job_id: "j",
+              collectible: true,
+              message: "worker stopped",
+            }),
+          ),
+      }),
+    );
+
+    const evidence = await client.cancel("j", cancelRequest());
+
+    expect(evidence.state).toBe("canceled");
+    expect(evidence.cancellation).toMatchObject({
       killed: true,
       failure: null,
     });

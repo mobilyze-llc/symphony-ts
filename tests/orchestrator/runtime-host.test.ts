@@ -9985,6 +9985,181 @@ describe("stage execution backend boundary", () => {
     expect(fakeRunner.runInputs).toHaveLength(1);
   });
 
+  it("writes delegated usage and lane identity through the stage ledger", async () => {
+    const fakeRunner = new FakeAgentRunner();
+    const backend: StageExecutionBackendRunner = {
+      backend: "crabrunner",
+      async execute(input) {
+        input.onLaneJobId?.("lane-ledger-1");
+        const base = createNormalResult();
+        return {
+          job: input.job,
+          result: {
+            ...base,
+            issue: input.runnerInput.issue,
+            liveSession: {
+              ...base.liveSession,
+              codexAppServerPid: null,
+              laneJobId: "lane-ledger-1",
+              codexInputTokens: 11,
+              codexOutputTokens: 7,
+              codexTotalTokens: 18,
+              totalStageInputTokens: 11,
+              totalStageOutputTokens: 7,
+              totalStageTotalTokens: 18,
+              usageMeasurement: {
+                schema: "symphony.stage-usage.v1",
+                source: "crabrunner",
+                runnerKind: "codex",
+                provider: "openai",
+                model: "gpt-5-codex",
+                profile: "write",
+                measurementQuality: "estimated",
+                tokens: {
+                  inputTokens: 11,
+                  outputTokens: 7,
+                  totalTokens: 18,
+                },
+                cost: {
+                  amountUsd: null,
+                  currency: "USD",
+                  source: "not_reported",
+                  authority: "unavailable",
+                  sourceDescription: "test",
+                },
+              },
+            },
+            metadata: { laneJobId: "lane-ledger-1" },
+          },
+        };
+      },
+    };
+    const host = new OrchestratorRuntimeHost({
+      config: createCrabrunnerStagedConfig(),
+      tracker: createTracker(),
+      agentRunner: fakeRunner,
+      stageExecutionBackends: new Map([["crabrunner", backend]]),
+      writeDispatcherRunJournalEntry: async () => {},
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    await host.waitForIdle();
+
+    const record = host
+      .getState()
+      .dispatcherRunJournal.find(
+        (entry) => entry.kind === "stage_record" && entry.issueId === "1",
+      )?.metadata;
+    expect(record).toMatchObject({
+      totalTokens: 18,
+      inputTokens: 11,
+      outputTokens: 7,
+      usageMeasurement: expect.objectContaining({
+        source: "crabrunner",
+        measurementQuality: "estimated",
+      }),
+    });
+    expect(host.getState().codexTotals.totalTokens).toBe(18);
+  });
+
+  it("cancels a running lane from emergency stop and parks without retry", async () => {
+    const cancelCalls: Array<{ jobId: string; reason: string }> = [];
+    const backend: StageExecutionBackendRunner & {
+      cancel: (
+        jobId: string,
+        request: { reason: string },
+      ) => Promise<{
+        state: "canceled";
+        workspacePath: string;
+        message: string;
+        cancellation: {
+          requested: true;
+          signal: "SIGTERM";
+          processGroup: true;
+          killed: true;
+          failure: null;
+        };
+      }>;
+    } = {
+      backend: "crabrunner",
+      async execute(input) {
+        input.onLaneJobId?.("remote-job-42");
+        const base = createNormalResult();
+        return await new Promise((resolve) => {
+          input.runnerInput.signal?.addEventListener(
+            "abort",
+            () =>
+              resolve({
+                job: input.job,
+                result: {
+                  ...base,
+                  issue: input.runnerInput.issue,
+                  runAttempt: {
+                    ...base.runAttempt,
+                    issueId: input.runnerInput.issue.id,
+                    issueIdentifier: input.runnerInput.issue.identifier,
+                    status: "canceled_by_reconciliation",
+                    error: "crabrunner_canceled: operator stop",
+                  },
+                  liveSession: {
+                    ...base.liveSession,
+                    codexAppServerPid: null,
+                    laneJobId: "remote-job-42",
+                  },
+                  metadata: { laneJobId: "remote-job-42" },
+                },
+              }),
+            { once: true },
+          );
+        });
+      },
+      async cancel(jobId, request) {
+        cancelCalls.push({ jobId, reason: request.reason });
+        return {
+          state: "canceled",
+          workspacePath: "/tmp/workspaces/1",
+          message: "canceled by operator",
+          cancellation: {
+            requested: true,
+            signal: "SIGTERM",
+            processGroup: true,
+            killed: true,
+            failure: null,
+          },
+        };
+      },
+    };
+    const host = new OrchestratorRuntimeHost({
+      config: createCrabrunnerStagedConfig(),
+      tracker: createTracker(),
+      agentRunner: new FakeAgentRunner(),
+      stageExecutionBackends: new Map([["crabrunner", backend]]),
+      writeDispatcherRunJournalEntry: async () => {},
+      deliverWorkerStopSignal: async () => {
+        throw new Error("lane cancellation must not use PID signaling");
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    const stopResponse = await host.requestEmergencyStop();
+    await host.waitForIdle();
+
+    expect(cancelCalls).toEqual([
+      { jobId: "remote-job-42", reason: "operator_stop" },
+    ]);
+    expect(stopResponse.interrupted_issues).toEqual([
+      expect.objectContaining({
+        lane_job_id: "remote-job-42",
+        control_path: "crabrunner_cancel",
+      }),
+    ]);
+    expect(host.getState().resumeRequired.has("1")).toBe(true);
+    expect(host.getState().retryAttempts["1"]).toBeUndefined();
+    expect(host.getState().completed.has("1")).toBe(false);
+  });
+
   it("routes a non-success crabrunner terminal through abnormal retry handling", async () => {
     const backend: StageExecutionBackendRunner = {
       backend: "crabrunner",

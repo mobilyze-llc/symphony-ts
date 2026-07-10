@@ -205,6 +205,12 @@ export interface StopSignalDeliveryResponse {
     sigterm: "delivered" | "already_exited" | "failed";
     sigkill: "delivered" | "already_exited" | "failed" | "not_attempted";
   }>;
+  lane_job_id?: string | null;
+  lane_cancellation?: {
+    state: string;
+    killed: boolean;
+    failure: string | null;
+  };
   warning: string | null;
 }
 

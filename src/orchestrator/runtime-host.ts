@@ -200,7 +200,12 @@ import {
   type StageExecutionJobSpec,
   UnsupportedStageExecutionBackendError,
 } from "../stage-execution/backend.js";
-import type { CrabrunnerStageExecutionEvidence } from "../stage-execution/crabrunner-backend.js";
+import type {
+  CancellableCrabrunnerStageExecutionBackend,
+  CrabrunnerCancellationRequest,
+  CrabrunnerStageExecutionEvidence,
+  CrabrunnerTerminalEvidence,
+} from "../stage-execution/crabrunner-backend.js";
 import { createStageExecutionJobSpec } from "../stage-execution/job-spec.js";
 import * as stageExecutionResult from "../stage-execution/result-metadata.js";
 import { serializeTrackerErrorDetails } from "../tracker/errors.js";
@@ -556,6 +561,13 @@ interface WorkerExecution {
   codexAppServerPid: number | null;
   codexAppServerIdentity: ProcessIdentitySnapshot | null;
   laneJobId: string | null;
+  laneKillGraceMs: number;
+  cancelLane:
+    | ((
+        jobId: string,
+        request: CrabrunnerCancellationRequest,
+      ) => Promise<CrabrunnerTerminalEvidence>)
+    | null;
   controller: AbortController;
   completion: Promise<void>;
   stopRequest: StopRequest | null;
@@ -4735,6 +4747,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       codexAppServerPid: null,
       codexAppServerIdentity: null,
       laneJobId: null,
+      laneKillGraceMs: 0,
+      cancelLane: null,
       controller,
       stopRequest: null,
       lastResult: null,
@@ -4757,6 +4771,12 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     });
     const stageExecutionBackend =
       this.resolveStageExecutionBackend(executionJob);
+    if (isCancellableCrabrunnerBackend(stageExecutionBackend)) {
+      execution.cancelLane = (jobId, request) =>
+        stageExecutionBackend.cancel(jobId, request);
+    }
+    execution.laneKillGraceMs =
+      executionJob.enforcement.cancellation.killGraceMs ?? 0;
 
     await this.logger?.info(
       "agent_runner_starting",
@@ -4847,6 +4867,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         return await stageExecutionBackend.execute({
           job: executionJob,
           runnerInput,
+          onLaneJobId: (laneJobId) => {
+            execution.laneJobId = laneJobId;
+            this.orchestrator.recordLaneJobId(issue.id, laneJobId);
+          },
         });
       });
     const completion = resultPromise
@@ -4856,6 +4880,12 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           result,
           evidence,
         );
+        if (executionJob.backend === "crabrunner") {
+          this.orchestrator.applyCrabrunnerResult({
+            issueId: execution.issueId,
+            result,
+          });
+        }
         const finalization =
           stageExecutionResult.resolveStageExecutionFinalization(
             executionJob.backend,
@@ -5484,6 +5514,15 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       workspacePath = null;
     }
 
+    const laneCancellationPromise =
+      execution.laneJobId !== null && execution.cancelLane !== null
+        ? execution.cancelLane(execution.laneJobId, {
+            reason: "operator_stop",
+            signal: "SIGTERM",
+            processGroup: true,
+            killGraceMs: execution.laneKillGraceMs,
+          })
+        : null;
     execution.controller.abort(`Stopped due to ${input.reason}.`);
 
     await this.logger?.info(
@@ -5499,6 +5538,18 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         ...(workspacePath === null ? {} : { workspace_path: workspacePath }),
       },
     );
+
+    if (laneCancellationPromise !== null) {
+      const evidence = await laneCancellationPromise;
+      const delivery = laneCancellationToStopSignalDelivery(
+        execution.laneJobId,
+        input,
+        evidence,
+        this.now(),
+      );
+      await this.logStopSignalDelivery(delivery, execution);
+      return delivery;
+    }
 
     const delivery = await this.deliverWorkerStopSignalSafe({
       issueId: execution.issueId,
@@ -8193,6 +8244,7 @@ interface EmergencyStopRecoveryCleanupPlan {
   issueIdentifier: string;
   codexAppServerPid: string | null;
   codexAppServerIdentity: ProcessIdentitySnapshot | null;
+  laneJobId: string | null;
   setBySequence: number;
   since: string;
 }
@@ -8219,6 +8271,7 @@ function collectUnconfirmedEmergencyStopCleanupPlans(
           issueIdentifier: issue.issueIdentifier,
           codexAppServerPid: issue.codexAppServerPid,
           codexAppServerIdentity: issue.codexAppServerIdentity,
+          laneJobId: issue.laneJobId ?? null,
           setBySequence: entry.sequence,
           since: entry.timestamp,
         };
@@ -8284,6 +8337,7 @@ function readEmergencyStopInterruptedIssues(
   issueIdentifier: string;
   codexAppServerPid: string | null;
   codexAppServerIdentity: ProcessIdentitySnapshot | null;
+  laneJobId: string | null;
 }> {
   const value = metadata.interruptedIssues;
   if (!Array.isArray(value)) {
@@ -8302,6 +8356,7 @@ function readEmergencyStopInterruptedIssues(
     const codexAppServerIdentity = readProcessIdentityMetadata(
       item.codexAppServerIdentity,
     );
+    const laneJobId = item.laneJobId;
     return [
       {
         issueId,
@@ -8312,6 +8367,7 @@ function readEmergencyStopInterruptedIssues(
             ? codexAppServerPid
             : null,
         codexAppServerIdentity,
+        laneJobId: stringMetadata(laneJobId),
       },
     ];
   });
@@ -8340,6 +8396,16 @@ function toErrorMessage(error: unknown): string {
   }
 
   return "worker failed";
+}
+
+function isCancellableCrabrunnerBackend(
+  backend: StageExecutionBackendRunner,
+): backend is CancellableCrabrunnerStageExecutionBackend {
+  return (
+    backend.backend === "crabrunner" &&
+    typeof (backend as Partial<CancellableCrabrunnerStageExecutionBackend>)
+      .cancel === "function"
+  );
 }
 
 function createFailedStopSignalDelivery(
@@ -8375,7 +8441,43 @@ function toStopSignalDeliveryResponse(
       sigterm: attempt.sigterm,
       sigkill: attempt.sigkill,
     })),
+    ...(delivery.laneJobId === undefined
+      ? {}
+      : { lane_job_id: delivery.laneJobId }),
+    ...(delivery.laneCancellation === undefined
+      ? {}
+      : { lane_cancellation: delivery.laneCancellation }),
     warning: delivery.warning,
+  };
+}
+
+function laneCancellationToStopSignalDelivery(
+  laneJobId: string | null,
+  input: StopRequest,
+  evidence: CrabrunnerTerminalEvidence,
+  attemptedAt: Date,
+): StopSignalDelivery {
+  const cancellation = evidence.cancellation;
+  const killed = cancellation?.killed === true && evidence.state === "canceled";
+  const alreadyStopped = evidence.state === "canceled" && !killed;
+  return {
+    status: killed ? "delivered" : alreadyStopped ? "already_exited" : "failed",
+    reason: input.reason,
+    attemptedAt: attemptedAt.toISOString(),
+    workspacePath: evidence.workspacePath ?? null,
+    attempts: [],
+    laneJobId,
+    laneCancellation: {
+      state: evidence.state,
+      killed: cancellation?.killed === true,
+      failure: cancellation?.failure ?? null,
+    },
+    warning:
+      killed || alreadyStopped
+        ? null
+        : (cancellation?.failure ??
+          evidence.message ??
+          `crabrunner cancellation ended in ${evidence.state}`),
   };
 }
 

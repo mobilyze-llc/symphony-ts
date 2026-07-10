@@ -123,6 +123,7 @@ const DEFAULT_MAX_BUFFER_BYTES = 16 * 1_024 * 1_024;
 // lifecycle state with collectible!==true is tolerated for this many extra
 // polls before failing closed (DeepSeek P2-1).
 const STATUS_TERMINAL_GRACE_POLLS = 3;
+const CANCELLATION_SETTLE_TIMEOUT_MS = 15_000;
 
 function defaultStateRoot(): string {
   return join(homedir(), ".crucible", "crabrunner");
@@ -515,26 +516,33 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
         ...this.stateRootArgs(),
       ]);
       const status = parseCrabrunnerStatus(result, "cancel", jobId);
-      await this.observeLiveness(jobId, status);
       // Only a TERMINAL "stopped" counts as killed. "stopping" is non-terminal
       // (still shutting down) and must NOT be reported as canceled, or consumers
-      // misread an in-flight job as killed (Codex P2 / DeepSeek P2-6).
-      const killed = status.state === "stopped";
+      // misread an in-flight job as killed (Codex P2 / DeepSeek P2-6). The
+      // cancel CLI can return stopping immediately, so settle against status
+      // before deciding whether the kill was delivered.
+      const settledStatus = await this.waitForCancellationTerminalStatus(
+        jobId,
+        status,
+        request,
+      );
+      await this.observeLiveness(jobId, settledStatus);
+      const killed = settledStatus.state === "stopped";
       const terminalState: CrabrunnerTerminalState = killed
         ? "canceled"
         : "kill_failed";
       const failure = killed
         ? null
-        : status.state === "stopping"
+        : settledStatus.state === "stopping"
           ? "cancel_incomplete"
-          : (status.message ?? "cancel_incomplete");
+          : (settledStatus.message ?? "cancel_incomplete");
 
       return {
         state: terminalState,
-        workspacePath: status.workspace ?? null,
-        message: status.message ?? null,
-        progress: buildProgress(status, this.livenessByJob.get(jobId)),
-        process: buildProcess(status),
+        workspacePath: settledStatus.workspace ?? null,
+        message: settledStatus.message ?? null,
+        progress: buildProgress(settledStatus, this.livenessByJob.get(jobId)),
+        process: buildProcess(settledStatus),
         cancellation: {
           requested: true,
           signal: request.signal,
@@ -900,6 +908,47 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     });
   }
 
+  private async waitForCancellationTerminalStatus(
+    jobId: string,
+    initialStatus: CrabrunnerStatus,
+    request: CrabrunnerCancellationRequest,
+  ): Promise<CrabrunnerStatus> {
+    if (CRABRUNNER_TERMINAL_LIFECYCLE_STATES.has(initialStatus.state)) {
+      return initialStatus;
+    }
+
+    const deadline =
+      Date.now() +
+      Math.min(
+        CANCELLATION_SETTLE_TIMEOUT_MS,
+        Math.max(1_000, request.killGraceMs + 5_000),
+      );
+    let status = initialStatus;
+    while (Date.now() < deadline) {
+      try {
+        const timeoutMs = Math.max(
+          1,
+          Math.min(this.cliTimeoutMs, deadline - Date.now()),
+        );
+        const result = await this.run(
+          ["status", "--job-id", jobId, ...this.stateRootArgs()],
+          undefined,
+          timeoutMs,
+        );
+        status = parseCrabrunnerStatus(result, "status", jobId);
+        if (CRABRUNNER_TERMINAL_LIFECYCLE_STATES.has(status.state)) {
+          return status;
+        }
+      } catch {
+        // Preserve the cancellation response when a status probe races state
+        // cleanup or a remote scheduler does not expose split polling.
+        return status;
+      }
+      await this.sleep(Math.max(25, Math.min(this.pollIntervalMs || 250, 250)));
+    }
+    return status;
+  }
+
   private async readUsage(
     usagePath: string | null | undefined,
   ): Promise<CrabrunnerUsage> {
@@ -1133,11 +1182,15 @@ function mapLaneWorkerUsage(
     };
   }
 
+  const summableQuality = summableMeasurementQuality(measurementQuality(usage));
   return {
     status: "available",
     inputTokens: inputTokens ?? 0,
     outputTokens: outputTokens ?? 0,
     totalTokens: totalTokens ?? (inputTokens ?? 0) + (outputTokens ?? 0),
+    ...(summableQuality === undefined
+      ? {}
+      : { measurementQuality: summableQuality }),
     ...optionalUsageToken(
       "cacheReadTokens",
       usage.cache_read_tokens ?? usage.cacheReadTokens,
@@ -1157,6 +1210,17 @@ function mapLaneWorkerUsage(
         usage.reasoningTokens,
     ),
   };
+}
+
+function summableMeasurementQuality(
+  value: string | null | undefined,
+): StageUsageMeasurementQuality | undefined {
+  return value !== undefined &&
+    value !== null &&
+    value !== "true" &&
+    SUMMABLE_MEASUREMENT_QUALITIES.has(value)
+    ? (value as StageUsageMeasurementQuality)
+    : undefined;
 }
 
 function measurementQuality(

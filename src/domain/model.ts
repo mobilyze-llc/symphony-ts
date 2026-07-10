@@ -827,6 +827,8 @@ export interface LiveSession {
   threadId: string | null;
   turnId: string | null;
   codexAppServerPid: string | null;
+  /** Crabrunner job identity; absent for the in-process worker path. */
+  laneJobId?: string | null;
   codexAppServerIdentity: ProcessIdentitySnapshot | null;
   lastCodexEvent: string | null;
   lastCodexTimestamp: string | null;
@@ -1557,6 +1559,7 @@ export interface PipelineEmergencyStopState {
     attempt: number | null;
     codexAppServerPid: string | null;
     codexAppServerIdentity: ProcessIdentitySnapshot | null;
+    laneJobId?: string | null;
   }>;
 }
 

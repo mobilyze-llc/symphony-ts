@@ -11,6 +11,7 @@ import type {
   PauseTriageEvidence,
   PauseTriageVerdict,
 } from "../agent/pause-triage.js";
+import type { AgentRunResult } from "../agent/runner.js";
 import type {
   StuckTriageEvidence,
   StuckTriageParkKind,
@@ -369,6 +370,12 @@ export interface StopSignalDelivery {
   workspacePath: string | null;
   attempts: StopSignalDeliveryAttempt[];
   warning: string | null;
+  laneJobId?: string | null;
+  laneCancellation?: {
+    state: string;
+    killed: boolean;
+    failure: string | null;
+  };
 }
 
 interface IntentWriteInput {
@@ -872,6 +879,12 @@ export class OrchestratorCore {
   private readonly onIssueDropped?: OrchestratorCoreOptions["onIssueDropped"];
 
   private readonly stopRunningIssue?: OrchestratorCoreOptions["stopRunningIssue"];
+
+  /** Lane admission can race the RunningEntry insertion during dispatch. */
+  private readonly pendingLaneJobIds = new Map<string, string>();
+
+  /** A very fast delegated terminal can race the RunningEntry insertion too. */
+  private readonly pendingCrabrunnerResults = new Map<string, AgentRunResult>();
 
   private readonly runEnsembleGate?: OrchestratorCoreOptions["runEnsembleGate"];
 
@@ -9683,6 +9696,53 @@ export class OrchestratorCore {
     return { applied: true, rateLimitsUpdated: telemetry.rateLimitsUpdated };
   }
 
+  /**
+   * Preserve the scheduler identity while a delegated stage is still running.
+   * A lane job id is opaque remote control data and must never enter the PID
+   * signal path.
+   */
+  recordLaneJobId(issueId: string, laneJobId: string): boolean {
+    const runningEntry = this.state.running[issueId];
+    if (laneJobId.trim() === "") {
+      return false;
+    }
+    if (runningEntry === undefined) {
+      this.pendingLaneJobIds.set(issueId, laneJobId);
+      return true;
+    }
+    runningEntry.laneJobId = laneJobId;
+    return true;
+  }
+
+  /**
+   * Apply the terminal delegated session to the same RunningEntry consumed by
+   * the stage-record reducer. The in-process runner remains event-driven; this
+   * one final projection is the lane equivalent of its usage event stream.
+   */
+  applyCrabrunnerResult(input: {
+    issueId: string;
+    result: AgentRunResult;
+  }): boolean {
+    const runningEntry = this.state.running[input.issueId];
+    if (runningEntry === undefined) {
+      this.pendingCrabrunnerResults.set(input.issueId, input.result);
+      return true;
+    }
+
+    Object.assign(runningEntry, input.result.liveSession);
+    const liveSession = input.result.liveSession;
+    this.state.codexTotals.inputTokens += liveSession.totalStageInputTokens;
+    this.state.codexTotals.outputTokens += liveSession.totalStageOutputTokens;
+    this.state.codexTotals.totalTokens += liveSession.totalStageTotalTokens;
+    this.state.codexTotals.cacheReadTokens +=
+      liveSession.totalStageCacheReadTokens;
+    this.state.codexTotals.cacheWriteTokens +=
+      liveSession.totalStageCacheWriteTokens;
+    this.state.codexTotals.reasoningTokens += liveSession.codexReasoningTokens;
+    this.state.codexTotals.noCacheTokens += liveSession.codexNoCacheTokens;
+    return true;
+  }
+
   async runContinuousFeedbackCheckpoint(input: {
     issueId: string;
     event: ContinuousFeedbackEvent;
@@ -10083,6 +10143,7 @@ export class OrchestratorCore {
       attempt: runningEntry.retryAttempt,
       codexAppServerPid: runningEntry.codexAppServerPid,
       codexAppServerIdentity: runningEntry.codexAppServerIdentity,
+      ...laneJobMetadata(runningEntry.laneJobId),
     };
   }
 
@@ -12238,6 +12299,7 @@ export class OrchestratorCore {
       });
       const runEntry: RunningEntry = {
         ...createEmptyLiveSession(),
+        laneJobId: this.pendingLaneJobIds.get(issue.id) ?? null,
         issue,
         identifier: issue.identifier,
         retryAttempt: normalizeRetryAttempt(attempt),
@@ -12246,7 +12308,18 @@ export class OrchestratorCore {
         monitorHandle: spawned.monitorHandle,
         failureReason: null,
       };
+      this.pendingLaneJobIds.delete(issue.id);
       this.state.running[issue.id] = runEntry;
+      const pendingCrabrunnerResult = this.pendingCrabrunnerResults.get(
+        issue.id,
+      );
+      if (pendingCrabrunnerResult !== undefined) {
+        this.pendingCrabrunnerResults.delete(issue.id);
+        this.applyCrabrunnerResult({
+          issueId: issue.id,
+          result: pendingCrabrunnerResult,
+        });
+      }
       this.state.claimed.add(issue.id);
       this.clearRetryEntry(issue.id);
       this.recordExistingActiveResumeIfNeeded({
@@ -12850,6 +12923,7 @@ export class OrchestratorCore {
               sourceSequence: options.emergencyStopSourceSequence ?? null,
               codexAppServerPid: runningEntry.codexAppServerPid,
               codexAppServerIdentity: runningEntry.codexAppServerIdentity,
+              ...laneJobMetadata(runningEntry.laneJobId),
             }
           : {}),
       },
@@ -12919,6 +12993,7 @@ export class OrchestratorCore {
                 sourceSequence: options.emergencyStopSourceSequence ?? null,
                 codexAppServerPid: runningEntry.codexAppServerPid,
                 codexAppServerIdentity: runningEntry.codexAppServerIdentity,
+                ...laneJobMetadata(runningEntry.laneJobId),
                 emergencyStopTerminationConfirmed,
                 signalDelivery: stopRequest.signalDelivery ?? null,
               }
@@ -15277,14 +15352,35 @@ export function isStopSignalDelivery(
       candidate.status,
       candidate.attempts,
       candidate.warning,
+      candidate.laneCancellation,
     ) &&
-    (typeof candidate.warning === "string" || candidate.warning === null)
+    (typeof candidate.warning === "string" || candidate.warning === null) &&
+    (candidate.laneJobId === undefined ||
+      candidate.laneJobId === null ||
+      (typeof candidate.laneJobId === "string" &&
+        candidate.laneJobId.trim().length > 0)) &&
+    (candidate.laneCancellation === undefined ||
+      (typeof candidate.laneCancellation === "object" &&
+        candidate.laneCancellation !== null &&
+        typeof candidate.laneCancellation.state === "string" &&
+        typeof candidate.laneCancellation.killed === "boolean" &&
+        (candidate.laneCancellation.failure === null ||
+          typeof candidate.laneCancellation.failure === "string")))
   );
+}
+
+function laneJobMetadata(
+  laneJobId: string | null | undefined,
+): Record<string, string> {
+  return laneJobId === undefined || laneJobId === null ? {} : { laneJobId };
 }
 
 function isEmergencyStopTerminationConfirmed(value: unknown): boolean {
   if (!isStopSignalDelivery(value)) {
     return false;
+  }
+  if (value.laneCancellation?.killed === true && value.status === "delivered") {
+    return true;
   }
   return (
     (value.status === "delivered" &&
@@ -15374,8 +15470,16 @@ function isStopSignalDeliveryStatusConsistent(
   status: StopSignalDeliveryStatus,
   attempts: StopSignalDeliveryAttempt[],
   warning: StopSignalDelivery["warning"] | undefined,
+  laneCancellation: StopSignalDelivery["laneCancellation"] | undefined,
 ): boolean {
   if (attempts.length === 0) {
+    if (laneCancellation !== undefined) {
+      return (
+        status === "delivered" ||
+        status === "already_exited" ||
+        (status === "failed" && typeof warning === "string")
+      );
+    }
     return (
       status === "not_attempted" ||
       (status === "failed" && typeof warning === "string")

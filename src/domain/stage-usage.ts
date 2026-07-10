@@ -160,7 +160,10 @@ export function mapGeminiAiSdkUsageToStageUsage(input: {
 
 export function mapCrabrunnerUsageToStageUsage(input: {
   usage:
-    | (AiSdkUsageLike & { status?: "available" })
+    | (AiSdkUsageLike & {
+        status?: "available";
+        measurementQuality?: StageUsageMeasurementQuality;
+      })
     | { status: "unavailable" | "unknown"; reason?: string }
     | null
     | undefined;
@@ -205,6 +208,9 @@ export function mapCrabrunnerUsageToStageUsage(input: {
     model: input.model,
     profile: input.profile,
     usage,
+    ...(usage.measurementQuality === undefined
+      ? {}
+      : { measurementQuality: usage.measurementQuality }),
     cost: costUnavailable(
       "Crabrunner usage artifact did not include authoritative billing spend.",
     ),
@@ -290,6 +296,7 @@ function createStageUsageMeasurement(input: {
   model: string | null;
   profile: string | null;
   usage: AiSdkUsageLike;
+  measurementQuality?: StageUsageMeasurementQuality;
   cost: StageUsageCostMeasurement;
 }): StageUsageMeasurement {
   const tokens = normalizeTokenCounts(input.usage);
@@ -300,7 +307,8 @@ function createStageUsageMeasurement(input: {
     provider: input.provider,
     model: input.model,
     profile: input.profile,
-    measurementQuality: classifyTokenQuality(tokens),
+    measurementQuality:
+      input.measurementQuality ?? classifyTokenQuality(tokens),
     tokens,
     cost: input.cost,
   };
