@@ -2,16 +2,6 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import {
-  DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
-  DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
-  DEFAULT_HARD_STOP_LIVE_BUDGET_GRACE_RATIO,
-  DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
-  DEFAULT_HARD_STOP_MAX_ITERATIONS,
-  DEFAULT_HARD_STOP_MAX_TOKENS_PER_UNIT,
-  DEFAULT_HARD_STOP_NO_PROGRESS_TURNS,
-  DEFAULT_STALL_TIMEOUT_MS,
-} from "../config/defaults.js";
 import type {
   StageExecutionPhase,
   StageExecutionRole,
@@ -23,7 +13,6 @@ import {
   type CrabrunnerSchedulerClient,
   type CrabrunnerTerminalEvidence,
   type CrabrunnerTerminalState,
-  validateCrabrunnerLaneEnforcementContract,
 } from "../stage-execution/crabrunner-backend.js";
 import {
   CrabrunnerCliSchedulerClient,
@@ -42,6 +31,10 @@ import {
   isSafeClaudeArtifactName,
   validateClaudeArtifact,
 } from "./claude-runner-contract.js";
+import {
+  assertClaudeCrabrunnerLaneEnforcement,
+  buildClaudeCrabrunnerLaneEnforcement,
+} from "./crabrunner-lane-enforcement.js";
 import { isInside, realpathOrSelf } from "./path-utils.js";
 
 /**
@@ -72,10 +65,6 @@ const DEFAULT_PROFILE = "read-only";
 const DEFAULT_TIMEOUT_SECONDS = 1_800;
 const DEFAULT_DIAGNOSTIC_BYTE_LIMIT = 16 * 1024;
 const DEFAULT_CRABRUNNER_BIN_LABEL = "crabrunner";
-const DELEGATED_LANE_HEARTBEAT_INTERVAL_MS = 30_000;
-const DELEGATED_LANE_PROGRESS_INTERVAL_MS = 30_000;
-const DELEGATED_LANE_USAGE_INTERVAL_MS = 30_000;
-const DELEGATED_LANE_KILL_GRACE_MS = 5_000;
 
 export interface ClaudeCrabrunnerIssueIdentity {
   id: string;
@@ -282,12 +271,7 @@ export async function runClaudeCrabrunner(
       timeoutSeconds,
       promptSha256,
     });
-    const enforcementFailure = validateCrabrunnerLaneEnforcementContract(spec);
-    if (enforcementFailure !== null) {
-      throw new Error(
-        enforcementFailure.message ?? "invalid crabrunner enforcement contract",
-      );
-    }
+    assertClaudeCrabrunnerLaneEnforcement(spec);
     const admission = await scheduler.submit(spec);
     if (admission.status !== "accepted" || admission.jobId === null) {
       message = `crabrunner admission rejected: ${admission.reason ?? "rejected"}`;
@@ -514,34 +498,7 @@ function buildCrabrunnerJobSpec(input: {
       provider,
       reasoningEffort: input.input.reasoningEffort ?? null,
     },
-    enforcement: {
-      required: true,
-      budget: {
-        maxTokens: DEFAULT_HARD_STOP_MAX_TOKENS_PER_UNIT,
-        maxUsd: DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
-        estimatedCostPer1kTokensUsd:
-          DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
-        cachedTokenCostRatio: DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
-        liveBudgetGraceRatio: DEFAULT_HARD_STOP_LIVE_BUDGET_GRACE_RATIO,
-      },
-      timing: {
-        timeoutMs: input.timeoutSeconds * 1_000,
-        stallTimeoutMs: DEFAULT_STALL_TIMEOUT_MS,
-        noProgressTurns: DEFAULT_HARD_STOP_NO_PROGRESS_TURNS,
-        maxIterations: DEFAULT_HARD_STOP_MAX_ITERATIONS,
-      },
-      telemetry: {
-        heartbeatIntervalMs: DELEGATED_LANE_HEARTBEAT_INTERVAL_MS,
-        progressIntervalMs: DELEGATED_LANE_PROGRESS_INTERVAL_MS,
-        usageIntervalMs: DELEGATED_LANE_USAGE_INTERVAL_MS,
-      },
-      cancellation: {
-        jobIdRequired: true,
-        cooperativeAbort: true,
-        processGroupKill: true,
-        killGraceMs: DELEGATED_LANE_KILL_GRACE_MS,
-      },
-    },
+    enforcement: buildClaudeCrabrunnerLaneEnforcement(input.timeoutSeconds),
     role,
     phase,
     issue,
