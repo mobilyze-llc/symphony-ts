@@ -666,7 +666,7 @@ export interface StandingPlanShadowTickDeps {
   workspaceRoot: string;
   fetchCandidates: () => Promise<Issue[]>;
   getInFlight: () => PlannerInFlight[];
-  /** Build a model runner for the configured planner model (cmux in prod). */
+  /** Build a model runner for the configured planner model (crabrunner in prod). */
   createPlannerRunner: (
     model: string,
   ) => (prompt: string) => Promise<PlannerRunResult>;

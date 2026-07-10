@@ -442,69 +442,6 @@ plan_service_env_refresh() {
   fi
 }
 
-archive_active_cmux_spawn_duplicate() {
-  local duplicate_dir="$1"
-  local duplicate_skill="$duplicate_dir/SKILL.md"
-  local archived_dir
-
-  if [[ ! -e "$duplicate_skill" ]]; then
-    return 0
-  fi
-
-  archived_dir="$duplicate_dir.disabled.$(date +%Y%m%d-%H%M%S)"
-  if [[ -e "$archived_dir" ]]; then
-    archived_dir="$archived_dir.$$"
-  fi
-
-  if $DRY_RUN; then
-    info "[dry-run] mv $duplicate_dir $archived_dir"
-    return 0
-  fi
-
-  mv "$duplicate_dir" "$archived_dir" || die "Failed to archive duplicate cmux-spawn skill install: $duplicate_dir"
-  ok "Archived duplicate cmux-spawn skill install: $duplicate_dir -> $archived_dir"
-}
-
-ensure_cmux_spawn_skill_install() {
-  local source_dir="${SYMPHONY_CMUX_SPAWN_SKILL_SOURCE:-$CLAUDE_CONFIG_DIR/skills/cmux-spawn}"
-  local user_skills_dir="${SYMPHONY_USER_SKILLS_DIR:-$HOME/.agents/skills}"
-  local user_install_dir="$user_skills_dir/cmux-spawn"
-  local archived_dir
-  local source_real
-  local install_real
-
-  [[ -f "$source_dir/SKILL.md" ]] || die "cmux-spawn skill source missing: $source_dir/SKILL.md"
-
-  source_real="$(realpath "$source_dir" 2>/dev/null)" || die "Could not resolve cmux-spawn skill source: $source_dir"
-
-  run_or_dry mkdir -p "$user_skills_dir"
-
-  if [[ -L "$user_install_dir" ]]; then
-    install_real="$(realpath "$user_install_dir" 2>/dev/null || true)"
-    if [[ "$install_real" != "$source_real" ]]; then
-      warn "$user_install_dir points to ${install_real:-unresolved target}; replacing with $source_real"
-      run_or_dry rm "$user_install_dir"
-      run_or_dry ln -s "$source_real" "$user_install_dir"
-    else
-      ok "cmux-spawn user skill already points at $source_real"
-    fi
-  elif [[ -e "$user_install_dir" ]]; then
-    warn "$user_install_dir is not a symlink; archiving copy-style install before replacing it"
-    archived_dir="$user_install_dir.disabled.$(date +%Y%m%d-%H%M%S)"
-    if [[ -e "$archived_dir" ]]; then
-      archived_dir="$archived_dir.$$"
-    fi
-    run_or_dry mv "$user_install_dir" "$archived_dir"
-    run_or_dry ln -s "$source_real" "$user_install_dir"
-  else
-    run_or_dry ln -s "$source_real" "$user_install_dir"
-    ok "Installed cmux-spawn user skill symlink: $user_install_dir -> $source_real"
-  fi
-
-  archive_active_cmux_spawn_duplicate "${SYMPHONY_CODEX_SKILLS_DIR:-$HOME/.codex/skills}/cmux-spawn"
-  archive_active_cmux_spawn_duplicate "${SYMPHONY_CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}/cmux-spawn"
-}
-
 # Ensure the report-server launchd job is installed and loaded. It serves
 # ~/.symphony/reports on :8090 (the BASE_URL host for the mobile dashboard and
 # token reports). The plist is generated here with $HOME baked in — no hardcoded
@@ -851,7 +788,6 @@ if $DO_CONFIG; then
       run_or_dry "$CLAUDE_CONFIG_DIR/deploy.sh"
       ok "claude-config applied"
     fi
-    ensure_cmux_spawn_skill_install
   fi
 
   echo ""

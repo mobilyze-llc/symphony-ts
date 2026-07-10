@@ -9,10 +9,10 @@
  * to the stable checkout source directory. Pass --user-installs to require
  * these machine-scoped installs; without it, missing user-level installs are
  * reported as warnings so CI and clean machines remain portable.
- * Duplicate global/user copies: ~/.codex/skills/<name> and
- * ~/.claude/skills/<name> are intentionally empty for these skills; any active
- * install there is treated as drift. These checks are machine-scoped and only
- * catch forbidden global copies on the machine where they run.
+ * Duplicate global/user copies: ~/.codex/skills/<name> is intentionally empty
+ * for these skills; any active install there is treated as drift. These checks
+ * are machine-scoped and only catch forbidden global copies on the machine
+ * where they run.
  */
 
 import { execFileSync } from "node:child_process";
@@ -42,24 +42,7 @@ const userSkillsRoot = resolve(
 const codexSkillsRoot = resolve(
   process.env.SYMPHONY_CODEX_SKILLS_DIR ?? resolve(homedir(), ".codex/skills"),
 );
-const claudeSkillsRoot = resolve(
-  process.env.SYMPHONY_CLAUDE_SKILLS_DIR ??
-    resolve(homedir(), ".claude/skills"),
-);
-const cmuxSpawnSkillSource = resolve(
-  process.env.SYMPHONY_CMUX_SPAWN_SKILL_SOURCE ??
-    resolve(homedir(), "projects/claude-config/skills/cmux-spawn"),
-);
-
 const skillNames = ["spec-review-lane", "claude-runner"];
-const userOnlySkillContracts = [
-  {
-    skillName: "cmux-spawn",
-    sourceDir: cmuxSpawnSkillSource,
-    sourceDescription:
-      "canonical claude-config main checkout cmux-spawn source",
-  },
-];
 const staleSkillNames = ["symphony-claude-runner"];
 const failures = [];
 const warnings = [];
@@ -95,31 +78,6 @@ for (const skillName of skillNames) {
   );
 }
 
-for (const {
-  skillName,
-  sourceDir,
-  sourceDescription,
-} of userOnlySkillContracts) {
-  assertMachineScopedUserInstall({
-    skillName,
-    sourceDir,
-    sourceDescription,
-    userInstallDir: resolve(userSkillsRoot, skillName),
-    requireUserInstalls,
-    warnings,
-    failures,
-  });
-
-  for (const duplicateRoot of [codexSkillsRoot, claudeSkillsRoot]) {
-    const duplicateSkill = resolve(duplicateRoot, skillName, "SKILL.md");
-    assertMissingFile(
-      duplicateSkill,
-      `${duplicateSkill} exists as an active duplicate cmux-spawn skill install. Keep exactly one active user-level install at ${resolve(userSkillsRoot, skillName)} as a symlink to ${sourceDir}.`,
-      failures,
-    );
-  }
-}
-
 for (const staleSkillName of staleSkillNames) {
   for (const stalePath of [
     resolve(repoRoot, "skills", staleSkillName),
@@ -145,8 +103,6 @@ if (failures.length > 0) {
         repoDiscoveryRoot,
         userSkillsRoot,
         codexSkillsRoot,
-        claudeSkillsRoot,
-        cmuxSpawnSkillSource,
         requireUserInstalls,
         warnings,
         failures,
@@ -167,8 +123,6 @@ console.log(
       repoDiscoveryRoot,
       userSkillsRoot,
       codexSkillsRoot,
-      claudeSkillsRoot,
-      cmuxSpawnSkillSource,
       requireUserInstalls,
       warnings,
     },
@@ -205,43 +159,6 @@ function assertSymlinkTarget(linkPath, targetPath, targetFailures) {
   }
 }
 
-function assertMachineScopedUserInstall({
-  skillName,
-  sourceDir,
-  sourceDescription,
-  userInstallDir,
-  requireUserInstalls,
-  warnings: targetWarnings,
-  failures: targetFailures,
-}) {
-  const sourceSkill = resolve(sourceDir, "SKILL.md");
-  const sourceFailure = readableFileFailure(sourceSkill);
-  const symlinkFailure = symlinkTargetFailure(userInstallDir, sourceDir);
-  const messages = [];
-
-  if (sourceFailure) {
-    messages.push(
-      `${sourceDescription} ${sourceSkill} is missing or unreadable: ${sourceFailure}`,
-    );
-  }
-
-  if (symlinkFailure) {
-    messages.push(
-      `${userInstallDir} should be the only active user-level ${skillName} install and must be a symlink to ${sourceDir}: ${symlinkFailure}`,
-    );
-  }
-
-  if (messages.length === 0) {
-    return;
-  }
-
-  if (requireUserInstalls) {
-    targetFailures.push(...messages);
-  } else {
-    targetWarnings.push(...messages);
-  }
-}
-
 function symlinkTargetFailure(linkPath, targetPath) {
   try {
     const linkStat = lstatSync(linkPath);
@@ -258,15 +175,6 @@ function symlinkTargetFailure(linkPath, targetPath) {
     return null;
   } catch (error) {
     return `missing or unreadable: ${message(error)}`;
-  }
-}
-
-function readableFileFailure(path) {
-  try {
-    readFileSync(path, "utf8");
-    return null;
-  } catch (error) {
-    return message(error);
   }
 }
 

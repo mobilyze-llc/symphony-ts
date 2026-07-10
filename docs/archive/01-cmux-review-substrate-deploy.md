@@ -1,5 +1,9 @@
 # CMUX Review Substrate Deploy
 
+> **Archived by SYMPH-1043.** Use
+> `docs/operations/03-crabrunner-review-qa.md` for the live review and QA
+> deployment contract.
+
 Historical artifact after SYMPH-812. This runbook is retained for one-release
 audit and archaeology only. It is not the live Symphony review substrate, not a
 production fallback, and not acceptable merge-authoritative review evidence.
