@@ -64,7 +64,7 @@ export interface RunStageExecutionMultiLaneInput<
     index: number,
   ) => StageExecutionBackendRunner<TEvidence>;
   /** Called as soon as any delegated lane is admitted by its backend. */
-  onLaneJobId?: (jobId: string) => void;
+  onLaneJobId?: ((jobId: string) => void) | undefined;
   expectedIdentity?:
     | StageExecutionLaneIdentityExpectation
     | ((
