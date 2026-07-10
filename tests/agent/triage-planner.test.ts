@@ -1990,6 +1990,31 @@ describe("createCrabrunnerPlannerRunner", () => {
     const result = await runner("PROMPT-BODY");
     expect(result.status).toBe("unavailable");
   });
+
+  it("degrades on a missing crabrunner root without fabricating usage", async () => {
+    const runner = createCrabrunnerPlannerRunner({
+      workspace: "/ws",
+      artifactDir: "/artifacts",
+      artifactName: "plan",
+      env: {},
+      fs: {
+        mkdir: async () => undefined,
+        writeFile: async () => undefined,
+        readFile: async () => {
+          throw new Error("should not read");
+        },
+      },
+    });
+
+    const result = await runner("PROMPT-BODY");
+
+    expect(result).toEqual({
+      status: "unavailable",
+      detail:
+        "crabrunner planner threw: SYMPHONY_CRABRUNNER_ROOT is required to run Claude through crabrunner",
+    });
+    expect(result).not.toHaveProperty("usage");
+  });
 });
 
 describe("QueueHealth / PlannerContext.health (SYMPH-939 U1)", () => {

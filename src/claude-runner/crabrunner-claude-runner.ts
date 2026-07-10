@@ -31,6 +31,10 @@ import {
   isSafeClaudeArtifactName,
   validateClaudeArtifact,
 } from "./claude-runner-contract.js";
+import {
+  assertClaudeCrabrunnerLaneEnforcement,
+  buildClaudeCrabrunnerLaneEnforcement,
+} from "./crabrunner-lane-enforcement.js";
 import { isInside, realpathOrSelf } from "./path-utils.js";
 
 /**
@@ -61,10 +65,6 @@ const DEFAULT_PROFILE = "read-only";
 const DEFAULT_TIMEOUT_SECONDS = 1_800;
 const DEFAULT_DIAGNOSTIC_BYTE_LIMIT = 16 * 1024;
 const DEFAULT_CRABRUNNER_BIN_LABEL = "crabrunner";
-const DELEGATED_LANE_HEARTBEAT_INTERVAL_MS = 30_000;
-const DELEGATED_LANE_PROGRESS_INTERVAL_MS = 30_000;
-const DELEGATED_LANE_USAGE_INTERVAL_MS = 30_000;
-const DELEGATED_LANE_KILL_GRACE_MS = 5_000;
 
 export interface ClaudeCrabrunnerIssueIdentity {
   id: string;
@@ -115,7 +115,7 @@ export function resolveClaudeCrabrunnerSchedulerOptions(
     firstNonEmpty(
       input.targetRepoRoot,
       env.SYMPHONY_CRABRUNNER_TARGET_REPO,
-      env.REPO_URL,
+      localRepoUrlPath(env.REPO_URL),
       cwd,
     ) ?? cwd;
   return {
@@ -271,6 +271,7 @@ export async function runClaudeCrabrunner(
       timeoutSeconds,
       promptSha256,
     });
+    assertClaudeCrabrunnerLaneEnforcement(spec);
     const admission = await scheduler.submit(spec);
     if (admission.status !== "accepted" || admission.jobId === null) {
       message = `crabrunner admission rejected: ${admission.reason ?? "rejected"}`;
@@ -497,33 +498,7 @@ function buildCrabrunnerJobSpec(input: {
       provider,
       reasoningEffort: input.input.reasoningEffort ?? null,
     },
-    enforcement: {
-      required: true,
-      budget: {
-        maxTokens: null,
-        maxUsd: null,
-        estimatedCostPer1kTokensUsd: null,
-        cachedTokenCostRatio: null,
-        liveBudgetGraceRatio: null,
-      },
-      timing: {
-        timeoutMs: input.timeoutSeconds * 1_000,
-        stallTimeoutMs: null,
-        noProgressTurns: null,
-        maxIterations: null,
-      },
-      telemetry: {
-        heartbeatIntervalMs: DELEGATED_LANE_HEARTBEAT_INTERVAL_MS,
-        progressIntervalMs: DELEGATED_LANE_PROGRESS_INTERVAL_MS,
-        usageIntervalMs: DELEGATED_LANE_USAGE_INTERVAL_MS,
-      },
-      cancellation: {
-        jobIdRequired: true,
-        cooperativeAbort: true,
-        processGroupKill: true,
-        killGraceMs: DELEGATED_LANE_KILL_GRACE_MS,
-      },
-    },
+    enforcement: buildClaudeCrabrunnerLaneEnforcement(input.timeoutSeconds),
     role,
     phase,
     issue,
@@ -865,6 +840,20 @@ function firstNonEmpty(...values: Array<string | undefined>): string | null {
     }
   }
   return null;
+}
+
+function localRepoUrlPath(value: string | undefined): string | undefined {
+  const candidate = value?.trim();
+  if (candidate === undefined || candidate === "") {
+    return undefined;
+  }
+  if (/^(?:https?:\/\/|ssh:\/\/)/iu.test(candidate)) {
+    return undefined;
+  }
+  if (/^(?:[^/@\s]+@)?[^/\\\s]+:[^/\\]/u.test(candidate)) {
+    return undefined;
+  }
+  return candidate;
 }
 
 function formatUnknownError(error: unknown): string {

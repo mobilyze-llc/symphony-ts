@@ -9,11 +9,12 @@ import {
   resolveClaudeCrabrunnerSchedulerOptions,
   runClaudeCrabrunner,
 } from "../../src/claude-runner/crabrunner-claude-runner.js";
-import type {
-  CrabrunnerAdmissionResult,
-  CrabrunnerJobSpec,
-  CrabrunnerSchedulerClient,
-  CrabrunnerTerminalEvidence,
+import {
+  type CrabrunnerAdmissionResult,
+  type CrabrunnerJobSpec,
+  type CrabrunnerSchedulerClient,
+  type CrabrunnerTerminalEvidence,
+  validateCrabrunnerLaneEnforcementContract,
 } from "../../src/stage-execution/crabrunner-backend.js";
 import { readyCollectedArtifact } from "../stage-execution/collected-artifact-fixtures.js";
 
@@ -89,16 +90,34 @@ describe("Claude crabrunner adapter", () => {
     ).toBe("/input/repo");
   });
 
-  it("falls back to REPO_URL only when no explicit target repo is provided", () => {
+  it("preserves a local filesystem path from REPO_URL", () => {
     expect(
       resolveClaudeCrabrunnerSchedulerOptions({
         cwd: "/fallback/repo",
         env: {
           SYMPHONY_CRABRUNNER_ROOT: "/crucible",
-          REPO_URL: "https://github.com/mobilyze-llc/symphony-ts.git",
+          REPO_URL: " /local/checkout ",
         },
       }).targetRepoRoot,
-    ).toBe("https://github.com/mobilyze-llc/symphony-ts.git");
+    ).toBe("/local/checkout");
+  });
+
+  it.each([
+    "https://github.com/mobilyze-llc/symphony-ts.git",
+    "http://github.com/mobilyze-llc/symphony-ts.git",
+    "ssh://git@github.com/mobilyze-llc/symphony-ts.git",
+    "git@github.com:mobilyze-llc/symphony-ts.git",
+    "github.com:mobilyze-llc/symphony-ts.git",
+  ])("rejects remote REPO_URL %s as a target root", (repoUrl) => {
+    expect(
+      resolveClaudeCrabrunnerSchedulerOptions({
+        cwd: "/fallback/repo",
+        env: {
+          SYMPHONY_CRABRUNNER_ROOT: "/crucible",
+          REPO_URL: repoUrl,
+        },
+      }).targetRepoRoot,
+    ).toBe("/fallback/repo");
   });
 
   it("submits a read-only crabrunner lane and maps the artifact to ClaudeRunnerResult", async () => {
@@ -143,7 +162,7 @@ describe("Claude crabrunner adapter", () => {
     expect(result).not.toHaveProperty("cmuxSpawnBin");
     expect(result.artifactPath).toBe(artifactPath);
     expect(result.message).toBe("done");
-    expect(result.usage).toMatchObject({
+    expect(result.usage).toEqual({
       status: "available",
       inputTokens: 10,
       outputTokens: 20,
@@ -176,15 +195,133 @@ describe("Claude crabrunner adapter", () => {
         provider: "anthropic",
         model: "opus",
       },
-      enforcement: {
-        required: true,
-        timing: {
-          timeoutMs: 42_000,
-        },
-      },
       issue: {
         identifier: "SYMPH-1038",
       },
+    });
+    const submission = scheduler.submissions[0]!;
+    expect(submission.enforcement).toEqual({
+      required: true,
+      budget: {
+        maxTokens: 6_000_000,
+        maxUsd: 50,
+        estimatedCostPer1kTokensUsd: 0.05,
+        cachedTokenCostRatio: 0.1,
+        liveBudgetGraceRatio: 0.1,
+      },
+      timing: {
+        timeoutMs: 42_000,
+        stallTimeoutMs: 300_000,
+        noProgressTurns: 3,
+        maxIterations: 20,
+      },
+      telemetry: {
+        heartbeatIntervalMs: 30_000,
+        progressIntervalMs: 30_000,
+        usageIntervalMs: 30_000,
+      },
+      cancellation: {
+        jobIdRequired: true,
+        cooperativeAbort: true,
+        processGroupKill: true,
+        killGraceMs: 5_000,
+      },
+    });
+    expect(validateCrabrunnerLaneEnforcementContract(submission)).toBeNull();
+  });
+
+  it("normalizes nullish and unavailable usage without inventing tokens", async () => {
+    const cases: Array<{
+      usage: CrabrunnerTerminalEvidence["usage"];
+      expected: Record<string, unknown> | null;
+    }> = [
+      { usage: undefined, expected: null },
+      { usage: null, expected: null },
+      {
+        usage: { status: "unavailable", reason: "usage artifact absent" },
+        expected: { status: "unavailable", reason: "usage artifact absent" },
+      },
+      {
+        usage: {
+          status: "available",
+          inputTokens: 7,
+          outputTokens: 5,
+          totalTokens: 12,
+        },
+        expected: {
+          status: "available",
+          inputTokens: 7,
+          outputTokens: 5,
+          totalTokens: 12,
+        },
+      },
+    ];
+
+    for (const testCase of cases) {
+      const harness = await createHarness();
+      const scheduler = new RecordingScheduler({
+        terminal: {
+          state: "succeeded",
+          artifact: readyArtifact(validReviewArtifact()),
+          ...(testCase.usage === undefined ? {} : { usage: testCase.usage }),
+        },
+      });
+
+      const result = await runClaudeCrabrunner(baseInput(harness), {
+        schedulerClient: scheduler,
+        now: fixedClock(),
+      });
+
+      expect(result.usage).toEqual(testCase.expected);
+    }
+  });
+
+  it("clones available usage and preserves every optional token field", async () => {
+    const harness = await createHarness();
+    const usage = {
+      status: "available" as const,
+      inputTokens: 100,
+      outputTokens: 20,
+      totalTokens: 120,
+      cacheReadTokens: 40,
+      cacheWriteTokens: 10,
+      noCacheTokens: 50,
+      reasoningTokens: 5,
+    };
+    const scheduler = new RecordingScheduler({
+      terminal: {
+        state: "succeeded",
+        artifact: readyArtifact(validReviewArtifact()),
+        usage,
+      },
+    });
+
+    const result = await runClaudeCrabrunner(baseInput(harness), {
+      schedulerClient: scheduler,
+      now: fixedClock(),
+    });
+
+    expect(result.usage).toEqual({
+      status: "available",
+      inputTokens: 100,
+      outputTokens: 20,
+      totalTokens: 120,
+      cacheReadTokens: 40,
+      cacheWriteTokens: 10,
+      noCacheTokens: 50,
+      reasoningTokens: 5,
+    });
+    expect(result.usage).not.toBe(usage);
+    usage.inputTokens = 999;
+    expect(result.usage).toEqual({
+      status: "available",
+      inputTokens: 100,
+      outputTokens: 20,
+      totalTokens: 120,
+      cacheReadTokens: 40,
+      cacheWriteTokens: 10,
+      noCacheTokens: 50,
+      reasoningTokens: 5,
     });
   });
 
@@ -307,6 +444,47 @@ describe("Claude crabrunner adapter", () => {
     expect(result.diagnostics.attempts[0]?.stdout.text).toContain(
       "status unavailable",
     );
+  });
+
+  it("returns a bounded failed attempt with job identity when collect throws", async () => {
+    const harness = await createHarness();
+    const collectMessage = `collect unavailable: ${"x".repeat(300)}`;
+    const scheduler = new RecordingScheduler({
+      terminal: { state: "succeeded" },
+      collectError: new Error(collectMessage),
+    });
+
+    const result = await runClaudeCrabrunner(
+      { ...baseInput(harness), diagnosticByteLimit: 64 },
+      { schedulerClient: scheduler, now: fixedClock() },
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.message).toBe(
+      `crabrunner scheduler failed: ${collectMessage}`,
+    );
+    expect(result.attempts).toHaveLength(1);
+    expect(result.attempts[0]).toMatchObject({
+      attempt: 1,
+      artifactName: "opus",
+      state: "failed",
+      exitCode: 1,
+      validationErrors: [`crabrunner scheduler failed: ${collectMessage}`],
+    });
+    const attemptPayload = JSON.parse(
+      await readFile(result.attempts[0]!.cliJsonPath, "utf8"),
+    ) as unknown;
+    expect(attemptPayload).toEqual({ jobId: "job-1", error: collectMessage });
+    const diagnostics = result.diagnostics.attempts[0]!.stdout;
+    expect(diagnostics).toMatchObject({
+      maxBytes: 64,
+      truncated: true,
+      originalBytes: expect.any(Number),
+      omittedBytes: expect.any(Number),
+    });
+    expect(Buffer.byteLength(diagnostics.text, "utf8")).toBeLessThanOrEqual(64);
+    expect(diagnostics.originalBytes).toBeGreaterThan(64);
+    expect(diagnostics.omittedBytes).toBeGreaterThan(0);
   });
 
   it("fails before scheduler submit when declared source visibility is invalid", async () => {
@@ -448,6 +626,28 @@ describe("Claude crabrunner adapter", () => {
         model: "anthropic/claude-opus-4",
         provider: null,
       },
+    });
+  });
+
+  it("treats a custom profile as metadata rather than a write grant", async () => {
+    const harness = await createHarness();
+    const scheduler = new RecordingScheduler({
+      terminal: {
+        state: "succeeded",
+        artifact: readyArtifact(validReviewArtifact()),
+      },
+    });
+
+    const result = await runClaudeCrabrunner(
+      { ...baseInput(harness), profile: "write-adjacent-custom" },
+      { schedulerClient: scheduler, now: fixedClock() },
+    );
+
+    expect(result.profile).toBe("write-adjacent-custom");
+    expect(scheduler.submissions[0]).toMatchObject({
+      identity: { profileId: "write-adjacent-custom" },
+      role: "reviewer",
+      phase: "review",
     });
   });
 
