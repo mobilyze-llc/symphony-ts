@@ -10115,9 +10115,13 @@ export class OrchestratorCore {
       attempt: runningEntry.retryAttempt,
       codexAppServerPid: runningEntry.codexAppServerPid,
       codexAppServerIdentity: runningEntry.codexAppServerIdentity,
-      laneCancellationSupported:
-        runningEntry.laneCancellationSupported === true,
-      ...laneJobMetadata(runningEntry.laneJobId),
+      ...(runningEntry.laneJobId === null
+        ? {}
+        : {
+            laneCancellationSupported:
+              runningEntry.laneCancellationSupported === true,
+            ...laneJobMetadata(runningEntry.laneJobId),
+          }),
     };
   }
 
@@ -12898,9 +12902,13 @@ export class OrchestratorCore {
               sourceSequence: options.emergencyStopSourceSequence ?? null,
               codexAppServerPid: runningEntry.codexAppServerPid,
               codexAppServerIdentity: runningEntry.codexAppServerIdentity,
-              laneCancellationSupported:
-                runningEntry.laneCancellationSupported === true,
-              ...laneJobMetadata(runningEntry.laneJobId),
+              ...(runningEntry.laneJobId === null
+                ? {}
+                : {
+                    laneCancellationSupported:
+                      runningEntry.laneCancellationSupported === true,
+                    ...laneJobMetadata(runningEntry.laneJobId),
+                  }),
             }
           : {}),
       },
@@ -14495,6 +14503,10 @@ function readInterruptedIssues(
     const codexAppServerIdentity = readProcessIdentityMetadata(
       record.codexAppServerIdentity,
     );
+    const laneJobId =
+      typeof record.laneJobId === "string" && record.laneJobId.trim() !== ""
+        ? record.laneJobId
+        : null;
     return [
       {
         issueId,
@@ -14510,11 +14522,13 @@ function readInterruptedIssues(
             ? codexAppServerPid
             : null,
         codexAppServerIdentity,
-        laneCancellationSupported: record.laneCancellationSupported === true,
-        laneJobId:
-          typeof record.laneJobId === "string" && record.laneJobId.trim() !== ""
-            ? record.laneJobId
-            : null,
+        ...(laneJobId === null
+          ? {}
+          : {
+              laneCancellationSupported:
+                record.laneCancellationSupported === true,
+              laneJobId,
+            }),
       },
     ];
   });

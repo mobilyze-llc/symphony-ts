@@ -1,9 +1,15 @@
 import type { StageExecutionBackendRunner } from "./backend.js";
 import type {
-  CrabrunnerSchedulerClient,
   CrabrunnerStageExecutionEvidence,
   CrabrunnerTerminalEvidence,
 } from "./crabrunner-backend.js";
+
+interface CancellationClient {
+  cancel?(
+    jobId: string,
+    request: CrabrunnerCancellationRequest,
+  ): Promise<CrabrunnerTerminalEvidence>;
+}
 
 export interface CancellableCrabrunnerStageExecutionBackend
   extends StageExecutionBackendRunner<CrabrunnerStageExecutionEvidence> {
@@ -21,7 +27,7 @@ export interface CrabrunnerCancellationRequest {
 }
 
 export async function cancelCrabrunnerJob(
-  client: CrabrunnerSchedulerClient,
+  client: CancellationClient,
   jobId: string,
   request: CrabrunnerCancellationRequest,
 ): Promise<CrabrunnerTerminalEvidence> {
@@ -63,7 +69,7 @@ export class CrabrunnerCancellationController {
     Promise<CrabrunnerTerminalEvidence>
   >();
 
-  constructor(private readonly client: CrabrunnerSchedulerClient) {}
+  constructor(private readonly client: CancellationClient) {}
 
   async cancel(
     jobId: string,
