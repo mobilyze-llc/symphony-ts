@@ -63,6 +63,8 @@ export interface RunStageExecutionMultiLaneInput<
     lane: TLane,
     index: number,
   ) => StageExecutionBackendRunner<TEvidence>;
+  /** Called as soon as any delegated lane is admitted by its backend. */
+  onLaneJobId?: (jobId: string) => void;
   expectedIdentity?:
     | StageExecutionLaneIdentityExpectation
     | ((
@@ -207,6 +209,9 @@ async function runOneLane<TLane, TArtifact, TAggregate, TEvidence>(
     const backendResult = await backend.execute({
       job,
       runnerInput: input.buildRunnerInput(lane, index, job),
+      ...(input.onLaneJobId === undefined
+        ? {}
+        : { onLaneJobId: input.onLaneJobId }),
     });
     return collectLane(input, {
       lane,

@@ -113,6 +113,8 @@ export interface RunCrabrunnerReviewJobGroupInput {
   lanes: readonly CrabrunnerReviewLaneSpec[];
   /** The crabrunner backend — the only dispatch surface (seam insulation). */
   backend: StageExecutionBackendRunner<CrabrunnerStageExecutionEvidence>;
+  /** Called as soon as any reviewer lane is admitted by crabrunner. */
+  onLaneJobId?: (jobId: string) => void;
   buildJobSpec: (lane: CrabrunnerReviewLaneSpec) => StageExecutionJobSpec;
   buildRunnerInput: (lane: CrabrunnerReviewLaneSpec) => AgentRunInput;
   /**
@@ -218,6 +220,9 @@ export async function runCrabrunnerReviewJobGroup(
     buildJobSpec: (lane) => input.buildJobSpec(lane),
     buildRunnerInput: (lane) => input.buildRunnerInput(lane),
     resolveBackend: () => input.backend,
+    ...(input.onLaneJobId === undefined
+      ? {}
+      : { onLaneJobId: input.onLaneJobId }),
     expectedIdentity: {
       issueId: input.issueId,
       runGroupId: input.runGroupId,

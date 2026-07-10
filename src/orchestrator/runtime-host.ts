@@ -4850,6 +4850,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           effectiveHardStops.maxDollarBudgetUsd * Math.max(1, budgetMultiplier),
       }),
     };
+    const onLaneJobId = (laneJobId: string): void => {
+      execution.laneJobId = laneJobId;
+      this.orchestrator.recordLaneJobId(issue.id, laneJobId);
+    };
     // Review and decomposed stages keep their existing dispatch contracts;
     // every branch feeds one result into the single finalization below.
     const resultPromise: Promise<StageExecutionBackendResult> =
@@ -4869,6 +4873,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
                 executionJob.identity.baseRef ?? resolveStageExecutionBaseRef(),
               artifactRoot: executionJob.identity.artifactRoot,
               backend: crabrunnerReviewBackend,
+              onLaneJobId,
             }),
           };
         }
@@ -4889,16 +4894,14 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
               baseRef:
                 executionJob.identity.baseRef ?? resolveStageExecutionBaseRef(),
               artifactRoot: executionJob.identity.artifactRoot,
+              onLaneJobId,
             }),
           };
         }
         return await stageExecutionBackend.execute({
           job: executionJob,
           runnerInput,
-          onLaneJobId: (laneJobId) => {
-            execution.laneJobId = laneJobId;
-            this.orchestrator.recordLaneJobId(issue.id, laneJobId);
-          },
+          onLaneJobId,
         });
       });
     const completion = resultPromise
@@ -4976,6 +4979,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     signal: AbortSignal;
     baseRef: string;
     artifactRoot: string;
+    onLaneJobId: (jobId: string) => void;
   }): Promise<AgentRunResult> {
     return executeDecomposedStageDispatch({
       issue: input.issue,
@@ -4986,6 +4990,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       baseRef: input.baseRef,
       artifactRoot: input.artifactRoot,
       signal: input.signal,
+      onLaneJobId: input.onLaneJobId,
       resolveBackend: this.resolveStageExecutionBackend.bind(this),
       createStageExecutionJobSpec: ({ execution, stageName }) =>
         this.createStageExecutionJobSpec({
@@ -5083,6 +5088,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     baseRef: string;
     artifactRoot: string;
     backend: StageExecutionBackendRunner;
+    onLaneJobId: (jobId: string) => void;
   }): Promise<AgentRunResult> {
     if (this.reviewStageDispatcher === null) {
       // Unreachable: resolveCrabrunnerReviewBackend already guarded this. Kept
@@ -5108,6 +5114,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       previousReviewedHeadSha: priorReview.previousReviewedHeadSha,
       priorStructuredArtifacts: priorReview.priorStructuredArtifacts,
       signal: input.signal,
+      onLaneJobId: input.onLaneJobId,
       backend:
         input.backend as StageExecutionBackendRunner<CrabrunnerStageExecutionEvidence>,
     };

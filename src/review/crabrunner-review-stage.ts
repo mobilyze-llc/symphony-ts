@@ -83,6 +83,8 @@ export interface RunCrabrunnerReviewStageInput {
   previousReviewedHeadSha?: string | null;
   lanes: readonly CrabrunnerReviewLaneSpec[];
   backend: StageExecutionBackendRunner<CrabrunnerStageExecutionEvidence>;
+  /** Called as soon as any reviewer lane is admitted by crabrunner. */
+  onLaneJobId?: (jobId: string) => void;
   buildJobSpec: (lane: CrabrunnerReviewLaneSpec) => StageExecutionJobSpec;
   buildRunnerInput: (lane: CrabrunnerReviewLaneSpec) => AgentRunInput;
   collectArtifact: (
@@ -141,6 +143,8 @@ export interface CrabrunnerReviewStageDispatchContext {
   signal: AbortSignal;
   /** The resolved crabrunner backend (the only dispatch surface). */
   backend: StageExecutionBackendRunner<CrabrunnerStageExecutionEvidence>;
+  /** Called as soon as any reviewer lane is admitted by crabrunner. */
+  onLaneJobId?: (jobId: string) => void;
 }
 
 /**
@@ -171,6 +175,9 @@ export async function runCrabrunnerReviewStage(
     currentHeadSha: input.currentHeadSha,
     lanes: input.lanes,
     backend: input.backend,
+    ...(input.onLaneJobId === undefined
+      ? {}
+      : { onLaneJobId: input.onLaneJobId }),
     buildJobSpec: input.buildJobSpec,
     buildRunnerInput: input.buildRunnerInput,
     collectArtifact: input.collectArtifact,

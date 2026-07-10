@@ -78,6 +78,13 @@ export function collectUnconfirmedEmergencyStopCleanupPlans(
       continue;
     }
 
+    // A completed trigger is not proof by itself. The runtime records this
+    // explicit false when delivery failed or remained unconfirmed; preserve
+    // the startup cleanup plan so the persisted lane can be retried.
+    if (entry.metadata.emergencyStopTerminationConfirmed === false) {
+      continue;
+    }
+
     const sourceSequence = readEmergencyStopSourceSequence(entry.metadata);
     if (sourceSequence !== null) {
       provenPlanKeys.add(

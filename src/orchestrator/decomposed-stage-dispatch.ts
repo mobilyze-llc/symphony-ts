@@ -95,6 +95,8 @@ export interface ExecuteDecomposedStageDispatchInput {
   artifactRoot: string;
   /** Abort signal threaded into each sub-stage runner input. */
   signal?: AbortSignal;
+  /** Called as soon as any delegated sub-stage lane is admitted. */
+  onLaneJobId?: (jobId: string) => void;
   /** Capsule paths available before the first sub-stage (rarely set). */
   initialCapsulePaths?: readonly string[];
   /** Resolve a backend for a job — the only dispatch path (seam insulation). */
@@ -180,6 +182,9 @@ export async function executeDecomposedStageDispatch(
           ctx,
         }),
       ),
+    ...(input.onLaneJobId === undefined
+      ? {}
+      : { onLaneJobId: input.onLaneJobId }),
     spendTokensOf: (result) => readStageTotalTokens(result.result.liveSession),
     resolveProducedCapsules: ({ ctx }) =>
       // Fail-closed handoff: a declared produced capsule counts only when the
