@@ -320,8 +320,8 @@ export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
   // delegated stage state is reconstructible by replay. Symphony stays the only
   // writer; late/duplicate results never advance the active attempt.
   "delegated_stage_attempt",
+  "altitude_reliability_retest",
 ] as const;
-
 // ---------------------------------------------------------------------------
 // Dispatch verdict events (SYMPH-405)
 // ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@
     "symphony-backlog-audit": "./dist/src/audit/backlog-audit-cli.js",
     "symphony-calibration-digest": "./dist/src/calibration/cli.js",
     "claude-runner": "./dist/src/cli/claude-runner.js",
+    "symphony-capability-retest": "./dist/src/cli/capability-retest.js",
     "symphony-manager-plan": "./dist/src/cli/manager-plan.js",
     "symphony-linear-portfolio": "./dist/src/cli/linear-portfolio-write.js",
     "symphony-spec-review-watch": "./dist/src/cli/spec-review-watch.js",

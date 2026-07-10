@@ -5,13 +5,21 @@ import { describe, expect, it } from "vitest";
 
 import {
   AUTOGEN,
+  CAPABILITY_RETEST_AUTOGEN,
   helpBlock,
   replaceAutogenRegion,
 } from "../../scripts/docs-sync.mjs";
+import { renderUsage as renderCapabilityRetestUsage } from "../../src/cli/capability-retest.js";
 import { renderUsage } from "../../src/cli/manager-plan.js";
 
 const DOC_PATH = fileURLToPath(
   new URL("../../docs/operations/02-symphony-manager-plan.md", import.meta.url),
+);
+const CAPABILITY_RETEST_DOC_PATH = fileURLToPath(
+  new URL(
+    "../../docs/operations/07-symphony-capability-retest.md",
+    import.meta.url,
+  ),
 );
 
 describe("docs-sync helpers", () => {
@@ -43,6 +51,19 @@ describe("02-symphony-manager-plan.md usage block (SYMPH-870 build-time gate)", 
       AUTOGEN.start,
       AUTOGEN.end,
       helpBlock(renderUsage()),
+    );
+    expect(doc).toBe(expected);
+  });
+});
+
+describe("07-symphony-capability-retest.md usage block", () => {
+  it("is in sync with renderUsage()", () => {
+    const doc = readFileSync(CAPABILITY_RETEST_DOC_PATH, "utf8");
+    const expected = replaceAutogenRegion(
+      doc,
+      CAPABILITY_RETEST_AUTOGEN.start,
+      AUTOGEN.end,
+      helpBlock(renderCapabilityRetestUsage()),
     );
     expect(doc).toBe(expected);
   });

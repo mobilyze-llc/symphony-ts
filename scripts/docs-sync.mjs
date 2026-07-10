@@ -25,6 +25,11 @@ export const AUTOGEN = {
   end: "<!-- AUTOGEN:help END -->",
 };
 
+export const CAPABILITY_RETEST_AUTOGEN = {
+  start:
+    "<!-- AUTOGEN:help START — managed by scripts/docs-sync.mjs; edit src/cli/capability-retest.ts renderUsage() -->",
+};
+
 const CLI_REFERENCE_DOC = "docs/operations/06-cli-reference.md";
 
 export const HELP_TARGETS = [
@@ -33,6 +38,13 @@ export const HELP_TARGETS = [
     doc: "docs/operations/02-symphony-manager-plan.md",
     cli: "dist/src/cli/manager-plan.js",
     start: AUTOGEN.start,
+    end: AUTOGEN.end,
+  },
+  {
+    name: "symphony-capability-retest",
+    doc: "docs/operations/07-symphony-capability-retest.md",
+    cli: "dist/src/cli/capability-retest.js",
+    start: CAPABILITY_RETEST_AUTOGEN.start,
     end: AUTOGEN.end,
   },
   ...[
