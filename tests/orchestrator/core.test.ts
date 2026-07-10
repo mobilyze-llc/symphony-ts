@@ -32,7 +32,6 @@ import {
   deriveAttemptedStopSignalDeliveryStatus,
   getFailedStopSignalDeliveryAttempts,
   isStopSignalDelivery,
-  sortIssuesForDispatch,
 } from "../../src/orchestrator/core.js";
 import {
   type MergeActuatorLiveState,
@@ -53,31 +52,6 @@ import type {
 } from "../../src/tracker/tracker.js";
 
 describe("orchestrator core", () => {
-  it("sorts dispatch candidates by priority, age, and identifier", () => {
-    const issues = sortIssuesForDispatch([
-      createIssue({
-        id: "3",
-        identifier: "ISSUE-3",
-        priority: 2,
-        createdAt: "2026-03-05T00:00:00.000Z",
-      }),
-      createIssue({
-        id: "2",
-        identifier: "ISSUE-2",
-        priority: 1,
-        createdAt: "2026-03-04T00:00:00.000Z",
-      }),
-      createIssue({
-        id: "1",
-        identifier: "ISSUE-1",
-        priority: 1,
-        createdAt: "2026-03-03T00:00:00.000Z",
-      }),
-    ]);
-
-    expect(issues.map((issue) => issue.id)).toEqual(["1", "2", "3"]);
-  });
-
   it("parks review completion before merge when the canonical review result artifact is missing", async () => {
     const spawnedStages: Array<string | null> = [];
     const orchestrator = createOrchestrator({

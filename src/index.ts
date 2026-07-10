@@ -1,6 +1,5 @@
 export * from "./agent/prompt-builder.js";
 export * from "./agent/runner.js";
-export * from "./audit/altitude-reliability.js";
 export * from "./audit/backlog-audit.js";
 export * from "./cli/main.js";
 export * from "./config/defaults.js";

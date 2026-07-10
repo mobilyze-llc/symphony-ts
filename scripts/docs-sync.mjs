@@ -40,14 +40,7 @@ export const HELP_TARGETS = [
     ["symphony-backlog-audit", "dist/src/audit/backlog-audit-cli.js"],
     ["symphony-calibration-digest", "dist/src/calibration/cli.js"],
     ["claude-runner", "dist/src/cli/claude-runner.js"],
-    ["symphony-manager-run-import", "dist/src/cli/manager-run-import.js"],
-    ["symphony-portfolio-audit", "dist/src/cli/portfolio-audit.js"],
-    ["symphony-portfolio-classify", "dist/src/cli/portfolio-classify.js"],
     ["symphony-linear-portfolio", "dist/src/cli/linear-portfolio-write.js"],
-    [
-      "symphony-investigate-productivity-report",
-      "dist/src/cli/investigate-productivity-report.js",
-    ],
     ["symphony-spec-review-watch", "dist/src/cli/spec-review-watch.js"],
     ["symphonyctl", "dist/src/cli/symphonyctl.js"],
   ].map(([name, cli]) => ({

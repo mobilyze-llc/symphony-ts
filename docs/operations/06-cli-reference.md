@@ -89,39 +89,6 @@ Options:
 ```
 <!-- AUTOGEN:help:claude-runner END -->
 
-## symphony-manager-run-import
-
-<!-- AUTOGEN:help:symphony-manager-run-import START — managed by scripts/docs-sync.mjs -->
-```text
-Usage: symphony-manager-run-import --input <ledger.json> [--output <manager-runs.jsonl>]
-
-Import a curated historical manager lane ledger into Symphony manager-run JSONL entries.
-When --output is omitted or set to -, JSONL is written to stdout.
-
-Example:
-  symphony-manager-run-import --input tests/fixtures/manager-run-ledgers/019ea74a-0df6-7983-bbff-60c7df539e80.json --output /tmp/manager-runs.jsonl
-```
-<!-- AUTOGEN:help:symphony-manager-run-import END -->
-
-## symphony-portfolio-audit
-
-<!-- AUTOGEN:help:symphony-portfolio-audit START — managed by scripts/docs-sync.mjs -->
-```text
-Usage:
-  symphony-portfolio-audit --issues-file <issues.json> [--projects-file <projects.json>] [--json]
-```
-<!-- AUTOGEN:help:symphony-portfolio-audit END -->
-
-## symphony-portfolio-classify
-
-<!-- AUTOGEN:help:symphony-portfolio-classify START — managed by scripts/docs-sync.mjs -->
-```text
-Usage:
-  symphony-portfolio-classify classify --issue-file <issue.json>
-  symphony-portfolio-classify validate-registry --projects-file <projects.json>
-```
-<!-- AUTOGEN:help:symphony-portfolio-classify END -->
-
 ## symphony-linear-portfolio
 
 <!-- AUTOGEN:help:symphony-linear-portfolio START — managed by scripts/docs-sync.mjs -->
@@ -131,21 +98,6 @@ Usage:
   symphony-linear-portfolio edit <ISSUE> --team <SYMPH|MOB> --description-file <file> [--title <title>] [--project <id|name|slug>] [--dry-run]
 ```
 <!-- AUTOGEN:help:symphony-linear-portfolio END -->
-
-## symphony-investigate-productivity-report
-
-<!-- AUTOGEN:help:symphony-investigate-productivity-report START — managed by scripts/docs-sync.mjs -->
-```text
-Usage: symphony-investigate-productivity-report --workspace <repo-root> [--output <file>]
-
-Reads durable dispatcher stage_record telemetry and prints investigate productivity JSON.
-
-Options:
-  --workspace <dir>  Workspace containing .symphony/run-journals/dispatcher.jsonl
-  --output <file>    Also write the JSON report to this file
-  --help             Show this help
-```
-<!-- AUTOGEN:help:symphony-investigate-productivity-report END -->
 
 ## symphony-spec-review-watch
 
