@@ -455,6 +455,10 @@
       "read_sites": ["src/orchestrator/runtime-host.ts"]
     },
     {
+      "name": "SYMPHONY_QUEUE_HYGIENE_CARRY_FORWARD_MAX_HEARTBEATS",
+      "read_sites": ["src/orchestrator/runtime-host.ts"]
+    },
+    {
       "name": "SYMPHONY_QUEUE_HYGIENE_HEARTBEAT_MS",
       "read_sites": ["src/orchestrator/runtime-host.ts"]
     },

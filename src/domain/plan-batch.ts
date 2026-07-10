@@ -90,6 +90,8 @@ export type NormalizePlanBatchResult =
 
 export interface NormalizePlanBatchOptions {
   allowedModes?: readonly PlanBatchMode[];
+  /** Candidate identifiers rejected at the planner-to-batch eligibility boundary. */
+  ineligibleIssueIdentifiers?: readonly string[] | ReadonlySet<string>;
 }
 
 export function normalizePlanBatch(
@@ -112,6 +114,19 @@ export function normalizePlanBatch(
   }
   if (members.length === 0) {
     return { ok: false, rejection: "empty batch members" };
+  }
+  const configuredIneligibleIssueIdentifiers =
+    options.ineligibleIssueIdentifiers ?? [];
+  const ineligibleIssueIdentifiers =
+    configuredIneligibleIssueIdentifiers instanceof Set
+      ? configuredIneligibleIssueIdentifiers
+      : new Set(configuredIneligibleIssueIdentifiers);
+  if (
+    members.some((member) =>
+      ineligibleIssueIdentifiers.has(member.issueIdentifier),
+    )
+  ) {
+    return { ok: false, rejection: "dispatch-ineligible batch member" };
   }
   if (
     rawBatch.canary !== undefined &&

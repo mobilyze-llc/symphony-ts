@@ -367,7 +367,7 @@ describe("assembleShadowPlannerContext", () => {
     expect(context.health).toEqual(health);
   });
 
-  it("excludes audit kill, stale, and supersession identifiers from planner candidates (SYMPH-983, SYMPH-1014)", () => {
+  it("annotates audit kills while excluding stale and supersession identifiers (SYMPH-989, SYMPH-1014)", () => {
     const context = assembleShadowPlannerContext({
       candidates: [
         issue("u1", "SYMPH-KEEP"),
@@ -378,14 +378,51 @@ describe("assembleShadowPlannerContext", () => {
       inFlight: [],
       envelope: ENVELOPE,
       auditDispositions: [
-        { type: "kill", issueIdentifiers: ["SYMPH-KILL"] },
+        {
+          type: "kill",
+          issueIdentifiers: ["SYMPH-KILL"],
+          classification: "kill",
+          rootIssueIdentifier: "SYMPH-ROOT",
+        },
         { type: "stale", issueIdentifiers: ["SYMPH-STALE"] },
         { type: "supersession", issueIdentifiers: ["SYMPH-SUPERSEDED"] },
       ],
     });
     expect(context.backlog.map((c) => c.issueIdentifier)).toEqual([
       "SYMPH-KEEP",
+      "SYMPH-KILL",
     ]);
+    expect(context.backlog[1]?.dispatchExclusionReasons).toEqual([
+      "audit:kill",
+    ]);
+    expect(context.backlog[1]?.auditAnnotations).toEqual([
+      { classification: "kill", rootIssueIdentifier: "SYMPH-ROOT" },
+    ]);
+  });
+
+  it("retains symptomatic root-cause audit context without excluding dispatch", () => {
+    const context = assembleShadowPlannerContext({
+      candidates: [issue("u1", "SYMPH-SYMPTOM")],
+      inFlight: [],
+      envelope: ENVELOPE,
+      auditDispositions: [
+        {
+          type: "advisory",
+          issueIdentifiers: ["SYMPH-SYMPTOM"],
+          classification: "symptomatic_of_root",
+          rootIssueIdentifier: "SYMPH-ROOT",
+        },
+      ],
+    });
+
+    expect(context.backlog).toHaveLength(1);
+    expect(context.backlog[0]?.auditAnnotations).toEqual([
+      {
+        classification: "symptomatic_of_root",
+        rootIssueIdentifier: "SYMPH-ROOT",
+      },
+    ]);
+    expect(context.backlog[0]?.dispatchExclusionReasons).toBeUndefined();
   });
 
   it("carries duplicate audit clusters onto surviving planner candidates (SYMPH-983)", () => {
@@ -479,12 +516,66 @@ describe("assembleShadowPlannerContext", () => {
         generatedAt: "2026-06-30T00:00:00.000Z",
         modelTier: "local_low_risk",
       },
+      {
+        proposalId: "p5",
+        findingId: "f5",
+        findingType: "other",
+        issueIds: ["f"],
+        issueIdentifiers: ["SYMPH-F"],
+        summary: "symptom",
+        evidence: "root cause is tracked elsewhere",
+        confidence: "high",
+        cull: {
+          classification: "symptomatic_of_root",
+          killReason: null,
+          marker: null,
+          rootIssueIdentifier: "SYMPH-ROOT",
+          advisoryOnly: true,
+        },
+        codeGroundingStatus: null,
+        codeGroundingEvidence: null,
+        generatedAt: "2026-06-30T00:00:00.000Z",
+        modelTier: "local_low_risk",
+      },
+      {
+        proposalId: "p6",
+        findingId: "f6",
+        findingType: "stale",
+        issueIds: ["g"],
+        issueIdentifiers: ["SYMPH-G"],
+        summary: "stale symptom",
+        evidence: "obsolete even though the audit retained a root advisory",
+        confidence: "high",
+        cull: {
+          classification: "symptomatic_of_root",
+          killReason: null,
+          marker: null,
+          rootIssueIdentifier: "SYMPH-ROOT",
+          advisoryOnly: true,
+        },
+        codeGroundingStatus: null,
+        codeGroundingEvidence: null,
+        generatedAt: "2026-06-30T00:00:00.000Z",
+        modelTier: "local_low_risk",
+      },
     ]);
     expect(dispositions).toEqual([
       { type: "duplicate", issueIdentifiers: ["SYMPH-A", "SYMPH-B"] },
       { type: "stale", issueIdentifiers: ["SYMPH-C"] },
-      { type: "kill", issueIdentifiers: ["SYMPH-D"] },
+      {
+        type: "kill",
+        issueIdentifiers: ["SYMPH-D"],
+        classification: "kill",
+        rootIssueIdentifier: null,
+      },
       { type: "supersession", issueIdentifiers: ["SYMPH-E"] },
+      {
+        type: "advisory",
+        issueIdentifiers: ["SYMPH-F"],
+        classification: "symptomatic_of_root",
+        rootIssueIdentifier: "SYMPH-ROOT",
+      },
+      { type: "stale", issueIdentifiers: ["SYMPH-G"] },
     ]);
   });
 

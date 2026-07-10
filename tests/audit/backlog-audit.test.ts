@@ -25,6 +25,8 @@ import {
   selectOffPressureCullIssues,
 } from "../../src/audit/backlog-audit.js";
 import type { Issue } from "../../src/domain/model.js";
+import { buildBacklogHygieneProposals } from "../../src/orchestrator/backlog-hygiene.js";
+import { buildShadowPlannerAuditDispositions } from "../../src/orchestrator/standing-plan-shadow.js";
 
 const ISSUE: Issue = {
   id: "issue-1",
@@ -815,7 +817,7 @@ describe("backlog audit", () => {
     }
   });
 
-  it("strips cull actions from hygiene-mode findings (cull is off-path only)", async () => {
+  it("preserves advisory cull metadata while stripping hygiene mutation authority", async () => {
     const fetchFn = vi.fn(async () =>
       chatCompletionResponse(
         JSON.stringify({
@@ -832,7 +834,7 @@ describe("backlog audit", () => {
             {
               findingId: "F-1",
               type: "stale",
-              issueIdentifiers: ["SYMPH-123"],
+              issueIdentifiers: ["SYMPH-100"],
               summary: "Stale ticket.",
               evidence: "No longer matches the plan.",
               confidence: "high",
@@ -840,6 +842,7 @@ describe("backlog audit", () => {
               cull: {
                 classification: "kill",
                 killReason: "unreachable",
+                rootIssueIdentifier: "SYMPH-100",
               },
             },
           ],
@@ -859,8 +862,34 @@ describe("backlog audit", () => {
       fetchFn: fetchFn as unknown as typeof fetch,
     });
 
-    // Default hygiene mode: the cull field is stripped so it cannot reach a plan.
-    expect(report.verdict.findings[0]?.cull ?? null).toBeNull();
+    // No mode is passed: production's default hygiene wiring retains only the
+    // planner annotation and cannot carry an actionable reason/marker.
+    expect(report.verdict.findings[0]?.cull).toEqual({
+      classification: "kill",
+      killReason: null,
+      marker: null,
+      rootIssueIdentifier: "SYMPH-100",
+      advisoryOnly: true,
+    });
+    const proposals = buildBacklogHygieneProposals({
+      report,
+      candidateIssues: [ISSUE],
+      maxProposalsPerProductPerPoll: 3,
+      modelTierDecision: {
+        tier: "local_low_risk",
+        reason: "test",
+        corpusId: "test",
+        failedDimensions: [],
+      },
+    });
+    expect(buildShadowPlannerAuditDispositions(proposals)).toEqual([
+      {
+        type: "kill",
+        issueIdentifiers: ["SYMPH-100"],
+        classification: "kill",
+        rootIssueIdentifier: "SYMPH-100",
+      },
+    ]);
   });
 
   it("dedupes cull findings to one per ticket so a ticket is not proposed twice", async () => {

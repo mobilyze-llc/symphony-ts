@@ -5,9 +5,7 @@ import {
   type BacklogAuditFindingType,
   type BacklogAuditReport,
   type RunBacklogAuditInput,
-  normalizeCullRootIssueIdentifier,
   runBacklogAudit,
-  stableCullMarker,
 } from "../audit/backlog-audit.js";
 import type { ResolvedWorkflowConfig } from "../config/types.js";
 import type {
@@ -15,6 +13,10 @@ import type {
   Issue,
   VerdictActor,
 } from "../domain/model.js";
+import {
+  buildConservativeCullApplicationPlan,
+  resolveBacklogHygieneMutationAuthority,
+} from "./backlog-hygiene-authority.js";
 import type {
   CodeGroundingReport,
   CodeGroundingTarget,
@@ -22,6 +24,12 @@ import type {
   RunCodeGroundingInput,
 } from "./code-grounding.js";
 import { runSharedCodeGrounding } from "./grounding-service.js";
+
+export {
+  buildConservativeCullApplicationPlan,
+  type ConservativeCullApplicationPlan,
+  type ConservativeCullOperatorDecision,
+} from "./backlog-hygiene-authority.js";
 
 export const BACKLOG_HYGIENE_PROPOSAL_LABELS = {
   proposed: "hygiene:proposed",
@@ -130,17 +138,6 @@ export interface BuildBacklogHygieneCodeGroundingInput {
 }
 
 export type BacklogHygieneProposalDecision = "accepted" | "rejected";
-
-export type ConservativeCullOperatorDecision = "none" | "agreed" | "disagreed";
-
-export interface ConservativeCullApplicationPlan {
-  proposalId: string;
-  classification: BacklogAuditCullFinding["classification"] | null;
-  requiresOperatorAgree: boolean;
-  cancelIssue: boolean;
-  markerLabels: string[];
-  blockedBy: Array<{ issueIdentifier: string; rootIssueIdentifier: string }>;
-}
 
 const BACKLOG_HYGIENE_SCOPE_ID = "__backlog_hygiene__";
 const BACKLOG_HYGIENE_SCOPE_IDENTIFIER = "__backlog_hygiene__";
@@ -450,6 +447,9 @@ export function buildBacklogHygieneDecisionJournalEntry(input: {
   const labelTransitionAdd = [decisionLabel, ...cullPlan.markerLabels].filter(
     (label, index, labels) => labels.indexOf(label) === index,
   );
+  const mutationAuthority = resolveBacklogHygieneMutationAuthority(
+    input.proposal.cull,
+  );
   return {
     idempotencyKey: `hygiene_proposal_decision:${input.proposal.proposalId}:${input.decision}:${input.actor.kind}@${input.actor.host}`,
     timestamp: input.timestamp,
@@ -471,10 +471,7 @@ export function buildBacklogHygieneDecisionJournalEntry(input: {
       finding_type: input.proposal.findingType,
       decision: input.decision,
       reason: input.reason,
-      mutation_authority:
-        input.proposal.cull?.classification === "kill"
-          ? "operator_agree_required"
-          : "calibration_label_only",
+      mutation_authority: mutationAuthority,
       issue_state_mutation: cullPlan.cancelIssue,
       cull: input.proposal.cull,
       cull_application: cullPlan,
@@ -490,67 +487,6 @@ export function buildBacklogHygieneDecisionJournalEntry(input: {
             },
       actor: actorMetadata(input.actor),
     },
-  };
-}
-
-export function buildConservativeCullApplicationPlan(input: {
-  proposal: BacklogHygieneProposal;
-  decision: ConservativeCullOperatorDecision;
-}): ConservativeCullApplicationPlan {
-  const cull = input.proposal.cull;
-  if (cull === null) {
-    return {
-      proposalId: input.proposal.proposalId,
-      classification: null,
-      requiresOperatorAgree: false,
-      cancelIssue: false,
-      markerLabels: [],
-      blockedBy: [],
-    };
-  }
-  const agreed = input.decision === "agreed";
-  // The marker is derived from the authoritative (classification, killReason)
-  // via the same stableCullMarker used at normalization — never trusted from the
-  // model-supplied `cull.marker` string. A marker is non-null only for a kill or
-  // downgrade carrying a valid stable kill reason; keep/symptomatic, a reasonless
-  // kill (killReason:null), or any hand-crafted marker yields null. This makes
-  // the planner robust to malformed input regardless of upstream normalization
-  // (SYMPH-966 AC#4).
-  const canonicalMarker = stableCullMarker({
-    classification: cull.classification,
-    killReason: cull.killReason,
-  });
-  const markerLabels =
-    agreed && canonicalMarker !== null ? [canonicalMarker] : [];
-  const rootIssueIdentifier = normalizeCullRootIssueIdentifier(
-    cull.rootIssueIdentifier,
-  );
-  // A kill may only cancel when it has a valid stable-reason marker (SYMPH-966
-  // AC#4): a reasonless kill (killReason:null → null marker) must not cancel a
-  // ticket, or a malformed kill could silently drop a real defect.
-  const killWithValidMarker =
-    cull.classification === "kill" && canonicalMarker !== null;
-  return {
-    proposalId: input.proposal.proposalId,
-    classification: cull.classification,
-    requiresOperatorAgree: killWithValidMarker,
-    cancelIssue: killWithValidMarker && agreed,
-    markerLabels,
-    blockedBy:
-      cull.classification === "symptomatic_of_root" &&
-      agreed &&
-      rootIssueIdentifier !== null
-        ? input.proposal.issueIdentifiers
-            // Drop self-references: a ticket symptomatic of itself would create
-            // a circular blockedBy that leaves it permanently self-blocked.
-            .filter(
-              (issueIdentifier) => issueIdentifier !== rootIssueIdentifier,
-            )
-            .map((issueIdentifier) => ({
-              issueIdentifier,
-              rootIssueIdentifier,
-            }))
-        : [],
   };
 }
 

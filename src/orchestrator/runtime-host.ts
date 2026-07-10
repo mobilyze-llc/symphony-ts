@@ -226,6 +226,13 @@ import { getDisplayVersion } from "../version.js";
 import { WorkspaceHookRunner } from "../workspace/hooks.js";
 import { WorkspaceManager } from "../workspace/workspace-manager.js";
 import {
+  type BacklogHygieneProposalTickResult,
+  DEFAULT_BACKLOG_HYGIENE_CARRY_FORWARD_HEARTBEATS,
+  coordinateBacklogHygieneShadowTick,
+  createBacklogHygieneProposalState,
+  recordBacklogHygieneProposals,
+} from "./backlog-hygiene-runtime-coordinator.js";
+import {
   type BacklogHygieneProposal,
   QUEUE_TRIAGE_EVALUATION_DIMENSIONS,
   QUEUE_TRIAGE_GOLDEN_CORPUS,
@@ -6633,30 +6640,29 @@ export async function startRuntimeService(
       });
   };
 
-  let backlogHygieneProposalTickInFlight = false;
-  let backlogHygieneProposalLastRunAtMs: number | null = null;
-  const runBacklogHygieneProposalTickIfConfigured = (
+  const backlogHygieneProposalState = createBacklogHygieneProposalState();
+  const runBacklogHygieneProposalTickIfConfigured = async (
     fetchSharedCandidateIssues: () => Promise<Issue[]>,
-  ): Promise<BacklogHygieneProposal[]> => {
-    if (backlogHygieneProposalTickInFlight) {
-      return Promise.resolve([]);
+  ): Promise<BacklogHygieneProposalTickResult> => {
+    if (backlogHygieneProposalState.inFlight) {
+      return { status: "skipped", reason: "in_flight" };
     }
     const hygieneConfig = resolveRuntimeBacklogHygieneConfig(process.env);
     if (hygieneConfig === null) {
-      return Promise.resolve([]);
+      return { status: "skipped", reason: "unconfigured" };
     }
     const nowMs = Date.now();
     const heartbeatMs = resolveRuntimeBacklogHygieneHeartbeatMs(process.env);
     if (
-      backlogHygieneProposalLastRunAtMs !== null &&
-      nowMs - backlogHygieneProposalLastRunAtMs < heartbeatMs
+      backlogHygieneProposalState.lastRunAtMs !== null &&
+      nowMs - backlogHygieneProposalState.lastRunAtMs < heartbeatMs
     ) {
-      return Promise.resolve([]);
+      return { status: "skipped", reason: "heartbeat" };
     }
-    backlogHygieneProposalLastRunAtMs = nowMs;
-    backlogHygieneProposalTickInFlight = true;
+    backlogHygieneProposalState.lastRunAtMs = nowMs;
+    backlogHygieneProposalState.inFlight = true;
     const runStartedAt = new Date();
-    return (async () => {
+    return (async (): Promise<BacklogHygieneProposalTickResult> => {
       const candidateIssues = await fetchSharedCandidateIssues();
       const state = runtimeHost.getState();
       const activeIssueIds = Object.keys(state.running);
@@ -6697,43 +6703,29 @@ export async function startRuntimeService(
         runId: `backlog-hygiene-${runStartedAt.toISOString()}`,
         codeGroundingTarget: null,
       });
-      let recordedProposalCount = 0;
-      let recordFailureCount = 0;
-      for (const proposal of result.proposals) {
-        try {
-          const sequence = await runtimeHost.recordBacklogHygieneProposal({
-            proposal,
-            actor: { kind: "dispatcher", host: hostname() },
-          });
-          if (sequence === null) {
-            recordFailureCount += 1;
-            await logger.warn(
-              "backlog_hygiene_proposal_record_failed",
-              "Failed to record backlog hygiene proposal (report-only; dispatch unaffected).",
-              {
-                outcome: "degraded",
-                proposal_id: proposal.proposalId,
-                issue_identifiers: proposal.issueIdentifiers,
-                detail: "record returned no journal sequence",
-              },
-            );
-            continue;
-          }
-          recordedProposalCount += 1;
-        } catch (error) {
-          recordFailureCount += 1;
-          await logger.warn(
-            "backlog_hygiene_proposal_record_failed",
-            "Failed to record backlog hygiene proposal (report-only; dispatch unaffected).",
-            {
-              outcome: "degraded",
-              proposal_id: proposal.proposalId,
-              issue_identifiers: proposal.issueIdentifiers,
-              detail: toErrorMessage(error),
-            },
-          );
-        }
+      if (result.status !== "completed") {
+        await logger.warn(
+          "backlog_hygiene_tick_failed",
+          "Backlog hygiene proposal lane did not complete; preserving the last successful dispositions.",
+          {
+            outcome: "degraded",
+            status: result.status,
+            warning_count: result.warnings.length,
+            warnings: result.warnings,
+          },
+        );
+        return { status: "unavailable" };
       }
+      const { recordedProposalCount, recordFailureCount } =
+        await recordBacklogHygieneProposals({
+          proposals: result.proposals,
+          record: (proposal) =>
+            runtimeHost.recordBacklogHygieneProposal({
+              proposal,
+              actor: { kind: "dispatcher", host: hostname() },
+            }),
+          logger,
+        });
       await logger.info(
         "backlog_hygiene_tick_completed",
         "Backlog hygiene proposal lane completed (report-only).",
@@ -6748,7 +6740,11 @@ export async function startRuntimeService(
           warnings: result.warnings,
         },
       );
-      return result.proposals;
+      backlogHygieneProposalState.lastSuccessful = {
+        completedAtMs: Date.now(),
+        proposals: [...result.proposals],
+      };
+      return { status: "ran", proposals: result.proposals };
     })()
       .catch(async (error) => {
         await logger.warn(
@@ -6756,13 +6752,14 @@ export async function startRuntimeService(
           "Backlog hygiene proposal lane failed (report-only; dispatch unaffected).",
           {
             outcome: "degraded",
+            status: "unavailable",
             detail: toErrorMessage(error),
           },
         );
-        return [];
+        return { status: "unavailable" as const };
       })
       .finally(() => {
-        backlogHygieneProposalTickInFlight = false;
+        backlogHygieneProposalState.inFlight = false;
       });
   };
 
@@ -6774,22 +6771,25 @@ export async function startRuntimeService(
       await logPollCycleResult(logger, result, durationMs);
       const fetchSharedCandidateIssues = createPollCandidateIssueFetcher();
       void (async () => {
-        const hygieneProposals =
-          await runBacklogHygieneProposalTickIfConfigured(
-            fetchSharedCandidateIssues,
-          );
-        // SYMPH-983 (council P2-1): an empty hygieneProposals can mean a prior
-        // hygiene tick is still in flight (the guard short-circuits to []), not
-        // that the backlog is clean. Skip the shadow planner tick in that case so
-        // it never plans against un-pruned candidates — otherwise a fast poll could
-        // let an audit-killed identifier reach a planned batch before the audit
-        // completes.
-        if (!backlogHygieneProposalTickInFlight) {
-          runStandingPlanShadowTickIfEnabled(
-            fetchSharedCandidateIssues,
-            hygieneProposals,
-          );
-        }
+        const hygieneTick = await runBacklogHygieneProposalTickIfConfigured(
+          fetchSharedCandidateIssues,
+        );
+        await coordinateBacklogHygieneShadowTick({
+          tick: hygieneTick,
+          lastSuccessful: backlogHygieneProposalState.lastSuccessful,
+          heartbeatMs: resolveRuntimeBacklogHygieneHeartbeatMs(process.env),
+          maxCarryForwardHeartbeats:
+            parseOptionalPositiveIntegerEnv(
+              process.env.SYMPHONY_QUEUE_HYGIENE_CARRY_FORWARD_MAX_HEARTBEATS,
+            ) ?? DEFAULT_BACKLOG_HYGIENE_CARRY_FORWARD_HEARTBEATS,
+          nowMs: Date.now(),
+          logger,
+          runShadow: (proposals) =>
+            runStandingPlanShadowTickIfEnabled(
+              fetchSharedCandidateIssues,
+              proposals,
+            ),
+        });
       })().catch((error) => {
         void logger.warn(
           "runtime_post_poll_shadow_chain_failed",

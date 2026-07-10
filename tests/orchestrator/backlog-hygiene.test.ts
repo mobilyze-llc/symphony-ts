@@ -581,6 +581,41 @@ describe("backlog hygiene proposal lane (SYMPH-484)", () => {
     ).toEqual([{ issueIdentifier: "SYMPH-956", rootIssueIdentifier: "S-1" }]);
   });
 
+  it("never builds mutation actions from hygiene advisory cull metadata", () => {
+    const proposal = {
+      proposalId: "p-advisory",
+      findingId: "F-advisory",
+      findingType: "other",
+      issueIds: ["956"],
+      issueIdentifiers: ["SYMPH-956"],
+      summary: "Advisory root-cause classification",
+      evidence: "Default hygiene audit metadata.",
+      confidence: "high",
+      cull: {
+        classification: "symptomatic_of_root",
+        killReason: null,
+        marker: null,
+        rootIssueIdentifier: "SYMPH-947",
+        advisoryOnly: true,
+      },
+      codeGroundingStatus: null,
+      codeGroundingEvidence: null,
+      generatedAt: "2026-06-29T00:00:00.000Z",
+      modelTier: "local_low_risk",
+    } as BacklogHygieneProposal;
+
+    expect(
+      buildConservativeCullApplicationPlan({ proposal, decision: "agreed" }),
+    ).toEqual({
+      proposalId: "p-advisory",
+      classification: null,
+      requiresOperatorAgree: false,
+      cancelIssue: false,
+      markerLabels: [],
+      blockedBy: [],
+    });
+  });
+
   it("parks symptomatic survivors behind their existing root ticket via blockedBy intent", () => {
     const [proposal] = buildBacklogHygieneProposals({
       report: {

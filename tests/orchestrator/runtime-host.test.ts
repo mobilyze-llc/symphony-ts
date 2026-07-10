@@ -6256,10 +6256,11 @@ describe("startRuntimeService shutdown", () => {
     }
   });
 
-  it("runs hygiene before shadow planning and applies audit dispositions to planner candidates (SYMPH-983)", async () => {
+  it("carries hygiene dispositions across skips and expires them after unavailable ticks (SYMPH-989, SYMPH-1005)", async () => {
     vi.stubEnv("SYMPHONY_QUEUE_AUDIT_BASE_URL", "http://127.0.0.1:43210/v1");
     vi.stubEnv("SYMPHONY_QUEUE_AUDIT_MODEL", "local-audit");
-    vi.stubEnv("SYMPHONY_QUEUE_HYGIENE_HEARTBEAT_MS", "900000");
+    vi.stubEnv("SYMPHONY_QUEUE_HYGIENE_HEARTBEAT_MS", "50");
+    vi.stubEnv("SYMPHONY_QUEUE_HYGIENE_CARRY_FORWARD_MAX_HEARTBEATS", "10");
     const originalPath = process.env.PATH ?? "";
     const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-shared-fetch-"));
     const fakeBin = mkdtempSync(join(tmpdir(), "symph-fake-git-"));
@@ -6298,7 +6299,10 @@ describe("startRuntimeService shutdown", () => {
       },
     ]);
     let capturedPrompt = "";
+    const capturedPrompts: string[] = [];
+    const nonCompletedRunPromptCounts: number[] = [];
     let hygieneIssues: Issue[] | null = null;
+    let hygieneRunCount = 0;
     const tickOrder: string[] = [];
     const state = {
       running: {},
@@ -6334,6 +6338,28 @@ describe("startRuntimeService shutdown", () => {
             OrchestratorRuntimeHost["runBacklogHygieneProposalLane"]
           >[0],
         ) => {
+          hygieneRunCount += 1;
+          if (hygieneRunCount === 2) {
+            nonCompletedRunPromptCounts.push(capturedPrompts.length);
+            return {
+              status: "audit_failed",
+              report: null,
+              proposals: [],
+              warnings: ["audit unavailable"],
+            };
+          }
+          if (hygieneRunCount === 3) {
+            nonCompletedRunPromptCounts.push(capturedPrompts.length);
+            return {
+              status: "model_tier_blocked",
+              report: null,
+              proposals: [],
+              warnings: ["model tier blocked"],
+            };
+          }
+          if (hygieneRunCount > 3) {
+            throw new Error("audit unavailable after the blocked tick");
+          }
           tickOrder.push("hygiene");
           hygieneIssues = input.issues;
           return {
@@ -6400,7 +6426,7 @@ describe("startRuntimeService shutdown", () => {
     } as unknown as OrchestratorRuntimeHost;
     const config = {
       ...createConfig(),
-      polling: { intervalMs: 900_000 },
+      polling: { intervalMs: 5 },
       workspace: { root: workspaceRoot },
       queueTriage: {
         enabled: true,
@@ -6441,6 +6467,7 @@ describe("startRuntimeService shutdown", () => {
         tickOrder.push(isReviewPrompt ? "review" : "planner");
         if (!isReviewPrompt) {
           capturedPrompt = prompt;
+          capturedPrompts.push(prompt);
         }
         return {
           status: "ok",
@@ -6455,24 +6482,75 @@ describe("startRuntimeService shutdown", () => {
         expect(hygieneIssues).not.toBeNull();
         expect(capturedPrompt).toContain("SYMPH-SHARED");
         expect(
-          entries.some((entry) => entry.event === "queue_triage_shadow_plan"),
+          entries.filter((entry) => entry.event === "queue_triage_shadow_plan")
+            .length,
+        ).toBeGreaterThanOrEqual(2);
+        expect(
+          entries.some(
+            (entry) =>
+              entry.event === "backlog_hygiene_tick_skipped" &&
+              entry.outcome === "carried_forward",
+          ),
         ).toBe(true);
       });
-      expect(tracker.fetchCandidateIssues).toHaveBeenCalledTimes(1);
+      expect(runtimeHost.runBacklogHygieneProposalLane).toHaveBeenCalled();
       expect(hygieneIssues).toEqual([sharedIssue, killedIssue, duplicateIssue]);
-      expect(tickOrder).toEqual(["hygiene", "planner", "review"]);
-      expect(capturedPrompt).not.toContain("SYMPH-KILLED");
+      expect(tickOrder.slice(0, 3)).toEqual(["hygiene", "planner", "planner"]);
+      expect(capturedPrompt).toContain("SYMPH-KILLED");
+      expect(capturedPrompt).toContain(
+        "DISPATCH-INELIGIBLE audit annotation: audit:kill",
+      );
       expect(capturedPrompt).toContain(
         "duplicate cluster: SYMPH-SHARED, SYMPH-DUP",
       );
-      const shadowPlan = entries.find(
+      await vi.waitFor(() => {
+        expect(capturedPrompts.length).toBeGreaterThanOrEqual(3);
+      });
+      for (const prompt of capturedPrompts.slice(0, 3)) {
+        expect(prompt).toContain(
+          "DISPATCH-INELIGIBLE audit annotation: audit:kill",
+        );
+        expect(prompt).toContain("duplicate cluster: SYMPH-SHARED, SYMPH-DUP");
+      }
+      await vi.waitFor(() => {
+        expect(
+          entries.some(
+            (entry) =>
+              entry.event === "backlog_hygiene_tick_failed" &&
+              entry.status === "audit_failed" &&
+              entry.outcome === "degraded",
+          ),
+        ).toBe(true);
+        expect(
+          entries.some(
+            (entry) =>
+              entry.event === "backlog_hygiene_tick_failed" &&
+              entry.status === "model_tier_blocked" &&
+              entry.outcome === "degraded",
+          ),
+        ).toBe(true);
+      });
+      await vi.waitFor(() => {
+        expect(nonCompletedRunPromptCounts).toHaveLength(2);
+        expect(capturedPrompts.length).toBeGreaterThan(
+          nonCompletedRunPromptCounts[1] ?? Number.POSITIVE_INFINITY,
+        );
+      });
+      for (const promptCount of nonCompletedRunPromptCounts) {
+        expect(capturedPrompts[promptCount]).toContain(
+          "DISPATCH-INELIGIBLE audit annotation: audit:kill",
+        );
+        expect(capturedPrompts[promptCount]).toContain(
+          "duplicate cluster: SYMPH-SHARED, SYMPH-DUP",
+        );
+      }
+      const shadowPlans = entries.filter(
         (entry) => entry.event === "queue_triage_shadow_plan",
       );
-      expect(shadowPlan?.batches).toEqual([
-        expect.objectContaining({
-          members: ["SYMPH-SHARED"],
-        }),
-      ]);
+      expect(shadowPlans.length).toBeGreaterThanOrEqual(2);
+      for (const shadowPlan of shadowPlans) {
+        expect(shadowPlan.batches).toEqual([]);
+      }
       expect(capturedPrompt).toContain("## Queue health");
       expect(capturedPrompt).toContain("- Review-round depth: 4");
       expect(tracker.fetchIssuesByStates).toHaveBeenCalledWith(["Triage"]);
@@ -6485,11 +6563,117 @@ describe("startRuntimeService shutdown", () => {
           (entry) => entry.event === "backlog_hygiene_tick_completed",
         ),
       ).toBe(true);
+      await vi.waitFor(() => {
+        expect(
+          entries.some(
+            (entry) =>
+              entry.event === "backlog_hygiene_tick_failed" &&
+              entry.outcome === "degraded",
+          ),
+        ).toBe(true);
+        expect(
+          entries.some(
+            (entry) =>
+              entry.event === "backlog_hygiene_dispositions_expired" &&
+              entry.outcome === "degraded",
+          ),
+        ).toBe(true);
+      });
+      expect(
+        vi.mocked(runtimeHost.runBacklogHygieneProposalLane).mock.calls.length,
+      ).toBeGreaterThanOrEqual(2);
     } finally {
       await service.shutdown();
       vi.unstubAllEnvs();
       rmSync(workspaceRoot, { recursive: true, force: true });
       rmSync(fakeBin, { recursive: true, force: true });
+    }
+  });
+
+  it("warns when the first hygiene tick is unavailable with no dispositions to carry (SYMPH-1005)", async () => {
+    vi.stubEnv("SYMPHONY_QUEUE_AUDIT_BASE_URL", "http://127.0.0.1:43210/v1");
+    vi.stubEnv("SYMPHONY_QUEUE_AUDIT_MODEL", "local-audit");
+    vi.stubEnv("SYMPHONY_QUEUE_HYGIENE_HEARTBEAT_MS", "900000");
+    const tracker = createTracker({ candidates: [] });
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const runtimeHost = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      agentRunner: new FakeAgentRunner(),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+    vi.spyOn(runtimeHost, "runBacklogHygieneProposalLane").mockResolvedValue({
+      status: "audit_failed",
+      report: null,
+      proposals: [],
+      warnings: ["audit unavailable"],
+    });
+    const plannerRunner = vi.fn(async () => ({
+      status: "ok" as const,
+      markdown: "# Plan\n",
+    }));
+    const config = {
+      ...createConfig(),
+      polling: { intervalMs: 5 },
+      queueTriage: {
+        enabled: true,
+        shadowMode: true,
+        plannerModel: "opus",
+        heartbeatMs: 1,
+        envelope: {
+          version: 1,
+          concurrencyCeiling: 2,
+          allowedRisk: "medium",
+          allowedModes: ["parallel-isolated"],
+        },
+        autoReleaseFrontier: 1,
+        controlDoc: { enabled: false, teamId: null },
+        admissionGuardrail: { enabled: false },
+        commentEnrichment: {
+          enabled: false,
+          maxCandidates: 25,
+          maxCommentPages: 3,
+          maxComments: 6,
+          maxCommentChars: 400,
+          maxTotalChars: 1200,
+        },
+        planReview: { enabled: false, plannerGroundingEnabled: false },
+      },
+    } satisfies ResolvedWorkflowConfig;
+
+    const service = await startRuntimeService({
+      config,
+      tracker,
+      logger,
+      workflowWatcher: null,
+      runtimeHost,
+      createStandingPlanPlannerRunner: () => plannerRunner,
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(
+          entries.some(
+            (entry) =>
+              entry.event === "backlog_hygiene_tick_skipped" &&
+              entry.outcome === "degraded" &&
+              entry.status === "unavailable" &&
+              entry.reason === "no_successful_dispositions",
+          ),
+        ).toBe(true);
+      });
+      expect(plannerRunner).not.toHaveBeenCalled();
+    } finally {
+      await service.shutdown();
+      vi.unstubAllEnvs();
     }
   });
 

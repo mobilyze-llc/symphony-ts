@@ -1,6 +1,8 @@
 import { Agent } from "undici";
 import { z } from "zod";
 
+import { stripBacklogAuditCullAuthority } from "./backlog-audit-authority.js";
+
 import { fenceBacklogAuditBoundaryTags } from "../agent/prompt-fence.js";
 import type { BlockerRef, Issue } from "../domain/model.js";
 import { formatMarkdownInlineCode } from "../shared/markdown.js";
@@ -89,6 +91,8 @@ export interface BacklogAuditCullFinding {
   killReason: BacklogAuditCullKillReason | null;
   marker: string | null;
   rootIssueIdentifier: string | null;
+  /** Hygiene-mode signal only; it must never authorize tracker mutation. */
+  advisoryOnly?: boolean;
 }
 
 export interface BacklogAuditVerdict {
@@ -222,25 +226,10 @@ export async function runBacklogAudit(
       new Set(issues.map((issue) => issue.identifier)),
     );
   }
-  // Cull actions are only authorized in off_pressure_cull mode. Strip any cull
-  // field a hygiene-mode model may have emitted so it cannot smuggle a kill /
-  // downgrade cancel into a hygiene decision (SYMPH-966 AC#5: off-path only).
-  return stripCullFindings(report);
-}
-
-function stripCullFindings(report: BacklogAuditReport): BacklogAuditReport {
-  if (report.verdict.findings.every((finding) => finding.cull == null)) {
-    return report;
-  }
-  return {
-    ...report,
-    verdict: {
-      ...report.verdict,
-      findings: report.verdict.findings.map((finding) =>
-        finding.cull == null ? finding : { ...finding, cull: null },
-      ),
-    },
-  };
+  // Preserve classification/root context for planner judgment, but explicitly
+  // strip mutation authority. Only off_pressure_cull may supply an actionable
+  // reason/marker (SYMPH-966 AC#5; SYMPH-989).
+  return stripBacklogAuditCullAuthority(report);
 }
 
 async function runLocalModelJudge(input: {
