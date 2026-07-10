@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const CONFIG_PATH = "config/architecture/env-registry.json";
@@ -32,6 +32,7 @@ export function scanNamedEnvReads(paths = sourcePaths()) {
   const reads = new Map();
   for (const path of paths) {
     if (path.endsWith(".test.ts") || path.endsWith(".test.mjs")) continue;
+    if (!existsSync(path)) continue;
     const content = readFileSync(path, "utf8");
     for (const pattern of [
       DOT_READ_RE,
