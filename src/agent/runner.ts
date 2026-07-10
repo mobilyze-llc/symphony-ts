@@ -192,6 +192,11 @@ export interface AgentRunResult {
   lastTurn: CodexTurnResult | null;
   rateLimits: Record<string, unknown> | null;
   hardStop?: HardStopDecision | null;
+  /** Backend-produced metadata consumed by RuntimeHost without changing the Codex path. */
+  metadata?: {
+    agentMessage?: string;
+    laneJobId?: string;
+  };
 }
 
 export interface WorkspaceBaseRefreshLogEntry {

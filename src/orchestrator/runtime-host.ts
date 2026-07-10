@@ -195,6 +195,7 @@ import {
 } from "../spec-review/spec-review.js";
 import {
   CurrentRunnerStageExecutionBackend,
+  type StageExecutionBackendResult,
   type StageExecutionBackendRunner,
   type StageExecutionJobSpec,
   UnsupportedStageExecutionBackendError,
@@ -553,6 +554,7 @@ interface WorkerExecution {
   stageName: string | null;
   codexAppServerPid: number | null;
   codexAppServerIdentity: ProcessIdentitySnapshot | null;
+  laneJobId: string | null;
   controller: AbortController;
   completion: Promise<void>;
   stopRequest: StopRequest | null;
@@ -4731,6 +4733,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       stageName,
       codexAppServerPid: null,
       codexAppServerIdentity: null,
+      laneJobId: null,
       controller,
       stopRequest: null,
       lastResult: null,
@@ -4813,53 +4816,69 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     // aggregate result; otherwise dispatch the single execution unchanged.
     // Every branch resolves to one AgentRunResult fed into the SAME finalization
     // below, so the orchestrator still performs exactly one stage transition.
-    const resultPromise: Promise<AgentRunResult> = Promise.resolve().then(
-      async () => {
+    const resultPromise: Promise<StageExecutionBackendResult> =
+      Promise.resolve().then(async () => {
         const crabrunnerReviewBackend =
           this.resolveCrabrunnerReviewBackend(stageName);
         if (crabrunnerReviewBackend !== null) {
-          return this.executeCrabrunnerReviewStageDispatch({
-            issue,
-            attempt,
-            stage,
-            stageName,
-            signal: controller.signal,
-            baseRef:
-              executionJob.identity.baseRef ?? resolveStageExecutionBaseRef(),
-            artifactRoot: executionJob.identity.artifactRoot,
-            backend: crabrunnerReviewBackend,
-          });
+          return {
+            job: executionJob,
+            result: await this.executeCrabrunnerReviewStageDispatch({
+              issue,
+              attempt,
+              stage,
+              stageName,
+              signal: controller.signal,
+              baseRef:
+                executionJob.identity.baseRef ?? resolveStageExecutionBaseRef(),
+              artifactRoot: executionJob.identity.artifactRoot,
+              backend: crabrunnerReviewBackend,
+            }),
+          };
         }
         if (
           stage?.execution?.subStages &&
           stage.execution.subStages.length > 0
         ) {
-          return this.executeDecomposedStageDispatch({
-            issue,
-            attempt,
-            stage,
-            stageName,
-            subStages: stage.execution.subStages,
-            effectiveHardStops,
-            signal: controller.signal,
-            baseRef:
-              executionJob.identity.baseRef ?? resolveStageExecutionBaseRef(),
-            artifactRoot: executionJob.identity.artifactRoot,
-          });
+          return {
+            job: executionJob,
+            result: await this.executeDecomposedStageDispatch({
+              issue,
+              attempt,
+              stage,
+              stageName,
+              subStages: stage.execution.subStages,
+              effectiveHardStops,
+              signal: controller.signal,
+              baseRef:
+                executionJob.identity.baseRef ?? resolveStageExecutionBaseRef(),
+              artifactRoot: executionJob.identity.artifactRoot,
+            }),
+          };
         }
-        const { result } = await stageExecutionBackend.execute({
+        return await stageExecutionBackend.execute({
           job: executionJob,
           runnerInput,
         });
-        return result;
-      },
-    );
+      });
     const completion = resultPromise
-      .then(async (result) => {
+      .then(async ({ result, evidence }) => {
         execution.lastResult = result;
+        execution.laneJobId =
+          result.metadata?.laneJobId ?? readLaneJobId(evidence);
+        const crabrunnerTerminalFailure =
+          executionJob.backend === "crabrunner" &&
+          result.runAttempt.status !== "succeeded";
         await this.enqueue(async () => {
           await this.finalizeWorkerExecution(execution, {
-            outcome: "normal",
+            outcome: crabrunnerTerminalFailure ? "abnormal" : "normal",
+            ...(crabrunnerTerminalFailure
+              ? {
+                  reason:
+                    result.runAttempt.error ??
+                    `crabrunner_run_attempt_${result.runAttempt.status}`,
+                }
+              : {}),
             endedAt: this.now(),
           });
         });
@@ -5704,6 +5723,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         input_tokens: liveSession?.codexInputTokens ?? 0,
         output_tokens: liveSession?.codexOutputTokens ?? 0,
         total_tokens: liveSession?.codexTotalTokens ?? 0,
+        lane_job_id: execution.laneJobId,
         ...(liveSession?.codexCacheReadTokens
           ? { cache_read_tokens: liveSession.codexCacheReadTokens }
           : {}),
@@ -5748,18 +5768,23 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       this.pruneLocalBranches();
     }
 
+    const metadataAgentMessage = execution.lastResult?.metadata?.agentMessage;
     const lastTurnMessage = execution.lastResult?.lastTurn?.message;
     const fallbackMessage = execution.lastResult?.liveSession?.lastCodexMessage;
     const agentMessage =
-      (lastTurnMessage !== null &&
-      lastTurnMessage !== undefined &&
-      lastTurnMessage !== ""
-        ? lastTurnMessage
-        : fallbackMessage !== null &&
-            fallbackMessage !== undefined &&
-            fallbackMessage !== ""
-          ? fallbackMessage
-          : undefined) ?? undefined;
+      (metadataAgentMessage !== null &&
+      metadataAgentMessage !== undefined &&
+      metadataAgentMessage !== ""
+        ? metadataAgentMessage
+        : lastTurnMessage !== null &&
+            lastTurnMessage !== undefined &&
+            lastTurnMessage !== ""
+          ? lastTurnMessage
+          : fallbackMessage !== null &&
+              fallbackMessage !== undefined &&
+              fallbackMessage !== ""
+            ? fallbackMessage
+            : undefined) ?? undefined;
 
     // Capture remaining state data
     const preHistory: ExecutionHistory = [
@@ -7916,6 +7941,14 @@ function truncateTraceText(text: string, maxLength = 200): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function readLaneJobId(evidence: unknown): string | null {
+  if (!isRecord(evidence) || !isRecord(evidence.admission)) {
+    return null;
+  }
+  const jobId = evidence.admission.jobId;
+  return typeof jobId === "string" && jobId.trim() !== "" ? jobId : null;
 }
 
 interface PriorCrabrunnerReviewState {

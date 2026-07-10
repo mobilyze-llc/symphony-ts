@@ -6,9 +6,13 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import type { StageExecutionJobSpec } from "../../src/stage-execution/backend.js";
+import type {
+  StageExecutionBackendInput,
+  StageExecutionJobSpec,
+} from "../../src/stage-execution/backend.js";
 import {
   type CrabrunnerJobSpec,
+  CrabrunnerStageExecutionBackend,
   createCrabrunnerJobSpec,
 } from "../../src/stage-execution/crabrunner-backend.js";
 import {
@@ -224,13 +228,25 @@ describe.skipIf(!existsSync(LIVE_CRABRUNNER_BIN))(
           pollIntervalMs: 50,
           cli,
         });
-        const spec = createSpec({ promptFile: promptPath, promptSha256 });
-        spec.enforcement.timing.timeoutMs = 30_000;
-
-        const admission = await client.submit(spec);
+        const job = createStageExecutionJob();
+        job.enforcement.timing.timeoutMs = 30_000;
+        const backend = new CrabrunnerStageExecutionBackend({
+          client,
+          resolvePromptFile: () => promptPath,
+          resolvePromptSha256: () => promptSha256,
+        });
+        const execution = await backend.execute({
+          job,
+          runnerInput: createRunnerInput(),
+        });
+        if (execution.evidence === undefined) {
+          throw new Error("crabrunner backend omitted execution evidence");
+        }
+        const admission = execution.evidence.admission;
+        const terminal = execution.evidence.terminal;
         expect(admission.status).toBe("accepted");
-        await client.status(admission.jobId!);
-        const terminal = await client.collect(admission.jobId!);
+        expect(admission.jobId).toBeTruthy();
+        expect(terminal).not.toBeNull();
         const persistedManifest = JSON.parse(
           await readFile(
             join(stateRoot, "jobs", admission.jobId!, "manifest.json"),
@@ -260,6 +276,13 @@ describe.skipIf(!existsSync(LIVE_CRABRUNNER_BIN))(
             lastProgressAt: expect.any(String),
           },
         });
+        expect(execution.result.lastTurn?.message).toBe(
+          "deterministic execution seam conformance",
+        );
+        expect(execution.result.metadata).toEqual({
+          agentMessage: "deterministic execution seam conformance",
+          laneJobId: admission.jobId,
+        });
       } finally {
         await Promise.all([
           rm(stateRoot, { recursive: true, force: true }),
@@ -275,7 +298,20 @@ function createSpec(
     Pick<CrabrunnerJobSpec, "promptFile" | "promptSha256">
   > = {},
 ): CrabrunnerJobSpec {
-  const job: StageExecutionJobSpec = {
+  return createCrabrunnerJobSpec(
+    {
+      job: createStageExecutionJob(),
+      runnerInput: createRunnerInput(),
+    },
+    false,
+    overrides.promptFile ?? "/sanitized/prompt.md",
+    overrides.promptSha256 ??
+      "95b9f06462d83e0e27b643a5f03f1f32ef298b2ef097f1e266b083752ae914ff",
+  );
+}
+
+function createStageExecutionJob(): StageExecutionJobSpec {
+  return {
     backend: "crabrunner",
     role: "implementer",
     phase: "implement",
@@ -325,33 +361,27 @@ function createSpec(
       },
     },
   };
-  return createCrabrunnerJobSpec(
-    {
-      job,
-      runnerInput: {
-        issue: {
-          id: "issue-1071",
-          identifier: "SYMPH-1071",
-          title: "Crucible execution-seam hardening",
-          description: null,
-          priority: 1,
-          state: "In Progress",
-          branchName: "codex/SYMPH-1071-conformance-debuggability",
-          url: null,
-          labels: [],
-          blockedBy: [],
-          createdAt: null,
-          updatedAt: null,
-        },
-        attempt: 2,
-        stageName: "execution-seam",
-      },
+}
+
+function createRunnerInput(): StageExecutionBackendInput["runnerInput"] {
+  return {
+    issue: {
+      id: "issue-1071",
+      identifier: "SYMPH-1071",
+      title: "Crucible execution-seam hardening",
+      description: null,
+      priority: 1,
+      state: "In Progress",
+      branchName: "codex/SYMPH-1071-conformance-debuggability",
+      url: null,
+      labels: [],
+      blockedBy: [],
+      createdAt: null,
+      updatedAt: null,
     },
-    false,
-    overrides.promptFile ?? "/sanitized/prompt.md",
-    overrides.promptSha256 ??
-      "95b9f06462d83e0e27b643a5f03f1f32ef298b2ef097f1e266b083752ae914ff",
-  );
+    attempt: 2,
+    stageName: "execution-seam",
+  };
 }
 
 function deterministicWorkerArgv(): string[] {

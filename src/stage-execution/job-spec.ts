@@ -11,6 +11,7 @@ import type {
   StageExecutionEnforcementContract,
   StageExecutionJobSpec,
 } from "./backend.js";
+import { runnerToLane } from "./runner-to-lane.js";
 
 const DELEGATED_LANE_HEARTBEAT_INTERVAL_MS = 30_000;
 const DELEGATED_LANE_PROGRESS_INTERVAL_MS = 30_000;
@@ -49,7 +50,7 @@ export function createStageExecutionJobSpec(
   const runnerKind = stageRunner ?? input.defaultRunnerKind;
   const runnerModel =
     input.runnerModel === undefined
-      ? (input.stage?.model ?? input.defaultRunnerModel)
+      ? (input.stage?.model ?? execution?.model ?? input.defaultRunnerModel)
       : input.runnerModel;
   const stageReasoningEffort =
     input.runnerReasoningEffort === undefined
@@ -82,11 +83,22 @@ export function createStageExecutionJobSpec(
         ? (input.stage?.timeoutMs ?? null)
         : input.stageTimeoutMs,
   });
+  const lane =
+    backend === "crabrunner" &&
+    execution?.role !== "reviewer" &&
+    execution?.phase !== "review"
+      ? runnerToLane({
+          runner: runnerKind,
+          model: runnerModel,
+          provider: runnerProvider,
+        })
+      : null;
   const runner = {
     runnerKind,
-    model: runnerModel,
-    provider: runnerProvider,
+    model: lane?.modelId ?? runnerModel,
+    provider: lane?.provider ?? runnerProvider,
     reasoningEffort: execution?.reasoningEffort ?? stageReasoningEffort,
+    ...(lane === null ? {} : { runtime: lane.runtime, modelId: lane.modelId }),
   };
 
   return {

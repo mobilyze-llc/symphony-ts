@@ -3,10 +3,12 @@ import {
   type RunAttemptPhase,
   createEmptyLiveSession,
 } from "../domain/model.js";
+import { parseHumanBlockSignal } from "../domain/model.js";
 import {
   coerceLegacyCounterValue,
   mapCrabrunnerUsageToStageUsage,
 } from "../domain/stage-usage.js";
+import type { HardStopDecision } from "../policy/hard-stops.js";
 import type {
   StageExecutionBackendInput,
   StageExecutionBackendResult,
@@ -528,6 +530,7 @@ export class CrabrunnerStageExecutionBackend
       input,
       status: mapped.status,
       terminal: mapped.terminal,
+      laneJobId: mapped.admission.jobId,
       now: this.now,
       ...(mapped.error === undefined ? {} : { error: mapped.error }),
     };
@@ -704,10 +707,16 @@ function createCrabrunnerAgentResult(input: {
   input: StageExecutionBackendInput;
   status: RunAttemptPhase;
   terminal: CrabrunnerTerminalEvidence | null;
+  laneJobId: string | null;
   error?: string;
   now: () => Date;
 }): AgentRunResult {
   const terminal = input.terminal;
+  const agentMessage = resolveCrabrunnerAgentMessage(terminal);
+  const humanBlockSignal =
+    input.status === "succeeded" && agentMessage !== null
+      ? parseHumanBlockSignal(agentMessage)
+      : null;
   const artifactRefs =
     terminal?.artifactRefs ??
     artifactRefsFromCollectedArtifact(terminal?.artifact);
@@ -740,6 +749,20 @@ function createCrabrunnerAgentResult(input: {
   const legacyReasoningTokens = coerceLegacyCounterValue(
     usageMeasurement.tokens.reasoningTokens,
   );
+  const hardStop: HardStopDecision | null =
+    humanBlockSignal === null
+      ? null
+      : {
+          outcome: "BLOCKED-needs-human",
+          trigger: "worker_reported_block",
+          reason: `Worker reported BLOCKED-needs-human at a delegated lane permission boundary (${humanBlockSignal.operation}).`,
+          turnCount: 1,
+          totalTokens: legacyTotalTokens,
+          billableTokens: legacyTotalTokens,
+          estimatedCostUsd: 0,
+          humanBlockOperation: humanBlockSignal.operation,
+          humanBlockBlockers: humanBlockSignal.blockers,
+        };
   return {
     issue: input.input.runnerInput.issue,
     workspace: {
@@ -795,9 +818,89 @@ function createCrabrunnerAgentResult(input: {
       })),
     },
     turnsCompleted: 0,
-    lastTurn: null,
+    lastTurn:
+      agentMessage === null
+        ? null
+        : {
+            status: input.status === "succeeded" ? "completed" : "failed",
+            threadId: "",
+            turnId: "",
+            sessionId: "",
+            usage: null,
+            rateLimits: null,
+            message: agentMessage,
+          },
     rateLimits: null,
+    ...(hardStop === null ? {} : { hardStop }),
+    metadata: {
+      ...(agentMessage === null ? {} : { agentMessage }),
+      ...(input.laneJobId === null ? {} : { laneJobId: input.laneJobId }),
+    },
   };
+}
+
+function resolveCrabrunnerAgentMessage(
+  terminal: CrabrunnerTerminalEvidence | null,
+): string | null {
+  if (terminal === null) {
+    return null;
+  }
+  const progressSignals = progressSignalMessages(terminal.artifact);
+  const finalMessage =
+    terminal.artifact?.status === "ready"
+      ? terminal.artifact.primary.content.trim()
+      : "";
+  // Keep progress before the final artifact so the existing signal parsers
+  // retain their current precedence: parseHumanBlockSignal walks the complete
+  // message and the last matching marker wins. This also preserves a terminal
+  // marker emitted before a provider continued to its final message.
+  const messages = [
+    ...progressSignals,
+    ...(finalMessage === "" ? [] : [finalMessage]),
+  ];
+  return messages.length === 0 ? null : messages.join("\n");
+}
+
+function progressSignalMessages(
+  artifact: CollectedArtifact | undefined,
+): string[] {
+  if (artifact === undefined) {
+    return [];
+  }
+  return artifact.entries.flatMap((entry) => {
+    if (!entry.name.endsWith(".progress.jsonl") || !("content" in entry)) {
+      return [];
+    }
+    return entry.content.split("\n").flatMap((line) => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        return signalFragment(line);
+      }
+      if (!isRecord(parsed)) {
+        return signalFragment(line);
+      }
+      return [parsed.detail, parsed.message, parsed.text, parsed.content]
+        .filter((value): value is string => typeof value === "string")
+        .flatMap(signalFragment);
+    });
+  });
+}
+
+function signalFragment(value: string): string[] {
+  const marker = value.search(
+    /\[(?:STAGE_COMPLETE|STAGE_FAILED:|BLOCKED_NEEDS_HUMAN:|BLOCKED_NEEDS_HUMAN_BLOCKERS:)/,
+  );
+  if (marker < 0 && !value.includes("BLOCKED-needs-human")) {
+    return [];
+  }
+  const fragment = marker < 0 ? value : value.slice(marker);
+  return fragment.trim() === "" ? [] : [fragment.trim()];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function formatUnknownError(error: unknown): string {

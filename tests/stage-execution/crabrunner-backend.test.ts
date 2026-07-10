@@ -86,6 +86,89 @@ describe("CrabrunnerStageExecutionBackend", () => {
     ]);
   });
 
+  it("preserves the lane final artifact as the agent message for existing signal parsers", async () => {
+    const finalMessage = "Investigation complete.\n[STAGE_COMPLETE]";
+    const backend = new CrabrunnerStageExecutionBackend({
+      client: createClient({
+        admission: { status: "accepted", jobId: "job-final-message" },
+        terminal: {
+          state: "succeeded",
+          artifact: {
+            status: "ready",
+            jobId: "job-final-message",
+            primary: {
+              name: "/attempts/1/artifact/investigate.md",
+              content: finalMessage,
+              hash: "hash-final-message",
+            },
+            entries: [],
+          },
+        },
+      }),
+    });
+
+    const result = await backend.execute({
+      job: createJob(),
+      runnerInput: createRunnerInput(),
+    });
+
+    expect(result.result.lastTurn?.message).toBe(finalMessage);
+    expect(result.result.metadata?.agentMessage).toBe(finalMessage);
+    expect(result.result.metadata?.laneJobId).toBe("job-final-message");
+  });
+
+  it("preserves a mid-loop human block from progress when the final artifact omits it", async () => {
+    const backend = new CrabrunnerStageExecutionBackend({
+      client: createClient({
+        admission: { status: "accepted", jobId: "job-progress-signal" },
+        terminal: {
+          state: "succeeded",
+          artifact: {
+            status: "ready",
+            jobId: "job-progress-signal",
+            primary: {
+              name: "/attempts/1/artifact/implement.md",
+              content: "The lane continued after an earlier boundary.",
+              hash: "hash-progress-signal",
+            },
+            entries: [
+              {
+                name: "/attempts/1/artifact/implement.progress.jsonl",
+                content: [
+                  JSON.stringify({
+                    seq: 3,
+                    type: "assistant-message",
+                    detail: "[BLOCKED_NEEDS_HUMAN: branch_push]",
+                  }),
+                  JSON.stringify({
+                    seq: 4,
+                    type: "assistant-message",
+                    detail: "[BLOCKED_NEEDS_HUMAN: pr_creation]",
+                  }),
+                ].join("\n"),
+                hash: "hash-progress",
+              },
+            ],
+          },
+        },
+      }),
+    });
+
+    const result = await backend.execute({
+      job: createJob(),
+      runnerInput: createRunnerInput(),
+    });
+
+    expect(result.result.lastTurn?.message).toContain(
+      "[BLOCKED_NEEDS_HUMAN: pr_creation]",
+    );
+    expect(result.result.hardStop).toMatchObject({
+      outcome: "BLOCKED-needs-human",
+      trigger: "worker_reported_block",
+      humanBlockOperation: "pr_creation",
+    });
+  });
+
   it("threads the runner abort signal into scheduler submit", async () => {
     const controller = new AbortController();
     const client = createClient({
