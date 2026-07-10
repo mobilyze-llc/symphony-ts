@@ -16,6 +16,8 @@ import {
   LINEAR_VIEWER_QUERY,
   LinearTrackerClient,
   type TrackerError,
+  trackRefilingSuppressionMarker,
+  triageDispositionMarker,
 } from "../../src/index.js";
 import {
   LINEAR_CANDIDATE_ISSUES_BY_SCOPE_QUERY,
@@ -1877,7 +1879,7 @@ describe("createTrackFindingIssue", () => {
     expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 
-  it("creates a Track-finding issue in the Backlog state when none exists", async () => {
+  it("creates a Track-finding issue in Triage when the team has one", async () => {
     const fetchFn = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse({ data: { issues: { nodes: [] } } }))
@@ -1903,7 +1905,7 @@ describe("createTrackFindingIssue", () => {
                 identifier: "SYMPH-600",
                 title: "[track:fp-1] New track finding",
                 url: "https://linear.app/x/issue/SYMPH-600",
-                state: { name: "Backlog" },
+                state: { name: "Triage" },
               },
             },
           },
@@ -1927,12 +1929,573 @@ describe("createTrackFindingIssue", () => {
       created: true,
     });
     expect(fetchFn).toHaveBeenCalledTimes(3);
-    // Backlog is preferred over Triage for non-blocking follow-up work.
+    // Triage is intake; Backlog is only the fallback for teams without it.
+    const createCall = parseRequestBody(fetchFn.mock.calls[2]?.[1]);
+    expect(createCall.variables.stateId).toBe("state-triage");
+  });
+
+  it("falls back to Backlog when the team has no Triage state", async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ data: { issues: { nodes: [] } } }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            workflowStates: {
+              nodes: [{ id: "state-backlog", name: "Backlog" }],
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issueCreate: {
+              success: true,
+              issue: {
+                id: "new-fallback",
+                identifier: "SYMPH-600",
+                title: "[track:fp-1] New track finding",
+                url: null,
+                state: { name: "Backlog" },
+              },
+            },
+          },
+        }),
+      );
+    const client = createClient({ fetchFn });
+
+    await client.createTrackFindingIssue({
+      teamId: "team-1",
+      teamKey: "SYMPH",
+      fingerprint: "fp-1",
+      title: "[track:fp-1] New track finding",
+      description: "body",
+    });
+
     const createCall = parseRequestBody(fetchFn.mock.calls[2]?.[1]);
     expect(createCall.variables.stateId).toBe("state-backlog");
   });
 
-  it("files a fresh issue when the only marker match is completed/cancelled", async () => {
+  it("suppresses a disposition-cancelled twin while its superseding root is open and comments once", async () => {
+    const suppressionMarker = trackRefilingSuppressionMarker("fp-1");
+    const cancelledTwinSearch = {
+      data: {
+        issues: {
+          nodes: [
+            {
+              id: "old-1",
+              identifier: "SYMPH-400",
+              title: "[track:fp-1] Absorbed finding",
+              url: "https://linear.app/x/issue/SYMPH-400",
+              state: { name: "Cancelled", type: "cancelled" },
+            },
+          ],
+        },
+      },
+    };
+    const cancelledTwinComments = {
+      data: {
+        issue: {
+          id: "old-1",
+          comments: {
+            nodes: [
+              {
+                body: triageDispositionMarker("absorb-into", "fp-1"),
+              },
+            ],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      },
+    };
+    const cancelledTwinRelations = {
+      data: {
+        issue: {
+          id: "old-1",
+          inverseRelations: {
+            nodes: [
+              {
+                type: "supersedes",
+                issue: {
+                  id: "root-1",
+                  identifier: "SYMPH-300",
+                  title: "Fix the root cause",
+                  url: "https://linear.app/x/issue/SYMPH-300",
+                  state: { name: "Backlog", type: "backlog" },
+                },
+              },
+            ],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      },
+    };
+    const rootComments = (comments: Array<{ body: string }>) => ({
+      data: {
+        issue: {
+          id: "root-1",
+          comments: {
+            nodes: comments,
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      },
+    });
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(cancelledTwinSearch))
+      .mockResolvedValueOnce(jsonResponse(cancelledTwinComments))
+      .mockResolvedValueOnce(jsonResponse(cancelledTwinRelations))
+      .mockResolvedValueOnce(jsonResponse(rootComments([])))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: { commentCreate: { success: true, comment: { id: "c-1" } } },
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse(cancelledTwinSearch))
+      .mockResolvedValueOnce(jsonResponse(cancelledTwinComments))
+      .mockResolvedValueOnce(jsonResponse(cancelledTwinRelations))
+      .mockResolvedValueOnce(
+        jsonResponse(rootComments([{ body: suppressionMarker }])),
+      );
+    const client = createClient({ fetchFn });
+    const input = {
+      teamId: "team-1",
+      teamKey: "SYMPH",
+      fingerprint: "fp-1",
+      title: "[track:fp-1] Recurring finding",
+      description: "body",
+      refilingSource: {
+        identifier: "SYMPH-1110",
+        url: "https://linear.app/x/issue/SYMPH-1110",
+      },
+    };
+
+    const first = await client.createTrackFindingIssue(input);
+    const second = await client.createTrackFindingIssue(input);
+
+    expect(first).toEqual({
+      id: "root-1",
+      identifier: "SYMPH-300",
+      title: "Fix the root cause",
+      url: "https://linear.app/x/issue/SYMPH-300",
+      created: false,
+      suppressedTwinIdentifier: "SYMPH-400",
+    });
+    expect(second).toEqual(first);
+    expect(fetchFn).toHaveBeenCalledTimes(9);
+    const searchCall = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(searchCall.query).not.toContain("comments(");
+    const detailCall = parseRequestBody(fetchFn.mock.calls[1]?.[1]);
+    expect(detailCall.variables).toEqual({
+      issueId: "old-1",
+      first: 50,
+      after: null,
+    });
+    const commentCall = parseRequestBody(fetchFn.mock.calls[4]?.[1]);
+    expect(commentCall.variables).toMatchObject({ issueId: "root-1" });
+    expect(commentCall.variables.body).toContain("Fingerprint: `fp-1`");
+    expect(commentCall.variables.body).toContain("SYMPH-1110");
+    expect(commentCall.variables.body).toContain("SYMPH-400");
+    expect(commentCall.variables.body).toContain(suppressionMarker);
+  });
+
+  it("finds disposition and root provenance on later pages without duplicating the root comment", async () => {
+    const suppressionMarker = trackRefilingSuppressionMarker("fp-1");
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issues: {
+              nodes: [
+                {
+                  id: "old-1",
+                  identifier: "SYMPH-400",
+                  title: "[track:fp-1] Absorbed finding",
+                  url: null,
+                  state: { name: "Cancelled", type: "cancelled" },
+                },
+              ],
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issue: {
+              id: "old-1",
+              comments: {
+                nodes: [{ body: "older unrelated disposition" }],
+                pageInfo: { hasNextPage: true, endCursor: "comments-1" },
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issue: {
+              id: "old-1",
+              comments: {
+                nodes: [
+                  {
+                    body: triageDispositionMarker("absorb-into", "fp-1"),
+                  },
+                ],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issue: {
+              id: "old-1",
+              inverseRelations: {
+                nodes: [{ type: "blocks", issue: null }],
+                pageInfo: { hasNextPage: true, endCursor: "relations-1" },
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issue: {
+              id: "old-1",
+              inverseRelations: {
+                nodes: [
+                  {
+                    type: "supersedes",
+                    issue: {
+                      id: "root-1",
+                      identifier: "SYMPH-300",
+                      title: "Fix the root cause",
+                      url: null,
+                      state: { name: "Backlog", type: "backlog" },
+                    },
+                  },
+                ],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issue: {
+              id: "root-1",
+              comments: {
+                nodes: [{ body: suppressionMarker }],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          },
+        }),
+      );
+    const client = createClient({ fetchFn });
+
+    const result = await client.createTrackFindingIssue({
+      teamId: "team-1",
+      teamKey: "SYMPH",
+      fingerprint: "fp-1",
+      title: "[track:fp-1] Recurring finding",
+      description: "body",
+    });
+
+    expect(result).toMatchObject({
+      identifier: "SYMPH-300",
+      created: false,
+      suppressedTwinIdentifier: "SYMPH-400",
+    });
+    expect(fetchFn).toHaveBeenCalledTimes(6);
+    expect(parseRequestBody(fetchFn.mock.calls[2]?.[1]).variables.after).toBe(
+      "comments-1",
+    );
+    expect(parseRequestBody(fetchFn.mock.calls[4]?.[1]).variables.after).toBe(
+      "relations-1",
+    );
+  });
+
+  it("refiles when disposition provenance exceeds the bounded page window", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          issues: {
+            nodes: [
+              {
+                id: "old-1",
+                identifier: "SYMPH-400",
+                title: "[track:fp-1] Cancelled finding",
+                url: null,
+                state: { name: "Cancelled", type: "cancelled" },
+              },
+            ],
+          },
+        },
+      }),
+    );
+    for (let page = 1; page <= 10; page += 1) {
+      fetchFn.mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issue: {
+              id: "old-1",
+              comments: {
+                nodes: [{ body: `unrelated comment ${page}` }],
+                pageInfo: {
+                  hasNextPage: true,
+                  endCursor: `comments-${page}`,
+                },
+              },
+            },
+          },
+        }),
+      );
+    }
+    fetchFn
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            workflowStates: {
+              nodes: [{ id: "state-triage", name: "Triage" }],
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issueCreate: {
+              success: true,
+              issue: {
+                id: "new-1",
+                identifier: "SYMPH-601",
+                title: "[track:fp-1] Refiled",
+                url: null,
+                state: { name: "Triage" },
+              },
+            },
+          },
+        }),
+      );
+    const client = createClient({ fetchFn });
+
+    const result = await client.createTrackFindingIssue({
+      teamId: "team-1",
+      teamKey: "SYMPH",
+      fingerprint: "fp-1",
+      title: "[track:fp-1] Refiled",
+      description: "body",
+    });
+
+    expect(result).toMatchObject({ identifier: "SYMPH-601", created: true });
+    expect(fetchFn).toHaveBeenCalledTimes(13);
+  });
+
+  it("refiles when the disposition root is Done", async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issues: {
+              nodes: [
+                {
+                  id: "old-1",
+                  identifier: "SYMPH-400",
+                  title: "[track:fp-1] Absorbed finding",
+                  url: "https://linear.app/x/issue/SYMPH-400",
+                  state: { name: "Cancelled", type: "cancelled" },
+                },
+              ],
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issue: {
+              id: "old-1",
+              comments: {
+                nodes: [
+                  {
+                    body: triageDispositionMarker(
+                      "supersede-by-root-fix",
+                      "fp-1",
+                    ),
+                  },
+                ],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issue: {
+              id: "old-1",
+              inverseRelations: {
+                nodes: [
+                  {
+                    type: "supersedes",
+                    issue: {
+                      id: "root-1",
+                      identifier: "SYMPH-300",
+                      title: "Completed root fix",
+                      url: null,
+                      state: { name: "Done", type: "completed" },
+                    },
+                  },
+                ],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            workflowStates: {
+              nodes: [{ id: "state-triage", name: "Triage" }],
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issueCreate: {
+              success: true,
+              issue: {
+                id: "new-regression",
+                identifier: "SYMPH-601",
+                title: "[track:fp-1] Regression",
+                url: null,
+                state: { name: "Triage" },
+              },
+            },
+          },
+        }),
+      );
+    const client = createClient({ fetchFn });
+
+    const result = await client.createTrackFindingIssue({
+      teamId: "team-1",
+      teamKey: "SYMPH",
+      fingerprint: "fp-1",
+      title: "[track:fp-1] Regression",
+      description: "body",
+    });
+
+    expect(result.created).toBe(true);
+    expect(result.identifier).toBe("SYMPH-601");
+    expect(fetchFn).toHaveBeenCalledTimes(5);
+  });
+
+  it("does not suppress a cancelled twin without a superseded-by root", async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issues: {
+              nodes: [
+                {
+                  id: "old-1",
+                  identifier: "SYMPH-400",
+                  title: "[track:fp-1] Cancelled finding",
+                  url: null,
+                  state: { name: "Cancelled", type: "cancelled" },
+                },
+              ],
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issue: {
+              id: "old-1",
+              comments: {
+                nodes: [
+                  {
+                    body: triageDispositionMarker("cancel-stale", "fp-1"),
+                  },
+                ],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issue: {
+              id: "old-1",
+              inverseRelations: {
+                nodes: [],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            workflowStates: {
+              nodes: [{ id: "state-triage", name: "Triage" }],
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issueCreate: {
+              success: true,
+              issue: {
+                id: "new-uncertain",
+                identifier: "SYMPH-602",
+                title: "[track:fp-1] Refiled finding",
+                url: null,
+                state: { name: "Triage" },
+              },
+            },
+          },
+        }),
+      );
+    const client = createClient({ fetchFn });
+
+    const result = await client.createTrackFindingIssue({
+      teamId: "team-1",
+      teamKey: "SYMPH",
+      fingerprint: "fp-1",
+      title: "[track:fp-1] Refiled finding",
+      description: "body",
+    });
+
+    expect(result.created).toBe(true);
+    expect(fetchFn).toHaveBeenCalledTimes(5);
+  });
+
+  it("files fresh for a Done twin carrying a cancel-fixed disposition", async () => {
     const fetchFn = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(
@@ -1946,6 +2509,13 @@ describe("createTrackFindingIssue", () => {
                   title: "[track:fp-1] Old (done)",
                   url: "https://linear.app/x/issue/SYMPH-400",
                   state: { name: "Done", type: "completed" },
+                  comments: {
+                    nodes: [
+                      {
+                        body: triageDispositionMarker("cancel-fixed", "fp-1"),
+                      },
+                    ],
+                  },
                 },
               ],
             },

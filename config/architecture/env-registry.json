@@ -463,6 +463,10 @@
       "read_sites": ["src/orchestrator/runtime-host.ts"]
     },
     {
+      "name": "SYMPHONY_TRIAGE_INTAKE_ALERT_THRESHOLD",
+      "read_sites": ["src/orchestrator/runtime-host.ts"]
+    },
+    {
       "name": "SYMPHONY_REVIEW_AGGREGATOR_AUTHORITATIVE",
       "read_sites": ["src/review/headless-council-gate.ts"]
     },

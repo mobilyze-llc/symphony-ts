@@ -318,15 +318,22 @@ import {
   recordPlanControlDecision,
 } from "./standing-plan-store.js";
 import { createIssueSupervisionSnapshot } from "./supervision.js";
-import {
-  type TrackFindingFilingRef,
-  type TrackFindingFilingRequest,
-  type TrackFindingFilingResult,
-  type TrackFindingIssueContext,
-  buildTrackFindingIssueBody,
-  buildTrackFindingIssueTitle,
+import type {
+  TrackFindingFilingRef,
+  TrackFindingFilingRequest,
+  TrackFindingFilingResult,
 } from "./track-finding-filing.js";
+import {
+  buildTrackFindingIntakeRequest,
+  buildTrackFindingIssueContext,
+  describeTrackFindingFiling,
+  toTrackFindingFilingRef,
+} from "./track-finding-runtime-adapter.js";
 import { writeTrackerIssueFromBoundary } from "./tracker-write.js";
+import {
+  TriageIntakeReportState,
+  parseOptionalPositiveIntegerEnv,
+} from "./triage-intake-reporting.js";
 
 const DEFAULT_RUNTIME_HARD_STOPS_CONFIG = {
   maxIterations: DEFAULT_HARD_STOP_MAX_ITERATIONS,
@@ -866,6 +873,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
    * runs or when it is skipped. */
   private continuousFeedbackPreflight: RuntimeSnapshotContinuousFeedbackPreflight | null =
     null;
+  private readonly triageIntakeReport = new TriageIntakeReportState();
 
   constructor(options: RuntimeHostOptions) {
     this.config = options.config;
@@ -2212,40 +2220,30 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       return allUnfiled(reason);
     }
 
-    const context: TrackFindingIssueContext = {
-      sourceIssueIdentifier: request.issueIdentifier,
-      sourceIssueUrl: request.issueUrl,
-      repo: request.repo,
-      prNumber: request.prNumber,
-      reviewedHeadSha: request.reviewedHeadSha,
-    };
+    const context = buildTrackFindingIssueContext(request);
 
     const filed: TrackFindingFilingRef[] = [];
     const unfiled: Array<{ fingerprint: string; reason: string }> = [];
     for (const finding of request.findings) {
       try {
-        const result = await tracker.createTrackFindingIssue({
-          teamId,
-          teamKey,
+        const result = await tracker.createTrackFindingIssue(
+          buildTrackFindingIntakeRequest({
+            context,
+            finding,
+            teamId,
+            teamKey,
+          }),
+        );
+        filed.push(toTrackFindingFilingRef(finding.fingerprint, result));
+        const filingLog = describeTrackFindingFiling({
+          sourceIssueId: request.issueId,
           fingerprint: finding.fingerprint,
-          title: buildTrackFindingIssueTitle(finding),
-          description: buildTrackFindingIssueBody(finding, context),
-        });
-        filed.push({
-          fingerprint: finding.fingerprint,
-          issueId: result.id,
-          identifier: result.identifier,
-          url: result.url,
+          result,
         });
         await this.logger?.info(
           "track_finding_filed",
-          `Track finding ${result.created ? "filed" : "deduped"}: ${result.identifier}`,
-          {
-            outcome: result.created ? "created" : "deduped",
-            issue_id: request.issueId,
-            identifier: result.identifier,
-            fingerprint: finding.fingerprint,
-          },
+          filingLog.message,
+          filingLog.fields,
         );
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
@@ -3757,6 +3755,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           inFlight,
           changelog:
             this.buildControlDocChangelogFromJournal(controlDocJournal),
+          triageIntake: this.triageIntakeReport.latest,
         },
         teamId: cfg.controlDoc.teamId,
         docClient: {
@@ -3813,6 +3812,17 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     } finally {
       this.controlSurfaceInFlight = false;
     }
+  }
+
+  recordTriageIntakeHealth(
+    intake: Parameters<TriageIntakeReportState["record"]>[0]["intake"],
+  ): Promise<void> {
+    return this.triageIntakeReport.record({
+      intake,
+      thresholdRaw: process.env.SYMPHONY_TRIAGE_INTAKE_ALERT_THRESHOLD,
+      warn: (event, message, fields) =>
+        this.logger?.warn(event, message, fields),
+    });
   }
 
   private controlDocRefPath(root: string): string {
@@ -6584,6 +6594,8 @@ export async function startRuntimeService(
       },
       now: () => new Date(),
       fetchTriageIssues: () => tracker.fetchIssuesByStates(["Triage"]),
+      onTriageIntakeComputed: (intake) =>
+        runtimeHost.recordTriageIntakeHealth(intake),
       fetchResidualIssues: () =>
         tracker.fetchIssuesByStates(["Backlog", "Triage"]),
       getReviewRoundDepth: async () =>
@@ -7170,18 +7182,6 @@ function resolveRuntimeBacklogHygieneHeartbeatMs(
     parseOptionalPositiveIntegerEnv(env.SYMPHONY_QUEUE_HYGIENE_HEARTBEAT_MS) ??
     DEFAULT_RUNTIME_BACKLOG_HYGIENE_HEARTBEAT_MS
   );
-}
-
-function parseOptionalPositiveIntegerEnv(
-  value: string | undefined,
-): number | null {
-  if (value === undefined || value.trim() === "") {
-    return null;
-  }
-  if (!/^[1-9]\d*$/.test(value.trim())) {
-    return null;
-  }
-  return Number.parseInt(value, 10);
 }
 
 function passingBacklogHygieneEvaluation() {

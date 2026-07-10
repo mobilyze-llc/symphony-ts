@@ -9,6 +9,7 @@ import type {
   PlannerCandidateGroundingEvidence,
   PlannerRunResult,
   QueueHealth,
+  TriageIntakeHealth,
 } from "../../src/agent/triage-planner.js";
 import { runTriagePlanner } from "../../src/agent/triage-planner.js";
 import type { WorkflowQueueTriageConfig } from "../../src/config/types.js";
@@ -2233,6 +2234,7 @@ describe("runStandingPlanShadowTick queue-health wiring", () => {
 
     it("a health-fetch throw degrades to no health and the tick still completes", async () => {
       const root = mkdtempSync(join(tmpdir(), "symph-shadow-health-"));
+      const intakeReadings: Array<TriageIntakeHealth | null> = [];
       try {
         // fetchTriageIssues throws → triageIntake null → buildQueueHealth undefined →
         // health absent. The tick must NOT throw and must still record a plan.
@@ -2241,9 +2243,13 @@ describe("runStandingPlanShadowTick queue-health wiring", () => {
           fetchTriageIssues: async () => {
             throw new Error("tracker down");
           },
+          onTriageIntakeComputed: (intake) => {
+            intakeReadings.push(intake);
+          },
         });
         expect(result.status).toBe("ok");
         expect((await loadStandingPlan(root))?.revision).toBe(1);
+        expect(intakeReadings).toEqual([null]);
       } finally {
         rmSync(root, { recursive: true, force: true });
       }

@@ -13,6 +13,7 @@ import {
   type DocChangelogEntry,
   type DocInFlightEntry,
   type DocShippedEntry,
+  type RenderStandingPlanControlDocInput,
   STANDING_PLAN_DOC_TITLE,
   renderStandingPlanControlDoc,
 } from "./standing-plan-doc-render.js";
@@ -38,6 +39,7 @@ export interface PublishControlDocDeps {
     recentlyShipped: DocShippedEntry[];
     inFlight: DocInFlightEntry[];
     changelog: DocChangelogEntry[];
+    triageIntake?: RenderStandingPlanControlDocInput["triageIntake"];
   };
   teamId: string;
   docClient: {
@@ -75,6 +77,9 @@ export async function publishControlDoc(deps: PublishControlDocDeps): Promise<{
     recentlyShipped: deps.context.recentlyShipped,
     inFlight: deps.context.inFlight,
     changelog: deps.context.changelog,
+    ...(deps.context.triageIntake === undefined
+      ? {}
+      : { triageIntake: deps.context.triageIntake }),
   });
   const contentHash = createHash("sha256").update(content).digest("hex");
 

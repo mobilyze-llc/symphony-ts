@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { DEFAULT_ACTIVE_STATES } from "../../src/config/defaults.js";
 import type { DispatcherRunJournalEntry } from "../../src/domain/model.js";
 import {
   type TrackFindingFilingResult,
@@ -38,6 +39,16 @@ function finding(
     family: overrides.family ?? null,
   };
 }
+
+describe("Track-finding intake inertness", () => {
+  it("keeps Triage and Backlog outside the dispatch candidate states", () => {
+    const active = new Set(
+      DEFAULT_ACTIVE_STATES.map((state) => state.toLowerCase()),
+    );
+    expect(active.has("triage")).toBe(false);
+    expect(active.has("backlog")).toBe(false);
+  });
+});
 
 function laneWithFindings(
   findings: StructuredReviewFinding[],

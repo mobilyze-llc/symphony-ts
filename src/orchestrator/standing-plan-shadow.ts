@@ -17,7 +17,6 @@ import type {
   PlannerPrInfo,
   PlannerRunResult,
   QueueHealth,
-  TriageIntakeHealth,
   TriagePlannerDeps,
 } from "../agent/triage-planner.js";
 import { runTriagePlanner } from "../agent/triage-planner.js";
@@ -43,7 +42,6 @@ import {
 import {
   buildQueueHealth,
   computeResidualShare,
-  computeTriageIntake,
 } from "./standing-plan-queue-health.js";
 import {
   loadLastReviewedContentHash,
@@ -56,6 +54,10 @@ import type {
   RotateRevisionOptions,
 } from "./standing-plan-supersession.js";
 import { rotateRevision } from "./standing-plan-supersession.js";
+import {
+  type TriageIntakePublisher,
+  collectTriageIntakeHealth,
+} from "./triage-intake-reporting.js";
 
 // ---------------------------------------------------------------------------
 // Shadow plan cycle (SYMPH-784 PR1)
@@ -713,6 +715,7 @@ export interface StandingPlanShadowTickDeps {
    */
   /** Fetch Triage-state issues for Triage-intake (depth + recent inflow). */
   fetchTriageIssues?: () => Promise<Issue[]>;
+  onTriageIntakeComputed?: TriageIntakePublisher;
   /** Fetch the Backlog+Triage population for residual-share (the [track:] marker fraction). */
   fetchResidualIssues?: () => Promise<Issue[]>;
   /** Read the persisted review-round depth (rounds_per_cycle); null when no recent reviews. */
@@ -809,14 +812,11 @@ export async function runStandingPlanShadowTick(
     // and must never break the poll. A null in any of the three CORE parts (triage
     // intake / residual / hot-file) makes buildQueueHealth return undefined → health is
     // simply omitted from the context (prompt byte-unchanged), and the tick continues.
-    let triageIntake: TriageIntakeHealth | null = null;
-    try {
-      const triageIssues = (await deps.fetchTriageIssues?.()) ?? null;
-      triageIntake =
-        triageIssues === null ? null : computeTriageIntake(triageIssues, nowMs);
-    } catch {
-      triageIntake = null;
-    }
+    const triageIntake = await collectTriageIntakeHealth({
+      fetch: deps.fetchTriageIssues,
+      nowMs,
+      publish: deps.onTriageIntakeComputed,
+    });
     let residualShare: number | null = null;
     try {
       // REGRESSION GUARD: residual is fed from the state-aware Backlog/Triage fetch,

@@ -1012,69 +1012,9 @@ export const LINEAR_SEARCH_ISSUES_BY_TITLE_AND_TEAM_QUERY = `
   }
 `.trim();
 
-/**
- * Search for an existing open issue carrying a fingerprint marker substring in
- * its title within a team (SYMPH-763). Used to deduplicate autonomously-filed
- * Track-finding issues by the `[track:<fingerprint>]` marker, which is robust to
- * the human-readable title tail drifting between review rounds. Returns `url` so
- * the orchestrator can journal the durable link.
- */
-export const LINEAR_SEARCH_ISSUES_BY_TITLE_MARKER_AND_TEAM_QUERY = `
-  query SymphonySearchIssuesByTitleMarkerAndTeam(
-    $teamKey: String!
-    $marker: String!
-    $first: Int!
-  ) {
-    issues(
-      first: $first
-      filter: {
-        team: { key: { eq: $teamKey } }
-        title: { containsIgnoreCase: $marker }
-      }
-      orderBy: updatedAt
-    ) {
-      nodes {
-        id
-        identifier
-        title
-        url
-        state {
-          name
-          type
-        }
-      }
-    }
-  }
-`.trim();
-
-/**
- * Create a Track-finding issue in a resolved workflow state (SYMPH-763).
- * Mirrors {@link LINEAR_CREATE_ISSUE_WITH_STATE_MUTATION} but additionally
- * returns `url` for the durable journal ref.
- */
-export const LINEAR_CREATE_TRACK_FINDING_ISSUE_MUTATION = `
-  mutation SymphonyCreateTrackFindingIssue(
-    $teamId: String!
-    $title: String!
-    $stateId: String!
-    $description: String
-  ) {
-    issueCreate(input: {
-      teamId: $teamId
-      title: $title
-      stateId: $stateId
-      description: $description
-    }) {
-      success
-      issue {
-        id
-        identifier
-        title
-        url
-        state {
-          name
-        }
-      }
-    }
-  }
-`.trim();
+export {
+  LINEAR_CREATE_TRACK_FINDING_ISSUE_MUTATION,
+  LINEAR_SEARCH_ISSUES_BY_TITLE_MARKER_AND_TEAM_QUERY,
+  LINEAR_TRACK_FINDING_DISPOSITION_DETAIL_QUERY,
+  LINEAR_TRACK_FINDING_INVERSE_RELATIONS_QUERY,
+} from "./track-finding-queries.js";
