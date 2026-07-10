@@ -204,14 +204,23 @@ function progressSignalMessages(
 }
 
 function signalFragment(value: string): string[] {
-  const marker = value.search(
-    /\[(?:STAGE_COMPLETE|STAGE_FAILED:|BLOCKED_NEEDS_HUMAN:|BLOCKED_NEEDS_HUMAN_BLOCKERS:)/,
-  );
-  if (marker < 0 && !value.includes("BLOCKED-needs-human")) {
+  return value.split("\n").flatMap((line) => {
+    const fragment = line.trim();
+    if (fragment === "BLOCKED-needs-human") {
+      return [fragment];
+    }
+    if (
+      /^\[STAGE_COMPLETE\](?:[ \t].*)?$/.test(fragment) ||
+      /^\[STAGE_FAILED:\s*[^\]]+\](?:[ \t].*)?$/.test(fragment) ||
+      (fragment.startsWith("[BLOCKED_NEEDS_HUMAN:") &&
+        fragment.endsWith("]")) ||
+      (fragment.startsWith("[BLOCKED_NEEDS_HUMAN_BLOCKERS:") &&
+        fragment.endsWith("]"))
+    ) {
+      return [fragment];
+    }
     return [];
-  }
-  const fragment = marker < 0 ? value : value.slice(marker);
-  return fragment.trim() === "" ? [] : [fragment.trim()];
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

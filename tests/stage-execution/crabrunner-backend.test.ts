@@ -169,6 +169,48 @@ describe("CrabrunnerStageExecutionBackend", () => {
     });
   });
 
+  it("ignores quoted human-block markers in progress prose", async () => {
+    const backend = new CrabrunnerStageExecutionBackend({
+      client: createClient({
+        admission: { status: "accepted", jobId: "job-quoted-progress" },
+        terminal: {
+          state: "succeeded",
+          artifact: {
+            status: "ready",
+            jobId: "job-quoted-progress",
+            primary: {
+              name: "/attempts/1/artifact/implement.md",
+              content: "The implementation completed.",
+              hash: "hash-quoted-progress",
+            },
+            entries: [
+              {
+                name: "/attempts/1/artifact/implement.progress.jsonl",
+                content: JSON.stringify({
+                  seq: 5,
+                  type: "assistant-message",
+                  detail:
+                    "When done, output [BLOCKED_NEEDS_HUMAN: pr_creation] on its own line.",
+                }),
+                hash: "hash-quoted-progress-log",
+              },
+            ],
+          },
+        },
+      }),
+    });
+
+    const result = await backend.execute({
+      job: createJob(),
+      runnerInput: createRunnerInput(),
+    });
+
+    expect(result.result.hardStop).toBeUndefined();
+    expect(result.result.lastTurn?.message).toBe(
+      "The implementation completed.",
+    );
+  });
+
   it("threads the runner abort signal into scheduler submit", async () => {
     const controller = new AbortController();
     const client = createClient({

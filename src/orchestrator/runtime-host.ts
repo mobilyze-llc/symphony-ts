@@ -555,6 +555,7 @@ interface WorkerExecution {
   stageName: string | null;
   codexAppServerPid: number | null;
   codexAppServerIdentity: ProcessIdentitySnapshot | null;
+  laneJobId: string | null;
   controller: AbortController;
   completion: Promise<void>;
   stopRequest: StopRequest | null;
@@ -4733,6 +4734,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       stageName,
       codexAppServerPid: null,
       codexAppServerIdentity: null,
+      laneJobId: null,
       controller,
       stopRequest: null,
       lastResult: null,
@@ -4848,8 +4850,12 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         });
       });
     const completion = resultPromise
-      .then(async ({ result }) => {
+      .then(async ({ result, evidence }) => {
         execution.lastResult = result;
+        execution.laneJobId = stageExecutionResult.readStageExecutionLaneJobId(
+          result,
+          evidence,
+        );
         const finalization =
           stageExecutionResult.resolveStageExecutionFinalization(
             executionJob.backend,
@@ -5705,9 +5711,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         input_tokens: liveSession?.codexInputTokens ?? 0,
         output_tokens: liveSession?.codexOutputTokens ?? 0,
         total_tokens: liveSession?.codexTotalTokens ?? 0,
-        lane_job_id: stageExecutionResult.readStageExecutionLaneJobId(
-          execution.lastResult,
-        ),
+        lane_job_id: execution.laneJobId,
         ...(liveSession?.codexCacheReadTokens
           ? { cache_read_tokens: liveSession.codexCacheReadTokens }
           : {}),

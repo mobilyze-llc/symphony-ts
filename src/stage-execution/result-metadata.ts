@@ -14,10 +14,18 @@ function readStageExecutionMetadata(
 
 export function readStageExecutionLaneJobId(
   result: AgentRunResult | null | undefined,
+  evidence: unknown,
 ): string | null {
   const metadataJobId = readStageExecutionMetadata(result)?.laneJobId;
-  return typeof metadataJobId === "string" && metadataJobId.trim() !== ""
-    ? metadataJobId
+  if (typeof metadataJobId === "string" && metadataJobId.trim() !== "") {
+    return metadataJobId;
+  }
+  if (!isRecord(evidence) || !isRecord(evidence.admission)) {
+    return null;
+  }
+  const evidenceJobId = evidence.admission.jobId;
+  return typeof evidenceJobId === "string" && evidenceJobId.trim() !== ""
+    ? evidenceJobId
     : null;
 }
 
@@ -52,4 +60,8 @@ export function readStageExecutionAgentMessage(
   return typeof fallbackMessage === "string" && fallbackMessage !== ""
     ? fallbackMessage
     : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
