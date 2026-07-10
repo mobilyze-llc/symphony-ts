@@ -20,6 +20,7 @@ calls**.
 | `blocked.md` | BLOCKED | a blocked lane fails closed; its finding escalates |
 | `track-only.md` | PASS | an explicitly non-blocking finding buckets to track, not escalate |
 | `preamble-prefixed.md` | CHANGES_REQUESTED | a short preamble before `## Verdict` (the DeepSeek tendency) must still parse |
+| `malformed-preamble.md` | malformed | a heading-shaped preamble is unsafe and must degrade rather than silently pass |
 | `wording-sensitive-a.md` / `-b.md` | CHANGES_REQUESTED | same `file:line`, different summary → distinct `fp` |
 | `legacy-findings.md` | FINDINGS (retired) | SYMPH-908: the retired Symphony-only `FINDINGS` token. Symphony normalizes it to `CHANGES_REQUESTED` before council-triage; fed raw to the spine it degrades to `parse_quality: partial` / `fail_open`. The cutover gate proves normalization prevents that. |
 
