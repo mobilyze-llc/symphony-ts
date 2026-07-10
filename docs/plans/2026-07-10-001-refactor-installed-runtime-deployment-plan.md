@@ -26,7 +26,7 @@ execution: code
 
 Symphony currently conflates its development checkout, build root, service working directory, configuration source, maintenance checkout, and installed command surface. The live `com.symphony.symphony` LaunchAgent points its binary, workflow, and working directory into the project checkout; `com.symphony.fence-sync` carries the same root; the installed manager-plan command is a symlink into the repository. The two documented deployment flows then preserve competing root models: routine deployment mutates the development checkout in place, while the deploy train uses a disposable Codex worktree.
 
-The new deployment contract uses a private Git repository and immutable release worktrees under `${HOME}/.local/share/symphony`, an atomic `current` symlink, external configuration and mutable state, stable commands under `${HOME}/.local/bin`, and LaunchAgents generated from the active installed release. The development checkout remains a place to author and initiate releases, but it is not read or mutated by a running service.
+The new deployment contract uses a private Git repository and immutable release worktrees under `${HOME}/.local/share/symphony`, immutable activation bundles that pair one release with one compatible external configuration generation, an atomic `active` symlink, mutable state outside the release, stable commands under `${HOME}/.local/bin`, and LaunchAgents generated from the active installed release. The development checkout remains a place to author and initiate releases, but it is not read or mutated by a running service.
 
 ### Problem Frame
 
@@ -40,7 +40,7 @@ This is a root-model migration, not a path substitution. A correct change must s
 
 - R1. Production code runs only from a managed installation rooted at `${HOME}/.local/share/symphony`.
 - R2. Each release is an immutable Git worktree or equivalent complete checkout identified by its full source commit and a unique build generation, with compiled output, frozen-lockfile dependencies, and `dist/.build-sha` produced before activation. A same-commit rebuild creates a new generation rather than mutating an existing release.
-- R3. `${HOME}/.local/share/symphony/current` changes atomically between validated releases and identifies the exact release used by LaunchAgents and installed commands.
+- R3. `${HOME}/.local/share/symphony/active` changes atomically between immutable activation bundles. At process start, each launcher resolves and validates `active` exactly once to a pinned immutable bundle path, then reads both release and configuration through that pinned path so a concurrent switch cannot produce a mixed pair.
 - R4. The installation retains a last-known-good release and its compatible configuration generation, and supports automatic and explicit rollback without fetching or rebuilding during the rollback window.
 - R5. Normal service activity does not dirty an installed release.
 
@@ -62,7 +62,7 @@ This is a root-model migration, not a path substitution. A correct change must s
 
 - R14. One canonical deploy path performs fetch, stage, frozen install, build, preflight, drain, atomic activation, restart, health/version verification, and cleanup.
 - R15. A build or preflight failure leaves the old service and active symlink untouched.
-- R16. An activation or post-start failure restores the prior release and compatible configuration generation, restarts it, and runs the same health/version gate before reporting failure. A failed rollback gate stops after one restoration attempt, leaves `current` on the prior release, preserves both diagnostic sets, and reports an explicit manual-recovery command.
+- R16. An activation or post-start failure atomically restores the prior activation bundle, restarts it, and runs the same health/version gate before reporting failure. A failed rollback gate stops after one restoration attempt, leaves `active` on the prior bundle, preserves both diagnostic sets, and reports an explicit manual-recovery command.
 - R17. Deployment fails closed if `origin/main` moves after the expected commit is selected, unless an operator explicitly selected an immutable commit.
 - R18. The existing three-consecutive-check drain contract, owner-host guard, and single-orchestrator invariant remain enforced.
 
@@ -82,7 +82,7 @@ This is a root-model migration, not a path substitution. A correct change must s
 ### Acceptance Examples
 
 - AE1. Given a healthy installed release and a dirty or renamed development checkout, when launchd restarts Symphony, then the service starts at the installed SHA and polls normally without reading the development checkout.
-- AE2. Given a new commit whose build fails, when deployment runs, then `current`, the loaded plist, and the running process remain on the prior healthy release.
+- AE2. Given a new commit whose build fails, when deployment runs, then `active`, the loaded plist, and the running process remain on the prior healthy activation bundle.
 - AE3. Given a staged release that starts but fails its health or version gate, when activation completes, then deployment switches back to the prior release, restarts it, verifies it, and exits unsuccessfully with both attempted and restored SHAs.
 - AE4. Given a successful cutover, when all user LaunchAgents, the user crontab, and installed wrappers are inspected, then no Symphony runtime path points into a development checkout.
 - AE5. Given an agent invokes manager-plan, backlog audit, `symphonyctl`, or status from an unrelated directory, then each command uses the installed code while preserving the explicitly selected target project.
@@ -116,13 +116,13 @@ This is a root-model migration, not a path substitution. A correct change must s
 
 ### Key Technical Decisions
 
-- KTD1. **Use immutable Git-backed build generations with atomic activation.** Keep a private repository under `${HOME}/.local/share/symphony/repository` and materialize releases under `releases/<full-sha>-<build-id>`. Point `current` at a validated generation. This preserves Git-derived provenance, allows safe same-commit rebuilds, and prevents failed builds or partial updates from corrupting the active runtime.
+- KTD1. **Use immutable Git-backed build generations and activation bundles.** Keep a private repository under `${HOME}/.local/share/symphony/repository`, materialize releases under `releases/<full-sha>-<build-id>`, and create immutable `activations/<activation-id>` bundles whose `release` and `config.env` entries resolve one verified pair. Atomically point `active` at a bundle. This preserves Git-derived provenance, allows safe same-commit rebuilds, prevents mixed release/config observations, and keeps failed builds or partial updates from corrupting the active runtime.
 - KTD2. **Replace both current deployment models.** Fold deploy-train safety into the canonical deploy command and retire the in-place project-root and `.codex/worktrees` production models. Compatibility aliases may forward to the canonical command for one transition, but they may not retain separate behavior.
 - KTD3. **Make root roles explicit.** Use separately resolved source, install, active release, config, state, log, and target-workspace roots. Do not reuse `SYMPHONY_ROOT` as both a service root and a development repository maintenance root.
 - KTD4. **Keep the active release Git-clean.** Direct service-owned mutable output to external state. Preserve target-workspace-relative `.symphony` behavior only where it is intentionally scoped to a target repository.
-- KTD5. **Externalize and version effective service configuration.** Treat the tracked encrypted environment as release input where applicable, generate an owner-only configuration generation under `${HOME}/.config/symphony/generations`, validate it before activation, and atomically switch a stable `active.env` link with the release. Generated plists contain no secrets; they invoke a stable launcher that loads the permission-restricted active environment immediately before `exec`. Retain the previous compatible configuration generation for rollback.
+- KTD5. **Externalize and version effective service configuration.** Treat the tracked encrypted environment as release input where applicable and generate an owner-only configuration generation under `${HOME}/.config/symphony/generations`. A validated activation bundle references that generation alongside its release; there is no independently switched configuration pointer. Generated plists contain no secrets and invoke a stable launcher that resolves and validates `active` once, pins the immutable real bundle path, and reads both `<pinned-bundle>/config.env` and `<pinned-bundle>/release` before `exec`. Retain the prior bundle and its referenced configuration generation for rollback.
 - KTD6. **Bind version and integrity evidence to the active artifact.** Resolve Git SHA with an explicit active-release working directory or embed the build SHA. Do not rely on the caller's ambient `cwd`. Require Git HEAD, build stamp, manifest, runtime report, and digests of the built runtime and installed dependency realization to agree.
-- KTD7. **Install location-independent wrappers.** Generate stable `${HOME}/.local/bin` launchers for lifecycle and supported CLI commands. Wrappers resolve `current`, do not self-build, and expose enough status to let operators and agents confirm which release and target root they will mutate.
+- KTD7. **Install location-independent wrappers.** Generate stable `${HOME}/.local/bin` launchers for lifecycle and supported CLI commands. Wrappers pin one validated activation-bundle realpath per invocation and resolve its `release` and `config.env` members, do not self-build, and expose enough status to let operators and agents confirm which activation, release, and target root they will mutate.
 - KTD8. **Use the same gate for deploy and rollback.** Both paths validate owner host, process count, service health, logs, API status, and expected SHA. Rollback is a first-class operation, not an emergency shell recipe.
 
 ### High-Level Technical Design
@@ -138,11 +138,12 @@ flowchart TB
   B --> I["Frozen dependency install and build"]
   I --> V
   V --> D["Drain gate"]
-  D --> A["Atomic current symlink activation"]
-  A --> L["LaunchAgents and installed wrappers"]
+  D --> A["Create immutable release/config activation bundle"]
+  A --> AS["Atomic active symlink switch"]
+  AS --> L["LaunchAgents and installed wrappers"]
   L --> H["Health, process, and version gate"]
-  H -->|pass| K["Retain current and previous releases"]
-  H -->|fail| P["Restore previous symlink"]
+  H -->|pass| K["Retain active and previous bundles"]
+  H -->|fail| P["Restore previous active pointer"]
   P --> RL["Relaunch prior release and config"]
   RL --> RH["Verify restored release health and version"]
   RH --> RF["Report attempted and restored SHAs"]
@@ -152,13 +153,15 @@ flowchart TB
 flowchart TB
   Install["${HOME}/.local/share/symphony"] --> Repo["repository"]
   Install --> Releases["releases/<sha>-<build-id>"]
-  Install --> Current["current symlink"]
-  Current --> Releases
-  Config["${HOME}/.config/symphony/generations"] --> ActiveEnv["active.env"]
-  ActiveEnv --> Launchd["Stable launchers and LaunchAgents"]
+  Install --> Activations["activations/<activation-id>"]
+  Install --> Active["active symlink"]
+  Active --> Activations
+  Activations --> Releases
+  Config["${HOME}/.config/symphony/generations"] --> Activations
+  Activations --> Launchd["Stable launchers and LaunchAgents"]
   State["${HOME}/.symphony"] --> Service["Symphony service"]
   Logs["${HOME}/Library/Logs/symphony"] --> Service
-  Current --> Launchd
+  Active --> Launchd
   Launchd --> Service
   Target["Explicit target project workspace"] --> Service
 ```
@@ -184,11 +187,11 @@ flowchart TB
 - **Secrets leak into release artifacts:** Generate plaintext environment only in the config root with restrictive permissions and scan release/manifest output for known secret-bearing files and values.
 - **Config generation is written unsafely:** Require an owner-controlled real config directory with mode `0700`; reject symlinks and unexpected ownership; write each environment generation as an owner-owned regular file with mode `0600` through a same-directory temporary file, restrictive umask, validation, and atomic rename; remove temporary plaintext on every exit path.
 - **Provenance records credentials:** Canonicalize remote identity before manifest persistence and reject or redact URL userinfo and sensitive query parameters.
-- **Installed link or wrapper is replaced:** Validate ownership, modes, regular-file type, and realpath containment of `current`, configuration links, and stable launchers before activation and start.
+- **Installed link or wrapper is replaced:** Resolve `active` once per invocation, then validate ownership, modes, type, and realpath containment of the pinned immutable bundle, its entries, and the stable launcher before reading configuration or executing code.
 - **launchd keeps stale definitions:** Use bootout/bootstrap for root-contract changes, verify `launchctl print`, process command line, and effective working directory, and retain the prior plist until post-login proof.
 - **Ancillary job is path-correct but semantically wrong:** Validate process identity and intended entrypoint, especially the existing Slack bridge template, rather than performing blind string replacement.
 - **Self-triggered dashboard deploy mutates its own active release:** Make dashboard deploy invoke the stable installed deploy wrapper, which stages a different release and activates only after preflight.
-- **Concurrent deploys race on `current`:** Serialize deploy and rollback under an install-root lock and include the selected expected commit in the lock-owned state.
+- **Concurrent deploys race on `active`:** Serialize deploy and rollback under an install-root lock and include the selected expected commit and activation ID in the lock-owned state.
 
 ---
 
@@ -217,19 +220,19 @@ flowchart TB
 - **Test scenarios:**
   - Fresh install from an empty install root produces a release whose HEAD and build stamp equal the selected commit.
   - Same-SHA deploy stages a new build generation when compiled entrypoint, build stamp, or content digest is missing or stale, without modifying the active generation.
-  - Build failure leaves `current` and the running service unchanged.
+  - Build failure leaves `active` and the running service unchanged.
   - A moving `origin/main` aborts before activation; an explicitly selected immutable commit remains valid.
   - Manifest contains required provenance, canonicalizes credential-bearing remote URLs, and contains no plaintext environment or known secret values.
   - Pre-activation and rollback reject a runtime or dependency tree whose digest differs from its manifest.
-  - Normal release cleanup preserves `current`, previous, and any release referenced by rollback state.
-- **Verification:** Hermetic temporary-repository tests plus a dry-run output contract that names source, staged, current, previous, and expected commits.
+  - Normal cleanup preserves the active and previous activation bundles plus every referenced release and configuration generation.
+- **Verification:** Hermetic temporary-repository tests plus a dry-run output contract that names source, staged release, staged activation, active, previous, and expected commits.
 
 ### U3. Externalize service configuration and mutable state
 
 - **Goal:** Ensure releases are immutable and secrets/configuration survive release replacement.
 - **Requirements:** R5, R10-R11, R25.
 - **Files:** `ops/symphony-deploy`, `ops/symphony-ctl`, `ops/slack-bridge-ctl`, `ops/fence-sync`, `src/orchestrator/runtime-host.ts`, `.env.example`, `config/architecture/env-registry.json`.
-- **Approach:** Generate versioned service environments under `${HOME}/.config/symphony/generations`, atomically select `active.env`, preserve the encrypted-source workflow, and keep service-owned state under `${HOME}/.symphony`. Stable launchers load configuration before executing installed code; plists contain only non-secret launch metadata. Document and test the boundary between service state and target-workspace artifacts. Coordinate config key ownership with SYMPH-1074 rather than adding a competing policy format.
+- **Approach:** Generate versioned service environments under `${HOME}/.config/symphony/generations`, preserve the encrypted-source workflow, and keep service-owned state under `${HOME}/.symphony`. Activation bundles pair a configuration generation with a release. Stable launchers resolve and validate `active` once, pin the immutable bundle path, and use only that path for both configuration and release lookup before executing installed code; plists contain only non-secret launch metadata. Document and test the boundary between service state and target-workspace artifacts. Coordinate config key ownership with SYMPH-1074 rather than adding a competing policy format.
 - **Test scenarios:**
   - Decrypt or refresh configuration without writing plaintext into a release.
   - Reject missing, unreadable, overly permissive, symlinked, incorrectly owned, or invalid service configuration before activation.
@@ -246,7 +249,7 @@ flowchart TB
 - **Goal:** Replace routine and detached flows with one guarded release lifecycle.
 - **Requirements:** R3-R4, R12-R18.
 - **Files:** `ops/symphony-deploy`, `ops/deploy-train.sh`, `ops/symphony-ctl`, `tests/ops/deploy-train.test.ts`, `tests/ops/symphony-deploy-preflight.test.ts`.
-- **Approach:** Port the drain, expected-SHA, moving-main, recovery, and live-version gates into the canonical deploy path; serialize deployment; activate the release and configuration generation as one recorded transaction; make rollback switch to the already-built release/configuration pair; retain a forwarding compatibility entry only if necessary for operator transition.
+- **Approach:** Port the drain, expected-SHA, moving-main, recovery, and live-version gates into the canonical deploy path; serialize deployment; construct an immutable activation bundle and atomically switch the single `active` pointer; make rollback switch to the prior already-verified bundle; retain a forwarding compatibility entry only if necessary for operator transition.
 - **Test scenarios:**
   - Three consecutive drained samples permit activation; running or retrying lanes reset the count.
   - Failed preflight does not stop the service.
@@ -255,6 +258,8 @@ flowchart TB
   - Failure of the restored release gate does not recurse; it preserves both diagnostic sets, leaves the prior pair selected, and reports manual recovery.
   - Manual rollback uses no network and no build step.
   - Concurrent deployment attempts serialize or fail with clear lock ownership.
+  - Process interruption, host restart, and launcher execution at every pre-switch and post-switch boundary can observe only the prior or new complete activation bundle, never a mixed release/configuration pair.
+  - An interleaving test pauses a launcher after pinning the activation realpath, switches `active`, and proves both subsequent member reads remain under the pinned prior bundle.
   - Dry-run changes no repository, symlink, plist, or process state.
 - **Verification:** Consolidated deploy tests must preserve every existing deploy-train safety assertion and remove assertions that defend dual serve roots.
 
@@ -321,7 +326,7 @@ Use `scripts/symphony-run-logged.mjs` for noisy repository verification and insp
 
 ## Definition of Done
 
-- The sole active Symphony orchestrator runs from `${HOME}/.local/share/symphony/current` at an artifact proven consistently by Git, build stamp, runtime-content digests, configuration generation, manifest, logs, and API status.
+- The sole active Symphony orchestrator resolves through `${HOME}/.local/share/symphony/active` to one immutable activation bundle whose release and configuration generation are proven consistently by Git, build stamp, runtime-content digests, manifest, logs, and API status.
 - The canonical deploy path stages immutable releases, preserves drain and moving-main gates, activates atomically, and automatically restores the last-known-good release on failed verification.
 - Configuration, secrets, mutable state, reports, and logs live outside immutable releases with documented ownership and safe permissions.
 - Main and companion LaunchAgents, cron entries, process commands, and installed wrappers have no unintended dependency on a Symphony development checkout.
