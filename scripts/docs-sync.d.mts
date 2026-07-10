@@ -1,4 +1,5 @@
 export const AUTOGEN: { start: string; end: string };
+export const CAPABILITY_RETEST_AUTOGEN: { start: string };
 
 export const HELP_TARGETS: Array<{
   name: string;

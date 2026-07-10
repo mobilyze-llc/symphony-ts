@@ -1,6 +1,10 @@
 # CLI help reference
 
-This page is generated from each shipped CLI's `--help` output. Run
+This page is the shared generated `--help` reference for the CLIs listed below.
+The package also ships `symphony-manager-plan` and
+`symphony-capability-retest`; their canonical references live in
+[02-symphony-manager-plan.md](02-symphony-manager-plan.md) and
+[07-symphony-capability-retest.md](07-symphony-capability-retest.md). Run
 `pnpm build && pnpm docs:sync` after changing a CLI usage surface.
 
 ## symphony
