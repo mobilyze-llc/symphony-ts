@@ -1,53 +1,44 @@
-export const LOG_FIELDS = [
-  "timestamp",
-  "level",
-  "event",
-  "message",
-  "outcome",
-  "reason",
-  "issue_id",
-  "issue_identifier",
-  "session_id",
-  "thread_id",
-  "turn_id",
-  "attempt",
-  "state",
-  "workspace_path",
-  "poll_interval_ms",
-  "max_concurrent_agents",
-  "input_tokens",
-  "output_tokens",
-  "total_tokens",
-  "cache_read_tokens",
-  "cache_write_tokens",
-  "no_cache_tokens",
-  "reasoning_tokens",
-  "rate_limit_requests_remaining",
-  "rate_limit_tokens_remaining",
-  "stage_name",
-  "turns_used",
-  "duration_ms",
-  "seconds_running",
-  "error_code",
-  "turn_number",
-  "prompt_chars",
-  "estimated_prompt_tokens",
-  "workers_aborted",
-  "timed_out",
-  "dispatched_count",
-  "running_count",
-  "reconciled_stop_requests",
-  "total_input_tokens",
-  "total_output_tokens",
-  "total_cache_read_tokens",
-  "total_cache_write_tokens",
-  "turn_count",
-] as const;
-
-export type LogField = (typeof LOG_FIELDS)[number];
-
-export const REQUIRED_LOG_CONTEXT_FIELDS = [
-  "issue_id",
-  "issue_identifier",
-  "session_id",
-] as const satisfies readonly LogField[];
+export type LogField =
+  | "timestamp"
+  | "level"
+  | "event"
+  | "message"
+  | "outcome"
+  | "reason"
+  | "issue_id"
+  | "issue_identifier"
+  | "session_id"
+  | "thread_id"
+  | "turn_id"
+  | "attempt"
+  | "state"
+  | "workspace_path"
+  | "poll_interval_ms"
+  | "max_concurrent_agents"
+  | "input_tokens"
+  | "output_tokens"
+  | "total_tokens"
+  | "cache_read_tokens"
+  | "cache_write_tokens"
+  | "no_cache_tokens"
+  | "reasoning_tokens"
+  | "rate_limit_requests_remaining"
+  | "rate_limit_tokens_remaining"
+  | "stage_name"
+  | "turns_used"
+  | "duration_ms"
+  | "seconds_running"
+  | "error_code"
+  | "turn_number"
+  | "prompt_chars"
+  | "estimated_prompt_tokens"
+  | "workers_aborted"
+  | "timed_out"
+  | "dispatched_count"
+  | "running_count"
+  | "reconciled_stop_requests"
+  | "total_input_tokens"
+  | "total_output_tokens"
+  | "total_cache_read_tokens"
+  | "total_cache_write_tokens"
+  | "turn_count";

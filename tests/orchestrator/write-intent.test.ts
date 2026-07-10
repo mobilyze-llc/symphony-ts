@@ -26,8 +26,8 @@ import { buildRuntimeSnapshot } from "../../src/logging/runtime-snapshot.js";
 import {
   OrchestratorCore,
   type OrchestratorCoreOptions,
-  sortIssuesForDispatch,
 } from "../../src/orchestrator/core.js";
+import { sortIssuesForDispatch } from "../../src/orchestrator/dispatch-comparator.js";
 import type { IntentActor } from "../../src/orchestrator/intent.js";
 import type { IssueTracker } from "../../src/tracker/tracker.js";
 

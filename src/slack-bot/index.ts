@@ -28,8 +28,6 @@ export {
   markError,
   markWarning,
 } from "../reactions.js";
-export { collectStream } from "../streaming.js";
-
 /**
  * Parse a JSON string of channel→project mappings into a ChannelProjectMap.
  * Expected format: `{ "C123": "/path/to/project", "C456": "/other/project" }`

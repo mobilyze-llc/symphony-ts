@@ -107,22 +107,6 @@ symphony-manager-plan --initiative "Autonomous Work Selection & Dispatch" --prom
 symphony-manager-plan --team SYMPH --project 9c1064215e8d --json
 ```
 
-## Dogfood evidence
-
-When live Linear access is unavailable in a worker, the controller must generate
-the SYMPH-961 dogfood evidence with:
-
-```bash
-scripts/symphony-manager-plan --project 9c1064215e8d --state Backlog --state Todo --runtime-state-base-url http://127.0.0.1:4321 --prompt-only --out-dir /tmp/symphony-manager-plan-SYMPH-961-prompt-only
-```
-
-The artifact must follow `src/cli/manager-plan-dogfood-evidence.ts`: record the
-prompt-only/live-equivalent rerun, classify `SYMPH-941`,
-`SYMPH-877`/`SYMPH-878` with `SYMPH-947`, and `SYMPH-839` with in-flight
-`SYMPH-950` as category `(a)`/`(b)`/`(c)`, and include the Phase 0 gate
-decision. Do not mark the acceptance criteria complete without the live evidence
-artifact.
-
 ## Edge cases & gotchas
 
 - **No scope given** → exit 1 (`Provide at least one scope: --team … | --project … | --initiative …`).

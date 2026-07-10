@@ -36,8 +36,6 @@ src/
 ├── workspace/         # Workspace lifecycle (create, hooks, path safety)
 ├── chunking.ts        # Prompt and payload chunking utilities
 ├── reactions.ts       # Reaction/feedback helpers
-├── streaming.ts       # Streaming response helpers
-├── test-alpha.ts      # Upstream alpha helper retained in the current tree
 ├── version.ts         # Package/runtime version helpers
 └── index.ts           # Public package barrel
 
@@ -102,7 +100,7 @@ No dev server -- this is a CLI tool. The D40 port table does not apply.
 ## Testing
 
 - **Framework**: Vitest
-- **Run tests**: `pnpm test` (runs 4,411 passing tests / 5 skipped across 227 files via `node scripts/test.mjs`)
+- **Run tests**: `pnpm test` (runs 4,372 passing tests / 5 skipped across 218 files via `node scripts/test.mjs`)
 - **Watch mode**: `pnpm test:watch`
 - **Location**: `tests/` directory, mirrors `src/` structure (e.g., `tests/orchestrator/core.test.ts` covers `src/orchestrator/core.ts`)
 - **Fixtures**: `tests/fixtures/` for shared test data
@@ -137,7 +135,7 @@ No dev server -- this is a CLI tool. The D40 port table does not apply.
 
 ### Verify commands (must pass before any PR)
 ```bash
-pnpm test             # 4,411 tests pass; 5 skipped across 227 files
+pnpm test             # 4,372 tests pass; 5 skipped across 218 files
 pnpm build            # Compiles without errors
 pnpm typecheck        # No type errors
 pnpm lint             # Biome passes

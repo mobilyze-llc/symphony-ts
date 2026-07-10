@@ -155,7 +155,6 @@ import { extractDispatcherDecisionEvents } from "./decision-quality.js";
 import {
   DISPATCH_COMPARATOR_VERSION,
   computeDispatchOrder,
-  sortIssuesForDispatch as sortIssuesForDispatchByPriorityFifo,
 } from "./dispatch-comparator.js";
 import {
   type EnsembleGateResult,
@@ -13524,10 +13523,6 @@ export class OrchestratorCore {
     );
     return sequence;
   }
-}
-
-export function sortIssuesForDispatch(issues: readonly Issue[]): Issue[] {
-  return sortIssuesForDispatchByPriorityFifo(issues);
 }
 
 export function computeFailureRetryDelayMs(
