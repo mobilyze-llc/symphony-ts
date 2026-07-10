@@ -1,3 +1,4 @@
+import type { TriageIntakeHealth } from "../agent/triage-planner.js";
 import type {
   PlanBatch,
   PlanDependencyEdge,
@@ -42,6 +43,24 @@ export interface RenderStandingPlanControlDocInput {
   recentlyShipped: DocShippedEntry[];
   inFlight: DocInFlightEntry[];
   changelog: DocChangelogEntry[];
+  triageIntake?:
+    | (TriageIntakeHealth & {
+        /** Null until operators derive a threshold from observed intake passes. */
+        alertThreshold: number | null;
+      })
+    | null;
+}
+
+function describeTriageIntakeAlert(
+  triageIntake: TriageIntakeHealth & { alertThreshold: number | null },
+): string {
+  if (triageIntake.alertThreshold === null) {
+    return "pending observed-inflow threshold derivation (report-only)";
+  }
+  if (triageIntake.depth > triageIntake.alertThreshold) {
+    return `BREACH (depth > ${triageIntake.alertThreshold}; report-only)`;
+  }
+  return `within threshold (depth ≤ ${triageIntake.alertThreshold}; report-only)`;
 }
 
 export function renderStandingPlanControlDoc(
@@ -57,6 +76,23 @@ export function renderStandingPlanControlDoc(
   );
   lines.push("");
   lines.push(plan.rationale.trim().length > 0 ? `> ${plan.rationale}` : "> —");
+
+  lines.push("", "## Intake");
+  if (input.triageIntake == null) {
+    lines.push(
+      "- Triage intake unavailable; alert state unknown (report-only).",
+    );
+  } else {
+    const { depth, inflowRate, alertThreshold } = input.triageIntake;
+    const alertState = describeTriageIntakeAlert({
+      depth,
+      inflowRate,
+      alertThreshold,
+    });
+    lines.push(
+      `- Triage depth: ${depth} · recent inflow: ${inflowRate} · alert: ${alertState}`,
+    );
+  }
 
   lines.push("", "## Recently shipped");
   lines.push(

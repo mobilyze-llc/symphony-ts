@@ -72,6 +72,13 @@ Do not reward speculative wording by promoting it.
    each source item's evidence and acceptance criterion in the batch.
 8. Comment on every mutated issue before changing its state or relationships.
    Add reciprocal context to an absorption or root-fix target.
+9. When cancelling an agent-filed Track finding, append the stable marker
+   `<!-- triage-disposition:<disposition>:<fingerprint> -->` to the disposition
+   comment. For `absorb-into` and `supersede-by-root-fix`, also create the native
+   `supersededBy` relation from the finding to the surviving root. These two
+   provenance records let later review rounds suppress the same fingerprint
+   only while that root remains open; they do not suppress a regression after
+   the root is Done.
 
 Never promote a "harden X" band-aid without a root trace. A symptom may remain
 as a regression test or acceptance criterion, but the planner candidate must
@@ -132,3 +139,9 @@ T1 may additionally roll the exact classes into comparison families:
 The shadow planner is report-only. Derive any agreement, cost, or autonomy
 threshold from observed passes; do not guess an enforcement threshold in this
 rubric.
+
+The control doc reports Triage depth and recent inflow even before an alert
+threshold exists. Leave `SYMPHONY_TRIAGE_INTAKE_ALERT_THRESHOLD` unset through
+the first observed passes, then set it from that recorded inflow baseline. A
+breach is journaled and displayed report-only; it never promotes or dispatches
+intake.

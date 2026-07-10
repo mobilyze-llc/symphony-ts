@@ -97,6 +97,51 @@ describe("renderStandingPlanControlDoc", () => {
     expect(md).toContain(STANDING_PLAN_DOC_TITLE);
     expect(md).toContain("(none)");
     expect(md).not.toContain("Review findings");
+    expect(md).toContain("Triage intake unavailable");
+  });
+
+  it("replaces a prior intake reading with unavailable on the next null render", () => {
+    const available = renderStandingPlanControlDoc({
+      plan: plan(),
+      recentlyShipped: [],
+      inFlight: [],
+      changelog: [],
+      triageIntake: { depth: 12, inflowRate: 4, alertThreshold: null },
+    });
+    const unavailable = renderStandingPlanControlDoc({
+      plan: plan(),
+      recentlyShipped: [],
+      inFlight: [],
+      changelog: [],
+      triageIntake: null,
+    });
+
+    expect(available).toContain("Triage depth: 12");
+    expect(unavailable).toContain("Triage intake unavailable");
+    expect(unavailable).not.toContain("Triage depth: 12");
+  });
+
+  it("renders report-only Triage intake and alert state", () => {
+    const pending = renderStandingPlanControlDoc({
+      plan: plan(),
+      recentlyShipped: [],
+      inFlight: [],
+      changelog: [],
+      triageIntake: { depth: 12, inflowRate: 4, alertThreshold: null },
+    });
+    expect(pending).toContain("## Intake");
+    expect(pending).toContain("Triage depth: 12");
+    expect(pending).toContain("recent inflow: 4");
+    expect(pending).toContain("pending observed-inflow threshold derivation");
+
+    const breached = renderStandingPlanControlDoc({
+      plan: plan(),
+      recentlyShipped: [],
+      inFlight: [],
+      changelog: [],
+      triageIntake: { depth: 12, inflowRate: 4, alertThreshold: 10 },
+    });
+    expect(breached).toContain("BREACH (depth > 10; report-only)");
   });
 
   it("renders review findings grouped by severity when present", () => {
