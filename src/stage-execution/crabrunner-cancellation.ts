@@ -26,7 +26,7 @@ export interface CrabrunnerCancellationRequest {
   killGraceMs: number;
 }
 
-export async function cancelCrabrunnerJob(
+async function cancelCrabrunnerJob(
   client: CancellationClient,
   jobId: string,
   request: CrabrunnerCancellationRequest,
