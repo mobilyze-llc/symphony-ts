@@ -206,12 +206,22 @@ function progressSignalMessages(
 function signalFragment(value: string): string[] {
   return value.split("\n").flatMap((line) => {
     const fragment = line.trim();
+    const stageFailedPrefix = "[STAGE_FAILED:";
+    const stageFailedClose = fragment.indexOf("]");
+    const stageFailed =
+      fragment.startsWith(stageFailedPrefix) &&
+      stageFailedClose > stageFailedPrefix.length &&
+      (stageFailedClose === fragment.length - 1 ||
+        fragment[stageFailedClose + 1] === " " ||
+        fragment[stageFailedClose + 1] === "\t");
     if (fragment === "BLOCKED-needs-human") {
       return [fragment];
     }
     if (
-      /^\[STAGE_COMPLETE\](?:[ \t].*)?$/.test(fragment) ||
-      /^\[STAGE_FAILED:\s*[^\]]+\](?:[ \t].*)?$/.test(fragment) ||
+      fragment === "[STAGE_COMPLETE]" ||
+      fragment.startsWith("[STAGE_COMPLETE] ") ||
+      fragment.startsWith("[STAGE_COMPLETE]\t") ||
+      stageFailed ||
       (fragment.startsWith("[BLOCKED_NEEDS_HUMAN:") &&
         fragment.endsWith("]")) ||
       (fragment.startsWith("[BLOCKED_NEEDS_HUMAN_BLOCKERS:") &&
