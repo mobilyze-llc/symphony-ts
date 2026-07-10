@@ -6,6 +6,22 @@ import type {
   CrabrunnerTerminalEvidence,
 } from "../stage-execution/crabrunner-backend.js";
 import type { StopRequest, StopSignalDelivery } from "./core.js";
+import { isStopSignalDelivery } from "./stop-signal-delivery.js";
+
+const CRABRUNNER_TERMINAL_STATES = new Set([
+  "succeeded",
+  "timed_out",
+  "budget_exceeded",
+  "turn_cap_reached",
+  "stalled",
+  "canceled",
+  "kill_failed",
+  "enforcement_contract_missing",
+  "runner_failed",
+  "artifact_parse_failed",
+  "artifact_collection_failed",
+  "usage_unavailable",
+]);
 
 export function isCancellableCrabrunnerBackend(
   backend: StageExecutionBackendRunner,
@@ -23,13 +39,21 @@ export function laneCancellationToStopSignalDelivery(
   evidence: CrabrunnerTerminalEvidence,
   attemptedAt: Date,
 ): StopSignalDelivery {
+  if (!isValidCrabrunnerTerminalEvidence(evidence)) {
+    return invalidLaneCancellationDelivery(
+      laneJobId,
+      input,
+      attemptedAt,
+      "Invalid crabrunner cancellation evidence.",
+    );
+  }
   const cancellation = evidence.cancellation;
   const killed = cancellation?.killed === true && evidence.state === "canceled";
   const alreadyStopped =
     evidence.state === "canceled" &&
     cancellation?.requested === true &&
     !killed;
-  return {
+  const delivery = {
     status: killed ? "delivered" : alreadyStopped ? "already_exited" : "failed",
     reason: input.reason,
     attemptedAt: attemptedAt.toISOString(),
@@ -47,7 +71,74 @@ export function laneCancellationToStopSignalDelivery(
         : (cancellation?.failure ??
           evidence.message ??
           `crabrunner cancellation ended in ${evidence.state}`),
+  } satisfies StopSignalDelivery;
+  return isStopSignalDelivery(delivery)
+    ? delivery
+    : invalidLaneCancellationDelivery(
+        laneJobId,
+        input,
+        attemptedAt,
+        "Invalid lane cancellation delivery telemetry.",
+      );
+}
+
+function invalidLaneCancellationDelivery(
+  laneJobId: string | null,
+  input: StopRequest,
+  attemptedAt: Date,
+  warning: string,
+): StopSignalDelivery {
+  return {
+    status: "failed",
+    reason: input.reason,
+    attemptedAt: attemptedAt.toISOString(),
+    workspacePath: null,
+    attempts: [],
+    laneJobId,
+    laneCancellation: {
+      state: "kill_failed",
+      killed: false,
+      failure: warning,
+    },
+    warning,
   };
+}
+
+function isValidCrabrunnerTerminalEvidence(
+  value: unknown,
+): value is CrabrunnerTerminalEvidence {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const evidence = value as Record<string, unknown>;
+  if (
+    typeof evidence.state !== "string" ||
+    !CRABRUNNER_TERMINAL_STATES.has(evidence.state) ||
+    (evidence.workspacePath !== undefined &&
+      evidence.workspacePath !== null &&
+      typeof evidence.workspacePath !== "string")
+  ) {
+    return false;
+  }
+  const cancellation = evidence.cancellation;
+  if (cancellation === undefined || cancellation === null) {
+    return true;
+  }
+  if (
+    typeof cancellation !== "object" ||
+    Array.isArray(cancellation) ||
+    cancellation === null
+  ) {
+    return false;
+  }
+  const block = cancellation as Record<string, unknown>;
+  return (
+    typeof block.requested === "boolean" &&
+    (block.signal === null || typeof block.signal === "string") &&
+    typeof block.processGroup === "boolean" &&
+    typeof block.killed === "boolean" &&
+    (block.failure === null || typeof block.failure === "string")
+  );
 }
 
 export function normalizeLaneCancellation(

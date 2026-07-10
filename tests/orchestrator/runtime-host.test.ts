@@ -43,6 +43,7 @@ import {
   SERVICE_SHUTDOWN_ABORT_REASON,
   type StopSignalDelivery,
 } from "../../src/orchestrator/core.js";
+import { laneCancellationToStopSignalDelivery } from "../../src/orchestrator/lane-cancellation.js";
 import type { MergeCandidateRecord } from "../../src/orchestrator/merge-candidate.js";
 import type { PipelineNotificationEvent } from "../../src/orchestrator/pipeline-notifier.js";
 import {
@@ -10158,6 +10159,42 @@ describe("stage execution backend boundary", () => {
     expect(host.getState().resumeRequired.has("1")).toBe(true);
     expect(host.getState().retryAttempts["1"]).toBeUndefined();
     expect(host.getState().completed.has("1")).toBe(false);
+  });
+
+  it("fails closed when lane cancellation evidence is malformed", () => {
+    const input = {
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      cleanupWorkspace: false,
+      reason: "emergency_stop",
+    } satisfies Parameters<typeof laneCancellationToStopSignalDelivery>[1];
+    const delivery = laneCancellationToStopSignalDelivery(
+      "malformed-job",
+      input,
+      {
+        state: "canceled",
+        cancellation: {
+          requested: true,
+          signal: "SIGTERM",
+          processGroup: true,
+          killed: "yes",
+          failure: {},
+        },
+      } as unknown as Parameters<
+        typeof laneCancellationToStopSignalDelivery
+      >[2],
+      new Date("2026-03-06T00:00:05.000Z"),
+    );
+
+    expect(delivery).toMatchObject({
+      status: "failed",
+      laneJobId: "malformed-job",
+      laneCancellation: {
+        state: "kill_failed",
+        killed: false,
+        failure: "Invalid crabrunner cancellation evidence.",
+      },
+    });
   });
 
   it("reports PID control for a lane backend that cannot cancel", async () => {

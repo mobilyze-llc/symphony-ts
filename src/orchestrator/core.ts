@@ -858,6 +858,9 @@ export class OrchestratorCore {
   /** A very fast delegated terminal can race the RunningEntry insertion too. */
   private readonly pendingCrabrunnerResults = new Map<string, AgentRunResult>();
 
+  /** Prevent a pending result and its completion callback from applying twice. */
+  private readonly appliedCrabrunnerResults = new WeakSet<AgentRunResult>();
+
   private readonly runEnsembleGate?: OrchestratorCoreOptions["runEnsembleGate"];
 
   private readonly postComment?: OrchestratorCoreOptions["postComment"];
@@ -9695,12 +9698,16 @@ export class OrchestratorCore {
     issueId: string;
     result: AgentRunResult;
   }): boolean {
+    if (this.appliedCrabrunnerResults.has(input.result)) {
+      return true;
+    }
     const runningEntry = this.state.running[input.issueId];
     if (runningEntry === undefined) {
       this.pendingCrabrunnerResults.set(input.issueId, input.result);
       return true;
     }
 
+    this.appliedCrabrunnerResults.add(input.result);
     Object.assign(runningEntry, input.result.liveSession);
     const liveSession = input.result.liveSession;
     this.state.codexTotals.inputTokens += liveSession.totalStageInputTokens;

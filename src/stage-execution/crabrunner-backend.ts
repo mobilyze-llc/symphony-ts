@@ -499,13 +499,6 @@ export class CrabrunnerStageExecutionBackend
     return await this.cancellationController.cancel(jobId, request);
   }
 
-  private async performCancel(
-    jobId: string,
-    request: CrabrunnerCancellationRequest,
-  ): Promise<CrabrunnerTerminalEvidence> {
-    return await this.cancellationController.cancel(jobId, request);
-  }
-
   private toBackendResult(
     input: StageExecutionBackendInput,
     mapped: CrabrunnerStageExecutionEvidence & {
