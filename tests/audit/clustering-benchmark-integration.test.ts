@@ -6,7 +6,9 @@ import {
   STRUCTURAL_ADVISORY_PROMPT_INSTRUCTION_LINES,
   STRUCTURAL_ADVISORY_PROMPT_JSON_LINES,
 } from "../../src/agent/structural-advisory-output.js";
+import { parsePlannerOutput } from "../../src/agent/triage-planner.js";
 import { loadClusteringGoldenSetFixture } from "../../src/audit/clustering-benchmark-fixture.js";
+import { scoreStructuralAdvisories } from "../../src/audit/clustering-benchmark-score.js";
 import { runClusteringBenchmark } from "../../src/audit/clustering-benchmark.js";
 import type { StructuralAdvisory } from "../../src/domain/structural-advisory.js";
 
@@ -60,8 +62,21 @@ describe("clustering benchmark production-path contract", () => {
         expect(prompt).toContain(line);
       for (const line of STRUCTURAL_ADVISORY_PROMPT_JSON_LINES)
         expect(prompt).toContain(line);
-      expect(prompt).toContain("## Backlog candidates");
-      expect(prompt).toContain("SYMPHONY_UNTRUSTED_CANDIDATES_");
+      const opening = prompt.indexOf("<SYMPHONY_UNTRUSTED_CANDIDATES_");
+      const backlog = prompt.indexOf("## Backlog candidates");
+      const advisoryInput = prompt.indexOf(
+        "## Backlog advisory input (REPORT-ONLY; never eligible for a batch)",
+      );
+      const closing = prompt.indexOf("</SYMPHONY_UNTRUSTED_CANDIDATES_");
+      expect(opening).toBeGreaterThanOrEqual(0);
+      expect(backlog).toBeGreaterThan(opening);
+      expect(advisoryInput).toBeGreaterThan(backlog);
+      expect(closing).toBeGreaterThan(advisoryInput);
+      const dispatchBacklog = prompt.slice(backlog, advisoryInput);
+      const reportOnlyInput = prompt.slice(advisoryInput, closing);
+      expect(dispatchBacklog).toContain("- (none)");
+      expect(dispatchBacklog).not.toMatch(/[A-Z][A-Z0-9]+-\d+/);
+      expect(reportOnlyInput).toMatch(/[A-Z][A-Z0-9]+-\d+/);
     }
     const positive = result.perRepeat[0]?.fixtures.find(
       (entry) => entry.fixtureKind === "positive",
@@ -81,6 +96,33 @@ describe("clustering benchmark production-path contract", () => {
       totalAttemptedMemberCount: 102,
     });
     expect(result.summary.invalidMemberRate).toBeCloseTo(1 / 34);
+  });
+
+  it("preserves U6 explicit roots through parsePlannerOutput and scoring", async () => {
+    const fixture = await loadClusteringGoldenSetFixture(positivePath);
+    const structuralAdvisories = fixture.answer_key.clusters.map((cluster) => ({
+      memberIssueIdentifiers: cluster.member_issue_identifiers,
+      rootCauseHypothesis: "A shared runtime condition explains these symptoms",
+      structuralFix: "Fix the shared runtime condition once",
+      confidenceNote: "Frozen-fixture evidence",
+      rootIssueIdentifier: cluster.root_issue_identifier,
+    }));
+    const parsed = parsePlannerOutput(
+      `\`\`\`json\n${JSON.stringify({
+        rationale: "report-only clustering",
+        batches: [],
+        structural_advisories: structuralAdvisories,
+      })}\n\`\`\``,
+    );
+    if (!parsed.ok) throw new Error(parsed.reason);
+
+    expect(parsed.value.structural_advisories).toEqual(structuralAdvisories);
+    expect(
+      scoreStructuralAdvisories(
+        fixture,
+        parsed.value.structural_advisories ?? [],
+      ).rootIdentificationAccuracy,
+    ).toBe(1);
   });
 
   it("weights graduation invalid-member rate by attempted members", async () => {

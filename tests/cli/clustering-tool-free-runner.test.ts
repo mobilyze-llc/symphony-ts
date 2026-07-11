@@ -32,7 +32,7 @@ describe("tool-free clustering planner runner", () => {
         "    args: process.argv.slice(2),",
         '    stdin: Buffer.concat(chunks).toString("utf8"),',
         "    env: Object.fromEntries(Object.entries(process.env).filter(([name]) =>",
-        '      ["ANTHROPIC_API_KEY", "LINEAR_API_KEY", "SYMPHONY_LINEAR_WEBHOOK_SECRET", "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_TOKEN", "GITHUB_APP_PRIVATE_KEY", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "SLACK_WEBHOOK_URL", "SYMPHONY_SLACK_WEBHOOK_URL"].includes(name),',
+        '      ["ANTHROPIC_API_KEY", "LINEAR_API_KEY", "LINEAR_WORKSPACE_PAT", "SYMPHONY_LINEAR_WEBHOOK_SECRET", "SYMPHONY_LINEAR_ADMIN_TOKEN_CACHE", "GH_TOKEN", "GH_AUTOMATION_PAT", "GITHUB_TOKEN", "GITHUB_APP_PRIVATE_KEY", "GITHUB_APP_CLIENT_SECRET_ROTATED", "SLACK_BOT_TOKEN", "SLACK_SIGNING_SECRET_V2", "SLACK_WEBHOOK_URL", "SYMPHONY_SLACK_ALERT_WEBHOOK_URL_PRIMARY", "LINEAR_PROJECT_SLUG", "GITHUB_REPOSITORY", "SLACK_NOTIFY_CHANNEL"].includes(name),',
         "    )),",
         "  }));",
         '  process.stdout.write(\'{"rationale":"measured","batches":[]}\');',
@@ -52,15 +52,22 @@ describe("tool-free clustering planner runner", () => {
         CAPTURE_PATH: capturePath,
         ANTHROPIC_API_KEY: "model-auth",
         LINEAR_API_KEY: "linear-secret",
+        LINEAR_WORKSPACE_PAT: "linear-missed-pattern",
         SYMPHONY_LINEAR_WEBHOOK_SECRET: "linear-webhook-secret",
+        SYMPHONY_LINEAR_ADMIN_TOKEN_CACHE: "linear-token-cache",
         GH_TOKEN: "github-secret",
-        GH_ENTERPRISE_TOKEN: "github-enterprise-secret",
+        GH_AUTOMATION_PAT: "github-missed-pattern",
         GITHUB_TOKEN: "github-secret-2",
         GITHUB_APP_PRIVATE_KEY: "github-private-key",
+        GITHUB_APP_CLIENT_SECRET_ROTATED: "github-client-secret",
         SLACK_BOT_TOKEN: "slack-secret",
-        SLACK_APP_TOKEN: "slack-secret-2",
+        SLACK_SIGNING_SECRET_V2: "slack-signing-secret",
         SLACK_WEBHOOK_URL: "slack-webhook-secret",
-        SYMPHONY_SLACK_WEBHOOK_URL: "symphony-slack-webhook-secret",
+        SYMPHONY_SLACK_ALERT_WEBHOOK_URL_PRIMARY:
+          "symphony-slack-webhook-secret",
+        LINEAR_PROJECT_SLUG: "preserved-project",
+        GITHUB_REPOSITORY: "preserved/repository",
+        SLACK_NOTIFY_CHANNEL: "preserved-channel",
       },
     });
 
@@ -92,19 +99,29 @@ describe("tool-free clustering planner runner", () => {
     );
     expect(processBoundary.env.ANTHROPIC_API_KEY).toBe("model-auth");
     expect(processBoundary.env).not.toHaveProperty("LINEAR_API_KEY");
+    expect(processBoundary.env).not.toHaveProperty("LINEAR_WORKSPACE_PAT");
     expect(processBoundary.env).not.toHaveProperty(
       "SYMPHONY_LINEAR_WEBHOOK_SECRET",
     );
+    expect(processBoundary.env).not.toHaveProperty(
+      "SYMPHONY_LINEAR_ADMIN_TOKEN_CACHE",
+    );
     expect(processBoundary.env).not.toHaveProperty("GH_TOKEN");
-    expect(processBoundary.env).not.toHaveProperty("GH_ENTERPRISE_TOKEN");
+    expect(processBoundary.env).not.toHaveProperty("GH_AUTOMATION_PAT");
     expect(processBoundary.env).not.toHaveProperty("GITHUB_TOKEN");
     expect(processBoundary.env).not.toHaveProperty("GITHUB_APP_PRIVATE_KEY");
+    expect(processBoundary.env).not.toHaveProperty(
+      "GITHUB_APP_CLIENT_SECRET_ROTATED",
+    );
     expect(processBoundary.env).not.toHaveProperty("SLACK_BOT_TOKEN");
-    expect(processBoundary.env).not.toHaveProperty("SLACK_APP_TOKEN");
+    expect(processBoundary.env).not.toHaveProperty("SLACK_SIGNING_SECRET_V2");
     expect(processBoundary.env).not.toHaveProperty("SLACK_WEBHOOK_URL");
     expect(processBoundary.env).not.toHaveProperty(
-      "SYMPHONY_SLACK_WEBHOOK_URL",
+      "SYMPHONY_SLACK_ALERT_WEBHOOK_URL_PRIMARY",
     );
+    expect(processBoundary.env.LINEAR_PROJECT_SLUG).toBe("preserved-project");
+    expect(processBoundary.env.GITHUB_REPOSITORY).toBe("preserved/repository");
+    expect(processBoundary.env.SLACK_NOTIFY_CHANNEL).toBe("preserved-channel");
     expect(
       await readFile(join(root, "artifacts", "repeat-1.prompt.md"), "utf8"),
     ).toBe("planner prompt");
@@ -123,6 +140,7 @@ describe("tool-free clustering planner runner", () => {
       artifactName: "repeat-1",
       env: {},
       runProcess: async () => ({
+        status: "completed",
         exitCode: 7,
         stdout: "",
         stderr: "runner unavailable",
@@ -132,6 +150,59 @@ describe("tool-free clustering planner runner", () => {
     await expect(runner("planner prompt")).resolves.toEqual({
       status: "unavailable",
       detail: "tool-free Claude exited 7: runner unavailable",
+    });
+    await expect(
+      readFile(join(root, "artifacts", "repeat-1.md"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("bounds an injected process rejection as unavailable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "clustering-tool-free-"));
+    roots.push(root);
+    const runner = createToolFreeClusteringPlannerRunner({
+      model: "opus",
+      workspace: root,
+      artifactDir: join(root, "artifacts"),
+      artifactName: "repeat-1",
+      env: {},
+      runProcess: async () => {
+        throw new Error(`spawn failed ${"x".repeat(3_000)}`);
+      },
+    });
+
+    const result = await runner("planner prompt");
+    expect(result.status).toBe("unavailable");
+    if (result.status !== "unavailable") throw new Error("expected failure");
+    expect(result.detail).toMatch(
+      /^tool-free Claude process failed: spawn failed/,
+    );
+    expect(result.detail.length).toBeLessThan(2_100);
+    expect(result.detail.endsWith("…")).toBe(true);
+    await expect(
+      readFile(join(root, "artifacts", "repeat-1.md"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("reports an injected timeout distinctly", async () => {
+    const root = await mkdtemp(join(tmpdir(), "clustering-tool-free-"));
+    roots.push(root);
+    const runner = createToolFreeClusteringPlannerRunner({
+      model: "opus",
+      workspace: root,
+      artifactDir: join(root, "artifacts"),
+      artifactName: "repeat-1",
+      env: {},
+      timeoutMs: 17,
+      runProcess: async () => ({
+        status: "timed_out",
+        stdout: "partial",
+        stderr: "killed",
+      }),
+    });
+
+    await expect(runner("planner prompt")).resolves.toEqual({
+      status: "unavailable",
+      detail: "tool-free Claude timed out after 17ms",
     });
     await expect(
       readFile(join(root, "artifacts", "repeat-1.md"), "utf8"),

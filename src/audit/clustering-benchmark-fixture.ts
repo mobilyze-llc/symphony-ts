@@ -2,10 +2,9 @@ import { readFile } from "node:fs/promises";
 
 import { z } from "zod";
 
-import type {
-  PlannerCandidate,
-  PlannerContext,
-} from "../agent/triage-planner.js";
+import type { PlannerContext } from "../agent/triage-planner.js";
+import type { Issue, IssueRelationRef } from "../domain/model.js";
+import { assembleShadowPlannerContext } from "../orchestrator/standing-plan-shadow.js";
 
 const CLUSTERING_GOLDEN_SET_SCHEMA_VERSION = 1;
 
@@ -131,12 +130,12 @@ export function buildClusteringBenchmarkPlannerContext(
   const excluded = new Set(
     reconstructed.answer_key.exclusions.map((entry) => entry.issue_identifier),
   );
-  return {
-    backlog: reconstructed.issues
+  return assembleShadowPlannerContext({
+    candidates: [],
+    advisoryInputCandidates: reconstructed.issues
       .filter((issue) => !excluded.has(issue.identifier))
-      .map(toPlannerCandidate),
-    openPrs: [],
-    recentlyMerged: [],
+      .map(toIssue),
+    structuralAdvisoriesEnabled: true,
     inFlight: [],
     envelope: {
       version: 1,
@@ -144,12 +143,10 @@ export function buildClusteringBenchmarkPlannerContext(
       allowedRisk: "medium",
       allowedModes: ["parallel-isolated", "shared-surface"],
     },
-  };
+  });
 }
 
-function toPlannerCandidate(
-  issue: ClusteringGoldenSetFixture["issues"][number],
-): PlannerCandidate {
+function toIssue(issue: ClusteringGoldenSetFixture["issues"][number]): Issue {
   const identifiers = (
     type: ClusteringGoldenSetFixture["issues"][number]["relations"][number]["type"],
   ): string[] =>
@@ -165,32 +162,34 @@ function toPlannerCandidate(
   const children = identifiers("child");
   const blockedBy = identifiers("blockedBy");
   return {
-    issueId: issue.identifier,
-    issueIdentifier: issue.identifier,
+    id: issue.identifier,
+    identifier: issue.identifier,
     title: issue.title,
     description: issue.description,
     state: issue.state,
     priority: issue.priority,
     labels: issue.labels.map((label) => label.name),
-    blockedBy,
-    advisoryRelations: {
-      ...(relatesTo.length === 0 ? {} : { relatesTo }),
-      ...(duplicates.length === 0 ? {} : { duplicates }),
-      ...(duplicatedBy.length === 0 ? {} : { duplicatedBy }),
-      ...(supersedes.length === 0 ? {} : { supersedes }),
-      ...(supersededBy.length === 0 ? {} : { supersededBy }),
-      parent,
-      ...(children.length === 0 ? {} : { children }),
-    },
-    comments: issue.comments.map((comment) => ({
-      id: comment.id,
-      body: comment.body,
-      createdAt: comment.created_at,
-      authorClass: "operator",
-      relevanceScore: 1,
-      relevanceRationale: "frozen golden-set snapshot",
+    branchName: null,
+    url: null,
+    blockedBy: blockedBy.map((identifier) => ({
+      id: null,
+      identifier,
+      state: null,
     })),
+    relatesTo: relatesTo.map(toIssueRelationRef),
+    duplicates: duplicates.map(toIssueRelationRef),
+    duplicatedBy: duplicatedBy.map(toIssueRelationRef),
+    supersedes: supersedes.map(toIssueRelationRef),
+    supersededBy: supersededBy.map(toIssueRelationRef),
+    parent: parent === null ? null : toIssueRelationRef(parent),
+    children: children.map(toIssueRelationRef),
+    createdAt: null,
+    updatedAt: null,
   };
+}
+
+function toIssueRelationRef(identifier: string): IssueRelationRef {
+  return { id: null, identifier, state: null, title: null };
 }
 
 function validateFixtureReferences(fixture: ClusteringGoldenSetFixture): void {

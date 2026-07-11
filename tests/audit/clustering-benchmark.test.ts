@@ -282,16 +282,16 @@ describe("clustering golden-set fixtures", () => {
     expect(
       strippedLabels.issues[0]?.labels.map((label) => label.name),
     ).not.toContain("post-cutoff-test-label");
-    const context = buildClusteringBenchmarkPlannerContext(fixture);
-    const candidate = context.backlog.find(
+    const context = buildClusteringBenchmarkPlannerContext(withLateLabel);
+    expect(context.backlog).toEqual([]);
+    expect(context.structuralAdvisoriesEnabled).toBe(true);
+    const candidate = context.advisoryInput?.find(
       (entry) => entry.issueIdentifier === "MOB-981",
-    );
-    expect(candidate?.comments?.map((comment) => comment.id)).not.toContain(
-      disposition?.id,
     );
     expect(candidate?.advisoryRelations?.relatesTo ?? []).not.toContain(
       "MOB-853",
     );
+    expect(candidate?.labels).not.toContain("post-cutoff-test-label");
   });
 
   it("commits the complete T0 union and explicit re-adjudication exclusions", async () => {

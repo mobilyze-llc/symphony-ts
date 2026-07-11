@@ -6,14 +6,16 @@ import type { PlannerRunResult } from "../agent/triage-planner.js";
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1_000;
 const EMPTY_MCP_CONFIG = JSON.stringify({ mcpServers: {} });
-const SENSITIVE_TOOL_CREDENTIAL_PATTERNS = [
-  /^LINEAR_(?:API_KEY|TOKEN|SECRET)$/,
-  /^SYMPHONY_LINEAR_.*(?:TOKEN|SECRET|KEY)$/,
-  /^GH_(?:TOKEN|ENTERPRISE_TOKEN)$/,
-  /^GITHUB_.*(?:TOKEN|SECRET|PRIVATE_KEY|CLIENT_SECRET)$/,
-  /^SLACK_.*(?:TOKEN|SECRET|WEBHOOK(?:_URL)?)$/,
-  /^SYMPHONY_SLACK_.*(?:TOKEN|SECRET|WEBHOOK(?:_URL)?)$/,
+const EXTERNAL_TOOL_CREDENTIAL_PREFIXES = [
+  "LINEAR_",
+  "SYMPHONY_LINEAR_",
+  "GH_",
+  "GITHUB_",
+  "SLACK_",
+  "SYMPHONY_SLACK_",
 ] as const;
+const CREDENTIAL_MARKER =
+  /(?:^|_)(?:TOKEN|PAT|API_KEY|SECRET|PRIVATE_KEY|CLIENT_SECRET|WEBHOOK(?:_URL)?)(?:_|$)/;
 
 interface ToolFreePlannerProcessInput {
   command: string;
@@ -24,11 +26,14 @@ interface ToolFreePlannerProcessInput {
   timeoutMs: number;
 }
 
-interface ToolFreePlannerProcessResult {
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-}
+type ToolFreePlannerProcessResult =
+  | {
+      status: "completed";
+      exitCode: number;
+      stdout: string;
+      stderr: string;
+    }
+  | { status: "timed_out"; stdout: string; stderr: string };
 
 type ToolFreePlannerProcess = (
   input: ToolFreePlannerProcessInput,
@@ -50,14 +55,29 @@ export function createToolFreeClusteringPlannerRunner(input: {
       prompt,
       "utf8",
     );
-    const result = await (input.runProcess ?? runToolFreePlannerProcess)({
-      command: "claude",
-      args: toolFreeClaudeArgs(input.model),
-      cwd: input.workspace,
-      env: withoutExternalToolCredentials(input.env),
-      stdin: prompt,
-      timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-    });
+    const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    let result: ToolFreePlannerProcessResult;
+    try {
+      result = await (input.runProcess ?? runToolFreePlannerProcess)({
+        command: "claude",
+        args: toolFreeClaudeArgs(input.model),
+        cwd: input.workspace,
+        env: withoutExternalToolCredentials(input.env),
+        stdin: prompt,
+        timeoutMs,
+      });
+    } catch (error) {
+      return {
+        status: "unavailable",
+        detail: `tool-free Claude process failed: ${bounded(errorDetail(error))}`,
+      };
+    }
+    if (result.status === "timed_out") {
+      return {
+        status: "unavailable",
+        detail: `tool-free Claude timed out after ${timeoutMs}ms`,
+      };
+    }
     if (result.exitCode !== 0) {
       return {
         status: "unavailable",
@@ -107,12 +127,16 @@ function withoutExternalToolCredentials(
   env: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv {
   return Object.fromEntries(
-    Object.entries(env).filter(
-      ([name]) =>
-        !SENSITIVE_TOOL_CREDENTIAL_PATTERNS.some((pattern) =>
-          pattern.test(name),
-        ),
-    ),
+    Object.entries(env).filter(([name]) => !isExternalToolCredentialName(name)),
+  );
+}
+
+function isExternalToolCredentialName(name: string): boolean {
+  const prefix = EXTERNAL_TOOL_CREDENTIAL_PREFIXES.find((candidate) =>
+    name.startsWith(candidate),
+  );
+  return (
+    prefix !== undefined && CREDENTIAL_MARKER.test(name.slice(prefix.length))
   );
 }
 
@@ -127,13 +151,29 @@ async function runToolFreePlannerProcess(
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
+    let timedOut = false;
     child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
     child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-    child.once("error", reject);
-    const timer = setTimeout(() => child.kill("SIGKILL"), input.timeoutMs);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, input.timeoutMs);
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
     child.once("close", (code) => {
       clearTimeout(timer);
+      if (timedOut) {
+        resolve({
+          status: "timed_out",
+          stdout: Buffer.concat(stdout).toString("utf8"),
+          stderr: Buffer.concat(stderr).toString("utf8"),
+        });
+        return;
+      }
       resolve({
+        status: "completed",
         exitCode: code ?? 1,
         stdout: Buffer.concat(stdout).toString("utf8"),
         stderr: Buffer.concat(stderr).toString("utf8"),
@@ -141,6 +181,10 @@ async function runToolFreePlannerProcess(
     });
     child.stdin.end(input.stdin);
   });
+}
+
+function errorDetail(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function bounded(value: string): string {

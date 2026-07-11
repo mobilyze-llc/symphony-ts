@@ -1,10 +1,6 @@
 import type { StructuralAdvisory } from "../domain/structural-advisory.js";
 import type { ClusteringGoldenSetFixture } from "./clustering-benchmark-fixture.js";
 
-type ScorableStructuralAdvisory = StructuralAdvisory & {
-  rootIssueIdentifier?: string | null;
-};
-
 export interface ClusteringScore {
   pairwisePrecision: number | null;
   pairwiseRecall: number | null;
@@ -20,7 +16,7 @@ export interface ClusteringScore {
 }
 
 export interface ValidatedStructuralAdvisories {
-  accepted: ScorableStructuralAdvisory[];
+  accepted: StructuralAdvisory[];
   invalidAdvisoryCount: number;
   invalidMemberCount: number;
   totalAttemptedMemberCount: number;
@@ -29,7 +25,7 @@ export interface ValidatedStructuralAdvisories {
 
 export function validateStructuralAdvisoryMembers(
   fixture: ClusteringGoldenSetFixture,
-  advisories: readonly ScorableStructuralAdvisory[],
+  advisories: readonly StructuralAdvisory[],
 ): ValidatedStructuralAdvisories {
   const exclusions = new Set(
     fixture.answer_key.exclusions.map((entry) => entry.issue_identifier),
@@ -39,7 +35,7 @@ export function validateStructuralAdvisoryMembers(
       .map((issue) => issue.identifier)
       .filter((identifier) => !exclusions.has(identifier)),
   );
-  const accepted: ScorableStructuralAdvisory[] = [];
+  const accepted: StructuralAdvisory[] = [];
   let invalidAdvisoryCount = 0;
   let invalidMemberCount = 0;
   let totalMemberCount = 0;
@@ -67,7 +63,7 @@ export function validateStructuralAdvisoryMembers(
 
 export function scoreStructuralAdvisories(
   fixture: ClusteringGoldenSetFixture,
-  advisories: readonly ScorableStructuralAdvisory[],
+  advisories: readonly StructuralAdvisory[],
 ): ClusteringScore {
   const validation = validateStructuralAdvisoryMembers(fixture, advisories);
   const exclusions = new Set(
@@ -168,8 +164,8 @@ function pairSet(
 
 function assignPredictionsByOverlap(
   truth: ClusteringGoldenSetFixture["answer_key"]["clusters"],
-  predictions: readonly ScorableStructuralAdvisory[],
-): Map<number, ScorableStructuralAdvisory> {
+  predictions: readonly StructuralAdvisory[],
+): Map<number, StructuralAdvisory> {
   const pairKeys = truth
     .flatMap((cluster) =>
       predictions.map(
@@ -213,7 +209,7 @@ function assignPredictionsByOverlap(
         overlap * overlapFactor + jaccardUnits * jaccardFactor + tieBonus;
     });
   });
-  const assignments = new Map<number, ScorableStructuralAdvisory>();
+  const assignments = new Map<number, StructuralAdvisory>();
   for (const [truthIndex, predictionIndex] of maximumWeightAssignment(
     weights,
   )) {
