@@ -11,6 +11,17 @@ import {
   type AltitudeReliabilityCase,
   type AltitudeReliabilityVerdict,
 } from "../audit/altitude-reliability.js";
+import type { ClaudeRunnerValidationConfig } from "../claude-runner/claude-runner-types.js";
+
+/**
+ * The verdict contract is an intentionally tiny exact-JSON artifact
+ * (`{"verdict":"kill"}` ~= 20 bytes). The crabrunner default 200-byte minimum
+ * rejects compliant answers and rewards prose padding (SYMPH-1119), so the
+ * altitude path overrides the floor; strict shape validation stays with the
+ * Zod parser below.
+ */
+export const CAPABILITY_RETEST_VERDICT_VALIDATION: ClaudeRunnerValidationConfig =
+  { minBytes: 1 };
 
 export function createCrabrunnerVerdictRunner(input: {
   model: string;
@@ -30,6 +41,7 @@ export function createCrabrunnerVerdictRunner(input: {
       artifactName,
       model: input.model,
       env: input.env,
+      validation: CAPABILITY_RETEST_VERDICT_VALIDATION,
     });
     const response = await runner(renderVerdictPrompt(testCase));
     return parseCapabilityRetestVerdictResponse(

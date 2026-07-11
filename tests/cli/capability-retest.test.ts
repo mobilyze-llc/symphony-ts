@@ -11,8 +11,12 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { validateClaudeArtifact } from "../../src/claude-runner/claude-runner-contract.js";
 import { runClusteringCapabilityRetest } from "../../src/cli/capability-retest-clustering.js";
-import { parseCapabilityRetestVerdictResponse } from "../../src/cli/capability-retest-runner.js";
+import {
+  CAPABILITY_RETEST_VERDICT_VALIDATION,
+  parseCapabilityRetestVerdictResponse,
+} from "../../src/cli/capability-retest-runner.js";
 import { createCapabilityRetestEvaluationWorkspace } from "../../src/cli/capability-retest-workspace.js";
 import {
   CAPABILITY_RETEST_EXIT,
@@ -38,6 +42,19 @@ afterEach(async () => {
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
   );
+});
+
+describe("CAPABILITY_RETEST_VERDICT_VALIDATION (SYMPH-1119)", () => {
+  it("accepts a contract-compliant tiny verdict artifact that the default policy rejects", async () => {
+    const compliant = '{"verdict":"reframe"}';
+    await expect(
+      validateClaudeArtifact(compliant, CAPABILITY_RETEST_VERDICT_VALIDATION),
+    ).resolves.toEqual([]);
+    // The regression this guards: the unparameterized default floor rejects
+    // exactly the artifact the verdict prompt demands.
+    const defaultErrors = await validateClaudeArtifact(compliant);
+    expect(defaultErrors.some((e) => e.includes("too small"))).toBe(true);
+  });
 });
 
 function captureIo() {

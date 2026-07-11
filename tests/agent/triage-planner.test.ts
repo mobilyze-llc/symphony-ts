@@ -2230,6 +2230,50 @@ describe("createCrabrunnerPlannerRunner", () => {
     expect(writes[0]?.data).toBe("PROMPT-BODY");
   });
 
+  it("threads per-caller validation through to the crabrunner input (SYMPH-1119)", async () => {
+    const captured: Array<{ validation: unknown }> = [];
+    const runner = createCrabrunnerPlannerRunner({
+      workspace: "/ws",
+      artifactDir: "/artifacts",
+      artifactName: "plan",
+      validation: { minBytes: 1 },
+      runCrabrunner: async (input) => {
+        captured.push({ validation: input.validation });
+        return crabrunnerResult({ artifactPath: "/artifacts/plan.md" });
+      },
+      fs: {
+        mkdir: async () => undefined,
+        writeFile: async () => undefined,
+        readFile: async () => '{"verdict":"reframe"}',
+      },
+    });
+
+    const result = await runner("PROMPT-BODY");
+    expect(result.status).toBe("ok");
+    expect(captured[0]?.validation).toEqual({ minBytes: 1 });
+  });
+
+  it("omits validation from the crabrunner input when the caller sets none", async () => {
+    const captured: Array<Record<string, unknown>> = [];
+    const runner = createCrabrunnerPlannerRunner({
+      workspace: "/ws",
+      artifactDir: "/artifacts",
+      artifactName: "plan",
+      runCrabrunner: async (input) => {
+        captured.push(input as unknown as Record<string, unknown>);
+        return crabrunnerResult({ artifactPath: "/artifacts/plan.md" });
+      },
+      fs: {
+        mkdir: async () => undefined,
+        writeFile: async () => undefined,
+        readFile: async () => "# Plan\n",
+      },
+    });
+
+    await runner("PROMPT-BODY");
+    expect("validation" in (captured[0] ?? {})).toBe(false);
+  });
+
   it("degrades to unavailable when crabrunner does not pass", async () => {
     const runner = createCrabrunnerPlannerRunner({
       workspace: "/ws",
