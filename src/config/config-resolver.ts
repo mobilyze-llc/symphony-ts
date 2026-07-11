@@ -114,6 +114,7 @@ import {
   DEFAULT_WATCHDOG_SYSTEMIC_THRESHOLD,
   DEFAULT_WORKSPACE_ROOT,
 } from "./defaults.js";
+import { resolveStructuralAdvisoryConfig } from "./queue-triage-structural-advisory.js";
 import { parseStageExecutionProfile } from "./stage-execution-profile.js";
 import type {
   DispatchValidationResult,
@@ -539,11 +540,7 @@ function resolvePreReviewVerifyConfig(
   };
 }
 
-/**
- * Queue Triage v2 Manager spine config (SYMPH-784). Default-DISABLED; shadow-on.
- * The envelope is validated by resolveStandingPlanEnvelope (throws on an invalid
- * envelope rather than silently widening the Manager's authority).
- */
+/** Resolve default-closed Queue Triage v2 config (SYMPH-784). */
 function resolveQueueTriageConfig(
   queueTriage: Record<string, unknown>,
   maxConcurrentAgents: number,
@@ -557,6 +554,7 @@ function resolveQueueTriageConfig(
     enabled: readBoolean(queueTriage.enabled) ?? DEFAULT_QUEUE_TRIAGE_ENABLED,
     shadowMode:
       readBoolean(queueTriage.shadow_mode) ?? DEFAULT_QUEUE_TRIAGE_SHADOW_MODE,
+    ...resolveStructuralAdvisoryConfig(queueTriage),
     plannerModel:
       readString(queueTriage.planner_model) ??
       DEFAULT_QUEUE_TRIAGE_PLANNER_MODEL,

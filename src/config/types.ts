@@ -562,16 +562,13 @@ export interface StagesConfig {
   stages: Readonly<Record<string, StageDefinition>>;
 }
 
-/**
- * Queue Triage v2 Manager spine (SYMPH-784). Default-DISABLED. When enabled in
- * `shadowMode` (the default), the Opus@max planner computes and persists a
- * standing plan and logs it WITHOUT changing dispatch (zero-diff). PR2 promotes
- * the plan to drive dispatch. The envelope is the read contract the planner and
- * (later) the consumer plan/dispatch within (SYMPH-793).
- */
+/** Queue Triage v2 Manager configuration (SYMPH-784). */
 export interface WorkflowQueueTriageConfig {
   enabled: boolean;
   shadowMode: boolean;
+  structuralAdvisories?: boolean;
+  structuralAdvisoryDormantOkTicks?: number;
+  structuralAdvisoryRenderCap?: number;
   /** Version-floating planner model alias (do not pin). Default "opus". */
   plannerModel: string;
   /** Re-plan heartbeat cadence for the shadow/plan loop, in ms. */

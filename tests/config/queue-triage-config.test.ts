@@ -8,6 +8,9 @@ import {
   DEFAULT_QUEUE_TRIAGE_PLAN_REVIEW_ENABLED,
   DEFAULT_QUEUE_TRIAGE_PLAN_REVIEW_PLANNER_GROUNDING_ENABLED,
   DEFAULT_QUEUE_TRIAGE_SHADOW_MODE,
+  DEFAULT_QUEUE_TRIAGE_STRUCTURAL_ADVISORIES,
+  DEFAULT_QUEUE_TRIAGE_STRUCTURAL_ADVISORY_DORMANT_OK_TICKS,
+  DEFAULT_QUEUE_TRIAGE_STRUCTURAL_ADVISORY_RENDER_CAP,
 } from "../../src/config/defaults.js";
 
 describe("config-resolver queue triage (SYMPH-784)", () => {
@@ -29,6 +32,13 @@ describe("config-resolver queue triage (SYMPH-784)", () => {
     expect(resolved.queueTriage?.heartbeatMs).toBe(
       DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS,
     );
+    expect(resolved.queueTriage).toMatchObject({
+      structuralAdvisories: DEFAULT_QUEUE_TRIAGE_STRUCTURAL_ADVISORIES,
+      structuralAdvisoryDormantOkTicks:
+        DEFAULT_QUEUE_TRIAGE_STRUCTURAL_ADVISORY_DORMANT_OK_TICKS,
+      structuralAdvisoryRenderCap:
+        DEFAULT_QUEUE_TRIAGE_STRUCTURAL_ADVISORY_RENDER_CAP,
+    });
     // concurrency ceiling defaults to the agent concurrency.
     expect(resolved.queueTriage?.envelope.concurrencyCeiling).toBe(4);
     // parallel-isolated + canary-chain by default (canary's execution path
@@ -63,6 +73,25 @@ describe("config-resolver queue triage (SYMPH-784)", () => {
       enabled: DEFAULT_QUEUE_TRIAGE_PLAN_REVIEW_ENABLED,
       plannerGroundingEnabled:
         DEFAULT_QUEUE_TRIAGE_PLAN_REVIEW_PLANNER_GROUNDING_ENABLED,
+    });
+  });
+
+  it("parses the structural-advisory arming key and lifecycle bounds", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      config: {
+        queue_triage: {
+          structural_advisories: true,
+          structural_advisory_dormant_ok_ticks: 5,
+          structural_advisory_render_cap: 7,
+        },
+      },
+      promptTemplate: "Prompt",
+    });
+    expect(resolved.queueTriage).toMatchObject({
+      structuralAdvisories: true,
+      structuralAdvisoryDormantOkTicks: 5,
+      structuralAdvisoryRenderCap: 7,
     });
   });
 

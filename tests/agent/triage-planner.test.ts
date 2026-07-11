@@ -1910,6 +1910,45 @@ describe("runTriagePlanner", () => {
     }
   });
 
+  it("runs for armed advisory input even when dispatch backlog is empty", async () => {
+    let prompt = "";
+    const advisory = context().backlog[0]!;
+    const result = await runTriagePlanner(
+      {
+        ...context(),
+        backlog: [],
+        advisoryInput: [{ ...advisory, state: "Backlog" }],
+        structuralAdvisoriesEnabled: true,
+      },
+      {
+        runClaude: async (renderedPrompt): Promise<PlannerRunResult> => {
+          prompt = renderedPrompt;
+          return {
+            status: "ok",
+            markdown: artifact({
+              rationale: "advisory scan",
+              batches: [],
+              structural_advisories: [
+                {
+                  memberIssueIdentifiers: ["SYMPH-1"],
+                  rootCauseHypothesis: "shared root",
+                  structuralFix: "fix root",
+                  confidenceNote: "medium",
+                },
+              ],
+            }),
+          };
+        },
+      },
+    );
+    expect(prompt).toContain("Backlog advisory input");
+    expect(result).toMatchObject({ status: "ok", attempts: 1 });
+    if (result.status === "ok") {
+      expect(result.body.batches).toEqual([]);
+      expect(result.body.structuralAdvisories).toHaveLength(1);
+    }
+  });
+
   it("returns a plan body on a good model artifact", async () => {
     const deps = {
       runClaude: async (): Promise<PlannerRunResult> => ({
