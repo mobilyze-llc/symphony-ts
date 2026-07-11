@@ -789,6 +789,104 @@ describe("calibration digest (SYMPH-411)", () => {
     ]);
   });
 
+  it("projects graded-to-active revival without counting it as an active/dormant flip", () => {
+    const advisory = (sequence: number, from: string | null, to: string) =>
+      entry({
+        sequence,
+        kind: "structural_advisory",
+        metadata: {
+          advisory_id: "fp-revived",
+          advisory_class: "3-5:existing-root",
+          lifecycle_from: from,
+          lifecycle_to: to,
+        },
+      });
+    const report = computeCalibrationReport([
+      advisory(1, null, "active"),
+      entry({
+        sequence: 2,
+        kind: "structural_advisory_grade",
+        metadata: { advisory_id: "fp-revived", decision: "reject" },
+      }),
+      advisory(3, "graded", "active"),
+    ]);
+
+    expect(report.structuralAdvisoryDecisions).toEqual([
+      {
+        advisoryId: "fp-revived",
+        advisoryClass: "3-5:existing-root",
+        advisorySequence: 1,
+        decision: "rejected",
+        gradeSequence: 2,
+        flipCount: 0,
+      },
+    ]);
+    expect(report.structuralAdvisoryStability).toEqual([
+      expect.objectContaining({
+        advisoryId: "fp-revived",
+        firstSeenAt: "2026-06-01T00:00:01.000Z",
+        lastSeenAt: "2026-06-01T00:00:03.000Z",
+        flipCount: 0,
+        decision: "rejected",
+      }),
+    ]);
+  });
+
+  it("joins structural advisory grades from indexes across a large synthetic journal", () => {
+    const journal: DispatcherRunJournalEntry[] = [];
+    for (let index = 0; index < 1_000; index += 1) {
+      const sequence = index * 3 + 1;
+      journal.push(
+        entry({
+          sequence,
+          kind: "structural_advisory",
+          metadata: {
+            advisory_id: `fp-${index}`,
+            advisory_class:
+              index % 2 === 0 ? "3-5:existing-root" : "2:new-root",
+            lifecycle_from: null,
+            lifecycle_to: "active",
+          },
+        }),
+        entry({
+          sequence: sequence + 1,
+          kind: "structural_advisory_grade",
+          metadata: {
+            advisory_id: `fp-${index}`,
+            decision: index % 3 === 0 ? "accept" : "reject",
+          },
+        }),
+        entry({
+          sequence: sequence + 2,
+          kind: "structural_advisory_grade",
+          metadata: {
+            advisory_id: `orphan-${index}`,
+            decision: "reject",
+          },
+        }),
+      );
+    }
+
+    const report = computeCalibrationReport(journal);
+
+    expect(report.structuralAdvisoryDecisions).toHaveLength(1_000);
+    expect(report.orphanStructuralAdvisoryGrades).toHaveLength(1_000);
+    expect(
+      report.structuralAdvisoryDecisions.filter(
+        (row) => row.decision === "accepted",
+      ),
+    ).toHaveLength(334);
+    expect(
+      report.structuralAdvisoryDecisions.filter(
+        (row) => row.decision === "rejected",
+      ),
+    ).toHaveLength(666);
+    expect(report.structuralAdvisoryDecisions.at(-1)).toMatchObject({
+      advisoryId: "fp-999",
+      gradeSequence: 2999,
+    });
+  });
+
   it("renders the synthetic journal to the expected golden digest", () => {
     const raw = readFileSync(
       join(FIXTURE_DIR, "synthetic-journal.jsonl"),
