@@ -80,10 +80,11 @@ export function parseCapabilityRetestVerdictResponse(
   };
 }
 
-function renderVerdictPrompt(testCase: AltitudeReliabilityCase): string {
+export function renderVerdictPrompt(testCase: AltitudeReliabilityCase): string {
   return [
     "You are running an unattended altitude-reliability capability re-test for the Symphony backlog planner.",
-    `Independently investigate Linear issue ${testCase.issueIdentifier} and its relevant repository/history context.`,
+    `Classify Linear issue ${testCase.issueIdentifier} from this prompt alone.`,
+    "This benchmark intentionally provides no live Linear access, git history, docs, tests, or answer-key context. Do not use tools, inspect files, or try to recover missing context.",
     "Judge the issue at the correct product altitude:",
     '- "kill" means the issue should be closed because its premise is disproved, redundant, or merely symptomatic.',
     '- "keep" means it is a valid, correctly scoped unit of work.',

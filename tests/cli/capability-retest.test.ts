@@ -16,6 +16,7 @@ import { runClusteringCapabilityRetest } from "../../src/cli/capability-retest-c
 import {
   CAPABILITY_RETEST_VERDICT_VALIDATION,
   parseCapabilityRetestVerdictResponse,
+  renderVerdictPrompt,
 } from "../../src/cli/capability-retest-runner.js";
 import { createCapabilityRetestEvaluationWorkspace } from "../../src/cli/capability-retest-workspace.js";
 import {
@@ -595,6 +596,21 @@ describe("capability re-test CLI", () => {
         "SYMPH-941",
       ),
     ).toThrow(/invalid verdict object/);
+  });
+
+  it("keeps the altitude verdict prompt context-contained for empty evaluation snapshots", () => {
+    const prompt = renderVerdictPrompt({
+      issueIdentifier: "SYMPH-941",
+      expectedVerdict: "reframe",
+      source: "root-cause regression",
+    });
+
+    expect(prompt).toContain(
+      "Classify Linear issue SYMPH-941 from this prompt alone",
+    );
+    expect(prompt).toContain("no live Linear access");
+    expect(prompt).toContain("Do not use tools");
+    expect(prompt).not.toContain("Independently investigate");
   });
 
   it.each([
