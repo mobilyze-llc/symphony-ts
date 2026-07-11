@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -16,6 +16,10 @@ import {
   runAltitudeReliabilityRetest,
 } from "../audit/altitude-reliability.js";
 import {
+  type ClusteringInference,
+  MIN_GATE_AUTHORITATIVE_CLUSTERING_REPEATS,
+} from "../audit/clustering-benchmark.js";
+import {
   type AltitudeReliabilityCapabilityLedgerRow,
   appendAltitudeReliabilityCapabilityLedgerRowWithLock,
 } from "../logging/capability-ledger.js";
@@ -23,6 +27,11 @@ import {
   type DispatcherRunJournalEntryDraft,
   appendDispatcherRunJournalEntriesWithLock,
 } from "../logging/run-journal.js";
+import { runClusteringCapabilityRetest } from "./capability-retest-clustering.js";
+import {
+  type CapabilityRetestCliOptions,
+  parseCapabilityRetestCliArgs,
+} from "./capability-retest-options.js";
 import { createCrabrunnerVerdictRunner } from "./capability-retest-runner.js";
 import { createCapabilityRetestEvaluationWorkspace } from "./capability-retest-workspace.js";
 
@@ -33,12 +42,7 @@ export const CAPABILITY_RETEST_EXIT = {
   unavailable: 3,
 } as const;
 
-export interface CapabilityRetestCliOptions {
-  model: string | null;
-  workspace: string;
-  outDir: string | null;
-  help: boolean;
-}
+export { parseCapabilityRetestCliArgs } from "./capability-retest-options.js";
 
 interface CapabilityRetestCliIo {
   stdout(message: string): void;
@@ -63,54 +67,7 @@ export interface CapabilityRetestCliDependencies {
     workspaceRoot: string,
     row: AltitudeReliabilityCapabilityLedgerRow,
   ) => Promise<unknown>;
-}
-
-class CapabilityRetestUsageError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "CapabilityRetestUsageError";
-  }
-}
-
-export function parseCapabilityRetestCliArgs(
-  argv: readonly string[],
-  cwd = process.cwd(),
-): CapabilityRetestCliOptions {
-  let model: string | null = null;
-  let workspace = cwd;
-  let outDir: string | null = null;
-  let help = false;
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const token = argv[index];
-    if (token === undefined) continue;
-    if (token === "--help" || token === "-h") {
-      help = true;
-      continue;
-    }
-
-    const inline = splitInlineValue(token);
-    const name = inline?.name ?? token;
-    const readValue = (flag: string): string =>
-      inline?.value ?? readValueFlag(argv, ++index, flag);
-    switch (name) {
-      case "--model":
-        model = readValue("--model");
-        break;
-      case "--workspace":
-        workspace = resolve(cwd, readValue("--workspace"));
-        break;
-      case "--out-dir": {
-        const value = readValue("--out-dir");
-        outDir = isAbsolute(value) ? value : resolve(cwd, value);
-        break;
-      }
-      default:
-        throw new CapabilityRetestUsageError(`Unknown option: ${token}`);
-    }
-  }
-
-  return { model, workspace, outDir, help };
+  runClusteringInference?: ClusteringInference;
 }
 
 export async function runCapabilityRetestCli(
@@ -142,6 +99,15 @@ export async function runCapabilityRetestCli(
     io.stderr(`--model must be a non-empty model alias.\n${renderUsage()}`);
     return CAPABILITY_RETEST_EXIT.usage;
   }
+  if (
+    options.benchmark === "clustering" &&
+    options.repeats < MIN_GATE_AUTHORITATIVE_CLUSTERING_REPEATS
+  ) {
+    io.stderr(
+      `Clustering benchmark evidence requires --repeats >= ${MIN_GATE_AUTHORITATIVE_CLUSTERING_REPEATS}.\n${renderUsage()}`,
+    );
+    return CAPABILITY_RETEST_EXIT.usage;
+  }
 
   const generatedAt = now().toISOString();
   const outDir =
@@ -153,6 +119,33 @@ export async function runCapabilityRetestCli(
   > | null = null;
   try {
     await mkdir(outDir, { recursive: true });
+    if (options.benchmark === "clustering") {
+      if (dependencies.runClusteringInference === undefined) {
+        evaluationWorkspace = await createCapabilityRetestEvaluationWorkspace(
+          options.workspace,
+        );
+      }
+      const result = await runClusteringCapabilityRetest({
+        model,
+        workspace: options.workspace,
+        evaluationWorkspace: evaluationWorkspace?.path ?? options.workspace,
+        outDir,
+        fixtureDir:
+          options.fixtureDir ??
+          join(options.workspace, "tests", "fixtures", "clustering-golden-set"),
+        repeats: options.repeats,
+        generatedAt,
+        runId: runId(),
+        env: dependencies.env ?? process.env,
+        dependencies: {
+          ...(dependencies.runClusteringInference === undefined
+            ? {}
+            : { runInference: dependencies.runClusteringInference }),
+        },
+      });
+      io.stdout(`${JSON.stringify(result, null, 2)}\n`);
+      return CAPABILITY_RETEST_EXIT.ok;
+    }
     if (dependencies.runVerdict === undefined) {
       evaluationWorkspace = await createCapabilityRetestEvaluationWorkspace(
         options.workspace,
@@ -236,49 +229,30 @@ const CAPABILITY_RETEST_BAR: AltitudeReliabilityBar =
 
 export function renderUsage(): string {
   return [
-    "Usage: symphony-capability-retest --model <alias> [options]",
+    "Usage: symphony-capability-retest --model <alias> [--benchmark altitude|clustering] [options]",
     "",
-    "Run the fixed altitude-reliability corpus through the planner's crabrunner",
-    "model path, append the authoritative score to the non-compacting capability",
-    "ledger and a non-authoritative observation to the dispatcher run journal,",
-    "then print the full result as JSON.",
+    "Run either the fixed altitude-reliability corpus or the frozen clustering",
+    "golden set, append the score to a non-compacting capability ledger, then",
+    "print the full result as JSON. Clustering runs at a tool-free boundary.",
     "",
     "Required:",
     "  --model <alias>       Planner model alias to score (for example, opus)",
     "",
     "Options:",
+    "  --benchmark <name>  altitude (default) or clustering",
+    "  --repeats <count>    Clustering repeats; gate-authoritative runs require >=3 (default 3)",
+    "  --fixture-dir <path> Frozen clustering fixtures (default tests/fixtures/clustering-golden-set)",
     "  --workspace <path>    Source workspace and durable-ledger root (default current directory)",
-    "  --out-dir <path>      Crabrunner prompt/artifact directory (default system temp)",
+    "  --out-dir <path>      Model prompt/artifact directory (default system temp)",
     "  --help                Show this help text",
     "",
     "Exit codes:",
     "  0  Capability bar passed",
     "  1  Usage error",
-    "  2  Capability bar failed (the scored ledger entries are still written)",
+    "  2  Altitude capability bar failed (the scored ledger entries are still written)",
     "  3  Runner, verdict parsing, journal, or capability-ledger write unavailable",
     "",
   ].join("\n");
-}
-
-function splitInlineValue(
-  token: string,
-): { name: string; value: string } | null {
-  const equals = token.indexOf("=");
-  return equals === -1
-    ? null
-    : { name: token.slice(0, equals), value: token.slice(equals + 1) };
-}
-
-function readValueFlag(
-  argv: readonly string[],
-  index: number,
-  flag: string,
-): string {
-  const value = argv[index];
-  if (value === undefined || value.startsWith("--")) {
-    throw new CapabilityRetestUsageError(`Missing value for ${flag}.`);
-  }
-  return value;
 }
 
 function stamp(value: string): string {
