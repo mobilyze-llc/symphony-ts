@@ -69,23 +69,21 @@ export function parseCapabilityRetestVerdictResponse(
   // final verdict as a standalone object (whole response, or its own line;
   // last one wins). Anchoring prevents extracting a nested verdict from a
   // contract-invalid wrapper like {"answer":{"verdict":"kill"},"extra":true}.
+  // One rule, no fallbacks: the response's final JSON block — everything
+  // from the last line that opens a JSON object to the end — must be exactly
+  // a contract-valid verdict object (single-line or pretty-printed). This
+  // tolerates reasoning prose above the final answer while making the final
+  // attempt authoritative: an invalid, wrapped, or extra-key final object is
+  // rejected and never falls back to an earlier line.
   const verdictObject = /^\{\s*"verdict"\s*:\s*"[a-z]+"\s*\}$/i;
-  const whole = response.markdown.trim();
-  // The FINAL verdict attempt is authoritative: take the last line that
-  // looks like a verdict-object attempt (starts with "{" and names
-  // "verdict") and require it to match the strict contract — never fall
-  // back to an earlier valid line past an invalid final answer.
-  const lastAttempt = response.markdown
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith("{") && /"verdict"/i.test(line))
-    .at(-1);
-  const candidate = verdictObject.test(whole)
-    ? whole
-    : lastAttempt !== undefined && verdictObject.test(lastAttempt)
-      ? lastAttempt
-      : undefined;
-  if (candidate === undefined) {
+  const lines = response.markdown.split(/\r?\n/);
+  let blockStart = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index]?.trim().startsWith("{")) blockStart = index;
+  }
+  const candidate =
+    blockStart === -1 ? "" : lines.slice(blockStart).join("\n").trim();
+  if (!verdictObject.test(candidate)) {
     throw new Error(
       `${issueIdentifier}: model response did not contain a verdict JSON object`,
     );
