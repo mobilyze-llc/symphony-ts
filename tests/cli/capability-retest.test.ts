@@ -9,8 +9,9 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { runClusteringCapabilityRetest } from "../../src/cli/capability-retest-clustering.js";
 import { parseCapabilityRetestVerdictResponse } from "../../src/cli/capability-retest-runner.js";
 import { createCapabilityRetestEvaluationWorkspace } from "../../src/cli/capability-retest-workspace.js";
 import {
@@ -21,6 +22,7 @@ import {
 import {
   getAltitudeReliabilityCapabilityLedgerPath,
   readAltitudeReliabilityCapabilityLedger,
+  readClusteringBenchmarkCapabilityLedger,
 } from "../../src/logging/capability-ledger.js";
 import {
   type DispatcherRunJournalEntryDraft,
@@ -66,6 +68,16 @@ describe("capability re-test CLI", () => {
 
     expect(options.model).toBe("opus");
     expect(options.workspace).toBe("/repo/fixture");
+    expect(options.benchmark).toBe("altitude");
+  });
+
+  it("parses the clustering benchmark surface", () => {
+    const options = parseCapabilityRetestCliArgs(
+      ["--model", "opus", "--benchmark", "clustering", "--repeats", "4"],
+      "/repo",
+    );
+
+    expect(options).toMatchObject({ benchmark: "clustering", repeats: 4 });
   });
 
   it("returns usage exit 1 when the model alias is missing", async () => {
@@ -76,6 +88,103 @@ describe("capability re-test CLI", () => {
     expect(capture.stderr()).toContain(
       "--model must be a non-empty model alias",
     );
+  });
+
+  it("rejects gate-authoritative clustering runs below three repeats", async () => {
+    const capture = captureIo();
+    const exit = await runCapabilityRetestCli(
+      ["--model", "opus", "--benchmark", "clustering", "--repeats", "2"],
+      { io: capture.io },
+    );
+
+    expect(exit).toBe(CAPABILITY_RETEST_EXIT.usage);
+    expect(capture.stderr()).toContain("requires --repeats >= 3");
+  });
+
+  it("rejects low-N direct ledger-producing calls before inference or append", async () => {
+    const root = await tempRoot();
+    const runInference = vi.fn();
+    const appendCapabilityLedger = vi.fn();
+
+    await expect(
+      runClusteringCapabilityRetest({
+        model: "opus",
+        workspace: root,
+        evaluationWorkspace: root,
+        outDir: join(root, "out"),
+        fixtureDir: join(
+          process.cwd(),
+          "tests",
+          "fixtures",
+          "clustering-golden-set",
+        ),
+        repeats: 2,
+        generatedAt: "2026-07-10T22:00:00.000Z",
+        runId: "low-n",
+        env: {},
+        dependencies: { runInference, appendCapabilityLedger },
+      }),
+    ).rejects.toThrow("requires at least 3 repeats");
+    expect(runInference).not.toHaveBeenCalled();
+    expect(appendCapabilityLedger).not.toHaveBeenCalled();
+    expect(await readClusteringBenchmarkCapabilityLedger(root)).toEqual([]);
+  });
+
+  it("runs three clustering repeats through the production prompt path and appends the durable ledger", async () => {
+    const root = await tempRoot();
+    const capture = captureIo();
+    const fixtureDir = join(
+      process.cwd(),
+      "tests",
+      "fixtures",
+      "clustering-golden-set",
+    );
+    const exit = await runCapabilityRetestCli(
+      [
+        "--model",
+        "opus",
+        "--benchmark",
+        "clustering",
+        "--workspace",
+        root,
+        "--fixture-dir",
+        fixtureDir,
+        "--repeats",
+        "3",
+      ],
+      {
+        cwd: root,
+        io: capture.io,
+        now: () => new Date("2026-07-10T22:00:00.000Z"),
+        runId: () => "clustering-run-1",
+        runClusteringInference: async ({ fixture }) =>
+          fixture.fixture_kind === "positive"
+            ? fixture.answer_key.clusters.map((cluster) => ({
+                memberIssueIdentifiers: cluster.member_issue_identifiers,
+                rootCauseHypothesis: `${cluster.root_issue_identifier} is the root`,
+                structuralFix: "Fix the shared root",
+                confidenceNote: "fixture injection",
+              }))
+            : [],
+      },
+    );
+
+    expect(exit).toBe(CAPABILITY_RETEST_EXIT.ok);
+    expect(JSON.parse(capture.stdout())).toMatchObject({
+      kind: "clustering_golden_set_benchmark",
+      repeats: 3,
+      summary: {
+        pairwisePrecision: { mean: 1, spread: 0 },
+        negativeFalseClusterRate: { mean: 0, spread: 0 },
+      },
+    });
+    const rows = await readClusteringBenchmarkCapabilityLedger(root);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      run_id: "clustering-run-1",
+      model: "opus",
+      result: { kind: "clustering_golden_set_benchmark", repeats: 3 },
+    });
   });
 
   it("scores the answer key as capability arrived and writes cases to the run journal", async () => {
