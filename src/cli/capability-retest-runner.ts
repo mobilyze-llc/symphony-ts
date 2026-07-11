@@ -10,6 +10,7 @@ import {
   ALTITUDE_RELIABILITY_VERDICTS,
   type AltitudeReliabilityCase,
   type AltitudeReliabilityContractViolation,
+  type AltitudeReliabilityVerdict,
   type AltitudeReliabilityVerdictObservation,
 } from "../audit/altitude-reliability.js";
 import type { ClaudeRunnerValidationConfig } from "../claude-runner/claude-runner-types.js";
@@ -67,32 +68,14 @@ export function parseCapabilityRetestVerdictResponse(
     throw new Error(`${issueIdentifier}: crabrunner ${response.detail}`);
   }
   const markdown = response.markdown;
-  const start = markdown.indexOf("{");
-  const end = markdown.lastIndexOf("}");
-  if (start === -1 || end < start) {
-    throw new Error(`${issueIdentifier}: model response did not contain JSON`);
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(markdown.slice(start, end + 1));
-  } catch (error) {
-    throw new Error(
-      `${issueIdentifier}: invalid verdict JSON: ${formatError(error)}`,
-    );
-  }
-  const core = CapabilityRetestVerdictCoreSchema.safeParse(parsed);
-  if (!core.success) {
-    throw new Error(
-      `${issueIdentifier}: invalid verdict object: ${z.prettifyError(core.error)}`,
-    );
-  }
+  const candidate = findVerdictJsonCandidate(markdown, issueIdentifier);
   const violations = [
-    ...contractProseViolations(markdown, start, end),
-    ...contractShapeViolations(parsed),
+    ...contractProseViolations(markdown, candidate.start, candidate.end),
+    ...contractShapeViolations(candidate.parsed),
   ];
-  if (violations.length === 0) return core.data.verdict;
+  if (violations.length === 0) return candidate.verdict;
   return {
-    verdict: core.data.verdict,
+    verdict: candidate.verdict,
     contractViolation: modelContractViolation(violations.join("; ")),
   };
 }
@@ -131,6 +114,84 @@ function contractProseViolations(
     violations.push("response included prose after the verdict JSON");
   }
   return violations;
+}
+
+function findVerdictJsonCandidate(
+  markdown: string,
+  issueIdentifier: string,
+): {
+  start: number;
+  end: number;
+  parsed: unknown;
+  verdict: AltitudeReliabilityVerdict;
+} {
+  let searchFrom = 0;
+  let firstParseError: string | null = null;
+  let firstCoreError: z.ZodError | null = null;
+  while (searchFrom < markdown.length) {
+    const start = markdown.indexOf("{", searchFrom);
+    if (start === -1) break;
+    const end = findJsonObjectEnd(markdown, start);
+    if (end === null) {
+      firstParseError ??= "incomplete JSON object";
+      searchFrom = start + 1;
+      continue;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(markdown.slice(start, end + 1));
+    } catch (error) {
+      firstParseError ??= formatError(error);
+      searchFrom = start + 1;
+      continue;
+    }
+    const core = CapabilityRetestVerdictCoreSchema.safeParse(parsed);
+    if (core.success) {
+      return { start, end, parsed, verdict: core.data.verdict };
+    }
+    firstCoreError ??= core.error;
+    searchFrom = end + 1;
+  }
+  if (firstCoreError !== null) {
+    throw new Error(
+      `${issueIdentifier}: invalid verdict object: ${z.prettifyError(firstCoreError)}`,
+    );
+  }
+  if (firstParseError !== null) {
+    throw new Error(
+      `${issueIdentifier}: invalid verdict JSON: ${firstParseError}`,
+    );
+  }
+  throw new Error(`${issueIdentifier}: model response did not contain JSON`);
+}
+
+function findJsonObjectEnd(markdown: string, start: number): number | null {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < markdown.length; index += 1) {
+    const char = markdown[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+    } else if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return index;
+      if (depth < 0) return null;
+    }
+  }
+  return null;
 }
 
 function contractShapeViolations(parsed: unknown): string[] {

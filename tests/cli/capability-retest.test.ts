@@ -298,13 +298,14 @@ describe("capability re-test CLI", () => {
         runId: () => "run-contract-violation",
         runVerdict: async (testCase) =>
           testCase.issueIdentifier === "SYMPH-941"
-            ? {
-                verdict: testCase.expectedVerdict,
-                contractViolation: {
-                  type: "output_contract_violation",
-                  detail: "response included prose after the verdict JSON",
+            ? parseCapabilityRetestVerdictResponse(
+                {
+                  status: "ok",
+                  markdown:
+                    'Explanation: object uses {}\n{"verdict":"kill"}\nTrailing object uses {}',
                 },
-              }
+                testCase.issueIdentifier,
+              )
             : testCase.expectedVerdict,
       },
     );
@@ -455,6 +456,21 @@ describe("capability re-test CLI", () => {
       contractViolation: {
         type: "output_contract_violation",
         detail: expect.stringContaining("after"),
+      },
+    });
+    expect(
+      parseCapabilityRetestVerdictResponse(
+        {
+          status: "ok",
+          markdown: 'Explanation: object uses {}\n{"verdict":"kill"}',
+        },
+        "SYMPH-941",
+      ),
+    ).toMatchObject({
+      verdict: "kill",
+      contractViolation: {
+        type: "output_contract_violation",
+        detail: expect.stringContaining("before"),
       },
     });
     expect(
