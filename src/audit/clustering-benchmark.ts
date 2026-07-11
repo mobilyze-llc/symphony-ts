@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
@@ -48,6 +50,10 @@ export interface ClusteringBenchmarkResult {
     cutoff: string;
     commit: string;
   }>;
+  fixtureContentHashes: Array<{
+    fixtureId: string;
+    sha256: string;
+  }>;
   perRepeat: ClusteringBenchmarkRepeat[];
   summary: {
     pairwisePrecision: MetricSummary;
@@ -80,6 +86,12 @@ export async function runClusteringBenchmark(input: {
   const fixtures = await Promise.all(
     input.fixturePaths.map(loadClusteringGoldenSetFixture),
   );
+  const fixtureContentHashes = await Promise.all(
+    input.fixturePaths.map(async (path, index) => ({
+      fixtureId: fixtures[index]?.fixture_id ?? path,
+      sha256: await sha256File(path),
+    })),
+  );
   assertFixtureKinds(fixtures);
   const perRepeat: ClusteringBenchmarkRepeat[] = [];
   for (let repeat = 1; repeat <= input.repeats; repeat += 1) {
@@ -110,6 +122,7 @@ export async function runClusteringBenchmark(input: {
       cutoff: fixture.snapshot_cutoff,
       commit: fixture.source.commit,
     })),
+    fixtureContentHashes,
     perRepeat,
     summary: summarize(perRepeat),
   };
@@ -229,4 +242,10 @@ function summarizeMetric(values: readonly (number | null)[]): MetricSummary {
 
 function stamp(value: string): string {
   return value.replace(/[:.]/g, "-");
+}
+
+async function sha256File(path: string): Promise<string> {
+  return createHash("sha256")
+    .update(await readFile(path))
+    .digest("hex");
 }

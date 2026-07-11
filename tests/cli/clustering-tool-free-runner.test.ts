@@ -156,6 +156,39 @@ describe("tool-free clustering planner runner", () => {
     ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("normalizes early stdin pipe errors as unavailable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "clustering-tool-free-"));
+    roots.push(root);
+    const executable = join(root, "claude");
+    await writeFile(
+      executable,
+      [
+        "#!/usr/bin/env node",
+        'require("node:fs").closeSync(0);',
+        "setTimeout(() => process.exit(0), 50);",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await chmod(executable, 0o755);
+    const runner = createToolFreeClusteringPlannerRunner({
+      model: "opus",
+      workspace: root,
+      artifactDir: join(root, "artifacts"),
+      artifactName: "repeat-1",
+      env: { PATH: `${root}${delimiter}${process.env.PATH ?? ""}` },
+    });
+
+    const result = await runner("x".repeat(16 * 1024 * 1024));
+
+    expect(result.status).toBe("unavailable");
+    if (result.status !== "unavailable") throw new Error("expected failure");
+    expect(result.detail).toContain("tool-free Claude");
+    await expect(
+      readFile(join(root, "artifacts", "repeat-1.md"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("bounds an injected process rejection as unavailable", async () => {
     const root = await mkdtemp(join(tmpdir(), "clustering-tool-free-"));
     roots.push(root);
