@@ -93,6 +93,72 @@ describe("structural advisory lifecycle", () => {
     ).toHaveLength(1);
   });
 
+  it("advances one lifecycle owner for competing member-set hypotheses", async () => {
+    const competing = [
+      base,
+      { ...base, rootCauseHypothesis: "competing root hypothesis" },
+    ];
+    const first = await applyAdvisoryLifecycle({
+      emitted: competing,
+      previous: [],
+      presentedIssueIdentifiers: presented,
+      config,
+    });
+    expect(
+      new Set(first.advisories.map((item) => item.memberSetHash)).size,
+    ).toBe(1);
+    expect(
+      new Set(first.advisories.map((item) => item.advisoryFingerprint)).size,
+    ).toBe(2);
+
+    const absent = await applyAdvisoryLifecycle({
+      emitted: [],
+      previous: first.advisories,
+      presentedIssueIdentifiers: presented,
+      config,
+    });
+    expect(absent.advisories).toHaveLength(2);
+    expect(
+      absent.advisories.map((item) => [
+        item.lifecycleState,
+        item.absentOkTicks,
+      ]),
+    ).toEqual([
+      ["dormant", 1],
+      ["dormant", 1],
+    ]);
+    expect(absent.events).toEqual([
+      expect.objectContaining({
+        kind: "transition",
+        from: "active",
+        to: "dormant",
+      }),
+    ]);
+
+    const reEmitted = await applyAdvisoryLifecycle({
+      emitted: competing,
+      previous: absent.advisories,
+      presentedIssueIdentifiers: presented,
+      config,
+    });
+    expect(
+      reEmitted.advisories.map((item) => [
+        item.lifecycleState,
+        item.absentOkTicks,
+      ]),
+    ).toEqual([
+      ["active", 0],
+      ["active", 0],
+    ]);
+    expect(reEmitted.events).toEqual([
+      expect.objectContaining({
+        kind: "transition",
+        from: "dormant",
+        to: "active",
+      }),
+    ]);
+  });
+
   it("does not journal an unchanged re-emission twice", async () => {
     const first = await applyAdvisoryLifecycle({
       emitted: [base],
@@ -143,6 +209,76 @@ describe("structural advisory lifecycle", () => {
     expect(withdrawn.advisories[0]).toMatchObject({
       lifecycleState: "withdrawn",
       absentOkTicks: 3,
+    });
+    expect(withdrawn.events).toContainEqual(
+      expect.objectContaining({
+        kind: "transition",
+        from: "dormant",
+        to: "withdrawn",
+      }),
+    );
+  });
+
+  it("preserves terminal member-set state across absences and re-emission", async () => {
+    const first = await applyAdvisoryLifecycle({
+      emitted: [base],
+      previous: [],
+      presentedIssueIdentifiers: presented,
+      config,
+    });
+    let snapshot = first.advisories;
+    for (let tick = 0; tick < config.dormantOkTicks; tick += 1) {
+      snapshot = (
+        await applyAdvisoryLifecycle({
+          emitted: [],
+          previous: snapshot,
+          presentedIssueIdentifiers: presented,
+          config,
+        })
+      ).advisories;
+    }
+    const afterExtraAbsence = await applyAdvisoryLifecycle({
+      emitted: [],
+      previous: snapshot,
+      presentedIssueIdentifiers: presented,
+      config,
+    });
+    const reEmitted = await applyAdvisoryLifecycle({
+      emitted: [base],
+      previous: afterExtraAbsence.advisories,
+      presentedIssueIdentifiers: presented,
+      config,
+    });
+    expect(afterExtraAbsence.advisories[0]).toMatchObject({
+      lifecycleState: "withdrawn",
+      rendered: false,
+    });
+    expect(reEmitted.advisories[0]).toMatchObject({
+      lifecycleState: "withdrawn",
+      rendered: false,
+    });
+
+    const graded = first.advisories.map((advisory) => ({
+      ...advisory,
+      lifecycleState: "graded" as const,
+      rendered: false,
+    }));
+    const gradedAbsent = await applyAdvisoryLifecycle({
+      emitted: [],
+      previous: graded,
+      presentedIssueIdentifiers: presented,
+      config,
+    });
+    const gradedReEmitted = await applyAdvisoryLifecycle({
+      emitted: [base],
+      previous: gradedAbsent.advisories,
+      presentedIssueIdentifiers: presented,
+      config,
+    });
+    expect(gradedAbsent.advisories[0]?.lifecycleState).toBe("graded");
+    expect(gradedReEmitted.advisories[0]).toMatchObject({
+      lifecycleState: "graded",
+      rendered: false,
     });
   });
 

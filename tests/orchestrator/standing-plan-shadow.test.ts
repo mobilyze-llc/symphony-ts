@@ -1176,6 +1176,65 @@ describe("runStandingPlanShadowTick", () => {
     }
   });
 
+  it("withdraws an existing advisory when a majority becomes terminal", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-terminal-advisory-"));
+    const transitions: Record<string, unknown>[] = [];
+    let tick = 0;
+    let plannerCalls = 0;
+    try {
+      for (tick = 0; tick < 2; tick += 1) {
+        const result = await runStandingPlanShadowTick({
+          config: triageConfig({ structuralAdvisories: true }),
+          workspaceRoot: root,
+          fetchCandidates: async () =>
+            tick === 0 ? [issue("u1", "SYMPH-1")] : [],
+          fetchAdvisoryInput: async () =>
+            tick === 0
+              ? [{ ...issue("u2", "SYMPH-2"), state: "Backlog" }]
+              : [
+                  { ...issue("u1", "SYMPH-1"), state: "Done" },
+                  { ...issue("u2", "SYMPH-2"), state: "Done" },
+                ],
+          terminalStates: ["Done"],
+          getInFlight: () => [],
+          createPlannerRunner: () => async () => {
+            plannerCalls += 1;
+            return {
+              status: "ok",
+              markdown: advisoryPlanMarkdown("Shared root"),
+            };
+          },
+          runPlanPostEmitReview: async () => ({
+            findings: [],
+            reviewRecords: [],
+          }),
+          log: (event, _message, fields) => {
+            if (event === "queue_triage_structural_advisory_transition") {
+              transitions.push(fields);
+            }
+          },
+          now: () => new Date(`2026-06-18T0${tick + 1}:00:00.000Z`),
+          force: true,
+        });
+        expect(result.status).toBe("ok");
+      }
+
+      expect(plannerCalls).toBe(1);
+      expect(
+        (await loadStandingPlan(root))?.structuralAdvisories?.[0],
+      ).toMatchObject({
+        memberIssueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+        lifecycleState: "withdrawn",
+        rendered: false,
+      });
+      expect(transitions).toEqual([
+        expect.objectContaining({ from: "active", to: "withdrawn" }),
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("does not advance absence across a failed advisory-input scan", async () => {
     const root = mkdtempSync(join(tmpdir(), "symph-shadow-scan-failure-"));
     const roots = ["Shared root", null, "Shared root"] as const;

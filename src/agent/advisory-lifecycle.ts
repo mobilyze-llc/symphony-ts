@@ -61,17 +61,19 @@ export async function applyAdvisoryLifecycle(
   input: ApplyAdvisoryLifecycleInput,
 ): Promise<ApplyAdvisoryLifecycleResult> {
   const events: AdvisoryLifecycleEvent[] = [];
-  const previousByMembers = new Map<string, StructuralAdvisory>();
+  const previousByMembers = new Map<string, StructuralAdvisory[]>();
   const previousFingerprints = new Set<string>();
   for (const advisory of input.previous) {
     if (advisory.memberSetHash !== undefined) {
-      previousByMembers.set(advisory.memberSetHash, advisory);
+      const group = previousByMembers.get(advisory.memberSetHash) ?? [];
+      previousByMembers.set(advisory.memberSetHash, [...group, advisory]);
     }
     if (advisory.advisoryFingerprint !== undefined) {
       previousFingerprints.add(advisory.advisoryFingerprint);
     }
   }
   const seenMemberSets = new Set<string>();
+  const transitionedMemberSets = new Set<string>();
   const active: StructuralAdvisory[] = [];
 
   for (const emitted of input.emitted) {
@@ -99,7 +101,7 @@ export async function applyAdvisoryLifecycle(
       emitted.rootCauseHypothesis,
     );
     seenMemberSets.add(memberSetHash);
-    const prior = previousByMembers.get(memberSetHash);
+    const prior = previousByMembers.get(memberSetHash)?.[0];
     const terminalCount = members.filter((identifier) =>
       input.terminalIssueIdentifiers?.has(identifier),
     ).length;
@@ -130,7 +132,12 @@ export async function applyAdvisoryLifecycle(
     if (!previousFingerprints.has(advisoryFingerprint)) {
       events.push({ kind: "emitted", memberSetHash, advisoryFingerprint });
     }
-    if (prior?.lifecycleState === "dormant" && lifecycleState === "active") {
+    if (
+      !transitionedMemberSets.has(memberSetHash) &&
+      prior?.lifecycleState === "dormant" &&
+      lifecycleState === "active"
+    ) {
+      transitionedMemberSets.add(memberSetHash);
       events.push({
         kind: "transition",
         memberSetHash,
@@ -138,9 +145,11 @@ export async function applyAdvisoryLifecycle(
         to: "active",
       });
     } else if (
+      !transitionedMemberSets.has(memberSetHash) &&
       prior?.lifecycleState === "active" &&
       lifecycleState === "withdrawn"
     ) {
+      transitionedMemberSets.add(memberSetHash);
       events.push({
         kind: "transition",
         memberSetHash,
@@ -157,31 +166,52 @@ export async function applyAdvisoryLifecycle(
     }
   }
 
-  const dormant = input.previous.flatMap((prior) => {
-    const memberSetHash = prior.memberSetHash;
-    if (memberSetHash === undefined || seenMemberSets.has(memberSetHash)) {
-      return [];
-    }
-    if (input.scanComplete === false) return [prior];
-    if (
-      prior.lifecycleState === "withdrawn" ||
-      prior.lifecycleState === "graded"
-    ) {
-      return [];
-    }
-    const absentOkTicks = (prior.absentOkTicks ?? 0) + 1;
-    const lifecycleState: StructuralAdvisory["lifecycleState"] =
-      absentOkTicks >= input.config.dormantOkTicks ? "withdrawn" : "dormant";
-    if (lifecycleState !== prior.lifecycleState) {
-      events.push({
-        kind: "transition",
-        memberSetHash,
-        from: prior.lifecycleState ?? "active",
-        to: lifecycleState,
-      });
-    }
-    return [{ ...prior, lifecycleState, absentOkTicks, rendered: false }];
-  });
+  const dormant = [...previousByMembers.entries()].flatMap(
+    ([memberSetHash, group]) => {
+      const prior = group[0];
+      if (prior === undefined || seenMemberSets.has(memberSetHash)) return [];
+      if (input.scanComplete === false) return group;
+      if (
+        prior.lifecycleState === "withdrawn" ||
+        prior.lifecycleState === "graded"
+      ) {
+        return group.map((advisory) => ({ ...advisory, rendered: false }));
+      }
+      const terminalCount = prior.memberIssueIdentifiers.filter((identifier) =>
+        input.terminalIssueIdentifiers?.has(identifier),
+      ).length;
+      if (terminalCount > prior.memberIssueIdentifiers.length / 2) {
+        events.push({
+          kind: "transition",
+          memberSetHash,
+          from: prior.lifecycleState ?? "active",
+          to: "withdrawn",
+        });
+        return group.map((advisory) => ({
+          ...advisory,
+          lifecycleState: "withdrawn" as const,
+          rendered: false,
+        }));
+      }
+      const absentOkTicks = (prior.absentOkTicks ?? 0) + 1;
+      const lifecycleState: StructuralAdvisory["lifecycleState"] =
+        absentOkTicks >= input.config.dormantOkTicks ? "withdrawn" : "dormant";
+      if (lifecycleState !== prior.lifecycleState) {
+        events.push({
+          kind: "transition",
+          memberSetHash,
+          from: prior.lifecycleState ?? "active",
+          to: lifecycleState,
+        });
+      }
+      return group.map((advisory) => ({
+        ...advisory,
+        lifecycleState,
+        absentOkTicks,
+        rendered: false,
+      }));
+    },
+  );
 
   const renderable = active.filter(
     (advisory) => advisory.lifecycleState === "active",

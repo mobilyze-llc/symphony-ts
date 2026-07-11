@@ -6549,11 +6549,7 @@ export async function startRuntimeService(
     }, currentConfig.polling.intervalMs);
   };
 
-  // Queue Triage v2 shadow tick (SYMPH-784). Fire-and-forget AFTER the poll's
-  // dispatch decision so the dispatch path is byte-identical whether or not the
-  // feature is enabled (zero-diff). The in-flight guard prevents overlapping
-  // planner runs across fast polls; the heartbeat gate inside the tick keeps it
-  // to its own cadence. Inert unless `queueTriage.enabled`.
+  // Queue Triage v2 shadow tick: post-dispatch, gated, and inert unless enabled.
   let standingPlanShadowTickInFlight = false;
   const runStandingPlanShadowTickIfEnabled = (
     fetchSharedCandidateIssues: () => Promise<Issue[]>,
@@ -6566,15 +6562,19 @@ export async function startRuntimeService(
       return;
     }
     standingPlanShadowTickInFlight = true;
-    // Predicate or operator requests bypass heartbeat cadence (SYMPH-787/789).
-    const force = runtimeHost.consumeStandingPlanReplanRequest();
+    const force = runtimeHost.consumeStandingPlanReplanRequest(); // predicate/operator bypass
     const linearTracker =
       tracker instanceof LinearTrackerClient ? tracker : null;
     void runStandingPlanShadowTick({
       config: currentConfig.queueTriage,
       workspaceRoot: workspaceManager.root,
       fetchCandidates: fetchSharedCandidateIssues,
-      fetchAdvisoryInput: () => tracker.fetchIssuesByStates(["Backlog"]),
+      fetchAdvisoryInput: () =>
+        tracker.fetchIssuesByStates([
+          "Backlog",
+          ...currentConfig.tracker.terminalStates,
+        ]),
+      terminalStates: currentConfig.tracker.terminalStates,
       getInFlight: () =>
         Object.values(runtimeHost.getState().running).map((entry) => ({
           issueIdentifier: entry.issue.identifier,

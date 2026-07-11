@@ -8,12 +8,32 @@ import type { StructuralAdvisory } from "../domain/structural-advisory.js";
 import { partitionPortfolioEligibleIssues } from "../portfolio/eligibility.js";
 import type { PlanBody } from "./standing-plan-supersession.js";
 
-export function prepareBacklogAdvisoryInput(issues: readonly Issue[]): {
+export function prepareBacklogAdvisoryInput(
+  issues: readonly Issue[],
+  terminalStates: readonly string[] = [],
+): {
   eligible: Issue[];
   heldCount: number;
+  terminalIssueIdentifiers: Set<string>;
 } {
-  const partition = partitionPortfolioEligibleIssues(issues);
-  return { eligible: partition.eligible, heldCount: partition.held.length };
+  const terminalStateSet = new Set(
+    terminalStates.map((state) => state.trim().toLowerCase()),
+  );
+  const terminalIssues = issues.filter((issue) =>
+    terminalStateSet.has(issue.state.trim().toLowerCase()),
+  );
+  const partition = partitionPortfolioEligibleIssues(
+    issues.filter(
+      (issue) => !terminalStateSet.has(issue.state.trim().toLowerCase()),
+    ),
+  );
+  return {
+    eligible: partition.eligible,
+    heldCount: partition.held.length,
+    terminalIssueIdentifiers: new Set(
+      terminalIssues.map((issue) => issue.identifier),
+    ),
+  };
 }
 
 export async function applyStandingPlanAdvisoryLifecycle(input: {

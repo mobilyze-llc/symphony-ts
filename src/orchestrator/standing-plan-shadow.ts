@@ -274,6 +274,7 @@ export interface ShadowPlanCycleDeps {
     dormantOkTicks: number;
     renderCap: number;
     scanComplete: boolean;
+    terminalIssueIdentifiers: ReadonlySet<string>;
     resolveRootIssueIdentifier?: (identifier: string) => Promise<boolean>;
   };
 }
@@ -321,6 +322,7 @@ export async function runShadowPlanCycle(
         renderCap: deps.advisoryLifecycle.renderCap,
       },
       scanComplete: deps.advisoryLifecycle.scanComplete,
+      terminalIssueIdentifiers: deps.advisoryLifecycle.terminalIssueIdentifiers,
       log: deps.log,
       ...(deps.advisoryLifecycle.resolveRootIssueIdentifier === undefined
         ? {}
@@ -460,6 +462,8 @@ export interface StandingPlanShadowTickDeps {
   fetchCandidates: () => Promise<Issue[]>;
   /** Backlog-state scan input; used only when structural advisories are armed. */
   fetchAdvisoryInput?: () => Promise<Issue[]>;
+  /** Tracker states that count as terminal for majority-terminal withdrawal. */
+  terminalStates?: readonly string[];
   resolveIssueByIdentifier?: (identifier: string) => Promise<Issue | null>;
   getInFlight: () => PlannerInFlight[];
   /** Build a model runner for the configured planner model (crabrunner in prod). */
@@ -602,6 +606,7 @@ export async function runStandingPlanShadowTick(
     const candidates = await deps.fetchCandidates();
     let advisoryInputCandidates: Issue[] = [];
     let advisoryInputScanComplete = false;
+    let terminalIssueIdentifiers = new Set<string>();
     if (config.structuralAdvisories === true) {
       if (deps.fetchAdvisoryInput === undefined) {
         await deps.log(
@@ -613,8 +618,10 @@ export async function runStandingPlanShadowTick(
         try {
           const prepared = prepareBacklogAdvisoryInput(
             await deps.fetchAdvisoryInput(),
+            deps.terminalStates,
           );
           advisoryInputCandidates = prepared.eligible;
+          terminalIssueIdentifiers = prepared.terminalIssueIdentifiers;
           advisoryInputScanComplete = true;
           if (prepared.heldCount > 0) {
             await deps.log(
@@ -768,6 +775,7 @@ export async function runStandingPlanShadowTick(
               dormantOkTicks: config.structuralAdvisoryDormantOkTicks ?? 3,
               renderCap: config.structuralAdvisoryRenderCap ?? 3,
               scanComplete: advisoryInputScanComplete,
+              terminalIssueIdentifiers,
               ...(deps.resolveIssueByIdentifier === undefined
                 ? {}
                 : {
