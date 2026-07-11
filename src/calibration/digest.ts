@@ -74,7 +74,7 @@ export interface HygieneProposalPrecisionRow {
   cursors: Array<{ proposalSequence: number; decisionSequence: number | null }>;
 }
 
-export interface StructuralAdvisoryDecisionJoinRow {
+interface StructuralAdvisoryDecisionJoinRow {
   advisoryId: string;
   advisoryClass: string;
   advisorySequence: number;
@@ -83,7 +83,7 @@ export interface StructuralAdvisoryDecisionJoinRow {
   flipCount: number;
 }
 
-export interface StructuralAdvisoryPrecisionRow {
+interface StructuralAdvisoryPrecisionRow {
   advisoryClass: string;
   accepted: number;
   partial: number;
@@ -93,7 +93,7 @@ export interface StructuralAdvisoryPrecisionRow {
   cursors: Array<{ advisorySequence: number; gradeSequence: number | null }>;
 }
 
-export interface StructuralAdvisoryStabilityRow {
+interface StructuralAdvisoryStabilityRow {
   advisoryId: string;
   advisoryClass: string;
   firstSeenAt: string;
@@ -103,7 +103,7 @@ export interface StructuralAdvisoryStabilityRow {
   undecidedAgeMs: number | null;
 }
 
-export interface OrphanStructuralAdvisoryGradeRow {
+interface OrphanStructuralAdvisoryGradeRow {
   advisoryId: string;
   gradeSequence: number;
   decision: string;

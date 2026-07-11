@@ -14,5 +14,60 @@
     "**/generated/**",
     "**/*.generated.*"
   ],
-  "waivers": []
+  "waivers": [
+    {
+      "path": "src/agent/triage-planner.ts",
+      "rule": "file_size.no_growth_over_threshold",
+      "reason": "SYMPH-1108/1109 coupled grading evidence; extraction tracked by SYMPH-1122",
+      "expires": "2026-08-15"
+    },
+    {
+      "path": "src/calibration/digest.ts",
+      "rule": "file_size.no_growth_over_threshold",
+      "reason": "SYMPH-1108/1109 coupled calibration output; extraction tracked by SYMPH-1122",
+      "expires": "2026-08-15"
+    },
+    {
+      "path": "src/cli/symphonyctl.ts",
+      "rule": "file_size.no_growth_over_threshold",
+      "reason": "SYMPH-1109 authenticated grading CLI; extraction tracked by SYMPH-1122",
+      "expires": "2026-08-15"
+    },
+    {
+      "path": "src/domain/model.ts",
+      "rule": "file_size.no_growth_over_threshold",
+      "reason": "SYMPH-1108 journal-kind registration; extraction tracked by SYMPH-1122",
+      "expires": "2026-08-15"
+    },
+    {
+      "path": "src/observability/dashboard-server.ts",
+      "rule": "file_size.no_growth_over_threshold",
+      "reason": "SYMPH-1109 authenticated grading schema; extraction tracked by SYMPH-1122",
+      "expires": "2026-08-15"
+    },
+    {
+      "path": "src/orchestrator/core.ts",
+      "rule": "file_size.no_growth_over_threshold",
+      "reason": "SYMPH-1108/1109 append-only journal commit boundary; extraction tracked by SYMPH-1122",
+      "expires": "2026-08-15"
+    },
+    {
+      "path": "src/orchestrator/runtime-host.ts",
+      "rule": "file_size.no_growth_over_threshold",
+      "reason": "SYMPH-1109 authenticated grade routing and persistence; extraction tracked by SYMPH-1122",
+      "expires": "2026-08-15"
+    },
+    {
+      "path": "src/orchestrator/standing-plan-shadow.ts",
+      "rule": "file_size.no_growth_over_threshold",
+      "reason": "SYMPH-1108/1109 lifecycle evidence and revival scan; extraction tracked by SYMPH-1122",
+      "expires": "2026-08-15"
+    },
+    {
+      "path": "src/orchestrator/structural-advisory-journal.ts",
+      "rule": "file_size.new_file_line_cap",
+      "reason": "SYMPH-1108/1109 coupled journal projection; split tracked by SYMPH-1122",
+      "expires": "2026-08-15"
+    }
+  ]
 }

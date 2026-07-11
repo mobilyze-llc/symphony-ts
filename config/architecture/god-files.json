@@ -24,5 +24,18 @@
       "forbidden_new_patterns": []
     }
   ],
-  "waivers": []
+  "waivers": [
+    {
+      "path": "src/orchestrator/core.ts",
+      "rule": "god_file.max_lines",
+      "reason": "SYMPH-1108/1109 journal commit boundary; extraction tracked by SYMPH-1122",
+      "expires": "2026-08-15"
+    },
+    {
+      "path": "src/orchestrator/runtime-host.ts",
+      "rule": "god_file.max_lines",
+      "reason": "SYMPH-1109 authenticated grade routing; extraction tracked by SYMPH-1122",
+      "expires": "2026-08-15"
+    }
+  ]
 }

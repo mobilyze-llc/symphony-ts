@@ -9,7 +9,7 @@ import {
   formatIntentAttribution,
 } from "./intent.js";
 
-export const STRUCTURAL_ADVISORY_GRADE_DECISIONS = [
+const STRUCTURAL_ADVISORY_GRADE_DECISIONS = [
   "accept",
   "partial",
   "reject",
@@ -413,7 +413,7 @@ function isFlip(from: string | null, to: string): boolean {
   );
 }
 
-export function structuralAdvisoryClass(advisory: StructuralAdvisory): string {
+function structuralAdvisoryClass(advisory: StructuralAdvisory): string {
   const count = advisory.memberIssueIdentifiers.length;
   const bucket = count <= 2 ? "2" : count <= 5 ? "3-5" : "6+";
   const rootKind =

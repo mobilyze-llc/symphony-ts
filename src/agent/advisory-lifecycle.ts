@@ -10,7 +10,7 @@ export interface AdvisoryLifecycleConfig {
   renderCap: number;
 }
 
-export interface AdvisoryLifecycleEvent {
+interface AdvisoryLifecycleEvent {
   kind:
     | "emitted"
     | "invalid_members"
