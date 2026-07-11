@@ -1,6 +1,10 @@
 import type { StructuralAdvisory } from "../domain/structural-advisory.js";
 import type { ClusteringGoldenSetFixture } from "./clustering-benchmark-fixture.js";
 
+type ScorableStructuralAdvisory = StructuralAdvisory & {
+  rootIssueIdentifier?: string | null;
+};
+
 export interface ClusteringScore {
   pairwisePrecision: number | null;
   pairwiseRecall: number | null;
@@ -16,7 +20,7 @@ export interface ClusteringScore {
 }
 
 export interface ValidatedStructuralAdvisories {
-  accepted: StructuralAdvisory[];
+  accepted: ScorableStructuralAdvisory[];
   invalidAdvisoryCount: number;
   invalidMemberCount: number;
   totalAttemptedMemberCount: number;
@@ -25,7 +29,7 @@ export interface ValidatedStructuralAdvisories {
 
 export function validateStructuralAdvisoryMembers(
   fixture: ClusteringGoldenSetFixture,
-  advisories: readonly StructuralAdvisory[],
+  advisories: readonly ScorableStructuralAdvisory[],
 ): ValidatedStructuralAdvisories {
   const exclusions = new Set(
     fixture.answer_key.exclusions.map((entry) => entry.issue_identifier),
@@ -35,7 +39,7 @@ export function validateStructuralAdvisoryMembers(
       .map((issue) => issue.identifier)
       .filter((identifier) => !exclusions.has(identifier)),
   );
-  const accepted: StructuralAdvisory[] = [];
+  const accepted: ScorableStructuralAdvisory[] = [];
   let invalidAdvisoryCount = 0;
   let invalidMemberCount = 0;
   let totalMemberCount = 0;
@@ -63,7 +67,7 @@ export function validateStructuralAdvisoryMembers(
 
 export function scoreStructuralAdvisories(
   fixture: ClusteringGoldenSetFixture,
-  advisories: readonly StructuralAdvisory[],
+  advisories: readonly ScorableStructuralAdvisory[],
 ): ClusteringScore {
   const validation = validateStructuralAdvisoryMembers(fixture, advisories);
   const exclusions = new Set(
@@ -104,8 +108,15 @@ export function scoreStructuralAdvisories(
       cluster.root_issue_identifier,
       ...cluster.absorbed_equivalent_root_identifiers,
     ]);
-    return [...extractIssueIdentifiers(prediction.rootCauseHypothesis)].some(
-      (identifier) => expectedRoots.has(identifier),
+    const explicitRoot = normalizeIssueIdentifier(
+      prediction.rootIssueIdentifier,
+    );
+    const predictedRoots =
+      explicitRoot === null
+        ? extractIssueIdentifiers(prediction.rootCauseHypothesis)
+        : new Set([explicitRoot]);
+    return [...predictedRoots].some((identifier) =>
+      expectedRoots.has(identifier),
     );
   });
   const falseClusters = predictedClusters.filter((members) => {
@@ -157,8 +168,8 @@ function pairSet(
 
 function assignPredictionsByOverlap(
   truth: ClusteringGoldenSetFixture["answer_key"]["clusters"],
-  predictions: readonly StructuralAdvisory[],
-): Map<number, StructuralAdvisory> {
+  predictions: readonly ScorableStructuralAdvisory[],
+): Map<number, ScorableStructuralAdvisory> {
   const pairKeys = truth
     .flatMap((cluster) =>
       predictions.map(
@@ -202,7 +213,7 @@ function assignPredictionsByOverlap(
         overlap * overlapFactor + jaccardUnits * jaccardFactor + tieBonus;
     });
   });
-  const assignments = new Map<number, StructuralAdvisory>();
+  const assignments = new Map<number, ScorableStructuralAdvisory>();
   for (const [truthIndex, predictionIndex] of maximumWeightAssignment(
     weights,
   )) {
@@ -279,4 +290,11 @@ function maximumWeightAssignment(
 
 function extractIssueIdentifiers(value: string): Set<string> {
   return new Set(value.toUpperCase().match(/[A-Z][A-Z0-9]+-\d+/g) ?? []);
+}
+
+function normalizeIssueIdentifier(
+  value: string | null | undefined,
+): string | null {
+  const normalized = value?.trim().toUpperCase() ?? "";
+  return /^[A-Z][A-Z0-9]+-\d+$/.test(normalized) ? normalized : null;
 }

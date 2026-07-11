@@ -71,6 +71,57 @@ describe("clustering golden-set scoring", () => {
     ).toBe(1);
   });
 
+  it("scores an explicit root identifier before falling back to hypothesis prose", async () => {
+    const fixture = await loadClusteringGoldenSetFixture(positivePath);
+    const predicted = fixture.answer_key.clusters.map((cluster, index) => ({
+      ...advisory(
+        cluster.member_issue_identifiers,
+        cluster.root_issue_identifier,
+      ),
+      ...(index === 0
+        ? {
+            rootIssueIdentifier: cluster.root_issue_identifier,
+            rootCauseHypothesis:
+              "The shared failure comes from ambient workspace identity.",
+          }
+        : {}),
+    }));
+
+    expect(
+      scoreStructuralAdvisories(fixture, predicted).rootIdentificationAccuracy,
+    ).toBe(1);
+  });
+
+  it("treats an explicit root identifier as authoritative over a prose identifier", async () => {
+    const fixture = await loadClusteringGoldenSetFixture(positivePath);
+    const predicted = fixture.answer_key.clusters.map((cluster, index) => ({
+      ...advisory(
+        cluster.member_issue_identifiers,
+        cluster.root_issue_identifier,
+      ),
+      ...(index === 0 ? { rootIssueIdentifier: "SYMPH-999999" } : {}),
+    }));
+
+    expect(
+      scoreStructuralAdvisories(fixture, predicted).rootIdentificationAccuracy,
+    ).toBe(7 / 8);
+  });
+
+  it("falls back to hypothesis prose when the explicit root is malformed", async () => {
+    const fixture = await loadClusteringGoldenSetFixture(positivePath);
+    const predicted = fixture.answer_key.clusters.map((cluster, index) => ({
+      ...advisory(
+        cluster.member_issue_identifiers,
+        cluster.root_issue_identifier,
+      ),
+      ...(index === 0 ? { rootIssueIdentifier: "not-an-issue" } : {}),
+    }));
+
+    expect(
+      scoreStructuralAdvisories(fixture, predicted).rootIdentificationAccuracy,
+    ).toBe(1);
+  });
+
   it("drops precision, not recall, when two answer-key clusters merge", async () => {
     const fixture = await loadClusteringGoldenSetFixture(positivePath);
     const [left, right, ...rest] = fixture.answer_key.clusters;

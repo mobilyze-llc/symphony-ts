@@ -3,9 +3,9 @@ import { join } from "node:path";
 import {
   type PlannerRunResult,
   buildPlannerPrompt,
-  createCrabrunnerPlannerRunner,
   parsePlannerOutput,
 } from "../agent/triage-planner.js";
+import { createToolFreeClusteringPlannerRunner } from "../cli/clustering-tool-free-runner.js";
 import type { StructuralAdvisory } from "../domain/structural-advisory.js";
 import {
   type ClusteringGoldenSetFixture,
@@ -123,7 +123,7 @@ export function createProductionClusteringInference(input: {
   generatedAt: string;
 }): ClusteringInference {
   return async ({ prompt, fixture, repeat }) => {
-    const runner = createCrabrunnerPlannerRunner({
+    const runner = createToolFreeClusteringPlannerRunner({
       model: input.model,
       workspace: input.workspace,
       artifactDir: join(input.outDir, fixture.fixture_id, `repeat-${repeat}`),

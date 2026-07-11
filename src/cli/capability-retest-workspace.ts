@@ -20,9 +20,16 @@ const EVALUATION_ROOT_FILES = [
 ] as const;
 const EVALUATION_SOURCE_EXCLUSIONS = new Set([
   join("src", "audit", "altitude-reliability.ts"),
+  join("src", "audit", "clustering-benchmark.ts"),
+  join("src", "audit", "clustering-benchmark-fixture.ts"),
+  join("src", "audit", "clustering-benchmark-score.ts"),
   join("src", "cli", "capability-retest.ts"),
+  join("src", "cli", "capability-retest-clustering.ts"),
+  join("src", "cli", "capability-retest-options.ts"),
   join("src", "cli", "capability-retest-runner.ts"),
   join("src", "cli", "capability-retest-workspace.ts"),
+  join("src", "cli", "clustering-tool-free-runner.ts"),
+  join("src", "logging", "capability-ledger.ts"),
 ]);
 
 /**
@@ -31,7 +38,8 @@ const EVALUATION_SOURCE_EXCLUSIONS = new Set([
  * Only production source/configuration is copied. Tests, plans, operations
  * docs, the answer-key module, the scoring CLI, runtime state, and `.git` are
  * absent, so a runner cannot recover expected verdicts from the evaluation
- * checkout. Linear remains available through the runner's normal agent tools.
+ * checkout. Clustering inference additionally disables every Claude built-in
+ * tool and supplies an empty strict MCP configuration at its process boundary.
  */
 export async function createCapabilityRetestEvaluationWorkspace(
   sourceRoot: string,

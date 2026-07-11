@@ -269,11 +269,33 @@ describe("capability re-test CLI", () => {
     expect(journal).toContain('"capability_arrived":false');
   });
 
+  it("keeps altitude on its verdict runner path when clustering uses a tool-free boundary", async () => {
+    const root = await tempRoot();
+    const runClusteringInference = vi.fn();
+    const exit = await runCapabilityRetestCli(
+      ["--model", "opus", "--workspace", root],
+      {
+        cwd: root,
+        io: captureIo().io,
+        runVerdict: async (testCase) => testCase.expectedVerdict,
+        runClusteringInference,
+      },
+    );
+
+    expect(exit).toBe(CAPABILITY_RETEST_EXIT.ok);
+    expect(runClusteringInference).not.toHaveBeenCalled();
+  });
+
   it("isolates model evaluation from answer-bearing files and original git history", async () => {
     const source = await tempRoot();
     await mkdir(join(source, "src", "audit"), { recursive: true });
+    await mkdir(join(source, "src", "agent"), { recursive: true });
     await mkdir(join(source, "src", "cli"), { recursive: true });
-    await mkdir(join(source, "tests"), { recursive: true });
+    await mkdir(join(source, "src", "domain"), { recursive: true });
+    await mkdir(join(source, "src", "logging"), { recursive: true });
+    await mkdir(join(source, "tests", "fixtures", "clustering-golden-set"), {
+      recursive: true,
+    });
     await mkdir(join(source, "docs", "plans"), { recursive: true });
     await mkdir(join(source, ".git"), { recursive: true });
     await writeFile(
@@ -288,7 +310,32 @@ describe("capability re-test CLI", () => {
       join(source, "src", "cli", "capability-retest.ts"),
       "export const answerKey = true;\n",
     );
-    await writeFile(join(source, "tests", "answer.test.ts"), "kill\n");
+    const retainedPlannerDependencies = [
+      join("src", "agent", "triage-planner.ts"),
+      join("src", "agent", "structural-advisory-output.ts"),
+      join("src", "domain", "structural-advisory.ts"),
+    ];
+    for (const path of retainedPlannerDependencies) {
+      await writeFile(join(source, path), "export const production = true;\n");
+    }
+    const clusteringAnswerSurfaces = [
+      join("src", "audit", "clustering-benchmark.ts"),
+      join("src", "audit", "clustering-benchmark-fixture.ts"),
+      join("src", "audit", "clustering-benchmark-score.ts"),
+      join("src", "cli", "capability-retest-clustering.ts"),
+      join("src", "cli", "capability-retest-options.ts"),
+      join("src", "cli", "capability-retest-runner.ts"),
+      join("src", "cli", "capability-retest-workspace.ts"),
+      join("src", "cli", "clustering-tool-free-runner.ts"),
+      join("src", "logging", "capability-ledger.ts"),
+    ];
+    for (const path of clusteringAnswerSurfaces) {
+      await writeFile(join(source, path), "export const answer = true;\n");
+    }
+    await writeFile(
+      join(source, "tests", "fixtures", "clustering-golden-set", "answer.json"),
+      "{}\n",
+    );
     await writeFile(join(source, "docs", "plans", "answer.md"), "kill\n");
     await writeFile(join(source, ".git", "answer"), "kill\n");
 
@@ -302,6 +349,14 @@ describe("capability re-test CLI", () => {
     await expectMissing(
       join(evaluation.path, "src", "cli", "capability-retest.ts"),
     );
+    for (const path of clusteringAnswerSurfaces) {
+      await expectMissing(join(evaluation.path, path));
+    }
+    for (const path of retainedPlannerDependencies) {
+      expect(await readFile(join(evaluation.path, path), "utf8")).toContain(
+        "production = true",
+      );
+    }
     await expectMissing(join(evaluation.path, "tests"));
     await expectMissing(join(evaluation.path, "docs"));
     await expectMissing(join(evaluation.path, ".git"));
