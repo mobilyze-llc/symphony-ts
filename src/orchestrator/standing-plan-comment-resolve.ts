@@ -45,7 +45,9 @@ export function resolveDocComment(input: {
   // were rendered cannot resolve against them (the [opt-N] markers reset each
   // revision). Re-present, never execute.
   const commentMs = Date.parse(input.comment.createdAt);
-  const revisionMs = Date.parse(input.plan.updatedAt);
+  const revisionMs = Date.parse(
+    input.plan.optionsPublishedAt ?? input.plan.createdAt,
+  );
   if (
     Number.isNaN(commentMs) ||
     (!Number.isNaN(revisionMs) && commentMs < revisionMs)

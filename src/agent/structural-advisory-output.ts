@@ -1,0 +1,100 @@
+import { z } from "zod";
+
+import type { StructuralAdvisory } from "../domain/structural-advisory.js";
+import { sanitizeForLinear } from "../shared/egress.js";
+
+const STRUCTURAL_ADVISORY_SCHEMA = z.object({
+  memberIssueIdentifiers: z.array(z.string()).min(1),
+  rootCauseHypothesis: z.string(),
+  structuralFix: z.string(),
+  confidenceNote: z.string(),
+});
+
+export const STRUCTURAL_ADVISORIES_SCHEMA = z.array(STRUCTURAL_ADVISORY_SCHEMA);
+
+export function parseStructuralAdvisories(
+  values: readonly unknown[],
+): StructuralAdvisory[] {
+  return values.flatMap((value) => {
+    const parsed = STRUCTURAL_ADVISORY_SCHEMA.safeParse(value);
+    return parsed.success ? [parsed.data] : [];
+  });
+}
+
+export const STRUCTURAL_ADVISORY_PROMPT_JSON_LINES = [
+  '  "structural_advisories": [',
+  "    {",
+  '      "memberIssueIdentifiers": ["SYMPH-1", "SYMPH-2"],',
+  '      "rootCauseHypothesis": "suspected shared root cause",',
+  '      "structuralFix": "structural fix that would supersede the members",',
+  '      "confidenceNote": "confidence and evidence limits"',
+  "    }",
+  "  ]",
+] as const;
+
+export const STRUCTURAL_ADVISORY_PROMPT_INSTRUCTION_LINES = [
+  "- In `structural_advisories`, scan candidates for symptom clusters that may share one root cause. Name the member issue identifiers, suspected root cause, structural fix that would supersede the members, and a confidence note.",
+  "- Structural advisories are non-binding and report-only. They never authorize dispatch, mutation, cancellation, or dependency changes. Use an empty array when no supported cluster exists.",
+] as const;
+
+const MEMBER_IDENTIFIER_LIMIT = 100;
+const ROOT_HYPOTHESIS_LIMIT = 500;
+const STRUCTURAL_FIX_LIMIT = 1_000;
+const CONFIDENCE_NOTE_LIMIT = 500;
+const OPTION_MARKER = /(?<![\w-])\[?opt-\d+(?::r\d+)?\]?(?![\w-])/gi;
+
+export function normalizeStructuralAdvisories(
+  advisories: readonly StructuralAdvisory[] | undefined,
+): StructuralAdvisory[] {
+  return (advisories ?? [])
+    .map((advisory) => ({
+      memberIssueIdentifiers: advisory.memberIssueIdentifiers
+        .map((identifier) => normalizeText(identifier, MEMBER_IDENTIFIER_LIMIT))
+        .filter((identifier) => identifier.length > 0),
+      rootCauseHypothesis: normalizeText(
+        advisory.rootCauseHypothesis,
+        ROOT_HYPOTHESIS_LIMIT,
+      ),
+      structuralFix: normalizeText(
+        advisory.structuralFix,
+        STRUCTURAL_FIX_LIMIT,
+      ),
+      confidenceNote: normalizeText(
+        advisory.confidenceNote,
+        CONFIDENCE_NOTE_LIMIT,
+      ),
+    }))
+    .filter(
+      (advisory) =>
+        advisory.memberIssueIdentifiers.length > 0 &&
+        advisory.rootCauseHypothesis.length > 0 &&
+        advisory.structuralFix.length > 0 &&
+        advisory.confidenceNote.length > 0,
+    );
+}
+
+export function renderStructuralAdvisoryDetails(
+  advisories: readonly StructuralAdvisory[] | undefined,
+): string[] {
+  const lines: string[] = [];
+  for (const [index, advisory] of normalizeStructuralAdvisories(
+    advisories,
+  ).entries()) {
+    lines.push(`### Advisory ${index + 1}`);
+    lines.push(`- Members: ${advisory.memberIssueIdentifiers.join(", ")}`);
+    lines.push(`- Root hypothesis: ${advisory.rootCauseHypothesis}`);
+    lines.push(`- Structural fix: ${advisory.structuralFix}`);
+    lines.push(`- Confidence: ${advisory.confidenceNote}`);
+  }
+  return lines;
+}
+
+function normalizeText(value: string, limit: number): string {
+  const neutralized = value.replace(
+    OPTION_MARKER,
+    "[option marker neutralized]",
+  );
+  const sanitized = sanitizeForLinear(neutralized, { maxLen: limit });
+  const singleLine = sanitized.replace(/\s+/g, " ").trim();
+  return singleLine.length > limit ? singleLine.slice(0, limit) : singleLine;
+}

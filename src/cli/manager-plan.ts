@@ -68,22 +68,17 @@ import {
   type LinearProjectReference,
   LinearTrackerClient,
 } from "../tracker/linear-client.js";
+import {
+  renderManagerPlanAdvisoryPreview,
+  withoutStructuralAdvisoryPreview,
+} from "./manager-plan-advisory-preview.js";
 
-// ---------------------------------------------------------------------------
 // symphony-manager-plan (SYMPH-837) — run the Queue Triage v2 backlog Manager
-// (the planner) ONE-SHOT against a team's eligible backlog and print the
-// suggested batch plan. OUTPUT-ONLY: it spends one Opus pass (unless
-// --prompt-only) and writes artifacts to its own temp dir, but writes NOTHING
-// to Linear, the live standing-plan store, or dispatch. It reuses the exact
-// planner core the live shadow tick uses; candidates come from standalone
-// Linear reads, while in-flight context can come from the runtime host snapshot
-// to match live shadow ticks.
-// ---------------------------------------------------------------------------
+// one-shot against eligible backlog. It reuses the live shadow planner core;
+// candidates come from standalone Linear reads and runtime-host context.
 
-/** CLI default operating-envelope concurrency ceiling (tunable via --concurrency-ceiling). */
 export const DEFAULT_MANAGER_PLAN_CONCURRENCY_CEILING = 3;
 export const DEFAULT_MANAGER_PLAN_MODEL = "opus";
-/** Default eligible-to-start state when --state is omitted (SYMPH-867). */
 export const DEFAULT_MANAGER_PLAN_STATE = "Backlog";
 export const DEFAULT_MANAGER_PLAN_IN_FLIGHT_STATES = [
   "In Progress",
@@ -108,8 +103,6 @@ export const MANAGER_PLAN_EXIT = {
   usage: 1,
   unavailable: 3,
   invalid: 4,
-  // Candidate load (network / Linear) failure — distinct from a usage error so
-  // scripted callers can tell "your args were wrong" from "Linear is down".
   loadFailed: 5,
 } as const;
 
@@ -789,12 +782,16 @@ export async function runManagerPlanCli(
       dependencies.persistPlanRevision ?? recordPlanRevision;
     const persistRoot = join(artifactDir, "manager-plan-store");
     try {
-      const record = await persistPlanRevision(persistRoot, result.body, {
-        createdAt: now().toISOString(),
-        planId: STANDING_PLAN_ID,
-        findings: review.findings,
-        reviewRecords: review.reviewRecords,
-      });
+      const record = await persistPlanRevision(
+        persistRoot,
+        withoutStructuralAdvisoryPreview(result.body),
+        {
+          createdAt: now().toISOString(),
+          planId: STANDING_PLAN_ID,
+          findings: review.findings,
+          reviewRecords: review.reviewRecords,
+        },
+      );
       persistence = {
         workspaceRoot: persistRoot,
         recorded: record.recorded,
@@ -858,6 +855,8 @@ function renderPlanJson(
       portfolioHeldCount,
       envelope: body.envelope,
       rationale: body.rationale,
+      structuralAdvisoryDisposition: "preview_only_not_journaled",
+      structuralAdvisories: body.structuralAdvisories ?? [],
       batches: body.batches,
       dependencyEdges: body.dependencyEdges,
       waves: computeDependencyWaves(
@@ -945,6 +944,7 @@ function renderPlanHuman(
       lines.push(`  ${option.marker} ${option.label}`);
     }
   }
+  lines.push(...renderManagerPlanAdvisoryPreview(body));
   if (persistence !== null) {
     lines.push("");
     lines.push(

@@ -12,6 +12,7 @@ import type {
   StandingPlanJournalEntry,
 } from "../../src/domain/standing-plan.js";
 import {
+  assertProjectedPlanValid,
   collectMergedOutcomesFromJournal,
   decidePlanDrivenDispatch,
   evaluateReplanPredicates,
@@ -91,6 +92,23 @@ function canaryBatch(
 }
 
 describe("selectDispatchableBatchMembers (posture-B)", () => {
+  it("ignores report-only structural advisories at the batch validation boundary", () => {
+    expect(() =>
+      assertProjectedPlanValid(
+        plan([batch("b1", ["SYMPH-1"])], {
+          structuralAdvisories: [
+            {
+              memberIssueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+              rootCauseHypothesis: "Shared root",
+              structuralFix: "Fix the root",
+              confidenceNote: "High",
+            },
+          ],
+        }),
+      ),
+    ).not.toThrow();
+  });
+
   it("auto-releases up to the frontier bound and holds the rest", () => {
     const result = selectDispatchableBatchMembers({
       plan: plan([

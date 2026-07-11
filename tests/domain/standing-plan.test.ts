@@ -4,6 +4,7 @@ import {
   type PlanEnvelope,
   computeDependencyWaves,
   computePlanContentHash,
+  isStandingPlanJournalEntry,
 } from "../../src/domain/standing-plan.js";
 
 const ENVELOPE: PlanEnvelope = {
@@ -12,6 +13,29 @@ const ENVELOPE: PlanEnvelope = {
   allowedRisk: "medium",
   allowedModes: ["parallel-isolated"],
 };
+
+function journalEntry(revisionOverrides: Record<string, unknown> = {}) {
+  return {
+    sequence: 1,
+    idempotencyKey: "plan-1:rev:1",
+    timestamp: "2026-06-18T00:00:00.000Z",
+    kind: "plan_revision",
+    planId: "plan-1",
+    revision: {
+      revision: 1,
+      planId: "plan-1",
+      contentHash: "hash",
+      supersedes: null,
+      createdAt: "2026-06-18T00:00:00.000Z",
+      envelope: ENVELOPE,
+      batches: [],
+      options: [],
+      rationale: "legacy",
+      source: "planner",
+      ...revisionOverrides,
+    },
+  };
+}
 
 describe("computeDependencyWaves (SYMPH-843)", () => {
   it("layers members by dependency depth, preserving input order within a wave", () => {
@@ -89,6 +113,14 @@ describe("computePlanContentHash review metadata", () => {
           severity: "Track" as const,
         },
       ],
+      structuralAdvisories: [
+        {
+          memberIssueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+          rootCauseHypothesis: "Root A",
+          structuralFix: "Fix A",
+          confidenceNote: "High",
+        },
+      ],
     };
     const second = {
       ...base,
@@ -106,8 +138,61 @@ describe("computePlanContentHash review metadata", () => {
           severity: "P2" as const,
         },
       ],
+      structuralAdvisories: [
+        {
+          memberIssueIdentifiers: ["SYMPH-1", "SYMPH-3"],
+          rootCauseHypothesis: "Root B",
+          structuralFix: "Fix B",
+          confidenceNote: "Medium",
+        },
+      ],
     };
 
     expect(computePlanContentHash(first)).toBe(computePlanContentHash(second));
+  });
+});
+
+describe("standing-plan structural advisory compatibility", () => {
+  it("accepts legacy revisions without the optional report field", () => {
+    expect(isStandingPlanJournalEntry(journalEntry())).toBe(true);
+  });
+
+  it.each([
+    {
+      memberIssueIdentifiers: [],
+      rootCauseHypothesis: "Root",
+      structuralFix: "Fix",
+      confidenceNote: "High",
+    },
+    {
+      memberIssueIdentifiers: ["   "],
+      rootCauseHypothesis: "Root",
+      structuralFix: "Fix",
+      confidenceNote: "High",
+    },
+    {
+      memberIssueIdentifiers: ["SYMPH-1"],
+      rootCauseHypothesis: "   ",
+      structuralFix: "Fix",
+      confidenceNote: "High",
+    },
+    {
+      memberIssueIdentifiers: ["SYMPH-1"],
+      rootCauseHypothesis: "Root",
+      structuralFix: "   ",
+      confidenceNote: "High",
+    },
+    {
+      memberIssueIdentifiers: ["SYMPH-1"],
+      rootCauseHypothesis: "Root",
+      structuralFix: "Fix",
+      confidenceNote: "   ",
+    },
+  ])("rejects malformed persisted advisory %#", (advisory) => {
+    expect(
+      isStandingPlanJournalEntry(
+        journalEntry({ structuralAdvisories: [advisory] }),
+      ),
+    ).toBe(false);
   });
 });

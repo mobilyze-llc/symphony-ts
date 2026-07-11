@@ -13,6 +13,7 @@ import type {
 } from "../../src/domain/standing-plan.js";
 import { appendStandingPlanJournalEntriesWithLock } from "../../src/logging/standing-plan-journal.js";
 import { readStandingPlanJournal } from "../../src/logging/standing-plan-journal.js";
+import { resolveDocComment } from "../../src/orchestrator/standing-plan-comment-resolve.js";
 import { renderStandingPlanControlDoc } from "../../src/orchestrator/standing-plan-doc-render.js";
 import {
   listHonoredDecisions,
@@ -106,6 +107,37 @@ describe("standing-plan store", () => {
     const root = tmpRoot();
     try {
       expect(await loadStandingPlan(root)).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("projects legacy revisions without advisories as an empty report array", async () => {
+    const root = tmpRoot();
+    try {
+      await appendStandingPlanJournalEntriesWithLock(root, [
+        {
+          kind: "plan_revision",
+          idempotencyKey: "legacy-plan:rev:1",
+          timestamp: "2026-06-18T00:00:00.000Z",
+          planId: "legacy-plan",
+          revision: {
+            revision: 1,
+            planId: "legacy-plan",
+            contentHash: "legacy-hash",
+            supersedes: null,
+            createdAt: "2026-06-18T00:00:00.000Z",
+            envelope: ENVELOPE,
+            batches: [],
+            dependencyEdges: [],
+            options: [],
+            rationale: "legacy",
+            source: "planner",
+          },
+        },
+      ]);
+
+      expect((await loadStandingPlan(root))?.structuralAdvisories).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -373,6 +405,104 @@ describe("standing-plan store", () => {
       expect((await loadStandingPlan(root))?.findings).toEqual(
         sameStructure.plan.findings,
       );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refreshes advisory-only reports in place and preserves pending decisions", async () => {
+    const root = tmpRoot();
+    try {
+      const planBody: PlanBody = {
+        ...body([lookahead("b1", "SYMPH-1")]),
+        options: [
+          {
+            marker: "[opt-1]",
+            label: "Release b1",
+            intent: { verb: "release_batch", batchId: "b1" },
+          },
+        ],
+      };
+      const first = await recordPlanRevision(
+        root,
+        {
+          ...planBody,
+          structuralAdvisories: [
+            {
+              memberIssueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+              rootCauseHypothesis: "Shared root A",
+              structuralFix: "Fix root A",
+              confidenceNote: "High",
+            },
+          ],
+        },
+        {
+          planId: "plan-1",
+          createdAt: "2026-06-18T00:00:00.000Z",
+        },
+      );
+      const approval: PlanDecision = {
+        decisionId: "decision-1",
+        planId: "plan-1",
+        revision: first.plan.revision,
+        batchId: "b1",
+        kind: "approve",
+        actor: "operator@example.com",
+        optionMarker: "[opt-1]",
+        createdAt: "2026-06-18T00:01:00.000Z",
+        note: null,
+      };
+      await recordPlanDecision(root, approval);
+
+      const refreshed = await recordPlanRevision(
+        root,
+        {
+          ...planBody,
+          structuralAdvisories: [
+            {
+              memberIssueIdentifiers: ["SYMPH-1", "SYMPH-3"],
+              rootCauseHypothesis: "Shared root B",
+              structuralFix: "Fix root B",
+              confidenceNote: "Medium",
+            },
+          ],
+        },
+        { createdAt: "2026-06-18T00:02:00.000Z" },
+      );
+
+      expect(refreshed.recorded).toBe(true);
+      expect(refreshed.plan.revision).toBe(first.plan.revision);
+      expect(refreshed.plan.contentHash).toBe(first.plan.contentHash);
+      expect(refreshed.plan.structuralAdvisories?.[0]?.structuralFix).toBe(
+        "Fix root B",
+      );
+      expect(await listHonoredDecisions(root)).toEqual([approval]);
+      const reloaded = await loadStandingPlan(root);
+      expect(reloaded?.structuralAdvisories).toEqual(
+        refreshed.plan.structuralAdvisories,
+      );
+      expect(reloaded?.updatedAt).toBe("2026-06-18T00:02:00.000Z");
+      expect(reloaded?.optionsPublishedAt).toBe("2026-06-18T00:00:00.000Z");
+      if (reloaded === null) {
+        throw new Error("expected a refreshed standing plan");
+      }
+      expect(
+        resolveDocComment({
+          comment: {
+            body: "approve",
+            quotedText: "[opt-1:r1] Release b1",
+            authorEmail: "operator@example.com",
+            createdAt: "2026-06-18T00:01:30.000Z",
+          },
+          plan: reloaded,
+          operatorAllowlist: new Set(["operator@example.com"]),
+        }),
+      ).toEqual({
+        kind: "intent",
+        optionMarker: "[opt-1]",
+        verb: "release_batch",
+        batchId: "b1",
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -666,6 +796,8 @@ describe("standing-plan store", () => {
       );
       expect(changed.recorded).toBe(true);
       expect(changed.plan.revision).toBe(2);
+      expect(changed.plan.updatedAt).toBe("2026-06-18T00:01:00.000Z");
+      expect(changed.plan.optionsPublishedAt).toBe("2026-06-18T00:01:00.000Z");
       expect((await loadStandingPlan(root))?.batches[0]?.batchId).toBe("b2");
     } finally {
       rmSync(root, { recursive: true, force: true });

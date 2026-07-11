@@ -1,3 +1,4 @@
+import { renderStructuralAdvisoryDetails } from "../agent/structural-advisory-output.js";
 import type { TriageIntakeHealth } from "../agent/triage-planner.js";
 import type {
   PlanBatch,
@@ -146,6 +147,17 @@ export function renderStandingPlanControlDoc(
   if (reviewFindingLines.length > 0) {
     lines.push("", "## Review findings", ...reviewFindingLines);
   }
+
+  const advisoryLines = renderStructuralAdvisoryDetails(
+    plan.structuralAdvisories,
+  );
+  lines.push("", "## Structural advisories (report-only)");
+  lines.push(
+    advisoryLines.length === 0
+      ? "- (none)"
+      : "_Non-binding: these advisories authorize no tracker or dispatch action._",
+  );
+  lines.push(...advisoryLines);
 
   lines.push("", "## Options");
   lines.push(

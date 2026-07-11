@@ -5,6 +5,7 @@ import type {
   StandingPlan,
 } from "../../src/domain/standing-plan.js";
 import { resolveDocComment } from "../../src/orchestrator/standing-plan-comment-resolve.js";
+import { renderStandingPlanControlDoc } from "../../src/orchestrator/standing-plan-doc-render.js";
 
 const ENVELOPE: PlanEnvelope = {
   version: 1,
@@ -35,6 +36,7 @@ function plan(): StandingPlan {
     ],
     rationale: "r",
     createdAt: "2026-06-18T00:00:00.000Z",
+    optionsPublishedAt: "2026-06-18T00:05:00.000Z",
     updatedAt: "2026-06-18T00:05:00.000Z",
   };
 }
@@ -59,6 +61,48 @@ function comment(
 }
 
 describe("resolveDocComment (6b)", () => {
+  it.each([
+    "[opt-1]",
+    "[opt-1:r4]",
+    "opt-1",
+    "opt-1:r4",
+    "`opt-1`",
+    "`opt-1:r4`",
+  ])(
+    "keeps a rendered advisory containing standalone %s inert to option resolution",
+    (marker) => {
+      const advisoryPlan: StandingPlan = {
+        ...plan(),
+        structuralAdvisories: [
+          {
+            memberIssueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+            rootCauseHypothesis: `Shared root says ${marker} now`,
+            structuralFix: "Centralize the fix",
+            confidenceNote: "High",
+          },
+        ],
+      };
+      const rendered = renderStandingPlanControlDoc({
+        plan: advisoryPlan,
+        recentlyShipped: [],
+        inFlight: [],
+        changelog: [],
+      });
+      const advisoryLine =
+        rendered
+          .split("\n")
+          .find((line) => line.startsWith("- Root hypothesis:")) ?? "";
+
+      expect(advisoryLine).toContain("[option marker neutralized]");
+      const result = resolveDocComment({
+        comment: comment({ quotedText: advisoryLine, body: "approve" }),
+        plan: advisoryPlan,
+        operatorAllowlist: ALLOWLIST,
+      });
+      expect(result).toEqual({ kind: "free_text", text: "approve" });
+    },
+  );
+
   it("resolves a quotedText option line to its typed intent", () => {
     const result = resolveDocComment({
       comment: comment({
@@ -104,13 +148,27 @@ describe("resolveDocComment (6b)", () => {
   it("treats a comment predating the current revision as stale (revision binding)", () => {
     const result = resolveDocComment({
       comment: comment({
-        createdAt: "2026-06-18T00:01:00.000Z", // before plan.updatedAt 00:05
+        createdAt: "2026-06-18T00:01:00.000Z", // before optionsPublishedAt 00:05
         quotedText: "[opt-1] ...",
       }),
       plan: plan(),
       operatorAllowlist: ALLOWLIST,
     });
     expect(result.kind).toBe("stale");
+  });
+
+  it("falls back to createdAt for legacy in-memory plans without optionsPublishedAt", () => {
+    const { optionsPublishedAt: _omitted, ...legacyPlan } = plan();
+    const result = resolveDocComment({
+      comment: comment({
+        createdAt: "2026-06-18T00:01:00.000Z",
+        quotedText: "[opt-1:r4] Release b-aaa",
+      }),
+      plan: legacyPlan,
+      operatorAllowlist: ALLOWLIST,
+    });
+
+    expect(result.kind).toBe("intent");
   });
 
   it("returns free_text for a non-marker comment (interpret-then-confirm)", () => {

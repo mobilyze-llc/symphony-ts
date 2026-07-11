@@ -65,6 +65,30 @@ function planFrom(revision: number, batches: PlanBatch[]): StandingPlan {
 }
 
 describe("rotateRevision", () => {
+  it("copies report-only structural advisories without changing batch semantics", () => {
+    const next = rotateRevision(
+      null,
+      {
+        ...body([lookaheadBatch("b1", "SYMPH-1")]),
+        structuralAdvisories: [
+          {
+            memberIssueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+            rootCauseHypothesis: "Shared root",
+            structuralFix: "Centralize the fix",
+            confidenceNote: "High",
+          },
+        ],
+      },
+      {
+        planId: "plan-1",
+        createdAt: "2026-06-18T00:00:00.000Z",
+      },
+    );
+
+    expect(next.structuralAdvisories).toHaveLength(1);
+    expect(next.batches).toEqual([lookaheadBatch("b1", "SYMPH-1")]);
+  });
+
   it("stamps the first revision with monotonic id and null supersedes", () => {
     const next = rotateRevision(null, body([lookaheadBatch("b1", "SYMPH-1")]), {
       planId: "plan-1",
