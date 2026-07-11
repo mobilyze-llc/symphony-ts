@@ -190,6 +190,16 @@ describe("capability re-test CLI", () => {
     expect(JSON.parse(capture.stdout())).toMatchObject({
       kind: "clustering_golden_set_benchmark",
       repeats: 3,
+      fixtureContentHashes: [
+        {
+          fixtureId: "crucible-root-cause-strategy-pr409",
+          sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+        },
+        {
+          fixtureId: "symphony-intake-t0-negative-control",
+          sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+        },
+      ],
       summary: {
         pairwisePrecision: { mean: 1, spread: 0 },
         negativeFalseClusterRate: { mean: 0, spread: 0 },
@@ -200,8 +210,102 @@ describe("capability re-test CLI", () => {
     expect(rows[0]).toMatchObject({
       run_id: "clustering-run-1",
       model: "opus",
-      result: { kind: "clustering_golden_set_benchmark", repeats: 3 },
+      result: {
+        kind: "clustering_golden_set_benchmark",
+        repeats: 3,
+        fixtureContentHashes: expect.arrayContaining([
+          expect.objectContaining({
+            fixtureId: "crucible-root-cause-strategy-pr409",
+            sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+          }),
+        ]),
+      },
     });
+  });
+
+  it("records fixture content hashes that change when fixture bytes change", async () => {
+    const root = await tempRoot();
+    const fixtureDir = join(root, "fixtures");
+    await mkdir(fixtureDir, { recursive: true });
+    const sourceFixtureDir = join(
+      process.cwd(),
+      "tests",
+      "fixtures",
+      "clustering-golden-set",
+    );
+    const positivePath = join(fixtureDir, "positive-crucible-strategy.json");
+    const negativePath = join(fixtureDir, "negative-symphony-t0.json");
+    await writeFile(
+      positivePath,
+      await readFile(
+        join(sourceFixtureDir, "positive-crucible-strategy.json"),
+        "utf8",
+      ),
+    );
+    await writeFile(
+      negativePath,
+      await readFile(
+        join(sourceFixtureDir, "negative-symphony-t0.json"),
+        "utf8",
+      ),
+    );
+    const run = (generatedAt: string, runId: string) =>
+      runClusteringCapabilityRetest({
+        model: "opus",
+        workspace: root,
+        evaluationWorkspace: root,
+        outDir: join(root, "out", runId),
+        fixtureDir,
+        repeats: 3,
+        generatedAt,
+        runId,
+        env: {},
+        dependencies: {
+          runInference: async ({ fixture }) =>
+            fixture.fixture_kind === "positive"
+              ? fixture.answer_key.clusters.map((cluster) => ({
+                  memberIssueIdentifiers: cluster.member_issue_identifiers,
+                  rootCauseHypothesis: `${cluster.root_issue_identifier} is the root`,
+                  structuralFix: "Fix the shared root",
+                  confidenceNote: "fixture injection",
+                }))
+              : [],
+        },
+      });
+
+    const first = await run("2026-07-10T22:01:00.000Z", "hash-run-1");
+    const positiveHash = (result: typeof first) =>
+      result.fixtureContentHashes.find(
+        (entry) => entry.fixtureId === "crucible-root-cause-strategy-pr409",
+      )?.sha256;
+    const firstHash = positiveHash(first);
+    const positive = JSON.parse(await readFile(positivePath, "utf8")) as {
+      provenance: { reconstruction: string };
+    };
+    positive.provenance.reconstruction += " Byte-level evidence changed.";
+    await writeFile(positivePath, `${JSON.stringify(positive, null, 2)}\n`);
+
+    const second = await run("2026-07-10T22:02:00.000Z", "hash-run-2");
+
+    expect(positiveHash(second)).not.toBe(firstHash);
+    expect(await readClusteringBenchmarkCapabilityLedger(root)).toMatchObject([
+      {
+        run_id: "hash-run-1",
+        result: {
+          fixtureContentHashes: expect.arrayContaining([
+            expect.objectContaining({ sha256: firstHash }),
+          ]),
+        },
+      },
+      {
+        run_id: "hash-run-2",
+        result: {
+          fixtureContentHashes: expect.arrayContaining([
+            expect.objectContaining({ sha256: positiveHash(second) }),
+          ]),
+        },
+      },
+    ]);
   });
 
   it("scores the answer key as capability arrived and writes cases to the run journal", async () => {

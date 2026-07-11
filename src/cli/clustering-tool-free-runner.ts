@@ -158,28 +158,46 @@ async function runToolFreePlannerProcess(
       timedOut = true;
       child.kill("SIGKILL");
     }, input.timeoutMs);
-    child.once("error", (error) => {
+    let settled = false;
+    const rejectOnce = (error: Error) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      if (!child.killed) child.kill("SIGKILL");
       reject(error);
+    };
+    const resolveOnce = (result: ToolFreePlannerProcessResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    child.once("error", rejectOnce);
+    child.stdin.once("error", (error) => {
+      if (timedOut) return;
+      rejectOnce(error);
     });
     child.once("close", (code) => {
-      clearTimeout(timer);
       if (timedOut) {
-        resolve({
+        resolveOnce({
           status: "timed_out",
           stdout: Buffer.concat(stdout).toString("utf8"),
           stderr: Buffer.concat(stderr).toString("utf8"),
         });
         return;
       }
-      resolve({
+      resolveOnce({
         status: "completed",
         exitCode: code ?? 1,
         stdout: Buffer.concat(stdout).toString("utf8"),
         stderr: Buffer.concat(stderr).toString("utf8"),
       });
     });
-    child.stdin.end(input.stdin);
+    try {
+      child.stdin.end(input.stdin);
+    } catch (error) {
+      rejectOnce(error instanceof Error ? error : new Error(String(error)));
+    }
   });
 }
 

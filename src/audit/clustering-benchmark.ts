@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
@@ -10,7 +12,7 @@ import type { StructuralAdvisory } from "../domain/structural-advisory.js";
 import {
   type ClusteringGoldenSetFixture,
   buildClusteringBenchmarkPlannerContext,
-  loadClusteringGoldenSetFixture,
+  parseClusteringGoldenSetFixture,
 } from "./clustering-benchmark-fixture.js";
 import {
   type ClusteringScore,
@@ -48,6 +50,10 @@ export interface ClusteringBenchmarkResult {
     cutoff: string;
     commit: string;
   }>;
+  fixtureContentHashes: Array<{
+    fixtureId: string;
+    sha256: string;
+  }>;
   perRepeat: ClusteringBenchmarkRepeat[];
   summary: {
     pairwisePrecision: MetricSummary;
@@ -77,9 +83,14 @@ export async function runClusteringBenchmark(input: {
   if (!Number.isInteger(input.repeats) || input.repeats < 1) {
     throw new Error("Clustering benchmark repeats must be a positive integer");
   }
-  const fixtures = await Promise.all(
-    input.fixturePaths.map(loadClusteringGoldenSetFixture),
+  const fixtureSnapshots = await Promise.all(
+    input.fixturePaths.map(loadClusteringGoldenSetFixtureSnapshot),
   );
+  const fixtures = fixtureSnapshots.map((snapshot) => snapshot.fixture);
+  const fixtureContentHashes = fixtureSnapshots.map((snapshot) => ({
+    fixtureId: snapshot.fixture.fixture_id,
+    sha256: snapshot.sha256,
+  }));
   assertFixtureKinds(fixtures);
   const perRepeat: ClusteringBenchmarkRepeat[] = [];
   for (let repeat = 1; repeat <= input.repeats; repeat += 1) {
@@ -110,8 +121,20 @@ export async function runClusteringBenchmark(input: {
       cutoff: fixture.snapshot_cutoff,
       commit: fixture.source.commit,
     })),
+    fixtureContentHashes,
     perRepeat,
     summary: summarize(perRepeat),
+  };
+}
+
+async function loadClusteringGoldenSetFixtureSnapshot(path: string): Promise<{
+  fixture: ClusteringGoldenSetFixture;
+  sha256: string;
+}> {
+  const content = await readFile(path);
+  return {
+    fixture: parseClusteringGoldenSetFixture(content.toString("utf8")),
+    sha256: sha256Bytes(content),
   };
 }
 
@@ -229,4 +252,8 @@ function summarizeMetric(values: readonly (number | null)[]): MetricSummary {
 
 function stamp(value: string): string {
   return value.replace(/[:.]/g, "-");
+}
+
+function sha256Bytes(content: Buffer): string {
+  return createHash("sha256").update(content).digest("hex");
 }
