@@ -466,6 +466,22 @@ describe("capability re-test CLI", () => {
         "SYMPH-956",
       ),
     ).toThrow(/did not contain a verdict JSON object/);
+    // Same rule for a multiline (pretty-printed) invalid final attempt.
+    expect(() =>
+      parseCapabilityRetestVerdictResponse(
+        {
+          status: "ok",
+          markdown: [
+            '{"verdict":"keep"}',
+            "{",
+            '  "verdict": "kill",',
+            '  "extra": true',
+            "}",
+          ].join("\n"),
+        },
+        "SYMPH-956",
+      ),
+    ).toThrow(/did not contain a verdict JSON object/);
   });
 
   it.each([
