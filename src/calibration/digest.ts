@@ -816,24 +816,29 @@ export function computeCalibrationReport(
 
   const advisoryFirstSeen = new Map<string, DispatcherRunJournalEntry>();
   const advisoryTransitions = new Map<string, DispatcherRunJournalEntry[]>();
+  const advisoryGrades = new Map<string, DispatcherRunJournalEntry>();
   for (const entry of sorted) {
-    if (entry.kind !== "structural_advisory") continue;
-    const advisoryId = metaString(entry, "advisory_id");
-    if (advisoryId === null) continue;
-    if (!advisoryFirstSeen.has(advisoryId))
-      advisoryFirstSeen.set(advisoryId, entry);
-    const transitions = advisoryTransitions.get(advisoryId) ?? [];
-    transitions.push(entry);
-    advisoryTransitions.set(advisoryId, transitions);
+    if (entry.kind === "structural_advisory") {
+      const advisoryId = metaString(entry, "advisory_id");
+      if (advisoryId === null) continue;
+      if (!advisoryFirstSeen.has(advisoryId))
+        advisoryFirstSeen.set(advisoryId, entry);
+      const transitions = advisoryTransitions.get(advisoryId) ?? [];
+      transitions.push(entry);
+      advisoryTransitions.set(advisoryId, transitions);
+      continue;
+    }
+    if (entry.kind === "structural_advisory_grade") {
+      const advisoryId = metaString(entry, "advisory_id");
+      if (advisoryId !== null && !advisoryGrades.has(advisoryId)) {
+        advisoryGrades.set(advisoryId, entry);
+      }
+    }
   }
   const structuralAdvisoryDecisions: StructuralAdvisoryDecisionJoinRow[] = [
     ...advisoryFirstSeen.entries(),
   ].map(([advisoryId, advisory]) => {
-    const grade = sorted.find(
-      (candidate) =>
-        candidate.kind === "structural_advisory_grade" &&
-        metaString(candidate, "advisory_id") === advisoryId,
-    );
+    const grade = advisoryGrades.get(advisoryId);
     const rawDecision =
       grade === undefined ? null : metaString(grade, "decision");
     const decision =
@@ -906,14 +911,7 @@ export function computeCalibrationReport(
   const orphanStructuralAdvisoryGrades = sorted.flatMap((entry) => {
     if (entry.kind !== "structural_advisory_grade") return [];
     const advisoryId = metaString(entry, "advisory_id");
-    if (
-      advisoryId === null ||
-      sorted.some(
-        (candidate) =>
-          candidate.kind === "structural_advisory" &&
-          metaString(candidate, "advisory_id") === advisoryId,
-      )
-    ) {
+    if (advisoryId === null || advisoryFirstSeen.has(advisoryId)) {
       return [];
     }
     return [

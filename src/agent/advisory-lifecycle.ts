@@ -183,7 +183,17 @@ export async function applyAdvisoryLifecycle(
         advisory,
       });
     }
-    if (
+    if (!transitionedMemberSets.has(memberSetHash) && explicitTerminalRevival) {
+      transitionedMemberSets.add(memberSetHash);
+      events.push({
+        kind: "transition",
+        memberSetHash,
+        advisoryFingerprint,
+        from: "graded",
+        to: "active",
+        advisory,
+      });
+    } else if (
       !transitionedMemberSets.has(memberSetHash) &&
       sharedPrior?.lifecycleState === "dormant" &&
       lifecycleState === "active"

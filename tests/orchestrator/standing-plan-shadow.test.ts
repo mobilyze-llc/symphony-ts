@@ -1366,6 +1366,7 @@ describe("runStandingPlanShadowTick", () => {
     const root = mkdtempSync(join(tmpdir(), "symph-shadow-comment-revival-"));
     const fetches: Array<{ issueId: string; maxPages: number | undefined }> =
       [];
+    const transitions: Array<{ from: string | null; to: string }> = [];
     const memberSetHash = structuralAdvisoryMemberSetHash([
       "SYMPH-2",
       "SYMPH-3",
@@ -1458,6 +1459,9 @@ describe("runStandingPlanShadowTick", () => {
           findings: [],
           reviewRecords: [],
         }),
+        recordAdvisoryTransition: async ({ from, to }) => {
+          transitions.push({ from, to });
+        },
         log: () => undefined,
         now: () => new Date("2026-06-19T01:00:00.000Z"),
         force: true,
@@ -1480,6 +1484,7 @@ describe("runStandingPlanShadowTick", () => {
         rendered: true,
         previouslyRejectedWithNewEvidence: true,
       });
+      expect(transitions).toEqual([{ from: "graded", to: "active" }]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

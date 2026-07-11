@@ -371,6 +371,15 @@ describe("structural advisory lifecycle", () => {
         previouslyRejectedWithNewEvidence: true,
       }),
     ]);
+    expect(revived.events).toEqual([
+      expect.objectContaining({
+        kind: "transition",
+        advisoryFingerprint: graded.advisoryFingerprint,
+        memberSetHash: graded.memberSetHash,
+        from: "graded",
+        to: "active",
+      }),
+    ]);
 
     const unrelatedRejection = await applyAdvisoryLifecycle({
       emitted: [base],
