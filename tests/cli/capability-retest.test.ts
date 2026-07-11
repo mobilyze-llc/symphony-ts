@@ -286,6 +286,61 @@ describe("capability re-test CLI", () => {
     expect(journal).toContain('"capability_arrived":false');
   });
 
+  it("writes a scored ledger and exits 2 for a parseable output-contract violation", async () => {
+    const root = await tempRoot();
+    const capture = captureIo();
+    const exit = await runCapabilityRetestCli(
+      ["--model", "fable", "--workspace", root],
+      {
+        cwd: root,
+        io: capture.io,
+        now: () => new Date("2026-07-10T20:01:30.000Z"),
+        runId: () => "run-contract-violation",
+        runVerdict: async (testCase) =>
+          testCase.issueIdentifier === "SYMPH-941"
+            ? {
+                verdict: testCase.expectedVerdict,
+                contractViolation: {
+                  type: "output_contract_violation",
+                  detail: "response included prose after the verdict JSON",
+                },
+              }
+            : testCase.expectedVerdict,
+      },
+    );
+
+    expect(exit).toBe(CAPABILITY_RETEST_EXIT.barFailed);
+    const stdout = JSON.parse(capture.stdout()) as {
+      results: Array<Record<string, unknown>>;
+    };
+    expect(stdout).toMatchObject({
+      capabilityArrived: false,
+    });
+    expect(
+      stdout.results.find((entry) => entry.issueIdentifier === "SYMPH-941"),
+    ).toMatchObject({
+      actualVerdict: "kill",
+      correct: false,
+      contractViolation: { type: "output_contract_violation" },
+    });
+    const ledgerRows = await readAltitudeReliabilityCapabilityLedger(root);
+    expect(ledgerRows).toHaveLength(1);
+    expect(ledgerRows[0]?.run_id).toBe("run-contract-violation");
+    const ledgerResult = ledgerRows[0]?.result as {
+      cases: Array<Record<string, unknown>>;
+    };
+    expect(
+      ledgerResult.cases.find(
+        (entry) => entry.issue_identifier === "SYMPH-941",
+      ),
+    ).toMatchObject({
+      model_contract_violation: {
+        type: "output_contract_violation",
+      },
+      correct: false,
+    });
+  });
+
   it("keeps altitude on its verdict runner path when clustering uses a tool-free boundary", async () => {
     const root = await tempRoot();
     const runClusteringInference = vi.fn();
@@ -383,19 +438,37 @@ describe("capability re-test CLI", () => {
     await expectMissing(evaluationPath);
   });
 
-  it("strictly parses verdict objects at the model boundary", () => {
+  it("parses recoverable verdict contract violations at the model boundary", () => {
     expect(
       parseCapabilityRetestVerdictResponse(
         { status: "ok", markdown: '{"verdict":"reframe"}' },
         "SYMPH-957",
       ),
     ).toBe("reframe");
-    expect(() =>
+    expect(
+      parseCapabilityRetestVerdictResponse(
+        { status: "ok", markdown: '{"verdict":"kill"}\nExplanation.' },
+        "SYMPH-941",
+      ),
+    ).toMatchObject({
+      verdict: "kill",
+      contractViolation: {
+        type: "output_contract_violation",
+        detail: expect.stringContaining("after"),
+      },
+    });
+    expect(
       parseCapabilityRetestVerdictResponse(
         { status: "ok", markdown: '{"verdict":"kill","answer":"key"}' },
         "SYMPH-941",
       ),
-    ).toThrow(/invalid verdict object/);
+    ).toMatchObject({
+      verdict: "kill",
+      contractViolation: {
+        type: "output_contract_violation",
+        detail: expect.stringContaining("extra"),
+      },
+    });
     expect(() =>
       parseCapabilityRetestVerdictResponse(
         { status: "ok", markdown: '{"verdict":17}' },

@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import {
   type AltitudeReliabilityBar,
   type AltitudeReliabilityCase,
-  type AltitudeReliabilityVerdict,
+  type AltitudeReliabilityVerdictObservation,
   DEFAULT_ALTITUDE_RELIABILITY_BAR,
   buildAltitudeReliabilityLedgerEntry,
   runAltitudeReliabilityRetest,
@@ -58,7 +58,7 @@ export interface CapabilityRetestCliDependencies {
   runVerdict?: (
     testCase: AltitudeReliabilityCase,
     context: { model: string; workspace: string; outDir: string },
-  ) => Promise<AltitudeReliabilityVerdict>;
+  ) => Promise<AltitudeReliabilityVerdictObservation>;
   appendJournal?: (
     workspaceRoot: string,
     drafts: readonly DispatcherRunJournalEntryDraft[],
@@ -249,8 +249,8 @@ export function renderUsage(): string {
     "Exit codes:",
     "  0  Capability bar passed",
     "  1  Usage error",
-    "  2  Altitude capability bar failed (the scored ledger entries are still written)",
-    "  3  Runner, verdict parsing, journal, or capability-ledger write unavailable",
+    "  2  Altitude capability bar failed (the scored ledger entries are still written; parseable model output-contract violations score as wrong cases)",
+    "  3  Runner, unrecoverable verdict parsing, journal, or capability-ledger write unavailable",
     "",
   ].join("\n");
 }

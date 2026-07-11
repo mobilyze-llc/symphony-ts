@@ -60,6 +60,45 @@ describe("altitude reliability re-test protocol", () => {
     expect(result.capabilityArrived).toBe(false);
   });
 
+  it("scores parseable output-contract violations as incorrect model cases", async () => {
+    const result = await runAltitudeReliabilityRetest({
+      model: "verbose-model-v0",
+      generatedAt: "2026-06-29T00:00:00.000Z",
+      runVerdict: async (testCase) =>
+        testCase.issueIdentifier === "SYMPH-941"
+          ? {
+              verdict: testCase.expectedVerdict,
+              contractViolation: {
+                type: "output_contract_violation",
+                detail: "response included prose after the verdict JSON",
+              },
+            }
+          : testCase.expectedVerdict,
+    });
+
+    expect(result.metrics.accuracy).toBe(4 / 5);
+    expect(result.capabilityArrived).toBe(false);
+    expect(result.results[0]).toMatchObject({
+      issueIdentifier: "SYMPH-941",
+      actualVerdict: "kill",
+      correct: false,
+      contractViolation: {
+        type: "output_contract_violation",
+      },
+    });
+    const ledger = buildAltitudeReliabilityLedgerEntry(result) as {
+      cases: Array<Record<string, unknown>>;
+    };
+    expect(
+      ledger.cases.find((entry) => entry.issue_identifier === "SYMPH-941"),
+    ).toMatchObject({
+      model_contract_violation: {
+        type: "output_contract_violation",
+      },
+      correct: false,
+    });
+  });
+
   it("refuses to score an empty corpus instead of reporting phantom capability", async () => {
     await expect(
       runAltitudeReliabilityRetest({

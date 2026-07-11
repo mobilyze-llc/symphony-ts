@@ -7,6 +7,18 @@ export const ALTITUDE_RELIABILITY_VERDICTS = [
 export type AltitudeReliabilityVerdict =
   (typeof ALTITUDE_RELIABILITY_VERDICTS)[number];
 
+export interface AltitudeReliabilityContractViolation {
+  type: "output_contract_violation";
+  detail: string;
+}
+
+export type AltitudeReliabilityVerdictObservation =
+  | AltitudeReliabilityVerdict
+  | {
+      verdict: AltitudeReliabilityVerdict;
+      contractViolation: AltitudeReliabilityContractViolation;
+    };
+
 export interface AltitudeReliabilityCase {
   issueIdentifier: string;
   expectedVerdict: AltitudeReliabilityVerdict;
@@ -60,11 +72,12 @@ export interface AltitudeReliabilityRunInput {
   bar?: Partial<AltitudeReliabilityBar>;
   runVerdict: (
     testCase: AltitudeReliabilityCase,
-  ) => Promise<AltitudeReliabilityVerdict>;
+  ) => Promise<AltitudeReliabilityVerdictObservation>;
 }
 
 export interface AltitudeReliabilityCaseResult extends AltitudeReliabilityCase {
   actualVerdict: AltitudeReliabilityVerdict;
+  contractViolation: AltitudeReliabilityContractViolation | null;
   correct: boolean;
   falseKill: boolean;
 }
@@ -101,13 +114,18 @@ export async function runAltitudeReliabilityRetest(
   validateReliabilityBar(bar);
   const results: AltitudeReliabilityCaseResult[] = [];
   for (const testCase of corpus) {
-    const actualVerdict = await input.runVerdict(testCase);
+    const observation = normalizeVerdictObservation(
+      await input.runVerdict(testCase),
+    );
     results.push({
       ...testCase,
-      actualVerdict,
-      correct: actualVerdict === testCase.expectedVerdict,
+      actualVerdict: observation.verdict,
+      contractViolation: observation.contractViolation,
+      correct:
+        observation.contractViolation === null &&
+        observation.verdict === testCase.expectedVerdict,
       falseKill:
-        actualVerdict === "kill" && testCase.expectedVerdict !== "kill",
+        observation.verdict === "kill" && testCase.expectedVerdict !== "kill",
     });
   }
   const metrics = scoreAltitudeReliability(results);
@@ -181,9 +199,25 @@ export function buildAltitudeReliabilityLedgerEntry(
       issue_identifier: entry.issueIdentifier,
       expected_verdict: entry.expectedVerdict,
       actual_verdict: entry.actualVerdict,
+      model_contract_violation: entry.contractViolation,
       correct: entry.correct,
       false_kill: entry.falseKill,
     })),
+  };
+}
+
+function normalizeVerdictObservation(
+  observation: AltitudeReliabilityVerdictObservation,
+): {
+  verdict: AltitudeReliabilityVerdict;
+  contractViolation: AltitudeReliabilityContractViolation | null;
+} {
+  if (typeof observation === "string") {
+    return { verdict: observation, contractViolation: null };
+  }
+  return {
+    verdict: observation.verdict,
+    contractViolation: observation.contractViolation,
   };
 }
 
