@@ -93,7 +93,7 @@ describe("structural advisory lifecycle", () => {
     ).toHaveLength(1);
   });
 
-  it("advances one lifecycle owner for competing member-set hypotheses", async () => {
+  it("advances shared lifecycle once for competing member-set hypotheses", async () => {
     const competing = [
       base,
       { ...base, rootCauseHypothesis: "competing root hypothesis" },
@@ -130,6 +130,7 @@ describe("structural advisory lifecycle", () => {
     expect(absent.events).toEqual([
       expect.objectContaining({
         kind: "transition",
+        memberSetHash: first.advisories[0]?.memberSetHash,
         from: "active",
         to: "dormant",
       }),
@@ -153,10 +154,110 @@ describe("structural advisory lifecycle", () => {
     expect(reEmitted.events).toEqual([
       expect.objectContaining({
         kind: "transition",
+        memberSetHash: first.advisories[0]?.memberSetHash,
         from: "dormant",
         to: "active",
       }),
     ]);
+  });
+
+  it("treats wording drift and rejection suppression as member-set observations", async () => {
+    const first = await applyAdvisoryLifecycle({
+      emitted: [base],
+      previous: [],
+      presentedIssueIdentifiers: presented,
+      config,
+    });
+    const memberSetHash = first.advisories[0]?.memberSetHash;
+    expect(memberSetHash).toBeDefined();
+
+    const wordingDrift = await applyAdvisoryLifecycle({
+      emitted: [{ ...base, rootCauseHypothesis: "Different root wording" }],
+      previous: first.advisories,
+      presentedIssueIdentifiers: presented,
+      config,
+    });
+    expect(wordingDrift.advisories).toHaveLength(2);
+    expect(wordingDrift.advisories).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          advisoryFingerprint: first.advisories[0]?.advisoryFingerprint,
+          lifecycleState: "active",
+          absentOkTicks: 0,
+        }),
+      ]),
+    );
+    expect(
+      wordingDrift.events.some((event) => event.kind === "transition"),
+    ).toBe(false);
+
+    const suppressed = await applyAdvisoryLifecycle({
+      emitted: [base],
+      previous: first.advisories,
+      presentedIssueIdentifiers: presented,
+      config,
+      rejectedMemberSets: [
+        {
+          advisoryId: "rejected-fingerprint",
+          memberSetHash: memberSetHash!,
+          memberActivityAtGrade: {
+            "SYMPH-1": "2026-06-01T00:00:00.000Z",
+            "SYMPH-2": "2026-06-01T00:00:00.000Z",
+          },
+          gradeSequence: 10,
+        },
+      ],
+      issueActivity: new Map([
+        ["SYMPH-1", "2026-06-01T00:00:00.000Z"],
+        ["SYMPH-2", "2026-06-01T00:00:00.000Z"],
+      ]),
+    });
+    expect(suppressed.advisories).toEqual([
+      expect.objectContaining({
+        advisoryFingerprint: first.advisories[0]?.advisoryFingerprint,
+        lifecycleState: "active",
+        absentOkTicks: 0,
+      }),
+    ]);
+    expect(suppressed.events.some((event) => event.kind === "transition")).toBe(
+      false,
+    );
+  });
+
+  it("keeps terminal grades fingerprint-scoped while sharing member-set lifecycle", async () => {
+    const first = await applyAdvisoryLifecycle({
+      emitted: [
+        base,
+        { ...base, rootCauseHypothesis: "competing root hypothesis" },
+      ],
+      previous: [],
+      presentedIssueIdentifiers: presented,
+      config,
+    });
+    const previous = first.advisories.map((advisory, index) =>
+      index === 0
+        ? { ...advisory, lifecycleState: "graded" as const, rendered: false }
+        : advisory,
+    );
+    const absent = await applyAdvisoryLifecycle({
+      emitted: [],
+      previous,
+      presentedIssueIdentifiers: presented,
+      config,
+    });
+    expect(absent.advisories).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          advisoryFingerprint: previous[0]?.advisoryFingerprint,
+          lifecycleState: "graded",
+        }),
+        expect.objectContaining({
+          advisoryFingerprint: previous[1]?.advisoryFingerprint,
+          lifecycleState: "dormant",
+        }),
+      ]),
+    );
+    expect(absent.events).toHaveLength(1);
   });
 
   it("does not journal an unchanged re-emission twice", async () => {
@@ -173,6 +274,119 @@ describe("structural advisory lifecycle", () => {
       config,
     });
     expect(second.events.some((event) => event.kind === "emitted")).toBe(false);
+  });
+
+  it("suppresses an exact rejected member set and revives it on member activity", async () => {
+    const memberSetHash = structuralAdvisoryMemberSetHash(
+      base.memberIssueIdentifiers,
+    );
+    const rejection = {
+      advisoryId: "prior-fingerprint",
+      memberSetHash,
+      memberActivityAtGrade: {
+        "SYMPH-1": "2026-06-01T00:00:00.000Z",
+        "SYMPH-2": "2026-06-01T00:00:00.000Z",
+      },
+      gradeSequence: 10,
+    };
+    const suppressed = await applyAdvisoryLifecycle({
+      emitted: [base],
+      previous: [],
+      presentedIssueIdentifiers: presented,
+      config,
+      rejectedMemberSets: [rejection],
+      issueActivity: new Map([
+        ["SYMPH-1", "2026-06-01T00:00:00.000Z"],
+        ["SYMPH-2", "2026-06-01T00:00:00.000Z"],
+      ]),
+    });
+    expect(suppressed.advisories).toHaveLength(0);
+    expect(suppressed.events).toContainEqual(
+      expect.objectContaining({ kind: "suppressed", memberSetHash }),
+    );
+
+    const revived = await applyAdvisoryLifecycle({
+      emitted: [base],
+      previous: [],
+      presentedIssueIdentifiers: presented,
+      config,
+      rejectedMemberSets: [rejection],
+      issueActivity: new Map([
+        ["SYMPH-1", "2026-06-02T00:00:00.000Z"],
+        ["SYMPH-2", "2026-06-01T00:00:00.000Z"],
+      ]),
+    });
+    expect(revived.advisories[0]?.previouslyRejectedWithNewEvidence).toBe(true);
+
+    const changedMembership = await applyAdvisoryLifecycle({
+      emitted: [
+        { ...base, memberIssueIdentifiers: ["SYMPH-1", "SYMPH-2", "SYMPH-3"] },
+      ],
+      previous: [],
+      presentedIssueIdentifiers: new Set(["SYMPH-1", "SYMPH-2", "SYMPH-3"]),
+      config,
+      rejectedMemberSets: [rejection],
+    });
+    expect(changedMembership.advisories).toHaveLength(1);
+  });
+
+  it("explicitly revives a graded rejected fingerprint when member activity advances", async () => {
+    const first = await applyAdvisoryLifecycle({
+      emitted: [base],
+      previous: [],
+      presentedIssueIdentifiers: presented,
+      config,
+    });
+    const graded = {
+      ...first.advisories[0]!,
+      lifecycleState: "graded" as const,
+      rendered: false,
+    };
+    const rejection = {
+      advisoryId: graded.advisoryFingerprint!,
+      memberSetHash: graded.memberSetHash!,
+      memberActivityAtGrade: {
+        "SYMPH-1": "2026-06-01T00:00:00.000Z",
+        "SYMPH-2": null,
+      },
+      gradeSequence: 10,
+    };
+
+    const revived = await applyAdvisoryLifecycle({
+      emitted: [base],
+      previous: [graded],
+      presentedIssueIdentifiers: presented,
+      config,
+      rejectedMemberSets: [rejection],
+      issueActivity: new Map([
+        ["SYMPH-1", "2026-06-01T00:00:00.000Z"],
+        ["SYMPH-2", "2026-06-02T00:00:00.000Z"],
+      ]),
+    });
+    expect(revived.advisories).toEqual([
+      expect.objectContaining({
+        advisoryFingerprint: graded.advisoryFingerprint,
+        lifecycleState: "active",
+        rendered: true,
+        previouslyRejectedWithNewEvidence: true,
+      }),
+    ]);
+
+    const unrelatedRejection = await applyAdvisoryLifecycle({
+      emitted: [base],
+      previous: [graded],
+      presentedIssueIdentifiers: presented,
+      config,
+      rejectedMemberSets: [{ ...rejection, advisoryId: "other-fingerprint" }],
+      issueActivity: new Map([
+        ["SYMPH-1", "2026-06-02T00:00:00.000Z"],
+        ["SYMPH-2", "2026-06-02T00:00:00.000Z"],
+      ]),
+    });
+    expect(unrelatedRejection.advisories[0]).toMatchObject({
+      lifecycleState: "graded",
+      rendered: false,
+    });
   });
 
   it("advances dormancy only for successful lifecycle evaluations", async () => {

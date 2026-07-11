@@ -113,6 +113,9 @@ describe("renderStandingPlanControlDoc", () => {
             structuralFix: `Centralize ${"x".repeat(2_000)}`,
             confidenceNote: "Two\nmatching symptoms",
             lifecycleState: "active",
+            advisoryFingerprint: "fp-1",
+            memberSetHash: "members-1",
+            previouslyRejectedWithNewEvidence: true,
             conflictIssueIdentifiers: ["SYMPH-2"],
             rendered: true,
           },
@@ -136,6 +139,11 @@ describe("renderStandingPlanControlDoc", () => {
     expect(md).toContain("Structural fix:");
     expect(md).toContain("Confidence: Two matching symptoms");
     expect(md).toContain("Lifecycle: active");
+    expect(md).toContain("Fingerprint: fp-1");
+    expect(md).toContain("Member-set hash: members-1");
+    expect(md).toContain(
+      "previously rejected, re-emitted after new member activity",
+    );
     expect(md).toContain("Conflict: hygiene kill annotation on SYMPH-2");
     expect(md).not.toContain("SYMPH-99");
     expect(md).not.toContain("```");

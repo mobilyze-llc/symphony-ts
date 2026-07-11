@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { fenceJudgeBoundaryTags } from "../../src/agent/prompt-fence.js";
+import { computeCalibrationReport } from "../../src/calibration/digest.js";
 import type {
   ResolvedWorkflowConfig,
   StagesConfig,
@@ -31,7 +32,10 @@ import { readStandingPlanJournal } from "../../src/logging/standing-plan-journal
 import { StructuredLogger } from "../../src/logging/structured-logger.js";
 import { OrchestratorCore } from "../../src/orchestrator/core.js";
 import { OrchestratorRuntimeHost } from "../../src/orchestrator/runtime-host.js";
-import { recordPlanRevision } from "../../src/orchestrator/standing-plan-store.js";
+import {
+  loadStandingPlan,
+  recordPlanRevision,
+} from "../../src/orchestrator/standing-plan-store.js";
 import type { PlanBody } from "../../src/orchestrator/standing-plan-supersession.js";
 import { LinearTrackerClient } from "../../src/tracker/linear-client.js";
 import type { IssueTracker } from "../../src/tracker/tracker.js";
@@ -153,6 +157,410 @@ describe("OrchestratorRuntimeHost.requestIntent", () => {
       batch: { revision: 1, batchId: "b-abc" },
     });
     expect(result.status).toBe("no_plan");
+  });
+
+  it("records immutable fingerprint-scoped advisory grades before issue resolution", async () => {
+    const members = [
+      createIssue({ id: "1", identifier: "SYMPH-1", state: "Backlog" }),
+      createIssue({ id: "2", identifier: "SYMPH-2", state: "Backlog" }),
+    ];
+    const { host, root } = createHost({ activeIssues: members });
+    await recordPlanRevision(
+      root,
+      {
+        ...seedBody([]),
+        structuralAdvisories: [
+          {
+            memberIssueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+            rootCauseHypothesis: "Shared parser",
+            structuralFix: "Fix the parser once",
+            confidenceNote: "high",
+            memberSetHash: "members-1",
+            advisoryFingerprint: "fp-1",
+            lifecycleState: "active",
+          },
+        ],
+      },
+      { planId: "plan-1", createdAt: "2026-06-12T11:59:00.000Z" },
+    );
+
+    const first = await host.requestIntent({
+      verb: "grade_advisory",
+      reason: "cluster is correct",
+      actor: { kind: "operator", host: "pro14", session: "symphonyctl" },
+      grade: {
+        target: "structural_advisory",
+        fingerprint: "fp-1",
+        decision: "partial",
+        acceptedIdentifiers: ["SYMPH-1"],
+      },
+    });
+    const conflict = await host.requestIntent({
+      verb: "grade_advisory",
+      reason: "changed my mind",
+      actor: { kind: "operator", host: "pro14", session: "symphonyctl" },
+      grade: {
+        target: "structural_advisory",
+        fingerprint: "fp-1",
+        decision: "reject",
+      },
+    });
+
+    expect(first.status).toBe("applied");
+    expect(
+      (await loadStandingPlan(root))?.structuralAdvisories?.[0],
+    ).toMatchObject({
+      advisoryFingerprint: "fp-1",
+      lifecycleState: "graded",
+      rendered: false,
+    });
+    expect(conflict.status).toBe("no_op");
+    expect(conflict.detail).toContain("immutable");
+    const grades = host
+      .getState()
+      .dispatcherRunJournal.filter(
+        (entry) => entry.kind === "structural_advisory_grade",
+      );
+    expect(grades).toHaveLength(1);
+    expect(grades[0]?.metadata).toMatchObject({
+      advisory_id: "fp-1",
+      decision: "partial",
+      accepted_identifiers: ["SYMPH-1"],
+      member_delta: ["SYMPH-2"],
+      attribution: "by operator@pro14 (session symphonyctl)",
+    });
+  });
+
+  it("keeps the earliest cross-actor grade authoritative and retains later audit evidence", async () => {
+    const members = [
+      createIssue({ id: "1", identifier: "SYMPH-1", state: "Backlog" }),
+      createIssue({ id: "2", identifier: "SYMPH-2", state: "Backlog" }),
+    ];
+    const { host, root } = createHost({ activeIssues: members });
+    await recordPlanRevision(
+      root,
+      {
+        ...seedBody([]),
+        structuralAdvisories: [
+          {
+            memberIssueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+            rootCauseHypothesis: "Shared parser",
+            structuralFix: "Fix the parser once",
+            confidenceNote: "high",
+            memberSetHash: "members-1",
+            advisoryFingerprint: "fp-1",
+            lifecycleState: "active",
+          },
+        ],
+      },
+      { planId: "plan-1", createdAt: "2026-06-12T11:59:00.000Z" },
+    );
+
+    const first = await host.requestIntent({
+      verb: "grade_advisory",
+      reason: "wrong cluster",
+      actor: { kind: "operator", host: "pro14", session: "first" },
+      grade: {
+        target: "structural_advisory",
+        fingerprint: "fp-1",
+        decision: "reject",
+      },
+    });
+    const later = await host.requestIntent({
+      verb: "grade_advisory",
+      reason: "second opinion",
+      actor: { kind: "operator", host: "pro16", session: "later" },
+      grade: {
+        target: "structural_advisory",
+        fingerprint: "fp-1",
+        decision: "accept",
+      },
+    });
+
+    expect(first.status).toBe("applied");
+    expect(later.status).toBe("no_op");
+    expect(later.detail).toContain("earliest grade is authoritative");
+    const grades = host
+      .getState()
+      .dispatcherRunJournal.filter(
+        (entry) => entry.kind === "structural_advisory_grade",
+      );
+    expect(grades.map((entry) => entry.metadata.decision)).toEqual([
+      "reject",
+      "accept",
+    ]);
+    const lifecycleRows = host
+      .getState()
+      .dispatcherRunJournal.filter(
+        (entry) => entry.kind === "structural_advisory",
+      );
+    expect(lifecycleRows).toHaveLength(1);
+    expect(lifecycleRows[0]?.metadata).toMatchObject({
+      lifecycle_from: "active",
+      lifecycle_to: "graded",
+    });
+    expect(
+      computeCalibrationReport(host.getState().dispatcherRunJournal)
+        .structuralAdvisoryStability[0],
+    ).toMatchObject({ flipCount: 0, decision: "rejected" });
+  });
+
+  it("requires partial grades to accept a proper nonempty subset of live original members", async () => {
+    const members = [
+      createIssue({ id: "1", identifier: "SYMPH-1", state: "Backlog" }),
+      createIssue({ id: "2", identifier: "SYMPH-2", state: "Backlog" }),
+    ];
+    const { host, root } = createHost({ activeIssues: members });
+    await recordPlanRevision(
+      root,
+      {
+        ...seedBody([]),
+        structuralAdvisories: [
+          {
+            memberIssueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+            rootCauseHypothesis: "Shared parser",
+            structuralFix: "Fix the parser once",
+            confidenceNote: "high",
+            memberSetHash: "members-1",
+            advisoryFingerprint: "fp-1",
+            lifecycleState: "active",
+          },
+        ],
+      },
+      { planId: "plan-1", createdAt: "2026-06-12T11:59:00.000Z" },
+    );
+
+    const equalAll = await host.requestIntent({
+      verb: "grade_advisory",
+      reason: "not actually partial",
+      actor: { kind: "operator", host: "pro14" },
+      grade: {
+        target: "structural_advisory",
+        fingerprint: "fp-1",
+        decision: "partial",
+        acceptedIdentifiers: ["SYMPH-1", "SYMPH-2"],
+      },
+    });
+    const empty = await host.requestIntent({
+      verb: "grade_advisory",
+      reason: "empty partial",
+      actor: { kind: "operator", host: "pro14" },
+      grade: {
+        target: "structural_advisory",
+        fingerprint: "fp-1",
+        decision: "partial",
+        acceptedIdentifiers: [],
+      },
+    });
+
+    expect(equalAll.status).toBe("invalid_request");
+    expect(equalAll.detail).toContain("proper subset");
+    expect(empty.status).toBe("invalid_request");
+    expect(empty.detail).toContain("non-empty");
+  });
+
+  it.each(["graded", "withdrawn"] as const)(
+    "treats an already-%s advisory grade request as a journal-free no-op",
+    async (lifecycleState) => {
+      const { host, root } = createHost();
+      await recordPlanRevision(
+        root,
+        {
+          ...seedBody([]),
+          structuralAdvisories: [
+            {
+              memberIssueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+              rootCauseHypothesis: "Shared parser",
+              structuralFix: "Fix the parser once",
+              confidenceNote: "high",
+              memberSetHash: "members-1",
+              advisoryFingerprint: "fp-1",
+              lifecycleState,
+            },
+          ],
+        },
+        { planId: "plan-1", createdAt: "2026-06-12T11:59:00.000Z" },
+      );
+
+      const result = await host.requestIntent({
+        verb: "grade_advisory",
+        reason: "late grade",
+        actor: { kind: "operator", host: "pro14" },
+        grade: {
+          target: "structural_advisory",
+          fingerprint: "fp-1",
+          decision: "accept",
+        },
+      });
+
+      expect(result.status).toBe("no_op");
+      expect(result.detail).toContain(`already ${lifecycleState}`);
+      expect(
+        host
+          .getState()
+          .dispatcherRunJournal.filter(
+            (entry) => entry.kind === "structural_advisory_grade",
+          ),
+      ).toHaveLength(0);
+    },
+  );
+
+  it("persists majority-terminal auto-withdraw immediately and keeps the advisory ungradable after reload", async () => {
+    const members = [
+      createIssue({ id: "1", identifier: "SYMPH-1", state: "Done" }),
+      createIssue({ id: "2", identifier: "SYMPH-2", state: "Canceled" }),
+      createIssue({ id: "3", identifier: "SYMPH-3", state: "Backlog" }),
+    ];
+    const { host, root } = createHost({ activeIssues: members });
+    await recordPlanRevision(
+      root,
+      {
+        ...seedBody([]),
+        structuralAdvisories: [
+          {
+            memberIssueIdentifiers: ["SYMPH-1", "SYMPH-2", "SYMPH-3"],
+            rootCauseHypothesis: "Shared parser",
+            structuralFix: "Fix the parser once",
+            confidenceNote: "high",
+            memberSetHash: "members-1",
+            advisoryFingerprint: "fp-1",
+            lifecycleState: "active",
+          },
+        ],
+      },
+      { planId: "plan-1", createdAt: "2026-06-12T11:59:00.000Z" },
+    );
+    const request = {
+      verb: "grade_advisory" as const,
+      reason: "late grade",
+      actor: { kind: "operator" as const, host: "pro14" },
+      grade: {
+        target: "structural_advisory" as const,
+        fingerprint: "fp-1",
+        decision: "accept" as const,
+      },
+    };
+
+    const first = await host.requestIntent(request);
+    expect(first.status).toBe("no_op");
+    expect(first.detail).toContain("auto-withdrawn");
+    expect(
+      (await loadStandingPlan(root))?.structuralAdvisories?.[0],
+    ).toMatchObject({ lifecycleState: "withdrawn", rendered: false });
+
+    const afterReload = await host.requestIntent(request);
+    expect(afterReload.status).toBe("no_op");
+    expect(afterReload.detail).toContain("already withdrawn");
+    expect(
+      host
+        .getState()
+        .dispatcherRunJournal.filter(
+          (entry) => entry.kind === "structural_advisory_grade",
+        ),
+    ).toHaveLength(0);
+  });
+
+  it("reconciles a retry when the grade journal landed before the standing-plan terminal state", async () => {
+    const members = [
+      createIssue({ id: "1", identifier: "SYMPH-1", state: "Backlog" }),
+      createIssue({ id: "2", identifier: "SYMPH-2", state: "Backlog" }),
+    ];
+    const { host, root } = createHost({ activeIssues: members });
+    const activeBody: PlanBody = {
+      ...seedBody([]),
+      structuralAdvisories: [
+        {
+          memberIssueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+          rootCauseHypothesis: "Shared parser",
+          structuralFix: "Fix the parser once",
+          confidenceNote: "high",
+          memberSetHash: "members-1",
+          advisoryFingerprint: "fp-1",
+          lifecycleState: "active",
+        },
+      ],
+    };
+    await recordPlanRevision(root, activeBody, {
+      planId: "plan-1",
+      createdAt: "2026-06-12T11:59:00.000Z",
+    });
+    const request = {
+      verb: "grade_advisory" as const,
+      reason: "correct cluster",
+      actor: {
+        kind: "operator" as const,
+        host: "pro14",
+        session: "retry",
+      },
+      grade: {
+        target: "structural_advisory" as const,
+        fingerprint: "fp-1",
+        decision: "accept" as const,
+      },
+    };
+    expect((await host.requestIntent(request)).status).toBe("applied");
+
+    // A stale report refresh racing after the grade cannot resurrect active
+    // state; the retry remains a journal-idempotent no-op.
+    await recordPlanRevision(root, activeBody, {
+      planId: "plan-1",
+      createdAt: "2026-06-12T12:01:00.000Z",
+    });
+    expect(
+      (await loadStandingPlan(root))?.structuralAdvisories?.[0]?.lifecycleState,
+    ).toBe("graded");
+
+    const retry = await host.requestIntent(request);
+    expect(retry.status).toBe("no_op");
+    expect(
+      (await loadStandingPlan(root))?.structuralAdvisories?.[0]?.lifecycleState,
+    ).toBe("graded");
+    expect(
+      host
+        .getState()
+        .dispatcherRunJournal.filter(
+          (entry) => entry.kind === "structural_advisory_grade",
+        ),
+    ).toHaveLength(1);
+  });
+
+  it("routes hygiene proposal grades through the same authenticated verb family", async () => {
+    const { host } = createHost();
+    await host.recordBacklogHygieneProposal({
+      proposal: {
+        proposalId: "proposal-1",
+        findingId: "finding-1",
+        findingType: "duplicate",
+        issueIds: ["1"],
+        issueIdentifiers: ["SYMPH-1"],
+        summary: "Duplicate symptom",
+        evidence: "same surface",
+        confidence: "high",
+        cull: null,
+        codeGroundingStatus: null,
+        codeGroundingEvidence: null,
+        generatedAt: "2026-06-12T11:00:00.000Z",
+        modelTier: "frontier_high_judgment",
+      },
+      actor: { kind: "dispatcher", host: "pro14" },
+    });
+    const result = await host.requestIntent({
+      verb: "grade_advisory",
+      reason: "correct finding",
+      actor: { kind: "operator", host: "pro14" },
+      grade: {
+        target: "hygiene_proposal",
+        fingerprint: "proposal-1",
+        decision: "accept",
+      },
+    });
+    expect(result.status).toBe("applied");
+    const report = computeCalibrationReport(
+      host.getState().dispatcherRunJournal,
+    );
+    expect(report.hygieneProposalPrecisionByFindingType).toMatchObject([
+      { findingType: "duplicate", accepted: 1, rejected: 0 },
+    ]);
   });
 
   it("fences the operator-supplied note before journaling a plan-control decision (parity with the doc-comment path)", async () => {

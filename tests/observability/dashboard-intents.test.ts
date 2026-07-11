@@ -87,6 +87,53 @@ describe("POST /api/v1/intents", () => {
     expect(JSON.parse(response.body).error.code).toBe("invalid_request");
   });
 
+  it("validates and authenticates fingerprint-scoped advisory grades", async () => {
+    const received: IntentRequest[] = [];
+    const server = await startServer({
+      requestIntent: (input) => {
+        received.push(input);
+        return appliedResult("grade_advisory");
+      },
+    });
+    const body = {
+      verb: "grade_advisory",
+      reason: "correct cluster",
+      grade: {
+        target: "structural_advisory",
+        fingerprint: "fp-1",
+        decision: "partial",
+        acceptedIdentifiers: ["SYMPH-1"],
+      },
+    };
+    const unauthenticated = await postIntent(server.port, body, {});
+    expect(unauthenticated.statusCode).toBe(401);
+    expect(received).toHaveLength(0);
+
+    const authenticated = await postIntent(server.port, body);
+    expect(authenticated.statusCode).toBe(200);
+    expect(received[0]).toMatchObject({
+      verb: "grade_advisory",
+      actor: OPERATOR_AUTH.actor,
+      grade: body.grade,
+    });
+  });
+
+  it("rejects malformed advisory grade payloads with a typed 400", async () => {
+    const server = await startServer({ requestIntent: () => appliedResult() });
+    const response = await postIntent(server.port, {
+      verb: "grade_advisory",
+      reason: "bad partial",
+      grade: {
+        target: "structural_advisory",
+        fingerprint: "fp-1",
+        decision: "partial",
+        acceptedIdentifiers: [3],
+      },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).error.code).toBe("invalid_request");
+  });
+
   it("requires anchor details for the anchor verb", async () => {
     const server = await startServer({
       requestIntent: () => appliedResult(),
@@ -1253,12 +1300,14 @@ function validBody(): Record<string, unknown> & { issueIdentifier: string } {
   };
 }
 
-function appliedResult(): IntentRequestResult {
+function appliedResult(
+  verb: IntentRequestResult["verb"] = "release",
+): IntentRequestResult {
   return {
     status: "applied",
     detail: "released",
     sequence: 7,
-    verb: "release",
+    verb,
     issue_id: "1",
     issue_identifier: "SYMPH-1",
   };
@@ -1288,12 +1337,16 @@ function dispatchFenceResult(
   };
 }
 
-function postIntent(port: number, body: unknown) {
+function postIntent(
+  port: number,
+  body: unknown,
+  headers: Record<string, string> = AUTH_HEADERS,
+) {
   return sendRequest(port, {
     method: "POST",
     path: "/api/v1/intents",
     body: JSON.stringify(body),
-    headers: { "content-type": "application/json", ...AUTH_HEADERS },
+    headers: { "content-type": "application/json", ...headers },
   });
 }
 

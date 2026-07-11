@@ -74,6 +74,41 @@ export interface HygieneProposalPrecisionRow {
   cursors: Array<{ proposalSequence: number; decisionSequence: number | null }>;
 }
 
+export interface StructuralAdvisoryDecisionJoinRow {
+  advisoryId: string;
+  advisoryClass: string;
+  advisorySequence: number;
+  decision: "accepted" | "partial" | "rejected" | "undecided";
+  gradeSequence: number | null;
+  flipCount: number;
+}
+
+export interface StructuralAdvisoryPrecisionRow {
+  advisoryClass: string;
+  accepted: number;
+  partial: number;
+  rejected: number;
+  undecided: number;
+  precision: number | null;
+  cursors: Array<{ advisorySequence: number; gradeSequence: number | null }>;
+}
+
+export interface StructuralAdvisoryStabilityRow {
+  advisoryId: string;
+  advisoryClass: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  flipCount: number;
+  decision: StructuralAdvisoryDecisionJoinRow["decision"];
+  undecidedAgeMs: number | null;
+}
+
+export interface OrphanStructuralAdvisoryGradeRow {
+  advisoryId: string;
+  gradeSequence: number;
+  decision: string;
+}
+
 export type ParkJudgement =
   | "true_park"
   | "false_park"
@@ -146,6 +181,10 @@ export interface CalibrationReport {
   queueBaseline: QueueBaselineSample[];
   hygieneProposalDecisions: HygieneProposalDecisionJoinRow[];
   hygieneProposalPrecisionByFindingType: HygieneProposalPrecisionRow[];
+  structuralAdvisoryDecisions: StructuralAdvisoryDecisionJoinRow[];
+  structuralAdvisoryPrecisionByClass: StructuralAdvisoryPrecisionRow[];
+  structuralAdvisoryStability: StructuralAdvisoryStabilityRow[];
+  orphanStructuralAdvisoryGrades: OrphanStructuralAdvisoryGradeRow[];
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +204,225 @@ function metaString(
 ): string | null {
   const value = entry.metadata[key];
   return typeof value === "string" ? value : null;
+}
+
+function metaNumber(
+  entry: DispatcherRunJournalEntry,
+  key: string,
+): number | null {
+  const value = entry.metadata[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function rehydrateBacklogManagerCalibration(
+  journal: DispatcherRunJournalEntry[],
+): DispatcherRunJournalEntry[] {
+  const checkpoint = [...journal]
+    .reverse()
+    .find(
+      (entry) =>
+        entry.kind === "journal_checkpoint" &&
+        isValidDigestCalibrationProjection(
+          entry.metadata.backlogManagerCalibration,
+        ) &&
+        isDigestSequence(entry.metadata.coveredThroughSequence),
+    );
+  if (checkpoint === undefined) return [...journal];
+  const projection = checkpoint.metadata.backlogManagerCalibration;
+  if (!isDigestRecord(projection) || projection.schemaVersion !== 1) {
+    return [...journal];
+  }
+  const synthetic: DispatcherRunJournalEntry[] = [];
+  if (isDigestRecord(projection.advisories)) {
+    for (const value of Object.values(projection.advisories)) {
+      if (
+        !isDigestRecord(value) ||
+        typeof value.advisoryId !== "string" ||
+        typeof value.memberSetHash !== "string" ||
+        typeof value.advisoryClass !== "string" ||
+        typeof value.firstSeenSequence !== "number" ||
+        typeof value.firstSeenAt !== "string"
+      )
+        continue;
+      synthetic.push(
+        digestSyntheticEntry({
+          sequence: value.firstSeenSequence,
+          timestamp: value.firstSeenAt,
+          kind: "structural_advisory",
+          metadata: {
+            advisory_id: value.advisoryId,
+            member_set_hash: value.memberSetHash,
+            advisory_class: value.advisoryClass,
+            projection_first_seen_at: value.firstSeenAt,
+            projection_last_seen_at: value.lastSeenAt,
+            projection_flip_count: value.flipCount,
+            lifecycle_from: null,
+            lifecycle_to: value.latestLifecycleTo,
+          },
+        }),
+      );
+      if (Array.isArray(value.grades)) {
+        for (const grade of value.grades) {
+          if (
+            !isDigestRecord(grade) ||
+            !isDigestRecord(grade.metadata) ||
+            typeof grade.sequence !== "number" ||
+            typeof grade.timestamp !== "string"
+          )
+            continue;
+          synthetic.push(
+            digestSyntheticEntry({
+              sequence: grade.sequence,
+              timestamp: grade.timestamp,
+              kind: "structural_advisory_grade",
+              metadata: grade.metadata,
+            }),
+          );
+        }
+      }
+    }
+  }
+  if (isDigestRecord(projection.hygieneProposals)) {
+    for (const value of Object.values(projection.hygieneProposals)) {
+      if (
+        !isDigestRecord(value) ||
+        !isDigestRecord(value.metadata) ||
+        typeof value.sequence !== "number" ||
+        typeof value.timestamp !== "string" ||
+        typeof value.summary !== "string"
+      )
+        continue;
+      synthetic.push(
+        digestSyntheticEntry({
+          sequence: value.sequence,
+          timestamp: value.timestamp,
+          kind: "hygiene_proposal",
+          metadata: value.metadata,
+          summary: value.summary,
+        }),
+      );
+      if (Array.isArray(value.decisions)) {
+        for (const decision of value.decisions) {
+          if (
+            !isDigestRecord(decision) ||
+            !isDigestRecord(decision.metadata) ||
+            typeof decision.sequence !== "number" ||
+            typeof decision.timestamp !== "string"
+          )
+            continue;
+          synthetic.push(
+            digestSyntheticEntry({
+              sequence: decision.sequence,
+              timestamp: decision.timestamp,
+              kind: "hygiene_proposal_decision",
+              metadata: decision.metadata,
+            }),
+          );
+        }
+      }
+    }
+  }
+  const covered = checkpoint.metadata.coveredThroughSequence as number;
+  return [
+    ...synthetic,
+    ...journal.filter(
+      (entry) =>
+        entry.kind !== "journal_checkpoint" && entry.sequence > covered,
+    ),
+  ];
+}
+
+function digestSyntheticEntry(input: {
+  sequence: number;
+  timestamp: string;
+  kind:
+    | "structural_advisory"
+    | "structural_advisory_grade"
+    | "hygiene_proposal"
+    | "hygiene_proposal_decision";
+  metadata: Record<string, unknown>;
+  summary?: string;
+}): DispatcherRunJournalEntry {
+  return {
+    sequence: input.sequence,
+    idempotencyKey: `checkpoint-projection:${input.kind}:${input.sequence}`,
+    timestamp: input.timestamp,
+    kind: input.kind,
+    issueId: `__${input.kind}__`,
+    issueIdentifier: input.kind.toUpperCase(),
+    operation: "dispatcher",
+    stage: null,
+    attempt: null,
+    ownerId: null,
+    lease: null,
+    summary: input.summary ?? `Projected ${input.kind}`,
+    metadata: input.metadata,
+  };
+}
+
+function isDigestRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isValidDigestCalibrationProjection(value: unknown): boolean {
+  if (
+    !isDigestRecord(value) ||
+    value.schemaVersion !== 1 ||
+    !isDigestSequence(value.coveredThroughSequence) ||
+    !isDigestRecord(value.advisories) ||
+    !isDigestRecord(value.hygieneProposals)
+  ) {
+    return false;
+  }
+  const validGrade = (grade: unknown) =>
+    isDigestRecord(grade) &&
+    isDigestSequence(grade.sequence) &&
+    isDigestString(grade.timestamp) &&
+    typeof grade.actorKey === "string" &&
+    (grade.idempotencyKey === undefined ||
+      isDigestString(grade.idempotencyKey)) &&
+    isDigestRecord(grade.metadata);
+  return (
+    Object.entries(value.advisories).every(
+      ([key, advisory]) =>
+        isDigestRecord(advisory) &&
+        advisory.advisoryId === key &&
+        isDigestString(advisory.memberSetHash) &&
+        isDigestString(advisory.advisoryClass) &&
+        isDigestSequence(advisory.firstSeenSequence) &&
+        isDigestString(advisory.firstSeenAt) &&
+        isDigestSequence(advisory.lastSeenSequence) &&
+        isDigestString(advisory.lastSeenAt) &&
+        (advisory.latestLifecycleFrom === null ||
+          typeof advisory.latestLifecycleFrom === "string") &&
+        isDigestString(advisory.latestLifecycleTo) &&
+        isDigestSequence(advisory.transitionOccurrenceCount) &&
+        isDigestSequence(advisory.flipCount) &&
+        Array.isArray(advisory.grades) &&
+        advisory.grades.every(validGrade),
+    ) &&
+    Object.entries(value.hygieneProposals).every(
+      ([key, proposal]) =>
+        isDigestRecord(proposal) &&
+        proposal.proposalId === key &&
+        isDigestSequence(proposal.sequence) &&
+        isDigestString(proposal.timestamp) &&
+        typeof proposal.summary === "string" &&
+        isDigestString(proposal.issueId) &&
+        isDigestString(proposal.issueIdentifier) &&
+        isDigestRecord(proposal.metadata) &&
+        Array.isArray(proposal.decisions) &&
+        proposal.decisions.every(validGrade),
+    )
+  );
+}
+
+function isDigestSequence(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function isDigestString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
 }
 
 function metaStringArray(
@@ -362,7 +620,9 @@ function buildHygieneProposalPrecisionRows(
 export function computeCalibrationReport(
   journal: DispatcherRunJournalEntry[],
 ): CalibrationReport {
-  const sorted = [...journal].sort((a, b) => a.sequence - b.sequence);
+  const sorted = rehydrateBacklogManagerCalibration(journal).sort(
+    (a, b) => a.sequence - b.sequence,
+  );
 
   // --- L2 triage joins (triage_verdict → terminal outcome) -----------------
   const triageJoins: TriageJoinRow[] = sorted.flatMap((entry) => {
@@ -554,6 +814,117 @@ export function computeCalibrationReport(
       ];
     });
 
+  const advisoryFirstSeen = new Map<string, DispatcherRunJournalEntry>();
+  const advisoryTransitions = new Map<string, DispatcherRunJournalEntry[]>();
+  for (const entry of sorted) {
+    if (entry.kind !== "structural_advisory") continue;
+    const advisoryId = metaString(entry, "advisory_id");
+    if (advisoryId === null) continue;
+    if (!advisoryFirstSeen.has(advisoryId))
+      advisoryFirstSeen.set(advisoryId, entry);
+    const transitions = advisoryTransitions.get(advisoryId) ?? [];
+    transitions.push(entry);
+    advisoryTransitions.set(advisoryId, transitions);
+  }
+  const structuralAdvisoryDecisions: StructuralAdvisoryDecisionJoinRow[] = [
+    ...advisoryFirstSeen.entries(),
+  ].map(([advisoryId, advisory]) => {
+    const grade = sorted.find(
+      (candidate) =>
+        candidate.kind === "structural_advisory_grade" &&
+        metaString(candidate, "advisory_id") === advisoryId,
+    );
+    const rawDecision =
+      grade === undefined ? null : metaString(grade, "decision");
+    const decision =
+      rawDecision === "accept"
+        ? "accepted"
+        : rawDecision === "partial"
+          ? "partial"
+          : rawDecision === "reject"
+            ? "rejected"
+            : "undecided";
+    const projectedFlipCount = metaNumber(advisory, "projection_flip_count");
+    const flipCount =
+      projectedFlipCount ??
+      (advisoryTransitions.get(advisoryId) ?? []).filter((transition) => {
+        const from = metaString(transition, "lifecycle_from");
+        const to = metaString(transition, "lifecycle_to");
+        return (
+          (from === "active" && to === "dormant") ||
+          (from === "dormant" && to === "active")
+        );
+      }).length;
+    return {
+      advisoryId,
+      advisoryClass: metaString(advisory, "advisory_class") ?? "unknown",
+      advisorySequence: advisory.sequence,
+      decision,
+      gradeSequence: grade?.sequence ?? null,
+      flipCount,
+    };
+  });
+  const structuralAdvisoryPrecisionByClass =
+    buildStructuralAdvisoryPrecisionRows(structuralAdvisoryDecisions);
+  const asOfMs = Date.parse(sorted.at(-1)?.timestamp ?? "");
+  const structuralAdvisoryStability: StructuralAdvisoryStabilityRow[] =
+    structuralAdvisoryDecisions.map((row) => {
+      const first = advisoryFirstSeen.get(row.advisoryId);
+      const transitions = advisoryTransitions.get(row.advisoryId) ?? [];
+      const firstSeenAt =
+        (first === undefined
+          ? null
+          : metaString(first, "projection_first_seen_at")) ??
+        first?.timestamp ??
+        "unknown";
+      const lastSeenCandidates = [
+        first === undefined
+          ? null
+          : metaString(first, "projection_last_seen_at"),
+        transitions.at(-1)?.timestamp ?? null,
+        firstSeenAt,
+      ]
+        .filter((value): value is string => value !== null)
+        .sort();
+      const lastSeenAt = lastSeenCandidates.at(-1) ?? firstSeenAt;
+      const firstMs = Date.parse(firstSeenAt);
+      return {
+        advisoryId: row.advisoryId,
+        advisoryClass: row.advisoryClass,
+        firstSeenAt,
+        lastSeenAt,
+        flipCount: row.flipCount,
+        decision: row.decision,
+        undecidedAgeMs:
+          row.decision === "undecided" &&
+          Number.isFinite(asOfMs) &&
+          Number.isFinite(firstMs)
+            ? Math.max(0, asOfMs - firstMs)
+            : null,
+      };
+    });
+  const orphanStructuralAdvisoryGrades = sorted.flatMap((entry) => {
+    if (entry.kind !== "structural_advisory_grade") return [];
+    const advisoryId = metaString(entry, "advisory_id");
+    if (
+      advisoryId === null ||
+      sorted.some(
+        (candidate) =>
+          candidate.kind === "structural_advisory" &&
+          metaString(candidate, "advisory_id") === advisoryId,
+      )
+    ) {
+      return [];
+    }
+    return [
+      {
+        advisoryId,
+        gradeSequence: entry.sequence,
+        decision: metaString(entry, "decision") ?? "unknown",
+      },
+    ];
+  });
+
   return {
     journalEntryCount: sorted.length,
     firstSequence: sorted[0]?.sequence ?? null,
@@ -573,7 +944,51 @@ export function computeCalibrationReport(
     hygieneProposalPrecisionByFindingType: buildHygieneProposalPrecisionRows(
       hygieneProposalDecisions,
     ),
+    structuralAdvisoryDecisions,
+    structuralAdvisoryPrecisionByClass,
+    structuralAdvisoryStability,
+    orphanStructuralAdvisoryGrades,
   };
+}
+
+function buildStructuralAdvisoryPrecisionRows(
+  rows: readonly StructuralAdvisoryDecisionJoinRow[],
+): StructuralAdvisoryPrecisionRow[] {
+  const byClass = new Map<string, StructuralAdvisoryDecisionJoinRow[]>();
+  for (const row of rows) {
+    const bucket = byClass.get(row.advisoryClass) ?? [];
+    bucket.push(row);
+    byClass.set(row.advisoryClass, bucket);
+  }
+  return [...byClass.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([advisoryClass, grouped]) => {
+      const accepted = grouped.filter(
+        (row) => row.decision === "accepted",
+      ).length;
+      const partial = grouped.filter(
+        (row) => row.decision === "partial",
+      ).length;
+      const rejected = grouped.filter(
+        (row) => row.decision === "rejected",
+      ).length;
+      const undecided = grouped.filter(
+        (row) => row.decision === "undecided",
+      ).length;
+      const decided = accepted + partial + rejected;
+      return {
+        advisoryClass,
+        accepted,
+        partial,
+        rejected,
+        undecided,
+        precision: decided === 0 ? null : (accepted + partial) / decided,
+        cursors: grouped.map((row) => ({
+          advisorySequence: row.advisorySequence,
+          gradeSequence: row.gradeSequence,
+        })),
+      };
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -649,6 +1064,36 @@ function formatHygieneProposalPrecisionTable(
     );
   }
   return lines;
+}
+
+function formatStructuralAdvisoryPrecisionTable(
+  rows: StructuralAdvisoryPrecisionRow[],
+): string[] {
+  if (rows.length === 0) return ["_No structural advisories in window._"];
+  const lines = [
+    "| advisory class | accepted | partial | rejected | undecided | precision | cursors |",
+    "| --- | --- | --- | --- | --- | --- | --- |",
+  ];
+  for (const row of rows) {
+    lines.push(
+      `| ${escapeMarkdownCell(row.advisoryClass)} | ${row.accepted} | ${row.partial} | ${row.rejected} | ${row.undecided} | ${formatPercent(row.precision)} | ${row.cursors.map((cursor) => formatCursorPair(cursor.advisorySequence, cursor.gradeSequence)).join(", ")} |`,
+    );
+  }
+  return lines;
+}
+
+function formatStructuralAdvisoryStabilityTable(
+  rows: StructuralAdvisoryStabilityRow[],
+): string[] {
+  if (rows.length === 0) return ["_No structural advisory stability rows._"];
+  return [
+    "| advisory | class | first seen | last seen | flips | decision | undecided age |",
+    "| --- | --- | --- | --- | --- | --- | --- |",
+    ...rows.map(
+      (row) =>
+        `| ${escapeMarkdownCell(row.advisoryId)} | ${escapeMarkdownCell(row.advisoryClass)} | ${row.firstSeenAt} | ${row.lastSeenAt} | ${row.flipCount} | ${row.decision} | ${row.undecidedAgeMs === null ? "—" : `${row.undecidedAgeMs}ms`} |`,
+    ),
+  ];
 }
 
 function formatParkRows(
@@ -827,6 +1272,35 @@ export function renderCalibrationDigest(
       report.hygieneProposalPrecisionByFindingType,
     ),
   );
+  lines.push("");
+
+  lines.push("## Structural advisory precision and lifecycle stability");
+  lines.push("");
+  lines.push(
+    "Transition-only advisory records join to the first grade by fingerprint.",
+    "Partial grades count as accepted-with-member-delta. Class precision is",
+    "reported separately from per-fingerprint lifecycle stability.",
+  );
+  lines.push("");
+  lines.push(
+    ...formatStructuralAdvisoryStabilityTable(
+      report.structuralAdvisoryStability,
+    ),
+  );
+  lines.push("");
+  lines.push(
+    ...formatStructuralAdvisoryPrecisionTable(
+      report.structuralAdvisoryPrecisionByClass,
+    ),
+  );
+  lines.push("");
+  if (report.orphanStructuralAdvisoryGrades.length === 0) {
+    lines.push("Orphan grades: none.");
+  } else {
+    lines.push(
+      `Orphan grades: ${report.orphanStructuralAdvisoryGrades.length} (${report.orphanStructuralAdvisoryGrades.map((row) => `${escapeMarkdownCell(row.advisoryId)} seq ${row.gradeSequence}`).join(", ")}).`,
+    );
+  }
   lines.push("");
 
   lines.push("## Queue baseline (week zero)");

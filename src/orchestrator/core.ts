@@ -135,6 +135,7 @@ export {
   getFailedStopSignalDeliveryAttempts,
   isStopSignalDelivery,
 } from "./stop-signal-delivery.js";
+import type { StructuralAdvisory } from "../domain/structural-advisory.js";
 import {
   type TicketFeature,
   extractTicketFeatures,
@@ -212,6 +213,16 @@ import type {
   WatchdogRegistrySnapshot,
 } from "./signature-cluster.js";
 import { partitionByAdmission } from "./standing-plan-admission.js";
+import {
+  type AdvisoryMemberActivitySnapshot,
+  type StructuralAdvisoryGradeDecision,
+  buildBacklogManagerCalibrationProjection,
+  buildStructuralAdvisoryGradeJournalEntry,
+  buildStructuralAdvisoryJournalEntry,
+  expandBacklogManagerCalibrationJournal,
+  projectStructuralAdvisoryGradeEvidence,
+  projectStructuralAdvisoryRejections,
+} from "./structural-advisory-journal.js";
 import {
   type IgnoredSetupInstructionCollision,
   type SupervisionFinding,
@@ -1158,6 +1169,9 @@ export class OrchestratorCore {
         state: this.createRunJournalCheckpointState(),
         privateState: this.createRunJournalCheckpointPrivateState(),
         decisionQualityEvents: extractDispatcherDecisionEvents(
+          this.state.dispatcherRunJournal,
+        ),
+        backlogManagerCalibration: buildBacklogManagerCalibrationProjection(
           this.state.dispatcherRunJournal,
         ),
       },
@@ -3367,6 +3381,103 @@ export class OrchestratorCore {
       );
       return null;
     }
+  }
+
+  getStructuralAdvisoryRejections() {
+    return projectStructuralAdvisoryRejections(this.state.dispatcherRunJournal);
+  }
+
+  getStructuralAdvisoryGradeEvidence() {
+    return projectStructuralAdvisoryGradeEvidence(
+      this.state.dispatcherRunJournal,
+    );
+  }
+
+  async recordStructuralAdvisoryTransition(input: {
+    advisory: StructuralAdvisory;
+    from: string | null;
+    to: string;
+    timestamp?: string;
+  }): Promise<number> {
+    const advisoryId = input.advisory.advisoryFingerprint;
+    const calibration = buildBacklogManagerCalibrationProjection(
+      this.state.dispatcherRunJournal,
+    );
+    const projected =
+      advisoryId === undefined ? undefined : calibration.advisories[advisoryId];
+    if (
+      projected?.latestLifecycleFrom === input.from &&
+      projected.latestLifecycleTo === input.to
+    ) {
+      return projected.lastSeenSequence;
+    }
+    const occurrence = projected?.transitionOccurrenceCount ?? 0;
+    const entry = await this.recordRunJournalEntry(
+      buildStructuralAdvisoryJournalEntry({
+        record: {
+          advisory: input.advisory,
+          from: input.from,
+          to: input.to,
+          timestamp: input.timestamp ?? this.now().toISOString(),
+          occurrence,
+        },
+        ownerId: this.leaseOwnerId,
+      }),
+    );
+    return entry.sequence;
+  }
+
+  async recordStructuralAdvisoryGrade(input: {
+    advisory: StructuralAdvisory;
+    decision: StructuralAdvisoryGradeDecision;
+    acceptedIdentifiers: readonly string[];
+    membersAtGrade: readonly AdvisoryMemberActivitySnapshot[];
+    droppedIdentifiers: readonly string[];
+    actor: IntentActor;
+    reason: string;
+    timestamp?: string;
+  }): Promise<{
+    status: "applied" | "conflict";
+    detail: string;
+    sequence: number;
+  }> {
+    const draft = buildStructuralAdvisoryGradeJournalEntry({
+      ...input,
+      ownerId: this.leaseOwnerId,
+      timestamp: input.timestamp ?? this.now().toISOString(),
+    });
+    const existing = expandBacklogManagerCalibrationJournal(
+      this.state.dispatcherRunJournal,
+    ).find((entry) => entry.idempotencyKey === draft.idempotencyKey);
+    if (existing !== undefined) {
+      if (input.advisory.lifecycleState !== "graded") {
+        await this.recordStructuralAdvisoryTransition({
+          advisory: { ...input.advisory, lifecycleState: "graded" },
+          from: input.advisory.lifecycleState ?? "active",
+          to: "graded",
+          timestamp: existing.timestamp,
+        });
+      }
+      return {
+        status: "conflict",
+        detail: `The first decision for this advisory by ${formatIntentAttribution(input.actor)} is immutable.`,
+        sequence: existing.sequence,
+      };
+    }
+    const entry = await this.recordRunJournalEntry(draft);
+    if (input.advisory.lifecycleState !== "graded") {
+      await this.recordStructuralAdvisoryTransition({
+        advisory: { ...input.advisory, lifecycleState: "graded" },
+        from: input.advisory.lifecycleState ?? "active",
+        to: "graded",
+        timestamp: entry.timestamp,
+      });
+    }
+    return {
+      status: "applied",
+      detail: `Advisory grade recorded ${formatIntentAttribution(input.actor)}.`,
+      sequence: entry.sequence,
+    };
   }
 
   private async recordQueueBaselineSample(input: {

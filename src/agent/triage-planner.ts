@@ -235,6 +235,17 @@ export interface PlannerContext {
   advisoryInput?: PlannerCandidate[];
   /** Explicit false keeps the live advisory path dark until Phase A arms it. */
   structuralAdvisoriesEnabled?: boolean;
+  /** Prior rejected exact member sets; untrusted calibration evidence only. */
+  advisoryRejections?: Array<{
+    memberSetHash: string;
+    memberIssueIdentifiers: string[];
+  }>;
+  advisoryGradeEvidence?: Array<{
+    advisoryId: string;
+    decision: "accept" | "partial" | "reject";
+    acceptedIdentifiers: string[];
+    memberDelta: string[];
+  }>;
   openPrs: PlannerPrInfo[];
   recentlyMerged: PlannerPrInfo[];
   inFlight: PlannerInFlight[];
@@ -859,6 +870,22 @@ function renderPlannerPrompt(
       "",
       "## Backlog advisory input (REPORT-ONLY; never eligible for a batch)",
       ...renderPlannerCandidates(context.advisoryInput ?? [], 0),
+      "",
+      "## Previously rejected structural advisory member sets (REPORT-ONLY)",
+      ...((context.advisoryRejections ?? []).length === 0
+        ? ["- (none)"]
+        : (context.advisoryRejections ?? []).map(
+            (rejection) =>
+              `- member_set_hash=${normalizeTrackerText(rejection.memberSetHash, PLANNER_CANDIDATE_TITLE_CHAR_LIMIT) ?? ""}; members=${rejection.memberIssueIdentifiers.map((identifier) => normalizeTrackerText(identifier, PLANNER_CANDIDATE_TITLE_CHAR_LIMIT) ?? "").join(", ")}; do not re-propose this exact member set absent new member activity`,
+          )),
+      "",
+      "## Structural advisory grade evidence (REPORT-ONLY)",
+      ...((context.advisoryGradeEvidence ?? []).length === 0
+        ? ["- (none)"]
+        : (context.advisoryGradeEvidence ?? []).map(
+            (grade) =>
+              `- advisory=${normalizeTrackerText(grade.advisoryId, PLANNER_CANDIDATE_TITLE_CHAR_LIMIT) ?? ""}; decision=${grade.decision}; accepted=${renderBoundedIdentifiers(grade.acceptedIdentifiers)}; member_delta=${renderBoundedIdentifiers(grade.memberDelta)}`,
+          )),
     );
   }
   lines.push("", "## In flight (immutable — do not re-plan these)");
@@ -914,6 +941,18 @@ function renderPlannerPrompt(
       : STRUCTURAL_ADVISORY_PROMPT_INSTRUCTION_LINES),
   );
   return lines.join("\n");
+}
+
+function renderBoundedIdentifiers(identifiers: readonly string[]): string {
+  const normalized = identifiers
+    .slice(0, 100)
+    .map((identifier) =>
+      normalizeTrackerText(identifier, PLANNER_CANDIDATE_TITLE_CHAR_LIMIT),
+    )
+    .filter((identifier): identifier is string => identifier !== null);
+  return normalized.length === 0
+    ? "(none)"
+    : joinBoundedParts(normalized, PLANNER_CANDIDATE_LABELS_CHAR_LIMIT);
 }
 
 function renderPlannerCandidates(

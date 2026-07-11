@@ -97,6 +97,12 @@ export function renderStructuralAdvisoryDetails(
     lines.push(`- Root hypothesis: ${advisory.rootCauseHypothesis}`);
     lines.push(`- Structural fix: ${advisory.structuralFix}`);
     lines.push(`- Confidence: ${advisory.confidenceNote}`);
+    if (advisory.advisoryFingerprint !== undefined) {
+      lines.push(`- Fingerprint: ${advisory.advisoryFingerprint}`);
+    }
+    if (advisory.memberSetHash !== undefined) {
+      lines.push(`- Member-set hash: ${advisory.memberSetHash}`);
+    }
     if (advisory.rootIssueIdentifier) {
       lines.push(`- Existing root: ${advisory.rootIssueIdentifier}`);
     } else if (advisory.proposedRootIssueIdentifier) {
@@ -106,6 +112,11 @@ export function renderStructuralAdvisoryDetails(
     }
     if (advisory.lifecycleState !== undefined) {
       lines.push(`- Lifecycle: ${advisory.lifecycleState}`);
+    }
+    if (advisory.previouslyRejectedWithNewEvidence === true) {
+      lines.push(
+        "- Rejection evidence: previously rejected, re-emitted after new member activity",
+      );
     }
     if ((advisory.conflictIssueIdentifiers?.length ?? 0) > 0) {
       lines.push(

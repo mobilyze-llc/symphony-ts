@@ -20,6 +20,36 @@ afterEach(() => {
 });
 
 describe("parseSymphonyctlArgs", () => {
+  it("parses a partial advisory grade with an accepted member subset", () => {
+    expect(
+      parseSymphonyctlArgs(
+        [
+          "grade-advisory",
+          "fp-1",
+          "partial",
+          "--members",
+          "SYMPH-1,SYMPH-2",
+          "--reason",
+          "one member is symptomatic",
+        ],
+        { SYMPHONY_OPERATOR_TOKEN: "token" },
+      ),
+    ).toMatchObject({
+      command: "grade-advisory",
+      gradeFingerprint: "fp-1",
+      gradeDecision: "partial",
+      acceptedIdentifiers: ["SYMPH-1", "SYMPH-2"],
+      reason: "one member is symptomatic",
+      operatorToken: "token",
+    });
+  });
+
+  it("rejects malformed partial advisory grades", () => {
+    expect(() =>
+      parseSymphonyctlArgs(["grade-advisory", "fp-1", "partial"], {}),
+    ).toThrow(SymphonyctlUsageError);
+  });
+
   it("parses state with the default base URL", () => {
     expect(parseSymphonyctlArgs(["state"], {})).toEqual({
       command: "state",
@@ -450,6 +480,39 @@ describe("runSymphonyctl", () => {
       verb: "release",
       issueIdentifier: "SYMPH-1",
       reason: "release",
+    });
+  });
+
+  it("posts grade-advisory through the authenticated fingerprint payload", async () => {
+    const requests: RequestInit[] = [];
+    globalThis.fetch = (async (
+      _input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      requests.push(init ?? {});
+      return new Response(JSON.stringify({ status: "applied" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const parsed = parseSymphonyctlArgs(
+      ["grade-advisory", "fp-1", "partial", "--members", "SYMPH-1"],
+      { SYMPHONY_OPERATOR_TOKEN: "env-token" },
+    );
+    expect(await runSymphonyctl(parsed, () => undefined)).toBe(0);
+    expect(JSON.parse(String(requests[0]?.body))).toEqual({
+      verb: "grade_advisory",
+      reason: "structural advisory grade via symphonyctl",
+      grade: {
+        target: "structural_advisory",
+        fingerprint: "fp-1",
+        decision: "partial",
+        acceptedIdentifiers: ["SYMPH-1"],
+      },
+    });
+    expect(requests[0]?.headers).toMatchObject({
+      authorization: "Bearer env-token",
     });
   });
 

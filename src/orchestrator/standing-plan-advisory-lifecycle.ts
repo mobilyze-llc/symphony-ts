@@ -7,6 +7,7 @@ import type { Issue } from "../domain/model.js";
 import type { StructuralAdvisory } from "../domain/structural-advisory.js";
 import { partitionPortfolioEligibleIssues } from "../portfolio/eligibility.js";
 import type { PlanBody } from "./standing-plan-supersession.js";
+import type { StructuralAdvisoryRejection } from "./structural-advisory-journal.js";
 
 export function prepareBacklogAdvisoryInput(
   issues: readonly Issue[],
@@ -44,6 +45,13 @@ export async function applyStandingPlanAdvisoryLifecycle(input: {
   resolveRootIssueIdentifier?: (identifier: string) => Promise<boolean>;
   terminalIssueIdentifiers?: ReadonlySet<string>;
   scanComplete: boolean;
+  rejectedMemberSets?: readonly StructuralAdvisoryRejection[];
+  issueActivity?: ReadonlyMap<string, string | null>;
+  recordTransition?: (input: {
+    advisory: StructuralAdvisory;
+    from: string | null;
+    to: string;
+  }) => Promise<void>;
   log: (
     event: string,
     message: string,
@@ -79,6 +87,12 @@ export async function applyStandingPlanAdvisoryLifecycle(input: {
     ...(input.terminalIssueIdentifiers === undefined
       ? {}
       : { terminalIssueIdentifiers: input.terminalIssueIdentifiers }),
+    ...(input.rejectedMemberSets === undefined
+      ? {}
+      : { rejectedMemberSets: input.rejectedMemberSets }),
+    ...(input.issueActivity === undefined
+      ? {}
+      : { issueActivity: input.issueActivity }),
   });
   for (const event of result.events) {
     await input.log(
@@ -86,6 +100,23 @@ export async function applyStandingPlanAdvisoryLifecycle(input: {
       "Structural advisory lifecycle evidence (report-only).",
       { outcome: "report_only", ...event },
     );
+    if (
+      input.recordTransition !== undefined &&
+      event.advisory !== undefined &&
+      (event.kind === "emitted" || event.kind === "transition")
+    ) {
+      // Journal evidence is part of the lifecycle commit boundary. Let a
+      // failed append fail this report-only tick before its plan revision is
+      // persisted; never leave lifecycle state without calibration evidence.
+      await input.recordTransition({
+        advisory: event.advisory,
+        from: event.kind === "emitted" ? null : (event.from ?? null),
+        to:
+          event.kind === "emitted"
+            ? (event.advisory.lifecycleState ?? "active")
+            : (event.to ?? event.advisory.lifecycleState ?? "active"),
+      });
+    }
   }
   return { ...input.body, structuralAdvisories: result.advisories };
 }

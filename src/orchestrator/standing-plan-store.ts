@@ -44,6 +44,11 @@ export interface RecordPlanDecisionResult {
   reason?: "no_plan" | "stale_revision" | "batch_not_found";
 }
 
+export interface RecordStructuralAdvisoryStateResult {
+  recorded: boolean;
+  reason?: "no_plan" | "advisory_not_found" | "already_terminal";
+}
+
 /** Project the current plan from the journal (latest revision, decisions void on rotate). */
 export function projectStandingPlan(
   journal: StandingPlanJournal,
@@ -159,10 +164,21 @@ export async function recordPlanRevision(
   return withStandingPlanJournalWriteLock(workspaceRoot, async () => {
     const journal = await readStandingPlanJournal(workspaceRoot);
     const current = projectStandingPlan(journal);
-    const candidate = rotateRevision(current, body, options);
+    const protectedBody: PlanBody = {
+      ...body,
+      structuralAdvisories: mergeTerminalStructuralAdvisories(
+        current?.structuralAdvisories ?? [],
+        body.structuralAdvisories ?? [],
+      ),
+    };
+    const candidate = rotateRevision(current, protectedBody, options);
 
     if (current !== null && candidate.contentHash === current.contentHash) {
-      const reportUpdate = refreshedReportRevision(journal, body, options);
+      const reportUpdate = refreshedReportRevision(
+        journal,
+        protectedBody,
+        options,
+      );
       if (reportUpdate !== null) {
         const appended = appendStandingPlanJournalEntry(journal, {
           kind: "plan_revision",
@@ -236,7 +252,10 @@ function refreshedReportRevision(
     return null;
   }
   const premises = body.premises ?? [];
-  const structuralAdvisories = body.structuralAdvisories ?? [];
+  const structuralAdvisories = mergeTerminalStructuralAdvisories(
+    latest.revision.structuralAdvisories ?? [],
+    body.structuralAdvisories ?? [],
+  );
   const reviewRecords = options.reviewRecords ?? [];
   const findings = mergeReportRefreshFindings({
     prior: latest.revision.findings ?? [],
@@ -263,6 +282,62 @@ function refreshedReportRevision(
     findings,
     reviewRecords,
   };
+}
+
+function mergeTerminalStructuralAdvisories(
+  prior: NonNullable<PlanRevision["structuralAdvisories"]>,
+  next: NonNullable<PlanRevision["structuralAdvisories"]>,
+): NonNullable<PlanRevision["structuralAdvisories"]> {
+  const priorByFingerprint = new Map(
+    prior.flatMap((advisory) =>
+      advisory.advisoryFingerprint === undefined
+        ? []
+        : [[advisory.advisoryFingerprint, advisory] as const],
+    ),
+  );
+  const seen = new Set<string>();
+  const merged = next.map((advisory) => {
+    const fingerprint = advisory.advisoryFingerprint;
+    if (fingerprint === undefined) return advisory;
+    seen.add(fingerprint);
+    const previous = priorByFingerprint.get(fingerprint);
+    if (
+      previous?.lifecycleState !== "graded" &&
+      previous?.lifecycleState !== "withdrawn"
+    ) {
+      return advisory;
+    }
+    const explicitRejectedRevival =
+      previous.lifecycleState === "graded" &&
+      advisory.lifecycleState === "active" &&
+      advisory.previouslyRejectedWithNewEvidence === true;
+    if (explicitRejectedRevival) return advisory;
+    return {
+      ...advisory,
+      lifecycleState: previous.lifecycleState,
+      rendered: false,
+      ...(previous.absentOkTicks === undefined
+        ? {}
+        : { absentOkTicks: previous.absentOkTicks }),
+      ...(previous.previouslyRejectedWithNewEvidence === undefined
+        ? {}
+        : {
+            previouslyRejectedWithNewEvidence:
+              previous.previouslyRejectedWithNewEvidence,
+          }),
+    };
+  });
+  for (const advisory of prior) {
+    if (
+      advisory.advisoryFingerprint !== undefined &&
+      !seen.has(advisory.advisoryFingerprint) &&
+      (advisory.lifecycleState === "graded" ||
+        advisory.lifecycleState === "withdrawn")
+    ) {
+      merged.push({ ...advisory, rendered: false });
+    }
+  }
+  return merged;
 }
 
 function mergeReportRefreshFindings(input: {
@@ -406,6 +481,70 @@ export async function recordPlanControlDecision(
     optionMarker: null,
     createdAt: input.createdAt,
     note: input.note,
+  });
+}
+
+/**
+ * Persist one fingerprint's terminal lifecycle state in the report-only plan
+ * projection without rotating the plan revision or touching batch content.
+ * The idempotency key makes a grade journal -> plan retry convergent after a
+ * partial failure.
+ */
+export async function recordStructuralAdvisoryState(
+  workspaceRoot: string,
+  input: {
+    advisoryFingerprint: string;
+    lifecycleState: "graded" | "withdrawn";
+    createdAt: string;
+  },
+): Promise<RecordStructuralAdvisoryStateResult> {
+  return withStandingPlanJournalWriteLock(workspaceRoot, async () => {
+    const journal = await readStandingPlanJournal(workspaceRoot);
+    const latest = latestPlanRevisionEntry(journal);
+    if (latest === null) return { recorded: false, reason: "no_plan" };
+    const advisories = latest.revision.structuralAdvisories ?? [];
+    const target = advisories.find(
+      (advisory) => advisory.advisoryFingerprint === input.advisoryFingerprint,
+    );
+    if (target === undefined) {
+      return { recorded: false, reason: "advisory_not_found" };
+    }
+    if (target.lifecycleState === input.lifecycleState) {
+      return { recorded: false };
+    }
+    if (
+      target.lifecycleState === "graded" ||
+      target.lifecycleState === "withdrawn"
+    ) {
+      return { recorded: false, reason: "already_terminal" };
+    }
+    const revision: PlanRevision = {
+      ...latest.revision,
+      structuralAdvisories: advisories.map((advisory) =>
+        advisory.advisoryFingerprint === input.advisoryFingerprint
+          ? {
+              ...advisory,
+              lifecycleState: input.lifecycleState,
+              rendered: false,
+            }
+          : advisory,
+      ),
+    };
+    const appended = appendStandingPlanJournalEntry(journal, {
+      kind: "plan_revision",
+      // Bind the projection update to the latest journal row, not only the
+      // logical revision number. Report-only refreshes can append another row
+      // for the same revision; a grade retry must then be able to converge that
+      // newer projection back to its durable terminal state.
+      idempotencyKey: `${revision.planId}:rev:${revision.revision}:advisory:${latest.sequence}:${input.advisoryFingerprint}:${input.lifecycleState}`,
+      timestamp: input.createdAt,
+      planId: revision.planId,
+      revision,
+    });
+    if (appended.appended) {
+      await appendStandingPlanJournalEntryToDisk(workspaceRoot, appended.entry);
+    }
+    return { recorded: appended.appended };
   });
 }
 

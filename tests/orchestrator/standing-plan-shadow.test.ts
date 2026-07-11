@@ -4,6 +4,10 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import {
+  structuralAdvisoryFingerprint,
+  structuralAdvisoryMemberSetHash,
+} from "../../src/agent/advisory-lifecycle.js";
 import type {
   HotFileGrowth,
   PlannerCandidateGroundingEvidence,
@@ -1353,6 +1357,184 @@ describe("runStandingPlanShadowTick", () => {
         expect.objectContaining({ from: "active", to: "dormant" }),
         expect.objectContaining({ from: "dormant", to: "active" }),
       ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("revives an exact rejected member set from comment-only activity using a bounded comment scan", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-comment-revival-"));
+    const fetches: Array<{ issueId: string; maxPages: number | undefined }> =
+      [];
+    const memberSetHash = structuralAdvisoryMemberSetHash([
+      "SYMPH-2",
+      "SYMPH-3",
+    ]);
+    const advisoryFingerprint = structuralAdvisoryFingerprint(
+      memberSetHash,
+      "Shared root",
+    );
+    const generalIssues = Array.from({ length: 105 }, (_, index) =>
+      issue(`general-${index}`, `SYMPH-${1000 + index}`),
+    );
+    try {
+      await recordPlanRevision(
+        root,
+        {
+          batches: [],
+          options: [],
+          envelope: ENVELOPE,
+          rationale: "prior rejected advisory",
+          source: "planner",
+          dependencyEdges: [],
+          structuralAdvisories: [
+            {
+              memberIssueIdentifiers: ["SYMPH-2", "SYMPH-3"],
+              rootCauseHypothesis: "Shared root",
+              structuralFix: "Fix the shared root",
+              confidenceNote: "high",
+              memberSetHash,
+              advisoryFingerprint,
+              lifecycleState: "graded",
+              rendered: false,
+            },
+          ],
+        },
+        { planId: "plan-1", createdAt: "2026-06-18T00:00:00.000Z" },
+      );
+      const result = await runStandingPlanShadowTick({
+        config: triageConfig({ structuralAdvisories: true }),
+        workspaceRoot: root,
+        fetchCandidates: async () => [],
+        fetchAdvisoryInput: async () => [
+          ...generalIssues,
+          issue("u2", "SYMPH-2"),
+        ],
+        terminalStates: ["Done"],
+        getInFlight: () => [],
+        getAdvisoryRejections: () => [
+          {
+            advisoryId: advisoryFingerprint,
+            memberSetHash,
+            memberActivityAtGrade: {
+              "SYMPH-2": "2026-06-18T00:00:00.000Z",
+              "SYMPH-3": null,
+            },
+            gradeSequence: 10,
+          },
+        ],
+        resolveIssueByIdentifier: async (identifier) =>
+          identifier === "SYMPH-3"
+            ? { ...issue("u3", identifier), state: "In Review" }
+            : null,
+        fetchIssueComments: async (issueId, options) => {
+          fetches.push({ issueId, maxPages: options.maxPages });
+          return issueId === "u3"
+            ? [
+                linearComment({
+                  id: "page-2-comment",
+                  createdAt: "2026-06-19T00:00:00.000Z",
+                  updatedAt: "2026-06-19T00:00:00.000Z",
+                }),
+              ]
+            : [];
+        },
+        createPlannerRunner: () => async () => ({
+          status: "ok",
+          markdown: `\`\`\`json\n${JSON.stringify({
+            rationale: "revive moved member",
+            batches: [],
+            structural_advisories: [
+              {
+                memberIssueIdentifiers: ["SYMPH-2", "SYMPH-3"],
+                rootCauseHypothesis: "Shared root",
+                structuralFix: "Fix the shared root",
+                confidenceNote: "high",
+              },
+            ],
+          })}\n\`\`\``,
+        }),
+        runPlanPostEmitReview: async () => ({
+          findings: [],
+          reviewRecords: [],
+        }),
+        log: () => undefined,
+        now: () => new Date("2026-06-19T01:00:00.000Z"),
+        force: true,
+      });
+
+      expect(result.status).toBe("ok");
+      expect(fetches).toHaveLength(100);
+      expect(fetches.slice(0, 2)).toEqual([
+        { issueId: "u2", maxPages: 10 },
+        { issueId: "u3", maxPages: 10 },
+      ]);
+      expect(fetches.some((fetch) => fetch.issueId === "general-104")).toBe(
+        false,
+      );
+      expect(
+        (await loadStandingPlan(root))?.structuralAdvisories?.[0],
+      ).toMatchObject({
+        memberSetHash,
+        lifecycleState: "active",
+        rendered: true,
+        previouslyRejectedWithNewEvidence: true,
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("records degraded observability when advisory comment activity cannot be fetched", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-comment-degraded-"));
+    const logs: string[] = [];
+    const memberSetHash = structuralAdvisoryMemberSetHash([
+      "SYMPH-1",
+      "SYMPH-2",
+    ]);
+    try {
+      const result = await runStandingPlanShadowTick({
+        config: triageConfig({ structuralAdvisories: true }),
+        workspaceRoot: root,
+        fetchCandidates: async () => [],
+        fetchAdvisoryInput: async () => [
+          issue("u1", "SYMPH-1"),
+          issue("u2", "SYMPH-2"),
+        ],
+        terminalStates: ["Done"],
+        getInFlight: () => [],
+        getAdvisoryRejections: () => [
+          {
+            advisoryId: "prior-fingerprint",
+            memberSetHash,
+            memberActivityAtGrade: {
+              "SYMPH-1": "2026-06-18T00:00:00.000Z",
+              "SYMPH-2": "2026-06-18T00:00:00.000Z",
+            },
+            gradeSequence: 10,
+          },
+        ],
+        fetchIssueComments: async () => {
+          throw new Error("comments unavailable");
+        },
+        createPlannerRunner: () => async () => ({
+          status: "ok",
+          markdown: advisoryPlanMarkdown("Shared root"),
+        }),
+        runPlanPostEmitReview: async () => ({
+          findings: [],
+          reviewRecords: [],
+        }),
+        log: (event) => {
+          logs.push(event);
+        },
+        now: () => new Date("2026-06-19T01:00:00.000Z"),
+        force: true,
+      });
+
+      expect(result.status).toBe("ok");
+      expect(logs).toContain("queue_triage_advisory_comment_activity_failed");
+      expect((await loadStandingPlan(root))?.structuralAdvisories).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

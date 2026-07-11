@@ -152,6 +152,8 @@ Commands:
   fence <issue> [issue...] [--reason <text>]
                                  POST /api/v1/dispatch-fence with a positive allowlist
   unfence                       DELETE /api/v1/dispatch-fence
+  grade-advisory <fingerprint> accept|partial|reject [--members <id,id>] [--reason <text>]
+                                 Grade one structural advisory through the authenticated intent surface
 
 Cold-shell hard stop:
   curl -fsS -X POST "${SYMPHONYCTL_BASE_URL:-http://127.0.0.1:4321}/api/v1/pipeline/stop" \

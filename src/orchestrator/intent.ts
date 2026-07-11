@@ -67,11 +67,32 @@ export const PLAN_CONTROL_VERBS = [
   "modify_plan",
 ] as const;
 
+/** Fingerprint-scoped calibration write; intentionally not revision-bound. */
+export const GRADE_INTENT_VERBS = ["grade_advisory"] as const;
+export type GradeIntentVerb = (typeof GRADE_INTENT_VERBS)[number];
+
 export type PlanControlVerb = (typeof PLAN_CONTROL_VERBS)[number];
 
 export function isPlanControlVerb(value: string): value is PlanControlVerb {
   return (PLAN_CONTROL_VERBS as readonly string[]).includes(value);
 }
+
+export function isGradeIntentVerb(value: string): value is GradeIntentVerb {
+  return (GRADE_INTENT_VERBS as readonly string[]).includes(value);
+}
+
+export type GradeIntentPayload =
+  | {
+      target: "structural_advisory";
+      fingerprint: string;
+      decision: "accept" | "partial" | "reject";
+      acceptedIdentifiers?: string[];
+    }
+  | {
+      target: "hygiene_proposal";
+      fingerprint: string;
+      decision: "accept" | "reject";
+    };
 
 /**
  * Payload for a plan-control intent. `revision` binds the operator action to a

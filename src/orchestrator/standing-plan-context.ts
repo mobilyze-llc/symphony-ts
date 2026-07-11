@@ -13,6 +13,10 @@ import {
   type ShadowPlannerAuditDisposition,
   buildShadowPlannerAuditDispositionIndex,
 } from "./standing-plan-audit-dispositions.js";
+import type {
+  StructuralAdvisoryGradeEvidence,
+  StructuralAdvisoryRejection,
+} from "./structural-advisory-journal.js";
 
 export interface AssembleShadowPlannerContextInput {
   candidates: Issue[];
@@ -24,6 +28,8 @@ export interface AssembleShadowPlannerContextInput {
   recentlyMerged?: PlannerPrInfo[];
   auditDispositions?: readonly ShadowPlannerAuditDisposition[];
   triageHealthInput?: QueueHealth;
+  advisoryRejections?: readonly StructuralAdvisoryRejection[];
+  advisoryGradeEvidence?: readonly StructuralAdvisoryGradeEvidence[];
   groundingEvidenceByIssueId?:
     | ReadonlyMap<string, PlannerCandidateGroundingEvidence>
     | Readonly<Record<string, PlannerCandidateGroundingEvidence>>;
@@ -105,6 +111,28 @@ export function assembleShadowPlannerContext(
     ...(input.structuralAdvisoriesEnabled === undefined
       ? {}
       : { structuralAdvisoriesEnabled: input.structuralAdvisoriesEnabled }),
+    ...(input.advisoryRejections === undefined
+      ? {}
+      : {
+          advisoryRejections: input.advisoryRejections.map((rejection) => ({
+            memberSetHash: rejection.memberSetHash,
+            memberIssueIdentifiers: Object.keys(
+              rejection.memberActivityAtGrade,
+            ).sort(),
+          })),
+        }),
+    ...(input.advisoryGradeEvidence === undefined
+      ? {}
+      : {
+          advisoryGradeEvidence: input.advisoryGradeEvidence.map(
+            (evidence) => ({
+              advisoryId: evidence.advisoryId,
+              decision: evidence.decision,
+              acceptedIdentifiers: evidence.acceptedIdentifiers,
+              memberDelta: evidence.memberDelta,
+            }),
+          ),
+        }),
     inFlight: input.inFlight,
     openPrs: input.openPrs ?? [],
     recentlyMerged: input.recentlyMerged ?? [],
