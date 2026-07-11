@@ -8,6 +8,7 @@ const STRUCTURAL_ADVISORY_SCHEMA = z.object({
   rootCauseHypothesis: z.string(),
   structuralFix: z.string(),
   confidenceNote: z.string(),
+  rootIssueIdentifier: z.string().nullable().optional(),
 });
 
 export const STRUCTURAL_ADVISORIES_SCHEMA = z.array(STRUCTURAL_ADVISORY_SCHEMA);
@@ -27,7 +28,8 @@ export const STRUCTURAL_ADVISORY_PROMPT_JSON_LINES = [
   '      "memberIssueIdentifiers": ["SYMPH-1", "SYMPH-2"],',
   '      "rootCauseHypothesis": "suspected shared root cause",',
   '      "structuralFix": "structural fix that would supersede the members",',
-  '      "confidenceNote": "confidence and evidence limits"',
+  '      "confidenceNote": "confidence and evidence limits",',
+  '      "rootIssueIdentifier": "SYMPH-123 or null"',
   "    }",
   "  ]",
 ] as const;
@@ -35,6 +37,7 @@ export const STRUCTURAL_ADVISORY_PROMPT_JSON_LINES = [
 export const STRUCTURAL_ADVISORY_PROMPT_INSTRUCTION_LINES = [
   "- In `structural_advisories`, scan candidates for symptom clusters that may share one root cause. Name the member issue identifiers, suspected root cause, structural fix that would supersede the members, and a confidence note.",
   "- Structural advisories are non-binding and report-only. They never authorize dispatch, mutation, cancellation, or dependency changes. Use an empty array when no supported cluster exists.",
+  "- Prefer non-overlapping member partitions. When naming an existing Linear root, set `rootIssueIdentifier`; otherwise leave it null and describe the proposed new root in `rootCauseHypothesis`.",
 ] as const;
 
 const MEMBER_IDENTIFIER_LIMIT = 100;
@@ -48,6 +51,7 @@ export function normalizeStructuralAdvisories(
 ): StructuralAdvisory[] {
   return (advisories ?? [])
     .map((advisory) => ({
+      ...advisory,
       memberIssueIdentifiers: advisory.memberIssueIdentifiers
         .map((identifier) => normalizeText(identifier, MEMBER_IDENTIFIER_LIMIT))
         .filter((identifier) => identifier.length > 0),
@@ -63,6 +67,13 @@ export function normalizeStructuralAdvisories(
         advisory.confidenceNote,
         CONFIDENCE_NOTE_LIMIT,
       ),
+      rootIssueIdentifier:
+        advisory.rootIssueIdentifier == null
+          ? null
+          : normalizeText(
+              advisory.rootIssueIdentifier,
+              MEMBER_IDENTIFIER_LIMIT,
+            ),
     }))
     .filter(
       (advisory) =>
@@ -77,14 +88,30 @@ export function renderStructuralAdvisoryDetails(
   advisories: readonly StructuralAdvisory[] | undefined,
 ): string[] {
   const lines: string[] = [];
-  for (const [index, advisory] of normalizeStructuralAdvisories(
-    advisories,
-  ).entries()) {
+  const rendered = normalizeStructuralAdvisories(advisories).filter(
+    (advisory) => advisory.rendered !== false,
+  );
+  for (const [index, advisory] of rendered.entries()) {
     lines.push(`### Advisory ${index + 1}`);
     lines.push(`- Members: ${advisory.memberIssueIdentifiers.join(", ")}`);
     lines.push(`- Root hypothesis: ${advisory.rootCauseHypothesis}`);
     lines.push(`- Structural fix: ${advisory.structuralFix}`);
     lines.push(`- Confidence: ${advisory.confidenceNote}`);
+    if (advisory.rootIssueIdentifier) {
+      lines.push(`- Existing root: ${advisory.rootIssueIdentifier}`);
+    } else if (advisory.proposedRootIssueIdentifier) {
+      lines.push(
+        `- Proposed new root (unresolved identifier): ${advisory.proposedRootIssueIdentifier}`,
+      );
+    }
+    if (advisory.lifecycleState !== undefined) {
+      lines.push(`- Lifecycle: ${advisory.lifecycleState}`);
+    }
+    if ((advisory.conflictIssueIdentifiers?.length ?? 0) > 0) {
+      lines.push(
+        `- Conflict: hygiene kill annotation on ${advisory.conflictIssueIdentifiers?.join(", ")}`,
+      );
+    }
   }
   return lines;
 }

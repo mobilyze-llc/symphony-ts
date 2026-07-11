@@ -195,4 +195,48 @@ describe("standing-plan structural advisory compatibility", () => {
       ),
     ).toBe(false);
   });
+
+  it.each([
+    { conflictIssueIdentifiers: "SYMPH-1" },
+    { conflictIssueIdentifiers: ["SYMPH-1", 2] },
+    { lifecycleState: "paused" },
+    { absentOkTicks: -1 },
+    { absentOkTicks: 1.5 },
+    { rendered: "yes" },
+    { rootIssueIdentifier: 123 },
+    { proposedRootIssueIdentifier: {} },
+    { memberSetHash: 123 },
+    { advisoryFingerprint: [] },
+  ])("rejects malformed advisory lifecycle metadata %#", (metadata) => {
+    expect(() =>
+      isStandingPlanJournalEntry(
+        journalEntry({
+          structuralAdvisories: [
+            {
+              memberIssueIdentifiers: ["SYMPH-1"],
+              rootCauseHypothesis: "Root",
+              structuralFix: "Fix",
+              confidenceNote: "High",
+              ...metadata,
+            },
+          ],
+        }),
+      ),
+    ).not.toThrow();
+    expect(
+      isStandingPlanJournalEntry(
+        journalEntry({
+          structuralAdvisories: [
+            {
+              memberIssueIdentifiers: ["SYMPH-1"],
+              rootCauseHypothesis: "Root",
+              structuralFix: "Fix",
+              confidenceNote: "High",
+              ...metadata,
+            },
+          ],
+        }),
+      ),
+    ).toBe(false);
+  });
 });

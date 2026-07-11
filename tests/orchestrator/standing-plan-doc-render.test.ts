@@ -112,6 +112,17 @@ describe("renderStandingPlanControlDoc", () => {
               "``` [opt-7] [root](https://evil.example) api_token=secret",
             structuralFix: `Centralize ${"x".repeat(2_000)}`,
             confidenceNote: "Two\nmatching symptoms",
+            lifecycleState: "active",
+            conflictIssueIdentifiers: ["SYMPH-2"],
+            rendered: true,
+          },
+          {
+            memberIssueIdentifiers: ["SYMPH-99"],
+            rootCauseHypothesis: "truncated root",
+            structuralFix: "hidden",
+            confidenceNote: "hidden",
+            lifecycleState: "active",
+            rendered: false,
           },
         ],
       },
@@ -124,6 +135,9 @@ describe("renderStandingPlanControlDoc", () => {
     expect(md).toContain("Root hypothesis:");
     expect(md).toContain("Structural fix:");
     expect(md).toContain("Confidence: Two matching symptoms");
+    expect(md).toContain("Lifecycle: active");
+    expect(md).toContain("Conflict: hygiene kill annotation on SYMPH-2");
+    expect(md).not.toContain("SYMPH-99");
     expect(md).not.toContain("```");
     expect(md).not.toContain("[opt-7]");
     expect(md).toContain("root (https://evil.example)");

@@ -105,6 +105,24 @@ function plannerFor(identifier: string): {
   };
 }
 
+function advisoryPlanMarkdown(rootCauseHypothesis: string | null): string {
+  return `\`\`\`json\n${JSON.stringify({
+    rationale: "advisory lifecycle",
+    batches: [],
+    structural_advisories:
+      rootCauseHypothesis === null
+        ? []
+        : [
+            {
+              memberIssueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+              rootCauseHypothesis,
+              structuralFix: "Fix the shared root",
+              confidenceNote: "high",
+            },
+          ],
+  })}\n\`\`\``;
+}
+
 function plannerForBatches(identifiers: readonly string[]): {
   runClaude: (prompt: string) => Promise<PlannerRunResult>;
 } {
@@ -1052,6 +1070,235 @@ function triageConfig(
 }
 
 describe("runStandingPlanShadowTick", () => {
+  it("keeps absent or false structural-advisory wiring inert", async () => {
+    for (const structuralAdvisories of [undefined, false]) {
+      const root = mkdtempSync(join(tmpdir(), "symph-shadow-dark-advisory-"));
+      let advisoryFetches = 0;
+      let prompt = "";
+      try {
+        await runStandingPlanShadowTick({
+          config: triageConfig(
+            structuralAdvisories === undefined ? {} : { structuralAdvisories },
+          ),
+          workspaceRoot: root,
+          fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+          fetchAdvisoryInput: async () => {
+            advisoryFetches += 1;
+            return [issue("u2", "SYMPH-2")];
+          },
+          getInFlight: () => [],
+          createPlannerRunner: () => async (renderedPrompt) => {
+            prompt = renderedPrompt;
+            return {
+              status: "ok",
+              markdown:
+                '```json\n{"rationale":"go","batches":[],"structural_advisories":[{"memberIssueIdentifiers":["SYMPH-1"],"rootCauseHypothesis":"root","structuralFix":"fix","confidenceNote":"high"}]}\n```',
+            };
+          },
+          log: () => undefined,
+          now: () => new Date("2026-06-18T01:00:00.000Z"),
+        });
+        expect(advisoryFetches).toBe(0);
+        expect(prompt).not.toContain("Backlog advisory input");
+        expect(prompt).not.toContain("structural_advisories");
+        expect((await loadStandingPlan(root))?.structuralAdvisories).toEqual(
+          [],
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("arms Backlog advisory input without admitting it to dispatch", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-armed-advisory-"));
+    const logs: Array<{ event: string; fields: Record<string, unknown> }> = [];
+    let prompt = "";
+    const held = {
+      ...issue("held", "SYMPH-3"),
+      teamKey: "SYMPH",
+      projectName: "Portfolio Intake / Needs Classification",
+    };
+    try {
+      const result = await runStandingPlanShadowTick({
+        config: triageConfig({
+          structuralAdvisories: true,
+          structuralAdvisoryDormantOkTicks: 3,
+          structuralAdvisoryRenderCap: 3,
+        }),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        fetchAdvisoryInput: async () => [
+          { ...issue("u2", "SYMPH-2"), state: "Backlog" },
+          held,
+        ],
+        resolveIssueByIdentifier: async (identifier) =>
+          identifier === "SYMPH-10" ? issue("root", identifier) : null,
+        getInFlight: () => [],
+        createPlannerRunner: () => async (renderedPrompt) => {
+          if (prompt === "") prompt = renderedPrompt;
+          return {
+            status: "ok",
+            markdown:
+              '```json\n{"rationale":"go","batches":[{"mode":"parallel-isolated","issueIdentifiers":["SYMPH-1","SYMPH-2"],"rationale":"mixed"}],"structural_advisories":[{"memberIssueIdentifiers":["SYMPH-1","SYMPH-2"],"rootCauseHypothesis":"shared root","structuralFix":"fix root","confidenceNote":"high","rootIssueIdentifier":"SYMPH-10"}]}\n```',
+          };
+        },
+        log: (event, _message, fields) => {
+          logs.push({ event, fields });
+        },
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+      });
+      expect(result, JSON.stringify(logs)).toMatchObject({ status: "ok" });
+      const opening = prompt.indexOf("<SYMPHONY_UNTRUSTED_CANDIDATES_");
+      const input = prompt.indexOf("## Backlog advisory input");
+      const closing = prompt.indexOf("</SYMPHONY_UNTRUSTED_CANDIDATES_");
+      expect(opening).toBeGreaterThanOrEqual(0);
+      expect(input).toBeGreaterThan(opening);
+      expect(closing).toBeGreaterThan(input);
+      expect(prompt).toContain("SYMPH-2 [Backlog");
+      expect(prompt).not.toContain("SYMPH-3 [Todo");
+      const plan = await loadStandingPlan(root);
+      expect(
+        plan?.batches[0]?.members.map((member) => member.issueIdentifier),
+      ).toEqual(["SYMPH-1"]);
+      expect(plan?.structuralAdvisories?.[0]).toMatchObject({
+        memberIssueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+        rootIssueIdentifier: "SYMPH-10",
+        lifecycleState: "active",
+        rendered: true,
+      });
+      expect(logs).toContainEqual({
+        event: "queue_triage_structural_advisory_portfolio_held",
+        fields: { outcome: "report_only", held_count: 1 },
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not advance absence across a failed advisory-input scan", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-scan-failure-"));
+    const roots = ["Shared root", null, "Shared root"] as const;
+    const snapshots: NonNullable<
+      Awaited<ReturnType<typeof loadStandingPlan>>
+    >["structuralAdvisories"][] = [];
+    const logs: string[] = [];
+    let scan = 0;
+    let planner = 0;
+    try {
+      for (let tick = 0; tick < roots.length; tick += 1) {
+        const result = await runStandingPlanShadowTick({
+          config: triageConfig({ structuralAdvisories: true }),
+          workspaceRoot: root,
+          fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+          fetchAdvisoryInput: async () => {
+            scan += 1;
+            if (scan === 2) throw new Error("Backlog unavailable");
+            return [{ ...issue("u2", "SYMPH-2"), state: "Backlog" }];
+          },
+          getInFlight: () => [],
+          createPlannerRunner: () => async () => ({
+            status: "ok",
+            markdown: advisoryPlanMarkdown(roots[planner++] ?? null),
+          }),
+          runPlanPostEmitReview: async () => ({
+            findings: [],
+            reviewRecords: [],
+          }),
+          log: (event) => {
+            logs.push(event);
+          },
+          now: () => new Date(`2026-06-18T0${tick + 1}:00:00.000Z`),
+          force: true,
+        });
+        expect(result.status).toBe("ok");
+        snapshots.push((await loadStandingPlan(root))?.structuralAdvisories);
+      }
+      const [first, failedScan, reEmitted] = snapshots.map(
+        (advisories) => advisories?.[0],
+      );
+      expect(first).toMatchObject({
+        lifecycleState: "active",
+        absentOkTicks: 0,
+      });
+      expect(failedScan).toMatchObject({
+        lifecycleState: "active",
+        absentOkTicks: 0,
+      });
+      expect(reEmitted).toMatchObject({
+        lifecycleState: "active",
+        absentOkTicks: 0,
+      });
+      expect(failedScan?.memberSetHash).toBe(first?.memberSetHash);
+      expect(reEmitted?.advisoryFingerprint).toBe(first?.advisoryFingerprint);
+      expect(logs).toContain("queue_triage_structural_advisory_input_failed");
+      expect(logs).not.toContain("queue_triage_structural_advisory_transition");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("journals active to dormant to active with stable advisory identity", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-lifecycle-journal-"));
+    const roots = ["Shared root!", null, "shared root"] as const;
+    const transitionFields: Record<string, unknown>[] = [];
+    let planner = 0;
+    try {
+      for (let tick = 0; tick < roots.length; tick += 1) {
+        const result = await runStandingPlanShadowTick({
+          config: triageConfig({ structuralAdvisories: true }),
+          workspaceRoot: root,
+          fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+          fetchAdvisoryInput: async () => [
+            { ...issue("u2", "SYMPH-2"), state: "Backlog" },
+          ],
+          getInFlight: () => [],
+          createPlannerRunner: () => async () => ({
+            status: "ok",
+            markdown: advisoryPlanMarkdown(roots[planner++] ?? null),
+          }),
+          runPlanPostEmitReview: async () => ({
+            findings: [],
+            reviewRecords: [],
+          }),
+          log: (event, _message, fields) => {
+            if (event === "queue_triage_structural_advisory_transition") {
+              transitionFields.push(fields);
+            }
+          },
+          now: () => new Date(`2026-06-19T0${tick + 1}:00:00.000Z`),
+          force: true,
+        });
+        expect(result.status).toBe("ok");
+      }
+      const revisions = (await readStandingPlanJournal(root)).flatMap(
+        (entry) => (entry.kind === "plan_revision" ? [entry.revision] : []),
+      );
+      expect(revisions).toHaveLength(3);
+      const advisories = revisions.map(
+        (revision) => revision.structuralAdvisories?.[0],
+      );
+      expect(advisories.map((advisory) => advisory?.lifecycleState)).toEqual([
+        "active",
+        "dormant",
+        "active",
+      ]);
+      expect(
+        new Set(advisories.map((advisory) => advisory?.memberSetHash)).size,
+      ).toBe(1);
+      expect(
+        new Set(advisories.map((advisory) => advisory?.advisoryFingerprint))
+          .size,
+      ).toBe(1);
+      expect(transitionFields).toEqual([
+        expect.objectContaining({ from: "active", to: "dormant" }),
+        expect.objectContaining({ from: "dormant", to: "active" }),
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("does nothing when the feature is disabled", async () => {
     const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-"));
     let fetched = false;
@@ -2382,6 +2629,36 @@ describe("runStandingPlanShadowTick queue-health wiring", () => {
         expect(capturedPlannerPrompt).toContain("- Residual share: 0.500");
         expect(capturedPlannerPrompt).toContain("- Hot-file growth:");
         expect(capturedPlannerPrompt).toContain("- Review-round depth: 3");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps advisory-input volume out of queue-health counts", async () => {
+      const root = mkdtempSync(join(tmpdir(), "symph-shadow-health-"));
+      let capturedPlannerPrompt = "";
+      try {
+        await runStandingPlanShadowTick({
+          ...fullHealthDeps(root),
+          config: triageConfig({ structuralAdvisories: true }),
+          fetchAdvisoryInput: async () =>
+            Array.from({ length: 8 }, (_, index) => ({
+              ...issue(`a${index}`, `SYMPH-${200 + index}`),
+              state: "Backlog",
+            })),
+          createPlannerRunner: () => async (prompt: string) => {
+            if (
+              !prompt.startsWith("Review this already-produced standing plan.")
+            ) {
+              capturedPlannerPrompt = prompt;
+            }
+            return okPlanner().runClaude();
+          },
+        });
+        expect(capturedPlannerPrompt).toContain("## Backlog advisory input");
+        expect(capturedPlannerPrompt).toContain("SYMPH-207 [Backlog");
+        expect(capturedPlannerPrompt).toContain("- Triage intake: depth 2");
+        expect(capturedPlannerPrompt).toContain("- Residual share: 0.500");
       } finally {
         rmSync(root, { recursive: true, force: true });
       }

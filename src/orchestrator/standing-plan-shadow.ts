@@ -11,12 +11,9 @@ import {
 } from "../agent/planner-comment-curation.js";
 import type {
   HotFileGrowth,
-  PlannerCandidateGroundingEvidence,
   PlannerContext,
   PlannerInFlight,
-  PlannerPrInfo,
   PlannerRunResult,
-  QueueHealth,
   TriagePlannerDeps,
 } from "../agent/triage-planner.js";
 import { runTriagePlanner } from "../agent/triage-planner.js";
@@ -26,22 +23,22 @@ import type {
   WorkflowQueueTriageConfig,
 } from "../config/types.js";
 import type { Issue } from "../domain/model.js";
-import type {
-  PlanEnvelope,
-  PlanRevision,
-  StandingPlan,
-} from "../domain/standing-plan.js";
+import type { PlanRevision, StandingPlan } from "../domain/standing-plan.js";
 import type { LinearIssueComment } from "../tracker/linear-client.js";
-import { extractGroundingPathHints } from "./code-grounding.js";
 import {
   type PlanPostEmitReviewDeps,
   type PlanPostEmitReviewResult,
   runPlanPostEmitReview,
 } from "./plan-post-emit-review.js";
 import {
-  type ShadowPlannerAuditDisposition,
-  buildShadowPlannerAuditDispositionIndex,
-} from "./standing-plan-audit-dispositions.js";
+  applyStandingPlanAdvisoryLifecycle,
+  prepareBacklogAdvisoryInput,
+} from "./standing-plan-advisory-lifecycle.js";
+import type { ShadowPlannerAuditDisposition } from "./standing-plan-audit-dispositions.js";
+import {
+  type AssembleShadowPlannerContextInput,
+  assembleShadowPlannerContext as assembleStandingPlanContext,
+} from "./standing-plan-context.js";
 import {
   buildQueueHealth,
   computeResidualShare,
@@ -62,10 +59,17 @@ import {
   collectTriageIntakeHealth,
 } from "./triage-intake-reporting.js";
 
+export type { AssembleShadowPlannerContextInput };
+
 export {
   buildShadowPlannerAuditDispositions,
   buildShadowPlannerSupersessionRelationDispositions,
 } from "./standing-plan-audit-dispositions.js";
+export function assembleShadowPlannerContext(
+  input: AssembleShadowPlannerContextInput,
+): PlannerContext {
+  return assembleStandingPlanContext(input);
+}
 
 // ---------------------------------------------------------------------------
 // Shadow plan cycle (SYMPH-784 PR1)
@@ -86,144 +90,6 @@ export {
   computeResidualShare,
   computeTriageIntake,
 } from "./standing-plan-queue-health.js";
-
-export interface AssembleShadowPlannerContextInput {
-  candidates: Issue[];
-  inFlight: PlannerInFlight[];
-  envelope: PlanEnvelope;
-  openPrs?: PlannerPrInfo[];
-  recentlyMerged?: PlannerPrInfo[];
-  auditDispositions?: readonly ShadowPlannerAuditDisposition[];
-  /**
-   * Pre-computed per-queue health (SYMPH-939). Computed by the async caller
-   * (runStandingPlanShadowTick) from injected deps and passed into this pure,
-   * synchronous assembler — which only threads it onto `context.health`. Absent →
-   * `health` omitted (back-compat).
-   */
-  triageHealthInput?: QueueHealth;
-  groundingEvidenceByIssueId?:
-    | ReadonlyMap<string, PlannerCandidateGroundingEvidence>
-    | Readonly<Record<string, PlannerCandidateGroundingEvidence>>;
-}
-
-export function assembleShadowPlannerContext(
-  input: AssembleShadowPlannerContextInput,
-): PlannerContext {
-  const inFlightIdentifiers = new Set(
-    input.inFlight.map((entry) => entry.issueIdentifier),
-  );
-  const {
-    excludedIdentifiers,
-    duplicateClustersByIdentifier,
-    auditAnnotationsByIdentifier,
-    dispatchExclusionsByIdentifier,
-  } = buildShadowPlannerAuditDispositionIndex(input.auditDispositions ?? []);
-  const backlog = input.candidates
-    .filter((issue) => !inFlightIdentifiers.has(issue.identifier))
-    .filter((issue) => !excludedIdentifiers.has(issue.identifier))
-    .map((issue) => {
-      const groundingEvidence = readGroundingEvidence(
-        input.groundingEvidenceByIssueId,
-        issue,
-      );
-      return {
-        issueId: issue.id,
-        issueIdentifier: issue.identifier,
-        title: issue.title,
-        priority: issue.priority,
-        state: issue.state,
-        // SYMPH-841: carry the recorded blocker identifiers through to the planner
-        // so its dependency reasoning is grounded in the real graph, not just titles.
-        blockedBy: issue.blockedBy
-          .map((ref) => ref.identifier)
-          .filter((identifier): identifier is string => identifier !== null),
-        advisoryRelations: {
-          relatesTo: issue.relatesTo?.flatMap(toRelationIdentifier) ?? [],
-          duplicates: issue.duplicates?.flatMap(toRelationIdentifier) ?? [],
-          duplicatedBy: issue.duplicatedBy?.flatMap(toRelationIdentifier) ?? [],
-          supersedes: issue.supersedes?.flatMap(toRelationIdentifier) ?? [],
-          supersededBy: issue.supersededBy?.flatMap(toRelationIdentifier) ?? [],
-          relationsTruncated: issue.advisoryRelationsTruncated === true,
-          parent: issue.parent?.identifier ?? null,
-          children: issue.children?.flatMap(toRelationIdentifier) ?? [],
-          childrenTruncated: issue.childrenTruncated === true,
-        },
-        // SYMPH-874: carry the body + labels so the Manager reasons over real
-        // ticket content (surface / area / intent), not just one-line titles.
-        description: issue.description,
-        labels: issue.labels,
-        ...(groundingEvidence === undefined ? {} : { groundingEvidence }),
-        // SYMPH-874 Tier 2 / SYMPH-895: the strongest same-surface signal —
-        // concrete file overlap. Deterministically extract the repo-relative
-        // paths the ticket itself cites (title + body) via the code-grounding
-        // path vocabulary. Absent/blank/no-path → [] → rendered as nothing.
-        pathHints: extractGroundingPathHints(
-          [issue.title, issue.description]
-            .filter(
-              (value): value is string =>
-                typeof value === "string" && value.trim() !== "",
-            )
-            .join("\n"),
-        ),
-        ...(duplicateClustersByIdentifier.has(issue.identifier)
-          ? {
-              duplicateClusterIdentifiers:
-                duplicateClustersByIdentifier.get(issue.identifier) ?? [],
-            }
-          : {}),
-        ...(auditAnnotationsByIdentifier.has(issue.identifier)
-          ? {
-              auditAnnotations:
-                auditAnnotationsByIdentifier.get(issue.identifier) ?? [],
-            }
-          : {}),
-        ...(dispatchExclusionsByIdentifier.has(issue.identifier)
-          ? {
-              dispatchExclusionReasons:
-                dispatchExclusionsByIdentifier.get(issue.identifier) ?? [],
-            }
-          : {}),
-      };
-    });
-  return {
-    backlog,
-    inFlight: input.inFlight,
-    openPrs: input.openPrs ?? [],
-    recentlyMerged: input.recentlyMerged ?? [],
-    envelope: input.envelope,
-    ...(input.triageHealthInput === undefined
-      ? {}
-      : { health: input.triageHealthInput }),
-  };
-}
-
-function toRelationIdentifier(ref: { identifier: string | null }): string[] {
-  return ref.identifier === null ? [] : [ref.identifier];
-}
-
-function readGroundingEvidence(
-  evidence:
-    | ReadonlyMap<string, PlannerCandidateGroundingEvidence>
-    | Readonly<Record<string, PlannerCandidateGroundingEvidence>>
-    | undefined,
-  issue: Issue,
-): PlannerCandidateGroundingEvidence | undefined {
-  if (evidence === undefined) {
-    return undefined;
-  }
-  if (isGroundingEvidenceMap(evidence)) {
-    return evidence.get(issue.id) ?? evidence.get(issue.identifier);
-  }
-  return evidence[issue.id] ?? evidence[issue.identifier];
-}
-
-function isGroundingEvidenceMap(
-  evidence:
-    | ReadonlyMap<string, PlannerCandidateGroundingEvidence>
-    | Readonly<Record<string, PlannerCandidateGroundingEvidence>>,
-): evidence is ReadonlyMap<string, PlannerCandidateGroundingEvidence> {
-  return typeof (evidence as { get?: unknown }).get === "function";
-}
 
 export interface EnrichPlannerContextWithCommentsDeps {
   context: PlannerContext;
@@ -403,6 +269,13 @@ export interface ShadowPlanCycleDeps {
     body: PlanBody,
     options: RotateRevisionOptions,
   ) => Promise<RecordPlanRevisionResult>;
+  advisoryLifecycle?: {
+    previous: PlanRevision["structuralAdvisories"];
+    dormantOkTicks: number;
+    renderCap: number;
+    scanComplete: boolean;
+    resolveRootIssueIdentifier?: (identifier: string) => Promise<boolean>;
+  };
 }
 
 export async function runShadowPlanCycle(
@@ -435,25 +308,43 @@ export async function runShadowPlanCycle(
     return { status: "invalid", detail: planned.detail };
   }
 
+  let body = planned.body;
+  if (deps.context.structuralAdvisoriesEnabled === false) {
+    body = { ...body, structuralAdvisories: [] };
+  } else if (deps.advisoryLifecycle !== undefined) {
+    body = await applyStandingPlanAdvisoryLifecycle({
+      body,
+      previous: deps.advisoryLifecycle.previous ?? [],
+      context: deps.context,
+      config: {
+        dormantOkTicks: deps.advisoryLifecycle.dormantOkTicks,
+        renderCap: deps.advisoryLifecycle.renderCap,
+      },
+      scanComplete: deps.advisoryLifecycle.scanComplete,
+      log: deps.log,
+      ...(deps.advisoryLifecycle.resolveRootIssueIdentifier === undefined
+        ? {}
+        : {
+            resolveRootIssueIdentifier:
+              deps.advisoryLifecycle.resolveRootIssueIdentifier,
+          }),
+    });
+  }
   const planId = deps.planId ?? STANDING_PLAN_ID;
   const createdAt = deps.now().toISOString();
   const tier2Body =
     deps.planReview?.enabled === true
       ? planBodyFromRevision(
-          rotateRevision(
-            await loadStandingPlan(deps.workspaceRoot),
-            planned.body,
-            {
-              createdAt,
-              planId,
-            },
-          ),
+          rotateRevision(await loadStandingPlan(deps.workspaceRoot), body, {
+            createdAt,
+            planId,
+          }),
         )
       : undefined;
   const postEmitReview = deps.runPlanPostEmitReview ?? runPlanPostEmitReview;
   const review = await postEmitReview({
     context: deps.context,
-    body: planned.body,
+    body,
     runClaude: deps.planner.runClaude,
     ...(deps.planReview?.enabled === true
       ? {
@@ -484,7 +375,7 @@ export async function runShadowPlanCycle(
   };
   const record = await persistPlanRevision(
     deps.workspaceRoot,
-    planned.body,
+    body,
     reviewOptions,
   );
   const tier2Record = review.reviewRecords.find(
@@ -567,6 +458,9 @@ export interface StandingPlanShadowTickDeps {
   config: WorkflowQueueTriageConfig | undefined;
   workspaceRoot: string;
   fetchCandidates: () => Promise<Issue[]>;
+  /** Backlog-state scan input; used only when structural advisories are armed. */
+  fetchAdvisoryInput?: () => Promise<Issue[]>;
+  resolveIssueByIdentifier?: (identifier: string) => Promise<Issue | null>;
   getInFlight: () => PlannerInFlight[];
   /** Build a model runner for the configured planner model (crabrunner in prod). */
   createPlannerRunner: (
@@ -706,6 +600,38 @@ export async function runStandingPlanShadowTick(
     // consumer), so there is nothing to warn about here.
 
     const candidates = await deps.fetchCandidates();
+    let advisoryInputCandidates: Issue[] = [];
+    let advisoryInputScanComplete = false;
+    if (config.structuralAdvisories === true) {
+      if (deps.fetchAdvisoryInput === undefined) {
+        await deps.log(
+          "queue_triage_structural_advisory_input_failed",
+          "Backlog advisory-input fetch is not wired; preserving lifecycle state.",
+          { outcome: "degraded", detail: "fetch_not_wired" },
+        );
+      } else {
+        try {
+          const prepared = prepareBacklogAdvisoryInput(
+            await deps.fetchAdvisoryInput(),
+          );
+          advisoryInputCandidates = prepared.eligible;
+          advisoryInputScanComplete = true;
+          if (prepared.heldCount > 0) {
+            await deps.log(
+              "queue_triage_structural_advisory_portfolio_held",
+              "Portfolio-held Backlog issues were excluded from advisory input.",
+              { outcome: "report_only", held_count: prepared.heldCount },
+            );
+          }
+        } catch (error) {
+          await deps.log(
+            "queue_triage_structural_advisory_input_failed",
+            "Backlog advisory-input fetch failed; preserving lifecycle state.",
+            { outcome: "degraded", detail: (error as Error).message },
+          );
+        }
+      }
+    }
 
     // SYMPH-939 health signals: compute each part independently and best-effort.
     // EVERY read is wrapped so a throw degrades to null — this tick is fire-and-forget
@@ -749,6 +675,8 @@ export async function runStandingPlanShadowTick(
 
     let context = assembleShadowPlannerContext({
       candidates,
+      advisoryInputCandidates,
+      structuralAdvisoriesEnabled: config.structuralAdvisories === true,
       inFlight: deps.getInFlight(),
       envelope: config.envelope,
       ...(deps.auditDispositions === undefined
@@ -833,6 +761,23 @@ export async function runStandingPlanShadowTick(
       planner: { runClaude },
       log: deps.log,
       now: () => now,
+      ...(config.structuralAdvisories === true
+        ? {
+            advisoryLifecycle: {
+              previous: plan?.structuralAdvisories,
+              dormantOkTicks: config.structuralAdvisoryDormantOkTicks ?? 3,
+              renderCap: config.structuralAdvisoryRenderCap ?? 3,
+              scanComplete: advisoryInputScanComplete,
+              ...(deps.resolveIssueByIdentifier === undefined
+                ? {}
+                : {
+                    resolveRootIssueIdentifier: async (identifier: string) =>
+                      (await deps.resolveIssueByIdentifier?.(identifier)) !==
+                      null,
+                  }),
+            },
+          }
+        : {}),
       ...(planReview === undefined ? {} : { planReview }),
       ...(deps.runPlanPostEmitReview === undefined
         ? {}

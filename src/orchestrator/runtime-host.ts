@@ -6566,17 +6566,15 @@ export async function startRuntimeService(
       return;
     }
     standingPlanShadowTickInFlight = true;
-    // A re-plan predicate trip or an operator modify_plan intent forces a
-    // re-plan now, bypassing the heartbeat cadence (SYMPH-787/789).
+    // Predicate or operator requests bypass heartbeat cadence (SYMPH-787/789).
     const force = runtimeHost.consumeStandingPlanReplanRequest();
-    // SYMPH-896 comment enrichment needs the LinearTrackerClient comment fetch;
-    // narrow once here (the dep is inert unless commentEnrichment is enabled).
     const linearTracker =
       tracker instanceof LinearTrackerClient ? tracker : null;
     void runStandingPlanShadowTick({
       config: currentConfig.queueTriage,
       workspaceRoot: workspaceManager.root,
       fetchCandidates: fetchSharedCandidateIssues,
+      fetchAdvisoryInput: () => tracker.fetchIssuesByStates(["Backlog"]),
       getInFlight: () =>
         Object.values(runtimeHost.getState().running).map((entry) => ({
           issueIdentifier: entry.issue.identifier,
@@ -6613,6 +6611,8 @@ export async function startRuntimeService(
       ...(linearTracker === null
         ? {}
         : {
+            resolveIssueByIdentifier: (identifier: string) =>
+              linearTracker.fetchIssueByIdentifier(identifier),
             fetchIssueComments: (
               issueId: string,
               options: { maxPages?: number },
