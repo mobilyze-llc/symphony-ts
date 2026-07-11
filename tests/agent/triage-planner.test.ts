@@ -146,6 +146,34 @@ describe("buildPlannerPrompt", () => {
     expect(prompt).toContain("non-binding and report-only");
   });
 
+  it("places partial-grade accepted members and member delta inside the untrusted planner fence", () => {
+    const ctx = context();
+    ctx.structuralAdvisoriesEnabled = true;
+    ctx.advisoryInput = [];
+    ctx.advisoryGradeEvidence = [
+      {
+        advisoryId: "fp-1",
+        decision: "partial",
+        acceptedIdentifiers: ["SYMPH-1"],
+        memberDelta: ["SYMPH-2"],
+      },
+    ];
+
+    const prompt = buildPlannerPrompt(ctx);
+    const evidence =
+      "advisory=fp-1; decision=partial; accepted=SYMPH-1; member_delta=SYMPH-2";
+    expect(prompt).toContain(evidence);
+    const fenceStart = prompt.indexOf("<SYMPHONY_UNTRUSTED_CANDIDATES_");
+    const evidenceAt = prompt.indexOf(evidence);
+    const fenceEnd = prompt.indexOf(
+      "</SYMPHONY_UNTRUSTED_CANDIDATES_",
+      fenceStart,
+    );
+    expect(fenceStart).toBeGreaterThanOrEqual(0);
+    expect(evidenceAt).toBeGreaterThan(fenceStart);
+    expect(evidenceAt).toBeLessThan(fenceEnd);
+  });
+
   it("includes backlog, envelope constraints, context, and the JSON output contract", () => {
     const prompt = buildPlannerPrompt(context());
     expect(prompt).toContain("SYMPH-1");

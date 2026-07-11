@@ -54,12 +54,18 @@ import type {
   RotateRevisionOptions,
 } from "./standing-plan-supersession.js";
 import { rotateRevision } from "./standing-plan-supersession.js";
+import type {
+  StructuralAdvisoryGradeEvidence,
+  StructuralAdvisoryRejection,
+} from "./structural-advisory-journal.js";
 import {
   type TriageIntakePublisher,
   collectTriageIntakeHealth,
 } from "./triage-intake-reporting.js";
 
 export type { AssembleShadowPlannerContextInput };
+
+const ADVISORY_ACTIVITY_ISSUE_LIMIT = 100;
 
 export {
   buildShadowPlannerAuditDispositions,
@@ -276,6 +282,13 @@ export interface ShadowPlanCycleDeps {
     scanComplete: boolean;
     terminalIssueIdentifiers: ReadonlySet<string>;
     resolveRootIssueIdentifier?: (identifier: string) => Promise<boolean>;
+    rejectedMemberSets?: readonly StructuralAdvisoryRejection[];
+    issueActivity?: ReadonlyMap<string, string | null>;
+    recordTransition?: (input: {
+      advisory: NonNullable<PlanRevision["structuralAdvisories"]>[number];
+      from: string | null;
+      to: string;
+    }) => Promise<void>;
   };
 }
 
@@ -324,6 +337,17 @@ export async function runShadowPlanCycle(
       scanComplete: deps.advisoryLifecycle.scanComplete,
       terminalIssueIdentifiers: deps.advisoryLifecycle.terminalIssueIdentifiers,
       log: deps.log,
+      ...(deps.advisoryLifecycle.rejectedMemberSets === undefined
+        ? {}
+        : {
+            rejectedMemberSets: deps.advisoryLifecycle.rejectedMemberSets,
+          }),
+      ...(deps.advisoryLifecycle.issueActivity === undefined
+        ? {}
+        : { issueActivity: deps.advisoryLifecycle.issueActivity }),
+      ...(deps.advisoryLifecycle.recordTransition === undefined
+        ? {}
+        : { recordTransition: deps.advisoryLifecycle.recordTransition }),
       ...(deps.advisoryLifecycle.resolveRootIssueIdentifier === undefined
         ? {}
         : {
@@ -465,6 +489,13 @@ export interface StandingPlanShadowTickDeps {
   /** Tracker states that count as terminal for majority-terminal withdrawal. */
   terminalStates?: readonly string[];
   resolveIssueByIdentifier?: (identifier: string) => Promise<Issue | null>;
+  getAdvisoryRejections?: () => readonly StructuralAdvisoryRejection[];
+  getAdvisoryGradeEvidence?: () => readonly StructuralAdvisoryGradeEvidence[];
+  recordAdvisoryTransition?: (input: {
+    advisory: NonNullable<PlanRevision["structuralAdvisories"]>[number];
+    from: string | null;
+    to: string;
+  }) => Promise<void>;
   getInFlight: () => PlannerInFlight[];
   /** Build a model runner for the configured planner model (crabrunner in prod). */
   createPlannerRunner: (
@@ -541,6 +572,12 @@ export interface StandingPlanShadowTickDeps {
 
 const shadowPlanLastRunAtByWorkspace = new Map<string, number>();
 
+function latestIso(left: string | null, right: string | null): string | null {
+  if (left === null) return right;
+  if (right === null) return left;
+  return left >= right ? left : right;
+}
+
 /**
  * One heartbeat-gated, best-effort shadow tick wired into the poll loop. It is
  * inert unless explicitly enabled, runs entirely AFTER the dispatch decision,
@@ -604,9 +641,12 @@ export async function runStandingPlanShadowTick(
     // consumer), so there is nothing to warn about here.
 
     const candidates = await deps.fetchCandidates();
+    const advisoryRejections = deps.getAdvisoryRejections?.() ?? [];
+    const advisoryGradeEvidence = deps.getAdvisoryGradeEvidence?.() ?? [];
     let advisoryInputCandidates: Issue[] = [];
     let advisoryInputScanComplete = false;
     let terminalIssueIdentifiers = new Set<string>();
+    let issueActivity = new Map<string, string | null>();
     if (config.structuralAdvisories === true) {
       if (deps.fetchAdvisoryInput === undefined) {
         await deps.log(
@@ -616,13 +656,121 @@ export async function runStandingPlanShadowTick(
         );
       } else {
         try {
+          const advisoryIssues = await deps.fetchAdvisoryInput();
           const prepared = prepareBacklogAdvisoryInput(
-            await deps.fetchAdvisoryInput(),
+            advisoryIssues,
             deps.terminalStates,
           );
           advisoryInputCandidates = prepared.eligible;
           terminalIssueIdentifiers = prepared.terminalIssueIdentifiers;
           advisoryInputScanComplete = true;
+          const activityIssues = new Map(
+            [...advisoryIssues, ...candidates].map((issue) => [
+              issue.identifier,
+              issue,
+            ]),
+          );
+          const relevantIdentifiers = [
+            ...new Set([
+              ...advisoryRejections.flatMap((rejection) =>
+                Object.keys(rejection.memberActivityAtGrade),
+              ),
+              ...(plan?.structuralAdvisories ?? []).flatMap(
+                (advisory) => advisory.memberIssueIdentifiers,
+              ),
+            ]),
+          ].slice(0, ADVISORY_ACTIVITY_ISSUE_LIMIT);
+          if (deps.resolveIssueByIdentifier !== undefined) {
+            await Promise.all(
+              relevantIdentifiers
+                .filter((identifier) => !activityIssues.has(identifier))
+                .map(async (identifier) => {
+                  try {
+                    const resolved =
+                      await deps.resolveIssueByIdentifier?.(identifier);
+                    if (resolved !== null && resolved !== undefined) {
+                      activityIssues.set(identifier, resolved);
+                    }
+                  } catch (error) {
+                    await deps.log(
+                      "queue_triage_advisory_member_activity_resolve_failed",
+                      "Advisory member activity could not be resolved; preserving available activity evidence.",
+                      {
+                        outcome: "degraded",
+                        issue_identifier: identifier,
+                        detail: (error as Error).message,
+                      },
+                    );
+                  }
+                }),
+            );
+          }
+          const terminalStates = new Set(
+            (deps.terminalStates ?? []).map((state) => state.toLowerCase()),
+          );
+          const alreadyPresented = new Set([
+            ...candidates.map((issue) => issue.identifier),
+            ...advisoryInputCandidates.map((issue) => issue.identifier),
+          ]);
+          for (const identifier of relevantIdentifiers) {
+            const issue = activityIssues.get(identifier);
+            if (issue === undefined || alreadyPresented.has(identifier))
+              continue;
+            if (terminalStates.has(issue.state.toLowerCase())) {
+              terminalIssueIdentifiers.add(identifier);
+            } else {
+              advisoryInputCandidates.push(issue);
+              alreadyPresented.add(identifier);
+            }
+          }
+          const relevantSet = new Set(relevantIdentifiers);
+          const boundedActivityIssues = [
+            ...relevantIdentifiers.flatMap((identifier) => {
+              const issue = activityIssues.get(identifier);
+              return issue === undefined ? [] : [issue];
+            }),
+            ...[...activityIssues.values()].filter(
+              (issue) => !relevantSet.has(issue.identifier),
+            ),
+          ].slice(0, ADVISORY_ACTIVITY_ISSUE_LIMIT);
+          issueActivity = new Map(
+            boundedActivityIssues.map((issue) => [
+              issue.identifier,
+              issue.updatedAt,
+            ]),
+          );
+          if (deps.fetchIssueComments !== undefined) {
+            await Promise.all(
+              boundedActivityIssues.map(async (issue) => {
+                try {
+                  const comments = await deps.fetchIssueComments?.(issue.id, {
+                    maxPages: 10,
+                  });
+                  const latestCommentAt = (comments ?? []).reduce<
+                    string | null
+                  >(
+                    (latest, comment) => latestIso(latest, comment.updatedAt),
+                    null,
+                  );
+                  issueActivity.set(
+                    issue.identifier,
+                    latestIso(issue.updatedAt, latestCommentAt),
+                  );
+                } catch (error) {
+                  await deps.log(
+                    "queue_triage_advisory_comment_activity_failed",
+                    "Advisory member comment activity could not be read; using issue activity only.",
+                    {
+                      outcome: "degraded",
+                      issue_id: issue.id,
+                      issue_identifier: issue.identifier,
+                      detail: (error as Error).message,
+                    },
+                  );
+                }
+              }),
+            );
+          }
           if (prepared.heldCount > 0) {
             await deps.log(
               "queue_triage_structural_advisory_portfolio_held",
@@ -690,6 +838,8 @@ export async function runStandingPlanShadowTick(
         ? {}
         : { auditDispositions: deps.auditDispositions }),
       ...(health === undefined ? {} : { triageHealthInput: health }),
+      ...(advisoryRejections.length === 0 ? {} : { advisoryRejections }),
+      ...(advisoryGradeEvidence.length === 0 ? {} : { advisoryGradeEvidence }),
     });
     // Curated-comment enrichment (SYMPH-896): default-off; when an operator opts
     // in AND a comment fetch is wired, inject curated comments into the planner
@@ -776,6 +926,13 @@ export async function runStandingPlanShadowTick(
               renderCap: config.structuralAdvisoryRenderCap ?? 3,
               scanComplete: advisoryInputScanComplete,
               terminalIssueIdentifiers,
+              issueActivity,
+              ...(advisoryRejections.length === 0
+                ? {}
+                : { rejectedMemberSets: advisoryRejections }),
+              ...(deps.recordAdvisoryTransition === undefined
+                ? {}
+                : { recordTransition: deps.recordAdvisoryTransition }),
               ...(deps.resolveIssueByIdentifier === undefined
                 ? {}
                 : {

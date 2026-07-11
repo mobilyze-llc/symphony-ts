@@ -39,6 +39,7 @@ export interface SymphonyctlCommand {
     | "stop"
     | "fence"
     | "unfence"
+    | "grade-advisory"
     | "help";
   baseUrl: string;
   verb?: IntentVerb | PlanControlVerb;
@@ -55,6 +56,9 @@ export interface SymphonyctlCommand {
   anchorExpiry?: AnchorExpiry;
   hard?: boolean;
   operatorToken?: string;
+  gradeFingerprint?: string;
+  gradeDecision?: "accept" | "partial" | "reject";
+  acceptedIdentifiers?: string[];
 }
 
 export class SymphonyctlUsageError extends Error {}
@@ -76,6 +80,8 @@ Commands:
   fence <issue> [issue...] [--reason <text>]
                                  POST /api/v1/dispatch-fence with a positive allowlist
   unfence                       DELETE /api/v1/dispatch-fence
+  grade-advisory <fingerprint> accept|partial|reject [--members <id,id>] [--reason <text>]
+                                 Grade one structural advisory through the authenticated intent surface
 
 Cold-shell hard stop:
   curl -fsS -X POST "\${SYMPHONYCTL_BASE_URL:-${DEFAULT_BASE_URL}}/api/v1/pipeline/stop" \\
@@ -182,6 +188,53 @@ export function parseSymphonyctlArgs(
     if (reason !== undefined) {
       result.reason = reason;
     }
+    return result;
+  }
+
+  if (command === "grade-advisory") {
+    const fingerprint = positional[1];
+    const decision = positional[2];
+    if (fingerprint === undefined) {
+      throw new SymphonyctlUsageError(
+        "grade-advisory requires an advisory fingerprint.",
+      );
+    }
+    if (
+      decision !== "accept" &&
+      decision !== "partial" &&
+      decision !== "reject"
+    ) {
+      throw new SymphonyctlUsageError(
+        "grade-advisory decision must be accept, partial, or reject.",
+      );
+    }
+    const members = flags
+      .get("members")
+      ?.split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (decision === "partial" && (members?.length ?? 0) === 0) {
+      throw new SymphonyctlUsageError(
+        "partial grade-advisory requires --members <id,id>.",
+      );
+    }
+    if (decision !== "partial" && members !== undefined) {
+      throw new SymphonyctlUsageError(
+        "--members is valid only for a partial grade-advisory.",
+      );
+    }
+    const result: SymphonyctlCommand = {
+      command: "grade-advisory",
+      baseUrl,
+      gradeFingerprint: fingerprint,
+      gradeDecision: decision,
+      ...(members === undefined ? {} : { acceptedIdentifiers: members }),
+    };
+    if (operatorToken !== undefined && operatorToken !== "") {
+      result.operatorToken = operatorToken;
+    }
+    const reason = flags.get("reason");
+    if (reason !== undefined) result.reason = reason;
     return result;
   }
 
@@ -431,7 +484,8 @@ function requiresOperatorToken(
     command === "resume" ||
     command === "stop" ||
     command === "fence" ||
-    command === "unfence"
+    command === "unfence" ||
+    command === "grade-advisory"
   );
 }
 
@@ -716,6 +770,32 @@ export async function runSymphonyctl(
       status === 200
         ? JSON.stringify(payload, null, 2)
         : formatHttpFailure("/api/v1/dispatch-fence", status, payload),
+    );
+    return status === 200 ? 0 : 1;
+  }
+
+  if (parsed.command === "grade-advisory") {
+    const { status, payload } = await httpJson(
+      "POST",
+      `${parsed.baseUrl}/api/v1/intents`,
+      {
+        verb: "grade_advisory",
+        reason: parsed.reason ?? "structural advisory grade via symphonyctl",
+        grade: {
+          target: "structural_advisory",
+          fingerprint: parsed.gradeFingerprint,
+          decision: parsed.gradeDecision,
+          ...(parsed.acceptedIdentifiers === undefined
+            ? {}
+            : { acceptedIdentifiers: parsed.acceptedIdentifiers }),
+        },
+      },
+      { operatorToken: parsed.operatorToken },
+    );
+    log(
+      status === 200
+        ? JSON.stringify(payload, null, 2)
+        : formatHttpFailure("/api/v1/intents", status, payload),
     );
     return status === 200 ? 0 : 1;
   }

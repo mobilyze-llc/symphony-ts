@@ -37,6 +37,9 @@ import {
 // tests/observability/dashboard-no-bypass.test.ts).
 import {
   type AnchorIntentPayload,
+  GRADE_INTENT_VERBS,
+  type GradeIntentPayload,
+  type GradeIntentVerb,
   INTENT_VERBS,
   type IntentActor,
   type IntentFence,
@@ -301,7 +304,7 @@ export interface DispatchFenceResponse {
  * adds no verb semantics of its own.
  */
 export interface IntentRequest {
-  verb: IntentVerb | PlanControlVerb;
+  verb: IntentVerb | PlanControlVerb | GradeIntentVerb;
   issueId?: string;
   issueIdentifier?: string;
   reason: string;
@@ -312,13 +315,15 @@ export interface IntentRequest {
   anchor?: AnchorIntentPayload;
   /** Plan-control payload (release_batch / hold / modify_plan), SYMPH-789. */
   batch?: PlanControlIntentPayload;
+  /** Fingerprint-scoped grade payload; never bound to a plan revision. */
+  grade?: GradeIntentPayload;
 }
 
 export interface IntentRequestResult {
   status: IntentStatus | "issue_not_found" | "invalid_request" | "no_plan";
   detail: string;
   sequence: number | null;
-  verb: IntentVerb | PlanControlVerb;
+  verb: IntentVerb | PlanControlVerb | GradeIntentVerb;
   issue_id: string | null;
   issue_identifier: string | null;
 }
@@ -451,9 +456,34 @@ const planControlBatchSchema = z
   })
   .strict();
 
+const gradeIntentPayloadSchema = z.discriminatedUnion("target", [
+  z
+    .object({
+      target: z.literal("structural_advisory"),
+      fingerprint: z.string().min(1).max(256),
+      decision: z.enum(["accept", "partial", "reject"]),
+      acceptedIdentifiers: z
+        .array(z.string().min(1).max(256))
+        .max(100)
+        .optional(),
+    })
+    .strict(),
+  z
+    .object({
+      target: z.literal("hygiene_proposal"),
+      fingerprint: z.string().min(1).max(256),
+      decision: z.enum(["accept", "reject"]),
+    })
+    .strict(),
+]);
+
 const intentRequestSchema = z
   .object({
-    verb: z.union([z.enum(INTENT_VERBS), z.enum(PLAN_CONTROL_VERBS)]),
+    verb: z.union([
+      z.enum(INTENT_VERBS),
+      z.enum(PLAN_CONTROL_VERBS),
+      z.enum(GRADE_INTENT_VERBS),
+    ]),
     issueId: z.string().min(1).max(256).optional(),
     issueIdentifier: z.string().min(1).max(256).optional(),
     reason: z.string().min(1).max(2048),
@@ -464,11 +494,13 @@ const intentRequestSchema = z
     stage: z.string().min(1).max(1024).optional(),
     anchor: anchorRequestSchema.optional(),
     batch: planControlBatchSchema.optional(),
+    grade: gradeIntentPayloadSchema.optional(),
   })
   .refine(
     // Issue-scoped verbs require an issue; plan-control verbs are batch-scoped.
     (value) =>
       isPlanControlVerb(value.verb) ||
+      value.verb === "grade_advisory" ||
       value.issueId !== undefined ||
       value.issueIdentifier !== undefined,
     { message: "Either issueId or issueIdentifier is required." },
@@ -481,6 +513,14 @@ const intentRequestSchema = z
       message:
         "The pipeline sentinel is not an addressable issue; use the pipeline pause/resume endpoints.",
     },
+  )
+  .refine(
+    (value) => value.verb !== "grade_advisory" || value.grade !== undefined,
+    { message: "grade_advisory requires a fingerprint-scoped grade payload." },
+  )
+  .refine(
+    (value) => value.verb === "grade_advisory" || value.grade === undefined,
+    { message: "grade payload is only valid for grade_advisory." },
   )
   .refine((value) => value.verb !== "anchor" || value.anchor !== undefined, {
     message: "anchor intent requires anchor placement and expiry.",
@@ -716,6 +756,23 @@ function toIntentRequest(
               ? {}
               : { batchId: data.batch.batchId }),
           },
+        }),
+    ...(data.grade === undefined
+      ? {}
+      : {
+          grade:
+            data.grade.target === "hygiene_proposal"
+              ? data.grade
+              : {
+                  target: data.grade.target,
+                  fingerprint: data.grade.fingerprint,
+                  decision: data.grade.decision,
+                  ...(data.grade.acceptedIdentifiers === undefined
+                    ? {}
+                    : {
+                        acceptedIdentifiers: data.grade.acceptedIdentifiers,
+                      }),
+                },
         }),
     ...(data.anchor === undefined
       ? {}

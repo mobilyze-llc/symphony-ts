@@ -451,7 +451,10 @@ export function buildBacklogHygieneDecisionJournalEntry(input: {
     input.proposal.cull,
   );
   return {
-    idempotencyKey: `hygiene_proposal_decision:${input.proposal.proposalId}:${input.decision}:${input.actor.kind}@${input.actor.host}`,
+    // First decision is immutable per proposal+actor. The decision value is
+    // deliberately excluded so accept-then-reject cannot become two valid
+    // calibration rows (same contract as structural advisory grades).
+    idempotencyKey: `hygiene_proposal_decision:${input.proposal.proposalId}:${input.actor.kind}@${input.actor.host}${input.actor.session === undefined ? "" : `#${input.actor.session}`}`,
     timestamp: input.timestamp,
     kind: "hygiene_proposal_decision",
     issueId: input.proposal.issueIds[0] ?? BACKLOG_HYGIENE_SCOPE_ID,

@@ -90,6 +90,7 @@ import type {
   RunningEntry,
 } from "../domain/model.js";
 import { createEmptyLiveSession } from "../domain/model.js";
+import type { StructuralAdvisory } from "../domain/structural-advisory.js";
 import { ERROR_CODES } from "../errors/codes.js";
 import type { ErrorSignatureClass } from "../errors/signature.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
@@ -274,9 +275,12 @@ import {
 } from "./emergency-stop-recovery.js";
 import { getDiff, runEnsembleGate } from "./gate-handler.js";
 import {
+  type GradeIntentVerb,
   type IntentActor,
   type IntentReason,
   type PlanControlVerb,
+  formatIntentAttribution,
+  isGradeIntentVerb,
   isPipelineSentinelValue,
   isPlanControlVerb,
 } from "./intent.js";
@@ -323,7 +327,9 @@ import {
   loadStandingPlan,
   recordBatchOutcome,
   recordPlanControlDecision,
+  recordStructuralAdvisoryState,
 } from "./standing-plan-store.js";
+import { expandBacklogManagerCalibrationJournal } from "./structural-advisory-journal.js";
 import { createIssueSupervisionSnapshot } from "./supervision.js";
 import type {
   TrackFindingFilingRef,
@@ -692,6 +698,39 @@ function mergeDispatcherRunJournals(
     }
     return left.idempotencyKey.localeCompare(right.idempotencyKey, "en");
   });
+}
+
+function latestIso(left: string | null, right: string | null): string | null {
+  if (left === null) return right;
+  if (right === null) return left;
+  return left >= right ? left : right;
+}
+
+function gradeIntentResult(
+  verb: GradeIntentVerb,
+  status: IntentRequestResult["status"],
+  detail: string,
+): IntentRequestResult {
+  return {
+    status,
+    detail,
+    sequence: null,
+    verb,
+    issue_id: null,
+    issue_identifier: null,
+  };
+}
+
+function sameJournalActor(value: unknown, actor: IntentActor): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const candidate = value as Record<string, unknown>;
+  return (
+    candidate.kind === actor.kind &&
+    candidate.host === actor.host &&
+    (candidate.session ?? null) === (actor.session ?? null)
+  );
 }
 
 function createMergedStageExecutionBackends(
@@ -1701,6 +1740,24 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   ) {
     return this.enqueue(() =>
       this.orchestrator.recordBacklogHygieneProposal(input),
+    );
+  }
+
+  getStructuralAdvisoryRejections() {
+    return this.orchestrator.getStructuralAdvisoryRejections();
+  }
+
+  getStructuralAdvisoryGradeEvidence() {
+    return this.orchestrator.getStructuralAdvisoryGradeEvidence();
+  }
+
+  async recordStructuralAdvisoryTransition(
+    input: Parameters<
+      OrchestratorCore["recordStructuralAdvisoryTransition"]
+    >[0],
+  ): Promise<number> {
+    return this.enqueue(() =>
+      this.orchestrator.recordStructuralAdvisoryTransition(input),
     );
   }
 
@@ -3528,6 +3585,13 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   async requestIntent(input: IntentRequest): Promise<IntentRequestResult> {
     await this.ensureDispatcherRunJournalLoaded();
 
+    // Fingerprint-scoped grades are intentionally neither revision-bound nor
+    // issue-scoped. Branch before both plan-control revision validation and
+    // issue resolution so a plan rotation cannot void calibration evidence.
+    if (isGradeIntentVerb(input.verb)) {
+      return this.handleGradeIntent(input.verb, input);
+    }
+
     // Queue Triage v2 plan-control verbs (SYMPH-789) are plan/batch-scoped, not
     // issue-scoped: handle them via the standing-plan store and skip the
     // issue-resolution + writeIntent path entirely.
@@ -3598,6 +3662,365 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       verb: input.verb,
       issue_id: resolved.issueId,
       issue_identifier: resolved.issueIdentifier,
+    };
+  }
+
+  private async handleGradeIntent(
+    verb: GradeIntentVerb,
+    input: IntentRequest,
+  ): Promise<IntentRequestResult> {
+    if (input.actor.kind !== "operator") {
+      return gradeIntentResult(
+        verb,
+        "invalid_request",
+        `grade intents require an operator actor (got ${input.actor.kind}).`,
+      );
+    }
+    const grade = input.grade;
+    if (grade === undefined) {
+      return gradeIntentResult(
+        verb,
+        "invalid_request",
+        "grade_advisory requires a fingerprint-scoped grade payload.",
+      );
+    }
+
+    if (grade.target === "hygiene_proposal") {
+      const proposal = this.findJournaledHygieneProposal(grade.fingerprint);
+      if (proposal === null) {
+        return gradeIntentResult(
+          verb,
+          "invalid_request",
+          `Hygiene proposal '${grade.fingerprint}' was not found.`,
+        );
+      }
+      const existingDecision = this.orchestrator.getState();
+      const priorHygieneDecision = expandBacklogManagerCalibrationJournal(
+        existingDecision.dispatcherRunJournal,
+      ).find(
+        (entry) =>
+          entry.kind === "hygiene_proposal_decision" &&
+          entry.metadata.proposal_id === grade.fingerprint &&
+          sameJournalActor(entry.metadata.actor, input.actor),
+      );
+      if (priorHygieneDecision !== undefined) {
+        return {
+          ...gradeIntentResult(
+            verb,
+            "no_op",
+            `The first hygiene decision by ${formatIntentAttribution(input.actor)} is immutable.`,
+          ),
+          sequence: priorHygieneDecision.sequence,
+        };
+      }
+      const sequence =
+        await this.orchestrator.recordBacklogHygieneProposalDecision({
+          proposal,
+          decision: grade.decision === "accept" ? "accepted" : "rejected",
+          actor: {
+            kind: input.actor.kind,
+            host: input.actor.host,
+            ...(input.actor.session === undefined ||
+            input.actor.session === null
+              ? {}
+              : { session: input.actor.session }),
+          },
+          reason: `${input.reason} (${formatIntentAttribution(input.actor)})`,
+          timestamp: this.now().toISOString(),
+        });
+      return {
+        ...gradeIntentResult(
+          verb,
+          sequence === null ? "invalid_request" : "applied",
+          sequence === null
+            ? "Hygiene proposal decision could not be journaled."
+            : `Hygiene proposal decision recorded ${formatIntentAttribution(input.actor)}.`,
+        ),
+        sequence,
+      };
+    }
+
+    const plan = await loadStandingPlan(this.workspaceManager.root);
+    const advisory = plan?.structuralAdvisories?.find(
+      (candidate) => candidate.advisoryFingerprint === grade.fingerprint,
+    );
+    if (advisory === undefined) {
+      return gradeIntentResult(
+        verb,
+        "invalid_request",
+        `Structural advisory '${grade.fingerprint}' was not found in the standing plan.`,
+      );
+    }
+    if (
+      advisory.lifecycleState === "graded" &&
+      this.getAuthoritativeStructuralAdvisoryGrade(grade.fingerprint) === null
+    ) {
+      return gradeIntentResult(
+        verb,
+        "no_op",
+        "Structural advisory is already graded and cannot be graded again.",
+      );
+    }
+    if (advisory.lifecycleState === "withdrawn") {
+      return gradeIntentResult(
+        verb,
+        "no_op",
+        "Structural advisory is already withdrawn and cannot be graded.",
+      );
+    }
+    const originalMembers = new Set(advisory.memberIssueIdentifiers);
+    const requestedAccepted = [...new Set(grade.acceptedIdentifiers ?? [])];
+    if (
+      grade.decision === "partial" &&
+      (requestedAccepted.length === 0 ||
+        requestedAccepted.some(
+          (identifier) => !originalMembers.has(identifier),
+        ))
+    ) {
+      return gradeIntentResult(
+        verb,
+        "invalid_request",
+        "partial grades require a non-empty acceptedIdentifiers subset of the advisory members.",
+      );
+    }
+    if (
+      grade.decision !== "partial" &&
+      grade.acceptedIdentifiers !== undefined
+    ) {
+      return gradeIntentResult(
+        verb,
+        "invalid_request",
+        "acceptedIdentifiers is valid only for a partial grade.",
+      );
+    }
+
+    const liveMembers = await this.fetchAdvisoryMembers(
+      advisory.memberIssueIdentifiers,
+    );
+    const liveByIdentifier = new Map(
+      liveMembers.map((issue) => [issue.identifier, issue]),
+    );
+    const droppedIdentifiers = advisory.memberIssueIdentifiers.filter(
+      (identifier) => !liveByIdentifier.has(identifier),
+    );
+    const terminalStates = new Set(
+      this.config.tracker.terminalStates.map((state) => state.toLowerCase()),
+    );
+    const terminalCount = liveMembers.filter((issue) =>
+      terminalStates.has(issue.state.toLowerCase()),
+    ).length;
+    if (terminalCount > advisory.memberIssueIdentifiers.length / 2) {
+      const sequence =
+        await this.orchestrator.recordStructuralAdvisoryTransition({
+          advisory: { ...advisory, lifecycleState: "withdrawn" },
+          from: advisory.lifecycleState ?? "active",
+          to: "withdrawn",
+          timestamp: this.now().toISOString(),
+        });
+      await recordStructuralAdvisoryState(this.workspaceManager.root, {
+        advisoryFingerprint: grade.fingerprint,
+        lifecycleState: "withdrawn",
+        createdAt: this.now().toISOString(),
+      });
+      return {
+        ...gradeIntentResult(
+          verb,
+          "no_op",
+          `Advisory auto-withdrawn: ${terminalCount}/${advisory.memberIssueIdentifiers.length} members are terminal.`,
+        ),
+        sequence,
+      };
+    }
+    if (
+      grade.decision === "partial" &&
+      requestedAccepted.some((identifier) => !liveByIdentifier.has(identifier))
+    ) {
+      return gradeIntentResult(
+        verb,
+        "invalid_request",
+        "partial acceptedIdentifiers must still be live at grade time.",
+      );
+    }
+    if (
+      grade.decision === "partial" &&
+      requestedAccepted.length >= liveMembers.length
+    ) {
+      return gradeIntentResult(
+        verb,
+        "invalid_request",
+        "partial acceptedIdentifiers must be a proper subset of the live original members.",
+      );
+    }
+
+    const membersAtGrade = await Promise.all(
+      liveMembers.map(async (issue) => {
+        const latestCommentAt = await this.latestIssueCommentAt(issue);
+        return {
+          identifier: issue.identifier,
+          state: issue.state,
+          stateUpdatedAt: issue.updatedAt,
+          latestCommentAt,
+          activityAt: latestIso(issue.updatedAt, latestCommentAt),
+        };
+      }),
+    );
+    const acceptedIdentifiers =
+      grade.decision === "accept"
+        ? liveMembers.map((issue) => issue.identifier)
+        : grade.decision === "partial"
+          ? requestedAccepted
+          : [];
+    const result = await this.orchestrator.recordStructuralAdvisoryGrade({
+      advisory,
+      decision: grade.decision,
+      acceptedIdentifiers,
+      membersAtGrade,
+      droppedIdentifiers,
+      actor: input.actor,
+      reason: input.reason,
+      timestamp: this.now().toISOString(),
+    });
+    const persisted = await recordStructuralAdvisoryState(
+      this.workspaceManager.root,
+      {
+        advisoryFingerprint: grade.fingerprint,
+        lifecycleState: "graded",
+        createdAt: this.now().toISOString(),
+      },
+    );
+    if (persisted.reason === "already_terminal") {
+      return gradeIntentResult(
+        verb,
+        "no_op",
+        "Structural advisory is already terminal and cannot change grade state.",
+      );
+    }
+    const authoritative = this.getAuthoritativeStructuralAdvisoryGrade(
+      grade.fingerprint,
+    );
+    const isAuthoritative = authoritative?.sequence === result.sequence;
+    return {
+      ...gradeIntentResult(
+        verb,
+        result.status === "conflict" || !isAuthoritative ? "no_op" : "applied",
+        !isAuthoritative && result.status !== "conflict"
+          ? `${result.detail} Retained as audit evidence; the earliest grade is authoritative.`
+          : result.detail,
+      ),
+      sequence: result.sequence,
+    };
+  }
+
+  private getAuthoritativeStructuralAdvisoryGrade(
+    advisoryFingerprint: string,
+  ): DispatcherRunJournalEntry | null {
+    return (
+      expandBacklogManagerCalibrationJournal(
+        this.orchestrator.getState().dispatcherRunJournal,
+      ).find(
+        (entry) =>
+          entry.kind === "structural_advisory_grade" &&
+          entry.metadata.advisory_id === advisoryFingerprint,
+      ) ?? null
+    );
+  }
+
+  private async fetchAdvisoryMembers(
+    identifiers: readonly string[],
+  ): Promise<Issue[]> {
+    if (this.tracker instanceof LinearTrackerClient) {
+      const resolved = await Promise.all(
+        identifiers.map((identifier) =>
+          this.tracker instanceof LinearTrackerClient
+            ? this.tracker.fetchIssueByIdentifier(identifier)
+            : Promise.resolve(null),
+        ),
+      );
+      return resolved.filter((issue): issue is Issue => issue !== null);
+    }
+    const states = [
+      ...this.config.tracker.activeStates,
+      ...this.config.tracker.terminalStates,
+      "Backlog",
+      "Triage",
+    ];
+    const all = await this.tracker.fetchIssuesByStates([...new Set(states)]);
+    const wanted = new Set(identifiers);
+    return all.filter((issue) => wanted.has(issue.identifier));
+  }
+
+  private async latestIssueCommentAt(issue: Issue): Promise<string | null> {
+    if (!(this.tracker instanceof LinearTrackerClient)) return null;
+    try {
+      const comments = await this.tracker.fetchIssueComments(issue.id, {
+        maxPages: 10,
+      });
+      return comments.reduce<string | null>(
+        (latest, comment) => latestIso(latest, comment.updatedAt),
+        null,
+      );
+    } catch (error) {
+      await this.logger?.warn(
+        "queue_triage_advisory_comment_activity_failed",
+        "Advisory member comment activity could not be read; using issue activity only.",
+        {
+          outcome: "degraded",
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          detail: toErrorMessage(error),
+        },
+      );
+      return null;
+    }
+  }
+
+  private findJournaledHygieneProposal(
+    proposalId: string,
+  ): BacklogHygieneProposal | null {
+    const entry = expandBacklogManagerCalibrationJournal(
+      this.orchestrator.getState().dispatcherRunJournal,
+    ).find(
+      (candidate) =>
+        candidate.kind === "hygiene_proposal" &&
+        candidate.metadata.proposal_id === proposalId,
+    );
+    if (entry === undefined) return null;
+    const metadata = entry.metadata;
+    if (
+      typeof metadata.finding_id !== "string" ||
+      typeof metadata.finding_type !== "string" ||
+      !Array.isArray(metadata.issue_ids) ||
+      !Array.isArray(metadata.issue_identifiers) ||
+      typeof metadata.evidence !== "string" ||
+      typeof metadata.confidence !== "string" ||
+      typeof metadata.model_tier !== "string"
+    ) {
+      return null;
+    }
+    return {
+      proposalId,
+      findingId: metadata.finding_id,
+      findingType:
+        metadata.finding_type as BacklogHygieneProposal["findingType"],
+      issueIds: metadata.issue_ids.filter(
+        (value): value is string => typeof value === "string",
+      ),
+      issueIdentifiers: metadata.issue_identifiers.filter(
+        (value): value is string => typeof value === "string",
+      ),
+      summary: entry.summary,
+      evidence: metadata.evidence,
+      confidence: metadata.confidence as BacklogHygieneProposal["confidence"],
+      cull: (metadata.cull as BacklogHygieneProposal["cull"]) ?? null,
+      codeGroundingStatus:
+        (metadata.code_grounding_status as BacklogHygieneProposal["codeGroundingStatus"]) ??
+        null,
+      codeGroundingEvidence:
+        typeof metadata.code_grounding_evidence === "string"
+          ? metadata.code_grounding_evidence
+          : null,
+      generatedAt: entry.timestamp,
+      modelTier: metadata.model_tier as BacklogHygieneProposal["modelTier"],
     };
   }
 
@@ -6608,6 +7031,33 @@ export async function startRuntimeService(
       getHotFileGrowth: () =>
         readHotFileGrowth({ repoPath: resolveRuntimeRepoRoot() }),
       auditDispositions: buildShadowPlannerAuditDispositions(hygieneProposals),
+      ...(typeof runtimeHost.getStructuralAdvisoryRejections !== "function"
+        ? {}
+        : {
+            getAdvisoryRejections: () =>
+              runtimeHost.getStructuralAdvisoryRejections(),
+          }),
+      ...(typeof runtimeHost.getStructuralAdvisoryGradeEvidence !== "function"
+        ? {}
+        : {
+            getAdvisoryGradeEvidence: () =>
+              runtimeHost.getStructuralAdvisoryGradeEvidence(),
+          }),
+      ...(typeof runtimeHost.recordStructuralAdvisoryTransition !== "function"
+        ? {}
+        : {
+            recordAdvisoryTransition: (transition: {
+              advisory: StructuralAdvisory;
+              from: string | null;
+              to: string;
+            }) =>
+              runtimeHost
+                .recordStructuralAdvisoryTransition({
+                  ...transition,
+                  timestamp: new Date().toISOString(),
+                })
+                .then(() => undefined),
+          }),
       ...(linearTracker === null
         ? {}
         : {

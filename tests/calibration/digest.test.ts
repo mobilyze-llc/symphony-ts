@@ -725,6 +725,70 @@ describe("calibration digest (SYMPH-411)", () => {
     expect(digest).toContain("| stale | 0 | 0 | 1 | n/a | seq 12→? |");
   });
 
+  it("joins structural grades, dedupes re-emissions, counts flips, and buckets orphan grades", () => {
+    const advisory = (sequence: number, from: string | null, to: string) =>
+      entry({
+        sequence,
+        kind: "structural_advisory",
+        metadata: {
+          advisory_id: "fp-1",
+          advisory_class: "3-5:existing-root",
+          lifecycle_from: from,
+          lifecycle_to: to,
+        },
+      });
+    const report = computeCalibrationReport([
+      advisory(1, null, "active"),
+      advisory(2, "active", "dormant"),
+      advisory(3, "dormant", "active"),
+      entry({
+        sequence: 4,
+        kind: "structural_advisory_grade",
+        metadata: { advisory_id: "fp-1", decision: "partial" },
+      }),
+      entry({
+        sequence: 5,
+        kind: "structural_advisory_grade",
+        metadata: { advisory_id: "orphan", decision: "reject" },
+      }),
+    ]);
+
+    expect(report.structuralAdvisoryDecisions).toEqual([
+      {
+        advisoryId: "fp-1",
+        advisoryClass: "3-5:existing-root",
+        advisorySequence: 1,
+        decision: "partial",
+        gradeSequence: 4,
+        flipCount: 2,
+      },
+    ]);
+    expect(report.structuralAdvisoryPrecisionByClass[0]).toMatchObject({
+      accepted: 0,
+      partial: 1,
+      rejected: 0,
+      undecided: 0,
+      precision: 1,
+    });
+    expect(report.structuralAdvisoryPrecisionByClass[0]).not.toHaveProperty(
+      "flipRate",
+    );
+    expect(report.structuralAdvisoryStability).toEqual([
+      {
+        advisoryId: "fp-1",
+        advisoryClass: "3-5:existing-root",
+        firstSeenAt: "2026-06-01T00:00:01.000Z",
+        lastSeenAt: "2026-06-01T00:00:03.000Z",
+        flipCount: 2,
+        decision: "partial",
+        undecidedAgeMs: null,
+      },
+    ]);
+    expect(report.orphanStructuralAdvisoryGrades).toEqual([
+      { advisoryId: "orphan", gradeSequence: 5, decision: "reject" },
+    ]);
+  });
+
   it("renders the synthetic journal to the expected golden digest", () => {
     const raw = readFileSync(
       join(FIXTURE_DIR, "synthetic-journal.jsonl"),

@@ -83,6 +83,18 @@ mutation. Precision = accepted / (accepted + rejected).
 
 _No hygiene proposals in window._
 
+## Structural advisory precision and lifecycle stability
+
+Transition-only advisory records join to the first grade by fingerprint.
+Partial grades count as accepted-with-member-delta. Class precision is
+reported separately from per-fingerprint lifecycle stability.
+
+_No structural advisory stability rows._
+
+_No structural advisories in window._
+
+Orphan grades: none.
+
 ## Queue baseline (week zero)
 
 FIFO-control samples recorded before queue-triage lanes gain authority.

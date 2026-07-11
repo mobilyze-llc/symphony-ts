@@ -24,6 +24,7 @@ import {
   recordPlanControlDecision,
   recordPlanDecision,
   recordPlanRevision,
+  recordStructuralAdvisoryState,
 } from "../../src/orchestrator/standing-plan-store.js";
 import type { PlanBody } from "../../src/orchestrator/standing-plan-supersession.js";
 
@@ -502,6 +503,124 @@ describe("standing-plan store", () => {
         optionMarker: "[opt-1]",
         verb: "release_batch",
         batchId: "b1",
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves terminal advisory state across stale report refreshes and permits only explicit rejected-evidence revival", async () => {
+    const root = tmpRoot();
+    const planBody = body([lookahead("b1", "SYMPH-1")]);
+    const advisoryBase = {
+      memberIssueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+      rootCauseHypothesis: "Shared root",
+      structuralFix: "Fix root",
+      confidenceNote: "High",
+      memberSetHash: "members-1",
+      advisoryFingerprint: "fp-1",
+      lifecycleState: "active" as const,
+      rendered: true,
+    };
+    const withdrawnBase = {
+      ...advisoryBase,
+      memberIssueIdentifiers: ["SYMPH-3", "SYMPH-4"],
+      memberSetHash: "members-2",
+      advisoryFingerprint: "fp-2",
+    };
+    try {
+      await recordPlanRevision(
+        root,
+        {
+          ...planBody,
+          structuralAdvisories: [advisoryBase, withdrawnBase],
+        },
+        { planId: "plan-1", createdAt: "2026-06-18T00:00:00.000Z" },
+      );
+      await recordStructuralAdvisoryState(root, {
+        advisoryFingerprint: "fp-1",
+        lifecycleState: "graded",
+        createdAt: "2026-06-18T00:01:00.000Z",
+      });
+      await recordStructuralAdvisoryState(root, {
+        advisoryFingerprint: "fp-2",
+        lifecycleState: "withdrawn",
+        createdAt: "2026-06-18T00:02:00.000Z",
+      });
+
+      const staleRefresh = await recordPlanRevision(
+        root,
+        {
+          ...planBody,
+          structuralAdvisories: [advisoryBase, withdrawnBase],
+        },
+        { createdAt: "2026-06-18T00:03:00.000Z" },
+      );
+      expect(
+        staleRefresh.plan.structuralAdvisories?.map((item) => [
+          item.advisoryFingerprint,
+          item.lifecycleState,
+          item.rendered,
+        ]),
+      ).toEqual([
+        ["fp-1", "graded", false],
+        ["fp-2", "withdrawn", false],
+      ]);
+
+      const changedBody = body(
+        [lookahead("b1", "SYMPH-1"), lookahead("b2", "SYMPH-2")],
+        [{ issueIdentifier: "SYMPH-2", dependsOn: "SYMPH-1" }],
+      );
+      const changedContentRefresh = await recordPlanRevision(
+        root,
+        {
+          ...changedBody,
+          structuralAdvisories: [advisoryBase, withdrawnBase],
+        },
+        { createdAt: "2026-06-18T00:03:30.000Z" },
+      );
+      expect(changedContentRefresh.plan.revision).toBe(2);
+      expect(changedContentRefresh.plan.dependencyEdges).toEqual([
+        { issueIdentifier: "SYMPH-2", dependsOn: "SYMPH-1" },
+      ]);
+      expect(
+        changedContentRefresh.plan.structuralAdvisories?.map((item) => [
+          item.advisoryFingerprint,
+          item.lifecycleState,
+          item.rendered,
+        ]),
+      ).toEqual([
+        ["fp-1", "graded", false],
+        ["fp-2", "withdrawn", false],
+      ]);
+
+      const explicitRevival = await recordPlanRevision(
+        root,
+        {
+          ...changedBody,
+          structuralAdvisories: [
+            {
+              ...advisoryBase,
+              previouslyRejectedWithNewEvidence: true,
+            },
+            {
+              ...withdrawnBase,
+              previouslyRejectedWithNewEvidence: true,
+            },
+          ],
+        },
+        { createdAt: "2026-06-18T00:04:00.000Z" },
+      );
+      expect(explicitRevival.plan.structuralAdvisories?.[0]).toMatchObject({
+        advisoryFingerprint: "fp-1",
+        lifecycleState: "active",
+        rendered: true,
+        previouslyRejectedWithNewEvidence: true,
+      });
+      expect(explicitRevival.plan.structuralAdvisories?.[1]).toMatchObject({
+        advisoryFingerprint: "fp-2",
+        lifecycleState: "withdrawn",
+        rendered: false,
       });
     } finally {
       rmSync(root, { recursive: true, force: true });

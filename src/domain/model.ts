@@ -297,6 +297,13 @@ export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
   // authority; it only labels proposal quality for calibration.
   "hygiene_proposal",
   "hygiene_proposal_decision",
+  // Root-cause-aware backlog Manager calibration family (SYMPH-1108/1109).
+  // Advisory observations are transition-only; grades join by advisory_id.
+  // advisory_outcome is reserved before the first ground-truth producer so a
+  // later root-fix/symptom-reopen join needs no journal schema migration.
+  "structural_advisory",
+  "structural_advisory_grade",
+  "advisory_outcome",
   // Deterministic dispatch comparator disagreement (SYMPH-485): emitted when
   // the actual dispatch pick differs from the computed-order head.
   "ordering_disagreement",

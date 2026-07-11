@@ -23,6 +23,8 @@ export interface StructuralAdvisory {
   absentOkTicks?: number;
   conflictIssueIdentifiers?: string[];
   rendered?: boolean;
+  /** Exact rejected member set revived because at least one member changed. */
+  previouslyRejectedWithNewEvidence?: boolean;
 }
 
 export function isStructuralAdvisories(
@@ -70,7 +72,9 @@ function isStructuralAdvisory(value: unknown): value is StructuralAdvisory {
           (identifier) => typeof identifier === "string",
         ))) &&
     ((value as StructuralAdvisory).rendered === undefined ||
-      typeof (value as StructuralAdvisory).rendered === "boolean")
+      typeof (value as StructuralAdvisory).rendered === "boolean") &&
+    (advisory.previouslyRejectedWithNewEvidence === undefined ||
+      typeof advisory.previouslyRejectedWithNewEvidence === "boolean")
   );
 }
 

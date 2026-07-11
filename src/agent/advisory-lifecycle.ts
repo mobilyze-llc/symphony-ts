@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type { StructuralAdvisory } from "../domain/structural-advisory.js";
+import type { StructuralAdvisoryRejection } from "../orchestrator/structural-advisory-journal.js";
 
 const ROOT_SLUG_LIMIT = 120;
 
@@ -10,7 +11,13 @@ export interface AdvisoryLifecycleConfig {
 }
 
 interface AdvisoryLifecycleEvent {
-  kind: "emitted" | "invalid_members" | "transition" | "conflict" | "truncated";
+  kind:
+    | "emitted"
+    | "invalid_members"
+    | "transition"
+    | "conflict"
+    | "truncated"
+    | "suppressed";
   memberSetHash?: string;
   advisoryFingerprint?: string;
   from?: string;
@@ -20,6 +27,7 @@ interface AdvisoryLifecycleEvent {
   conflictIssueIdentifiers?: string[];
   emittedCount?: number;
   renderedCount?: number;
+  advisory?: StructuralAdvisory;
 }
 
 export interface ApplyAdvisoryLifecycleInput {
@@ -32,6 +40,8 @@ export interface ApplyAdvisoryLifecycleInput {
   resolveRootIssueIdentifier?: (identifier: string) => Promise<boolean>;
   /** False means the advisory-input scan was unavailable, so absence is no-signal. */
   scanComplete?: boolean;
+  rejectedMemberSets?: readonly StructuralAdvisoryRejection[];
+  issueActivity?: ReadonlyMap<string, string | null>;
 }
 
 export interface ApplyAdvisoryLifecycleResult {
@@ -61,18 +71,22 @@ export async function applyAdvisoryLifecycle(
   input: ApplyAdvisoryLifecycleInput,
 ): Promise<ApplyAdvisoryLifecycleResult> {
   const events: AdvisoryLifecycleEvent[] = [];
+  const previousByFingerprint = new Map<string, StructuralAdvisory>();
   const previousByMembers = new Map<string, StructuralAdvisory[]>();
   const previousFingerprints = new Set<string>();
   for (const advisory of input.previous) {
-    if (advisory.memberSetHash !== undefined) {
-      const group = previousByMembers.get(advisory.memberSetHash) ?? [];
-      previousByMembers.set(advisory.memberSetHash, [...group, advisory]);
-    }
     if (advisory.advisoryFingerprint !== undefined) {
       previousFingerprints.add(advisory.advisoryFingerprint);
+      previousByFingerprint.set(advisory.advisoryFingerprint, advisory);
+    }
+    if (advisory.memberSetHash !== undefined) {
+      const group = previousByMembers.get(advisory.memberSetHash) ?? [];
+      group.push(advisory);
+      previousByMembers.set(advisory.memberSetHash, group);
     }
   }
-  const seenMemberSets = new Set<string>();
+  const seenFingerprints = new Set<string>();
+  const observedMemberSets = new Set<string>();
   const transitionedMemberSets = new Set<string>();
   const active: StructuralAdvisory[] = [];
 
@@ -100,14 +114,33 @@ export async function applyAdvisoryLifecycle(
       memberSetHash,
       emitted.rootCauseHypothesis,
     );
-    seenMemberSets.add(memberSetHash);
-    const prior = previousByMembers.get(memberSetHash)?.[0];
+    // Observation ownership is the exact member set (KTD-1), not the root
+    // wording fingerprint. Mark it before suppression so a rejected proposal
+    // still counts as observed and cannot fabricate an absence transition.
+    observedMemberSets.add(memberSetHash);
+    const prior = previousByFingerprint.get(advisoryFingerprint);
+    const sharedPrior = (previousByMembers.get(memberSetHash) ?? []).find(
+      (candidate) =>
+        candidate.lifecycleState !== "graded" &&
+        candidate.lifecycleState !== "withdrawn",
+    );
     const terminalCount = members.filter((identifier) =>
       input.terminalIssueIdentifiers?.has(identifier),
     ).length;
     const terminalState = prior?.lifecycleState;
-    const lifecycleState =
-      terminalState === "graded" || terminalState === "withdrawn"
+    const rejection = latestRejection(
+      input.rejectedMemberSets ?? [],
+      memberSetHash,
+    );
+    const rejectedWithNewEvidence =
+      rejection !== undefined && hasNewActivity(rejection, input.issueActivity);
+    const explicitTerminalRevival =
+      terminalState === "graded" &&
+      rejection?.advisoryId === advisoryFingerprint &&
+      rejectedWithNewEvidence;
+    const lifecycleState = explicitTerminalRevival
+      ? "active"
+      : terminalState === "graded" || terminalState === "withdrawn"
         ? terminalState
         : terminalCount > members.length / 2
           ? "withdrawn"
@@ -128,21 +161,51 @@ export async function applyAdvisoryLifecycle(
       rootIssueIdentifier: root.resolved,
       proposedRootIssueIdentifier: root.proposed,
     };
+    if (rejection !== undefined && lifecycleState === "active") {
+      if (!rejectedWithNewEvidence) {
+        events.push({
+          kind: "suppressed",
+          memberSetHash,
+          advisoryFingerprint,
+          advisory,
+        });
+        continue;
+      }
+      advisory.previouslyRejectedWithNewEvidence = true;
+    }
+    seenFingerprints.add(advisoryFingerprint);
     active.push(advisory);
     if (!previousFingerprints.has(advisoryFingerprint)) {
-      events.push({ kind: "emitted", memberSetHash, advisoryFingerprint });
+      events.push({
+        kind: "emitted",
+        memberSetHash,
+        advisoryFingerprint,
+        advisory,
+      });
     }
     if (
       !transitionedMemberSets.has(memberSetHash) &&
-      prior?.lifecycleState === "dormant" &&
+      sharedPrior?.lifecycleState === "dormant" &&
       lifecycleState === "active"
     ) {
       transitionedMemberSets.add(memberSetHash);
+      const transitionAdvisory = {
+        ...sharedPrior,
+        lifecycleState: "active" as const,
+        absentOkTicks: 0,
+        rendered: false,
+      };
       events.push({
         kind: "transition",
         memberSetHash,
+        ...(transitionAdvisory.advisoryFingerprint === undefined
+          ? {}
+          : {
+              advisoryFingerprint: transitionAdvisory.advisoryFingerprint,
+            }),
         from: "dormant",
         to: "active",
+        advisory: transitionAdvisory,
       });
     } else if (
       !transitionedMemberSets.has(memberSetHash) &&
@@ -153,8 +216,10 @@ export async function applyAdvisoryLifecycle(
       events.push({
         kind: "transition",
         memberSetHash,
+        advisoryFingerprint,
         from: "active",
         to: "withdrawn",
+        advisory,
       });
     }
     if (conflicts.length > 0) {
@@ -168,48 +233,74 @@ export async function applyAdvisoryLifecycle(
 
   const dormant = [...previousByMembers.entries()].flatMap(
     ([memberSetHash, group]) => {
-      const prior = group[0];
-      if (prior === undefined || seenMemberSets.has(memberSetHash)) return [];
-      if (input.scanComplete === false) return group;
-      if (
-        prior.lifecycleState === "withdrawn" ||
-        prior.lifecycleState === "graded"
-      ) {
-        return group.map((advisory) => ({ ...advisory, rendered: false }));
+      const unseen = group.filter(
+        (prior) =>
+          prior.advisoryFingerprint === undefined ||
+          !seenFingerprints.has(prior.advisoryFingerprint),
+      );
+      if (unseen.length === 0) return [];
+      if (input.scanComplete === false) return unseen;
+      if (observedMemberSets.has(memberSetHash)) {
+        return unseen.map((prior) =>
+          prior.lifecycleState === "graded" ||
+          prior.lifecycleState === "withdrawn"
+            ? { ...prior, rendered: false }
+            : {
+                ...prior,
+                lifecycleState: "active" as const,
+                absentOkTicks: 0,
+                rendered: false,
+              },
+        );
       }
-      const terminalCount = prior.memberIssueIdentifiers.filter((identifier) =>
+
+      const lifecycleMembers = group.filter(
+        (prior) =>
+          prior.lifecycleState !== "graded" &&
+          prior.lifecycleState !== "withdrawn",
+      );
+      const owner = lifecycleMembers[0];
+      if (owner === undefined) {
+        return unseen.map((prior) => ({ ...prior, rendered: false }));
+      }
+      const terminalCount = owner.memberIssueIdentifiers.filter((identifier) =>
         input.terminalIssueIdentifiers?.has(identifier),
       ).length;
-      if (terminalCount > prior.memberIssueIdentifiers.length / 2) {
-        events.push({
-          kind: "transition",
-          memberSetHash,
-          from: prior.lifecycleState ?? "active",
-          to: "withdrawn",
-        });
-        return group.map((advisory) => ({
-          ...advisory,
-          lifecycleState: "withdrawn" as const,
-          rendered: false,
-        }));
-      }
-      const absentOkTicks = (prior.absentOkTicks ?? 0) + 1;
+      const absentOkTicks = (owner.absentOkTicks ?? 0) + 1;
       const lifecycleState: StructuralAdvisory["lifecycleState"] =
-        absentOkTicks >= input.config.dormantOkTicks ? "withdrawn" : "dormant";
-      if (lifecycleState !== prior.lifecycleState) {
+        terminalCount > owner.memberIssueIdentifiers.length / 2 ||
+        absentOkTicks >= input.config.dormantOkTicks
+          ? "withdrawn"
+          : "dormant";
+      if (lifecycleState !== owner.lifecycleState) {
+        const transitioned = {
+          ...owner,
+          lifecycleState,
+          absentOkTicks,
+          rendered: false,
+        };
         events.push({
           kind: "transition",
           memberSetHash,
-          from: prior.lifecycleState ?? "active",
+          ...(owner.advisoryFingerprint === undefined
+            ? {}
+            : { advisoryFingerprint: owner.advisoryFingerprint }),
+          from: owner.lifecycleState ?? "active",
           to: lifecycleState,
+          advisory: transitioned,
         });
       }
-      return group.map((advisory) => ({
-        ...advisory,
-        lifecycleState,
-        absentOkTicks,
-        rendered: false,
-      }));
+      return unseen.map((prior) =>
+        prior.lifecycleState === "graded" ||
+        prior.lifecycleState === "withdrawn"
+          ? { ...prior, rendered: false }
+          : {
+              ...prior,
+              lifecycleState,
+              absentOkTicks,
+              rendered: false,
+            },
+      );
     },
   );
 
@@ -235,6 +326,28 @@ export async function applyAdvisoryLifecycle(
     });
   }
   return { advisories, events };
+}
+
+function latestRejection(
+  rejections: readonly StructuralAdvisoryRejection[],
+  memberSetHash: string,
+): StructuralAdvisoryRejection | undefined {
+  return rejections
+    .filter((rejection) => rejection.memberSetHash === memberSetHash)
+    .sort((a, b) => b.gradeSequence - a.gradeSequence)[0];
+}
+
+function hasNewActivity(
+  rejection: StructuralAdvisoryRejection,
+  activity: ReadonlyMap<string, string | null> | undefined,
+): boolean {
+  if (activity === undefined) return false;
+  return Object.entries(rejection.memberActivityAtGrade).some(
+    ([identifier, prior]) => {
+      const current = activity.get(identifier) ?? null;
+      return current !== null && (prior === null || current > prior);
+    },
+  );
 }
 
 function normalizeRootSlug(value: string): string {
