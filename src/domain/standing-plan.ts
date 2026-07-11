@@ -45,6 +45,10 @@ import {
   type PlanBatchMode,
   type PlanBatchStatus,
 } from "./plan-batch-contract.js";
+import {
+  type StructuralAdvisory,
+  isStructuralAdvisories,
+} from "./structural-advisory.js";
 
 /**
  * A resolved, directed execution-dependency edge (SYMPH-843): `issueIdentifier`
@@ -166,28 +170,20 @@ export const PLAN_REVISION_SOURCES = [
 
 export type PlanRevisionSource = (typeof PLAN_REVISION_SOURCES)[number];
 
-/**
- * A single revision of the standing plan — the journaled unit. The latest
- * `plan_revision` entry projects to the current StandingPlan read-model.
- */
+/** A journaled standing-plan revision; the latest entry is the read model. */
 export interface PlanRevision {
-  /** Monotonic within a planId. */
   revision: number;
-  /** Stable identity of the living plan across revisions. */
   planId: string;
-  /** sha256 over the normalized batches+DAG+options+envelope. */
   contentHash: string;
-  /** The prior revision this one replaces (null for the first). */
   supersedes: number | null;
   createdAt: string;
   envelope: PlanEnvelope;
-  /** Ordered: committed (immutable) batches first, then the lookahead tail. */
   batches: PlanBatch[];
-  /** Persisted execution-dependency DAG over planned issue identifiers. */
   dependencyEdges: PlanDependencyEdge[];
   options: PlanOptionLine[];
   rationale: string;
   premises?: PlanPremiseRecord[];
+  structuralAdvisories?: StructuralAdvisory[];
   findings?: PlanReviewFinding[];
   reviewRecords?: PlanReviewRecord[];
   source: PlanRevisionSource;
@@ -251,9 +247,11 @@ export interface StandingPlan {
   options: PlanOptionLine[];
   rationale: string;
   premises?: PlanPremiseRecord[];
+  structuralAdvisories?: StructuralAdvisory[];
   findings?: PlanReviewFinding[];
   reviewRecords?: PlanReviewRecord[];
   createdAt: string;
+  optionsPublishedAt?: string;
   updatedAt: string;
 }
 
@@ -529,6 +527,8 @@ function isPlanRevision(value: unknown): value is PlanRevision {
     value.options.every(isPlanOptionLine) &&
     typeof value.rationale === "string" &&
     (value.premises === undefined || isPlanPremiseRecords(value.premises)) &&
+    (value.structuralAdvisories === undefined ||
+      isStructuralAdvisories(value.structuralAdvisories)) &&
     (value.findings === undefined ||
       (Array.isArray(value.findings) &&
         value.findings.every(isPlanReviewFinding))) &&

@@ -98,6 +98,37 @@ describe("renderStandingPlanControlDoc", () => {
     expect(md).toContain("(none)");
     expect(md).not.toContain("Review findings");
     expect(md).toContain("Triage intake unavailable");
+    expect(md).toContain("Structural advisories (report-only)");
+  });
+
+  it("renders sanitized and bounded structural advisory details", () => {
+    const md = renderStandingPlanControlDoc({
+      plan: {
+        ...plan(),
+        structuralAdvisories: [
+          {
+            memberIssueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+            rootCauseHypothesis:
+              "``` [opt-7] [root](https://evil.example) api_token=secret",
+            structuralFix: `Centralize ${"x".repeat(2_000)}`,
+            confidenceNote: "Two\nmatching symptoms",
+          },
+        ],
+      },
+      recentlyShipped: [],
+      inFlight: [],
+      changelog: [],
+    });
+
+    expect(md).toContain("Members: SYMPH-1, SYMPH-2");
+    expect(md).toContain("Root hypothesis:");
+    expect(md).toContain("Structural fix:");
+    expect(md).toContain("Confidence: Two matching symptoms");
+    expect(md).not.toContain("```");
+    expect(md).not.toContain("[opt-7]");
+    expect(md).toContain("root (https://evil.example)");
+    expect(md).toContain("api_token=[REDACTED]");
+    expect(md.length).toBeLessThan(2_500);
   });
 
   it("replaces a prior intake reading with unavailable on the next null render", () => {

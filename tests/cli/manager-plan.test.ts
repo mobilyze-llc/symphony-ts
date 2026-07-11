@@ -67,6 +67,29 @@ function captureIo() {
 const GOOD_ARTIFACT =
   '# Plan\n```json\n{"rationale":"go","batches":[{"mode":"parallel-isolated","issueIdentifiers":["MOB-1"],"rationale":"first"}]}\n```\n';
 
+const ADVISORY_ARTIFACT = `# Plan
+\`\`\`json
+${JSON.stringify({
+  rationale: "go",
+  batches: [
+    {
+      mode: "parallel-isolated",
+      issueIdentifiers: ["MOB-1"],
+      rationale: "first",
+    },
+  ],
+  structural_advisories: [
+    {
+      memberIssueIdentifiers: ["MOB-1", "MOB-2"],
+      rootCauseHypothesis: "Shared root",
+      structuralFix: "Centralize the fix",
+      confidenceNote: "High",
+    },
+  ],
+})}
+\`\`\`
+`;
+
 const okRunner = () => async (): Promise<PlannerRunResult> => ({
   status: "ok",
   markdown: GOOD_ARTIFACT,
@@ -640,6 +663,8 @@ describe("runManagerPlanCli", () => {
     expect(out()).toContain("MOB-1");
     // The emitted prompt shows the exact canary keys (SYMPH-836).
     expect(out()).toContain("headIssueIdentifiers");
+    expect(out()).toContain('"structural_advisories"');
+    expect(out()).toContain("non-binding and report-only");
   });
 
   it("--prompt-only writes the assembled prompt when --out-dir is provided (SYMPH-961)", async () => {
@@ -1052,6 +1077,60 @@ describe("runManagerPlanCli", () => {
     expect(out().toLowerCase()).toContain("batch");
   });
 
+  it("renders structural advisories as preview-only and never journals them", async () => {
+    const { io, out } = captureIo();
+    const outDir = await mkdtemp(join(tmpdir(), "manager-plan-advisory-"));
+    const persistPlanRevision = vi.fn<
+      NonNullable<ManagerPlanCliDependencies["persistPlanRevision"]>
+    >(async (_workspaceRoot, body, options) => ({
+      recorded: true,
+      plan: {
+        planId: options.planId ?? "plan-1",
+        revision: 1,
+        contentHash: "hash",
+        envelope: body.envelope,
+        batches: body.batches,
+        dependencyEdges: body.dependencyEdges,
+        options: body.options,
+        rationale: body.rationale,
+        createdAt: options.createdAt,
+        updatedAt: options.createdAt,
+      },
+    }));
+    try {
+      const code = await runManagerPlanCli(
+        [
+          "--team",
+          "MOB",
+          "--state",
+          "Backlog",
+          "--out-dir",
+          outDir,
+          "--persist",
+        ],
+        {
+          io,
+          env: {},
+          loadCandidates: async () => [issue("u1", "MOB-1")],
+          createPlannerRunner: () => async () => ({
+            status: "ok",
+            markdown: ADVISORY_ARTIFACT,
+          }),
+          persistPlanRevision,
+        },
+      );
+
+      expect(code).toBe(0);
+      expect(out()).toContain("preview only — not journaled by this command");
+      expect(out()).toContain("Members: MOB-1, MOB-2");
+      expect(
+        persistPlanRevision.mock.calls[0]?.[1].structuralAdvisories,
+      ).toBeUndefined();
+    } finally {
+      await rm(outDir, { recursive: true, force: true });
+    }
+  });
+
   it("does not persist by default and persists only with --persist (SYMPH-838)", async () => {
     const { io, out } = captureIo();
     const outDir = await mkdtemp(join(tmpdir(), "manager-plan-persist-"));
@@ -1185,8 +1264,10 @@ describe("runManagerPlanCli", () => {
       );
 
       expect(code).toBe(0);
+      const { structuralAdvisories: _previewOnly, ...expectedPersistedBody } =
+        expected.body;
       expect(JSON.stringify(persistPlanRevision.mock.calls[0]?.[1])).toBe(
-        JSON.stringify(expected.body),
+        JSON.stringify(expectedPersistedBody),
       );
       expect(persistPlanRevision.mock.calls[0]?.[2].findings).toEqual([
         {
@@ -1426,6 +1507,38 @@ describe("runManagerPlanCli", () => {
     expect(code).toBe(0);
     const parsed = JSON.parse(out());
     expect(parsed.batches[0].members[0].issueIdentifier).toBe("MOB-1");
+    expect(parsed.structuralAdvisoryDisposition).toBe(
+      "preview_only_not_journaled",
+    );
+  });
+
+  it("emits the normalized advisory preview payload with --json", async () => {
+    const { io, out } = captureIo();
+    const code = await runManagerPlanCli(
+      ["--team", "MOB", "--state", "Backlog", "--json"],
+      {
+        io,
+        env: {},
+        loadCandidates: async () => [issue("u1", "MOB-1")],
+        createPlannerRunner: () => async () => ({
+          status: "ok",
+          markdown: ADVISORY_ARTIFACT,
+        }),
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(JSON.parse(out())).toMatchObject({
+      structuralAdvisoryDisposition: "preview_only_not_journaled",
+      structuralAdvisories: [
+        {
+          memberIssueIdentifiers: ["MOB-1", "MOB-2"],
+          rootCauseHypothesis: "Shared root",
+          structuralFix: "Centralize the fix",
+          confidenceNote: "High",
+        },
+      ],
+    });
   });
 
   it("keeps --json machine output parseable when planner grounding emits telemetry", async () => {

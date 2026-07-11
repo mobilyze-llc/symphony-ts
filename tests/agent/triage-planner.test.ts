@@ -137,6 +137,15 @@ const malformedNonCanaryBatchCases: Array<[string, unknown]> = [
 ];
 
 describe("buildPlannerPrompt", () => {
+  it("includes the non-binding structural advisory instruction and schema", () => {
+    const prompt = buildPlannerPrompt(context());
+
+    expect(prompt).toContain('"structural_advisories"');
+    expect(prompt).toContain('"memberIssueIdentifiers"');
+    expect(prompt).toContain("scan candidates for symptom clusters");
+    expect(prompt).toContain("non-binding and report-only");
+  });
+
   it("includes backlog, envelope constraints, context, and the JSON output contract", () => {
     const prompt = buildPlannerPrompt(context());
     expect(prompt).toContain("SYMPH-1");
@@ -1178,6 +1187,95 @@ describe("buildPlannerPrompt", () => {
 });
 
 describe("parsePlannerOutput", () => {
+  it("round-trips optional structural advisories while old output stays valid", () => {
+    const legacy = parsePlannerOutput(
+      artifact({ rationale: "legacy", batches: [] }),
+    );
+    const current = parsePlannerOutput(
+      artifact({
+        rationale: "current",
+        batches: [],
+        structural_advisories: [
+          {
+            memberIssueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+            rootCauseHypothesis: "Shared parsing gap",
+            structuralFix: "Centralize parser validation",
+            confidenceNote: "High; both failures share the same edge",
+          },
+        ],
+      }),
+    );
+
+    expect(legacy.ok).toBe(true);
+    expect(current.ok).toBe(true);
+    if (legacy.ok && current.ok) {
+      expect(legacy.value.structural_advisories).toBeUndefined();
+      expect(current.value.structural_advisories).toHaveLength(1);
+    }
+  });
+
+  it("drops malformed structural advisories without rejecting valid batches", () => {
+    const validAdvisory = {
+      memberIssueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+      rootCauseHypothesis: "Shared parser gap",
+      structuralFix: "Centralize validation",
+      confidenceNote: "High",
+    };
+    const mixed = parsePlannerOutput(
+      artifact({
+        rationale: "valid plan",
+        batches: [
+          {
+            mode: "parallel-isolated",
+            issueIdentifiers: ["SYMPH-1"],
+            rationale: "valid batch",
+          },
+        ],
+        structural_advisories: [
+          validAdvisory,
+          { memberIssueIdentifiers: "not-an-array" },
+        ],
+      }),
+    );
+    const allMalformed = parsePlannerOutput(
+      artifact({
+        rationale: "valid plan",
+        batches: [
+          {
+            mode: "parallel-isolated",
+            issueIdentifiers: ["SYMPH-1"],
+            rationale: "valid batch",
+          },
+        ],
+        structural_advisories: [
+          { memberIssueIdentifiers: [] },
+          { rootCauseHypothesis: "missing required fields" },
+        ],
+      }),
+    );
+
+    expect(mixed.ok).toBe(true);
+    expect(allMalformed.ok).toBe(true);
+    if (mixed.ok && allMalformed.ok) {
+      expect(mixed.value.batches).toHaveLength(1);
+      expect(mixed.value.structural_advisories).toEqual([validAdvisory]);
+      expect(allMalformed.value.batches).toHaveLength(1);
+      expect(allMalformed.value.structural_advisories).toEqual([]);
+    }
+  });
+
+  it("rejects a non-array structural_advisories envelope", () => {
+    const result = parsePlannerOutput(
+      artifact({
+        rationale: "valid plan",
+        batches: [],
+        structural_advisories: { not: "an array" },
+      }),
+    );
+
+    expect(result.ok).toBe(false);
+  });
+
   it("extracts and validates a fenced JSON plan", () => {
     const md = artifact({
       rationale: "top first",
@@ -1368,6 +1466,49 @@ describe("parsePlannerOutput", () => {
 });
 
 describe("buildPlanBody", () => {
+  it("normalizes empty advisories to [] and sanitizes/bounds hostile free text", () => {
+    const empty = buildPlanBody(
+      { rationale: "plan", batches: [], structural_advisories: [] },
+      context(),
+    );
+    expect(empty.structuralAdvisories).toEqual([]);
+
+    const hostile = buildPlanBody(
+      {
+        rationale: "plan",
+        batches: [],
+        structural_advisories: [
+          {
+            memberIssueIdentifiers: [" SYMPH-1\n"],
+            rootCauseHypothesis:
+              "```\n[opt-1] [click](https://evil.example) api_token=supersecret",
+            structuralFix: `Centralize ${"x".repeat(2_000)}`,
+            confidenceNote: "  supported\nby two symptoms  ",
+          },
+          {
+            memberIssueIdentifiers: ["   "],
+            rootCauseHypothesis: "",
+            structuralFix: "",
+            confidenceNote: "",
+          },
+        ],
+      },
+      context(),
+    );
+
+    expect(hostile.structuralAdvisories).toHaveLength(1);
+    const advisory = hostile.structuralAdvisories?.[0];
+    expect(advisory?.memberIssueIdentifiers).toEqual(["SYMPH-1"]);
+    expect(advisory?.rootCauseHypothesis).not.toContain("```");
+    expect(advisory?.rootCauseHypothesis).not.toContain("[opt-1]");
+    expect(advisory?.rootCauseHypothesis).toContain("[REDACTED]");
+    expect(advisory?.rootCauseHypothesis).toContain(
+      "click (https://evil.example)",
+    );
+    expect(advisory?.structuralFix.length).toBeLessThanOrEqual(1_000);
+    expect(advisory?.confidenceNote).toBe("supported by two symptoms");
+  });
+
   it("never emits a batch containing a dispatch-ineligible annotated candidate", () => {
     const ctx = context();
     ctx.backlog[1]!.dispatchExclusionReasons = ["audit:kill"];

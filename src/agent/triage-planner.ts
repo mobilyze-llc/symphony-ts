@@ -18,9 +18,9 @@ import {
   type PlanDependencyEdge,
   type PlanEnvelope,
   type PlanOptionLine,
-  type PlanPremiseRecord,
 } from "../domain/standing-plan.js";
 import type { PlanBody } from "../orchestrator/standing-plan-supersession.js";
+import { normalizePlanPremises } from "./plan-premises.js";
 import {
   type PlannerCandidateAdvisoryRelations,
   type PlannerCandidateAuditAnnotation,
@@ -28,6 +28,13 @@ import {
   renderPlannerIdentifierList,
 } from "./planner-candidate-audit.js";
 import type { CuratedPlannerComment } from "./planner-comment-curation.js";
+import {
+  STRUCTURAL_ADVISORIES_SCHEMA,
+  STRUCTURAL_ADVISORY_PROMPT_INSTRUCTION_LINES,
+  STRUCTURAL_ADVISORY_PROMPT_JSON_LINES,
+  normalizeStructuralAdvisories,
+  parseStructuralAdvisories,
+} from "./structural-advisory-output.js";
 
 export type { PlannerCandidateAdvisoryRelations } from "./planner-candidate-audit.js";
 
@@ -275,6 +282,7 @@ export const PLANNER_OUTPUT_SCHEMA = z.object({
   // backward-compatible; resolved/validated in buildPlanBody.
   dependencies: PLANNER_DEPENDENCIES_SCHEMA.optional(),
   premises: PLANNER_PREMISES_SCHEMA.optional(),
+  structural_advisories: STRUCTURAL_ADVISORIES_SCHEMA.optional(),
 });
 
 const PLANNER_OUTPUT_ENVELOPE_SCHEMA = z.object({
@@ -282,6 +290,7 @@ const PLANNER_OUTPUT_ENVELOPE_SCHEMA = z.object({
   batches: z.array(z.unknown()),
   dependencies: PLANNER_DEPENDENCIES_SCHEMA.optional(),
   premises: PLANNER_PREMISES_SCHEMA.optional(),
+  structural_advisories: z.array(z.unknown()).optional(),
 });
 
 export type RawPlan = z.infer<typeof PLANNER_OUTPUT_SCHEMA>;
@@ -974,7 +983,8 @@ function renderPlannerPrompt(
     '  "premises": [',
     '    { "decisionAnchor": "SYMPH-2", "kind": "verifiable", "statement": "HARD blockedBy is empty" },',
     '    { "decisionAnchor": "batch:SYMPH-2", "kind": "judgment", "statement": "Highest expected queue value" }',
-    "  ]",
+    "  ],",
+    ...STRUCTURAL_ADVISORY_PROMPT_JSON_LINES,
     "}",
     "```",
     "- `mode` must be one of the allowed modes above.",
@@ -983,6 +993,7 @@ function renderPlannerPrompt(
     "- For `canary-chain`, set `canary` to an object with exactly these keys: `headIssueIdentifiers` (the gating head, at least one identifier) and `contingentIssueIdentifiers` (the tail, released only once the head validates) — both arrays of backlog identifiers. For every other mode set `canary` to null.",
     "- In `dependencies`, capture the cross-batch execution order you infer: an issue that must complete before another (e.g. a shared-surface foundation before its dependents). One entry per dependent issue, with its prerequisites in `dependsOn`; use only backlog identifiers. The `HARD blocked by` relations shown in the backlog are HARD constraints — never order an issue ahead of one it is blocked by.",
     "- In `premises`, add concise per-decision premises. Use `verifiable` for tracker/envelope facts and `judgment` for prioritization or risk calls.",
+    ...STRUCTURAL_ADVISORY_PROMPT_INSTRUCTION_LINES,
   );
   return lines.join("\n");
 }
@@ -1089,6 +1100,11 @@ export function parsePlannerOutput(
   }
   if (envelope.data.premises !== undefined) {
     value.premises = envelope.data.premises;
+  }
+  if (envelope.data.structural_advisories !== undefined) {
+    value.structural_advisories = parseStructuralAdvisories(
+      envelope.data.structural_advisories,
+    );
   }
   return { ok: true, value, droppedMalformedBatchCount };
 }
@@ -1210,6 +1226,9 @@ export function buildPlanBody(raw: RawPlan, context: PlannerContext): PlanBody {
     envelope: context.envelope,
     rationale: raw.rationale,
     premises: normalizePlanPremises(raw.premises, raw.rationale, batches),
+    structuralAdvisories: normalizeStructuralAdvisories(
+      raw.structural_advisories,
+    ),
     source: "planner",
     dependencyEdges: resolvePlanDependencyEdges(
       batches,
@@ -1217,48 +1236,6 @@ export function buildPlanBody(raw: RawPlan, context: PlannerContext): PlanBody {
       raw.dependencies ?? [],
     ),
   };
-}
-
-function normalizePlanPremises(
-  rawPremises: readonly PlanPremiseRecord[] | undefined,
-  rationale: string,
-  batches: readonly PlanBatch[],
-): PlanPremiseRecord[] {
-  const cleaned =
-    rawPremises
-      ?.map((premise) => ({
-        decisionAnchor: premise.decisionAnchor.trim(),
-        kind: premise.kind,
-        statement: premise.statement.trim(),
-      }))
-      .filter(
-        (premise) =>
-          premise.decisionAnchor.length > 0 && premise.statement.length > 0,
-      ) ?? [];
-  if (cleaned.length > 0) {
-    return cleaned;
-  }
-  const fallback: PlanPremiseRecord[] = [];
-  const planRationale = rationale.trim();
-  if (planRationale.length > 0) {
-    fallback.push({
-      decisionAnchor: "plan",
-      kind: "judgment",
-      statement: planRationale,
-    });
-  }
-  for (const batch of batches) {
-    const statement = batch.rationale.trim();
-    if (statement.length === 0) {
-      continue;
-    }
-    fallback.push({
-      decisionAnchor: batch.batchId,
-      kind: "judgment",
-      statement,
-    });
-  }
-  return fallback;
 }
 
 /**

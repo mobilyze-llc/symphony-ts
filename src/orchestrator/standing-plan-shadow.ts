@@ -72,8 +72,7 @@ export {
 //
 // Runs the planner on the heartbeat cadence, persists the resulting revision to
 // the standing-plan store, and LOGS the plan. In shadow mode this is the whole
-// behavior — dispatch is untouched (zero-diff). PR2 promotes the plan to drive
-// dispatch. Everything here is best-effort: a planner outage degrades (the
+// behavior — dispatch is untouched. A planner outage degrades (the
 // consumer falls back to the comparator) and never breaks the poll.
 // ---------------------------------------------------------------------------
 
@@ -896,6 +895,7 @@ function planBodyFromRevision(revision: PlanRevision): PlanBody {
     rationale: revision.rationale,
     source: revision.source,
     dependencyEdges: revision.dependencyEdges,
+    structuralAdvisories: revision.structuralAdvisories ?? [],
     ...(premises.length === 0 ? {} : { premises }),
   };
 }

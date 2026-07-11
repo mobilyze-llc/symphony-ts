@@ -67,11 +67,32 @@ export function projectStandingPlan(
     options: revision.options,
     rationale: revision.rationale,
     premises: revision.premises ?? [],
+    structuralAdvisories: revision.structuralAdvisories ?? [],
     findings: revision.findings ?? [],
     reviewRecords: revision.reviewRecords ?? [],
     createdAt: revision.createdAt,
+    optionsPublishedAt: optionsPublicationTimestamp(journal, latest),
     updatedAt: latest.timestamp,
   };
+}
+
+function optionsPublicationTimestamp(
+  journal: StandingPlanJournal,
+  latest: PlanRevisionJournalEntry,
+): string {
+  let publication = latest;
+  for (const entry of journal) {
+    if (
+      entry.kind === "plan_revision" &&
+      entry.sequence < publication.sequence &&
+      entry.planId === latest.planId &&
+      entry.revision.revision === latest.revision.revision &&
+      entry.revision.contentHash === latest.revision.contentHash
+    ) {
+      publication = entry;
+    }
+  }
+  return publication.timestamp;
 }
 
 export async function loadStandingPlan(
@@ -215,6 +236,7 @@ function refreshedReportRevision(
     return null;
   }
   const premises = body.premises ?? [];
+  const structuralAdvisories = body.structuralAdvisories ?? [];
   const reviewRecords = options.reviewRecords ?? [];
   const findings = mergeReportRefreshFindings({
     prior: latest.revision.findings ?? [],
@@ -224,13 +246,20 @@ function refreshedReportRevision(
   });
   if (
     planReportHash(latest.revision) ===
-    planReportHash({ ...latest.revision, premises, findings, reviewRecords })
+    planReportHash({
+      ...latest.revision,
+      premises,
+      structuralAdvisories,
+      findings,
+      reviewRecords,
+    })
   ) {
     return null;
   }
   return {
     ...latest.revision,
     premises,
+    structuralAdvisories,
     findings,
     reviewRecords,
   };
@@ -273,6 +302,7 @@ function planFindingKey(finding: PlanReviewFinding): string {
 
 function planReportHash(input: {
   premises?: readonly PlanPremiseRecord[];
+  structuralAdvisories?: PlanRevision["structuralAdvisories"];
   findings?: readonly PlanReviewFinding[];
   reviewRecords?: NonNullable<PlanRevision["reviewRecords"]>;
 }): string {
@@ -280,6 +310,7 @@ function planReportHash(input: {
     .update(
       JSON.stringify({
         premises: input.premises ?? [],
+        structuralAdvisories: input.structuralAdvisories ?? [],
         findings: input.findings ?? [],
         reviewRecords: input.reviewRecords ?? [],
       }),

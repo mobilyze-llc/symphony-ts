@@ -30,6 +30,7 @@ export interface PlanBody {
   envelope: PlanEnvelope;
   rationale: string;
   premises?: PlanPremiseRecord[];
+  structuralAdvisories?: PlanRevision["structuralAdvisories"];
   source: PlanRevisionSource;
   /**
    * Resolved execution-dependency edges (SYMPH-843): soft (model) + recorded
@@ -115,6 +116,7 @@ export function rotateRevision(
     options: optionsForLookahead,
     rationale: body.rationale,
     premises: body.premises ?? [],
+    structuralAdvisories: body.structuralAdvisories ?? [],
     findings: options.findings ?? [],
     reviewRecords: options.reviewRecords ?? [],
     source: body.source,

@@ -685,6 +685,91 @@ describe("shouldRunShadowPlanCycle", () => {
 });
 
 describe("runShadowPlanCycle", () => {
+  it("round-trips advisory-only shadow churn into the control doc without revision rotation", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-advisory-"));
+    let rootName = "Root A";
+    const planner = {
+      runClaude: async (): Promise<PlannerRunResult> => ({
+        status: "ok",
+        markdown: `# Plan\n\`\`\`json\n${JSON.stringify({
+          rationale: "go",
+          batches: [
+            {
+              mode: "parallel-isolated",
+              issueIdentifiers: ["SYMPH-1"],
+              rationale: "first",
+            },
+          ],
+          structural_advisories: [
+            {
+              memberIssueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+              rootCauseHypothesis: rootName,
+              structuralFix: `Fix ${rootName}`,
+              confidenceNote: "High",
+            },
+          ],
+        })}\n\`\`\`\n`,
+      }),
+    };
+    const context = assembleShadowPlannerContext({
+      candidates: [issue("u1", "SYMPH-1")],
+      inFlight: [],
+      envelope: ENVELOPE,
+    });
+    try {
+      const first = await runShadowPlanCycle({
+        workspaceRoot: root,
+        context,
+        planner,
+        log: () => undefined,
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+        planId: "plan-1",
+      });
+      rootName = "Root B";
+      const second = await runShadowPlanCycle({
+        workspaceRoot: root,
+        context,
+        planner,
+        log: () => undefined,
+        now: () => new Date("2026-06-18T01:05:00.000Z"),
+        planId: "plan-1",
+      });
+
+      expect(first.status).toBe("ok");
+      expect(second.status).toBe("ok");
+      if (first.status === "ok" && second.status === "ok") {
+        expect(second.revision).toBe(first.revision);
+        expect(second.recorded).toBe(true);
+      }
+      const plan = await loadStandingPlan(root);
+      expect(plan?.structuralAdvisories?.[0]?.rootCauseHypothesis).toBe(
+        "Root B",
+      );
+      expect(plan?.updatedAt).toBe("2026-06-18T01:05:00.000Z");
+      expect(plan?.optionsPublishedAt).toBe("2026-06-18T01:00:00.000Z");
+      if (plan === null) {
+        throw new Error("expected a persisted plan");
+      }
+      expect(
+        shouldRunShadowPlanCycle({
+          plan,
+          nowMs: Date.parse("2026-06-18T01:05:30.000Z"),
+          heartbeatMs: 60_000,
+        }),
+      ).toBe(false);
+      const doc = renderStandingPlanControlDoc({
+        plan,
+        recentlyShipped: [],
+        inFlight: [],
+        changelog: [],
+      });
+      expect(doc).toContain("Structural advisories (report-only)");
+      expect(doc).toContain("Root hypothesis: Root B");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("records a revision and logs the plan (shadow, no dispatch)", async () => {
     const root = mkdtempSync(join(tmpdir(), "symph-shadow-"));
     const logs: Array<{ event: string; fields: Record<string, unknown> }> = [];
