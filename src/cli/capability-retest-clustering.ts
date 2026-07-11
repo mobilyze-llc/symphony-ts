@@ -11,6 +11,7 @@ import {
   type ClusteringBenchmarkCapabilityLedgerRow,
   appendClusteringBenchmarkCapabilityLedgerRowWithLock,
 } from "../logging/capability-ledger.js";
+import { resolveToolFreeIsolationTier } from "./clustering-tool-free-runner.js";
 
 export interface ClusteringCapabilityRetestDependencies {
   runInference?: ClusteringInference;
@@ -67,6 +68,7 @@ export async function runClusteringCapabilityRetest(input: {
     run_id: input.runId,
     generated_at: input.generatedAt,
     model: input.model,
+    isolation_tier: resolveToolFreeIsolationTier(input.model),
     result: result as unknown as Record<string, unknown>,
   });
   return result;

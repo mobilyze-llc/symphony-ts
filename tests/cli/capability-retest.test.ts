@@ -197,6 +197,7 @@ describe("capability re-test CLI", () => {
     });
     const rows = await readClusteringBenchmarkCapabilityLedger(root);
     expect(rows).toHaveLength(1);
+    expect(rows[0]?.isolation_tier).toBe("tool_free");
     expect(rows[0]).toMatchObject({
       run_id: "clustering-run-1",
       model: "opus",

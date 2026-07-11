@@ -128,6 +128,15 @@ describe("clustering golden-set scoring", () => {
     };
     const namedScore = scoreStructuralAdvisories(fixture, [named]);
     expect(namedScore.rootIdentificationAccuracy).toBe(0);
+    // A malformed non-null value still named a root — it is not a decline.
+    const malformed: StructuralAdvisory = {
+      ...declined,
+      rootIssueIdentifier: "not-an-issue",
+    };
+    expect(
+      scoreStructuralAdvisories(fixture, [malformed])
+        .rootIdentificationAccuracy,
+    ).toBe(0);
   });
 
   it("scores an explicit root identifier before falling back to hypothesis prose", async () => {

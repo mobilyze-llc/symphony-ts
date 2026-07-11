@@ -128,9 +128,11 @@ export function scoreStructuralAdvisories(
       prediction.rootIssueIdentifier,
     );
     if (expectedRoots.size === 0) {
-      // A null-root key cluster asserts no canonical root exists; declining
-      // to name one is the correct answer, not a miss.
-      return explicitRoot === null;
+      // A null-root key cluster asserts no canonical root exists; only an
+      // actual decline (absent/null/empty root field) is correct. A malformed
+      // non-null value ("null", "not-an-issue") named a root and is a miss.
+      const raw = prediction.rootIssueIdentifier;
+      return raw === null || raw === undefined || raw.trim() === "";
     }
     const predictedRoots =
       explicitRoot === null

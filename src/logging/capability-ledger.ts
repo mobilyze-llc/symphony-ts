@@ -31,6 +31,7 @@ const ClusteringBenchmarkCapabilityLedgerRowSchema = z
     run_id: z.string().min(1),
     generated_at: z.string().min(1),
     model: z.string().min(1),
+    isolation_tier: z.enum(["tool_free", "reduced_sandbox"]).optional(),
     result: z.record(z.string(), z.unknown()),
   })
   .strict();

@@ -101,6 +101,20 @@ export function createToolFreeClusteringPlannerRunner(input: {
   };
 }
 
+export type ToolFreeIsolationTier = "tool_free" | "reduced_sandbox";
+
+/**
+ * Claude runs truly tool-free (`--tools ""`); codex has no disable-all-tools
+ * flag, so `openai/*` models run under a read-only sandbox that still permits
+ * model-generated shell reads. Rows produced at `reduced_sandbox` are for
+ * cross-model comparison only and are not gate-authoritative.
+ */
+export function resolveToolFreeIsolationTier(
+  model: string,
+): ToolFreeIsolationTier {
+  return model.startsWith("openai/") ? "reduced_sandbox" : "tool_free";
+}
+
 interface ToolFreeInvocation {
   command: string;
   args: string[];
