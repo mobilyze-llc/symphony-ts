@@ -436,6 +436,24 @@ describe("capability re-test CLI", () => {
         "SYMPH-944",
       ),
     ).toThrow(/did not contain a verdict JSON object/);
+    // A verdict nested inside a contract-invalid wrapper never matches — the
+    // final answer must be a standalone object (whole response or own line).
+    expect(() =>
+      parseCapabilityRetestVerdictResponse(
+        {
+          status: "ok",
+          markdown: '{"answer":{"verdict":"kill"},"extra":true}',
+        },
+        "SYMPH-941",
+      ),
+    ).toThrow(/did not contain a verdict JSON object/);
+    // A pretty-printed pure verdict object still parses.
+    expect(
+      parseCapabilityRetestVerdictResponse(
+        { status: "ok", markdown: '{\n  "verdict": "reframe"\n}' },
+        "SYMPH-957",
+      ),
+    ).toBe("reframe");
   });
 
   it.each([

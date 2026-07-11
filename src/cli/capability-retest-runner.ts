@@ -64,12 +64,20 @@ export function parseCapabilityRetestVerdictResponse(
   }
   // Match the exact verdict contract rather than slicing first-{ to last-}:
   // a verbose-but-correct response containing any second brace region breaks
-  // the naive slice (observed with fable, 2026-07-11). The last match wins —
-  // models that reason first state their final answer last.
-  const matches = response.markdown.match(
-    /\{\s*"verdict"\s*:\s*"[a-z]+"\s*\}/gi,
-  );
-  const candidate = matches?.at(-1);
+  // the naive slice (observed with fable, 2026-07-11). The deliberate
+  // leniency is exactly one shape: reasoning prose on other lines with the
+  // final verdict as a standalone object (whole response, or its own line;
+  // last one wins). Anchoring prevents extracting a nested verdict from a
+  // contract-invalid wrapper like {"answer":{"verdict":"kill"},"extra":true}.
+  const verdictObject = /^\{\s*"verdict"\s*:\s*"[a-z]+"\s*\}$/i;
+  const whole = response.markdown.trim();
+  const candidate = verdictObject.test(whole)
+    ? whole
+    : response.markdown
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => verdictObject.test(line))
+        .at(-1);
   if (candidate === undefined) {
     throw new Error(
       `${issueIdentifier}: model response did not contain a verdict JSON object`,
