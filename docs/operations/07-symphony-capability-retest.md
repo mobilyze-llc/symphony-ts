@@ -40,8 +40,8 @@ Options:
 Exit codes:
   0  Capability bar passed
   1  Usage error
-  2  Altitude capability bar failed (the scored ledger entries are still written)
-  3  Runner, verdict parsing, journal, or capability-ledger write unavailable
+  2  Altitude capability bar failed (the scored ledger entries are still written; parseable model output-contract violations score as wrong cases)
+  3  Runner, unrecoverable verdict parsing, journal, or capability-ledger write unavailable
 ```
 <!-- AUTOGEN:help END -->
 
@@ -61,8 +61,8 @@ symphony-capability-retest --model opus --benchmark clustering --repeats 3 --wor
 
 ## Edge cases & gotchas
 
-- A failed capability bar is a completed measurement: the command writes the ledger row, prints the score, and exits `2`.
-- Runner, response-parsing, journal-write, and capability-ledger-write failures exit `3` and do not claim a gate-authoritative scored run.
+- A failed capability bar is a completed measurement: the command writes the ledger row, prints the score, and exits `2`. Parseable model output-contract violations, such as prose after a valid verdict JSON object, are visible per case and score as wrong model behavior.
+- Runner failures, unrecoverable response parsing, journal-write, and capability-ledger-write failures exit `3` and do not claim a gate-authoritative scored run.
 - The command writes the non-authoritative dispatcher observation first. If the capability-ledger append then fails, the surviving journal row remains explicitly non-authoritative and the Phase-A gate stays unarmed.
 - Gate-authoritative capability evidence exists only in `.symphony/capability-ledger/altitude-reliability.jsonl` and survives dispatcher journal checkpoint compaction.
 - Gate-authoritative clustering evidence exists only in `.symphony/capability-ledger/clustering-benchmark.jsonl`; the CLI rejects fewer than three repeats.
@@ -78,8 +78,8 @@ symphony-capability-retest --model opus --benchmark clustering --repeats 3 --wor
 |---|---|
 | `0` | The model passed the capability bar. |
 | `1` | Arguments were invalid. |
-| `2` | The model completed the corpus but failed the bar. |
-| `3` | The run could not produce and persist a valid score. |
+| `2` | The model completed the corpus but failed the bar, including parseable output-contract violations scored as wrong cases. |
+| `3` | The run could not produce and persist a valid score because the runner, unrecoverable parsing, journal, or capability ledger was unavailable. |
 
 ## Deploy
 

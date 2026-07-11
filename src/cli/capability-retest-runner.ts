@@ -9,7 +9,9 @@ import {
 import {
   ALTITUDE_RELIABILITY_VERDICTS,
   type AltitudeReliabilityCase,
+  type AltitudeReliabilityContractViolation,
   type AltitudeReliabilityVerdict,
+  type AltitudeReliabilityVerdictObservation,
 } from "../audit/altitude-reliability.js";
 import type { ClaudeRunnerValidationConfig } from "../claude-runner/claude-runner-types.js";
 
@@ -32,7 +34,7 @@ export function createCrabrunnerVerdictRunner(input: {
 }): (
   testCase: AltitudeReliabilityCase,
   context: { model: string; workspace: string; outDir: string },
-) => Promise<AltitudeReliabilityVerdict> {
+) => Promise<AltitudeReliabilityVerdictObservation> {
   return async (testCase, _context) => {
     const artifactName = `altitude-reliability-${testCase.issueIdentifier.toLowerCase()}-${stamp(input.generatedAt)}`;
     const runner = createCrabrunnerPlannerRunner({
@@ -54,34 +56,28 @@ export function createCrabrunnerVerdictRunner(input: {
 const CapabilityRetestVerdictSchema = z
   .object({ verdict: z.enum(ALTITUDE_RELIABILITY_VERDICTS) })
   .strict();
+const CapabilityRetestVerdictCoreSchema = z
+  .object({ verdict: z.enum(ALTITUDE_RELIABILITY_VERDICTS) })
+  .passthrough();
 
 export function parseCapabilityRetestVerdictResponse(
   response: PlannerRunResult,
   issueIdentifier: string,
-): AltitudeReliabilityVerdict {
+): AltitudeReliabilityVerdictObservation {
   if (response.status !== "ok") {
     throw new Error(`${issueIdentifier}: crabrunner ${response.detail}`);
   }
-  const start = response.markdown.indexOf("{");
-  const end = response.markdown.lastIndexOf("}");
-  if (start === -1 || end < start) {
-    throw new Error(`${issueIdentifier}: model response did not contain JSON`);
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(response.markdown.slice(start, end + 1));
-  } catch (error) {
-    throw new Error(
-      `${issueIdentifier}: invalid verdict JSON: ${formatError(error)}`,
-    );
-  }
-  const verdict = CapabilityRetestVerdictSchema.safeParse(parsed);
-  if (!verdict.success) {
-    throw new Error(
-      `${issueIdentifier}: invalid verdict object: ${z.prettifyError(verdict.error)}`,
-    );
-  }
-  return verdict.data.verdict;
+  const markdown = response.markdown;
+  const candidate = findVerdictJsonCandidate(markdown, issueIdentifier);
+  const violations = [
+    ...contractProseViolations(markdown, candidate.start, candidate.end),
+    ...contractShapeViolations(candidate.parsed),
+  ];
+  if (violations.length === 0) return candidate.verdict;
+  return {
+    verdict: candidate.verdict,
+    contractViolation: modelContractViolation(violations.join("; ")),
+  };
 }
 
 function renderVerdictPrompt(testCase: AltitudeReliabilityCase): string {
@@ -103,4 +99,109 @@ function stamp(value: string): string {
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function contractProseViolations(
+  markdown: string,
+  start: number,
+  end: number,
+): string[] {
+  const violations: string[] = [];
+  if (markdown.slice(0, start).trim() !== "") {
+    violations.push("response included prose before the verdict JSON");
+  }
+  if (markdown.slice(end + 1).trim() !== "") {
+    violations.push("response included prose after the verdict JSON");
+  }
+  return violations;
+}
+
+function findVerdictJsonCandidate(
+  markdown: string,
+  issueIdentifier: string,
+): {
+  start: number;
+  end: number;
+  parsed: unknown;
+  verdict: AltitudeReliabilityVerdict;
+} {
+  let searchFrom = 0;
+  let firstParseError: string | null = null;
+  let firstCoreError: z.ZodError | null = null;
+  while (searchFrom < markdown.length) {
+    const start = markdown.indexOf("{", searchFrom);
+    if (start === -1) break;
+    const end = findJsonObjectEnd(markdown, start);
+    if (end === null) {
+      firstParseError ??= "incomplete JSON object";
+      searchFrom = start + 1;
+      continue;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(markdown.slice(start, end + 1));
+    } catch (error) {
+      firstParseError ??= formatError(error);
+      searchFrom = start + 1;
+      continue;
+    }
+    const core = CapabilityRetestVerdictCoreSchema.safeParse(parsed);
+    if (core.success) {
+      return { start, end, parsed, verdict: core.data.verdict };
+    }
+    firstCoreError ??= core.error;
+    searchFrom = end + 1;
+  }
+  if (firstCoreError !== null) {
+    throw new Error(
+      `${issueIdentifier}: invalid verdict object: ${z.prettifyError(firstCoreError)}`,
+    );
+  }
+  if (firstParseError !== null) {
+    throw new Error(
+      `${issueIdentifier}: invalid verdict JSON: ${firstParseError}`,
+    );
+  }
+  throw new Error(`${issueIdentifier}: model response did not contain JSON`);
+}
+
+function findJsonObjectEnd(markdown: string, start: number): number | null {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < markdown.length; index += 1) {
+    const char = markdown[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+    } else if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return index;
+      if (depth < 0) return null;
+    }
+  }
+  return null;
+}
+
+function contractShapeViolations(parsed: unknown): string[] {
+  const strict = CapabilityRetestVerdictSchema.safeParse(parsed);
+  if (strict.success) return [];
+  return ["verdict JSON had extra or malformed fields"];
+}
+
+function modelContractViolation(
+  detail: string,
+): AltitudeReliabilityContractViolation {
+  return { type: "output_contract_violation", detail };
 }
