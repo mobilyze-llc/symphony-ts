@@ -68,7 +68,7 @@ export interface PlanReviewLaneUsage {
   usage: Record<string, unknown> | null;
 }
 
-export interface PlanReviewLaneFailure {
+interface PlanReviewLaneFailure {
   reviewer: string;
   error: string;
 }
