@@ -12,7 +12,7 @@ import type { StructuralAdvisory } from "../domain/structural-advisory.js";
 import {
   type ClusteringGoldenSetFixture,
   buildClusteringBenchmarkPlannerContext,
-  loadClusteringGoldenSetFixture,
+  parseClusteringGoldenSetFixture,
 } from "./clustering-benchmark-fixture.js";
 import {
   type ClusteringScore,
@@ -83,15 +83,14 @@ export async function runClusteringBenchmark(input: {
   if (!Number.isInteger(input.repeats) || input.repeats < 1) {
     throw new Error("Clustering benchmark repeats must be a positive integer");
   }
-  const fixtures = await Promise.all(
-    input.fixturePaths.map(loadClusteringGoldenSetFixture),
+  const fixtureSnapshots = await Promise.all(
+    input.fixturePaths.map(loadClusteringGoldenSetFixtureSnapshot),
   );
-  const fixtureContentHashes = await Promise.all(
-    input.fixturePaths.map(async (path, index) => ({
-      fixtureId: fixtures[index]?.fixture_id ?? path,
-      sha256: await sha256File(path),
-    })),
-  );
+  const fixtures = fixtureSnapshots.map((snapshot) => snapshot.fixture);
+  const fixtureContentHashes = fixtureSnapshots.map((snapshot) => ({
+    fixtureId: snapshot.fixture.fixture_id,
+    sha256: snapshot.sha256,
+  }));
   assertFixtureKinds(fixtures);
   const perRepeat: ClusteringBenchmarkRepeat[] = [];
   for (let repeat = 1; repeat <= input.repeats; repeat += 1) {
@@ -125,6 +124,17 @@ export async function runClusteringBenchmark(input: {
     fixtureContentHashes,
     perRepeat,
     summary: summarize(perRepeat),
+  };
+}
+
+async function loadClusteringGoldenSetFixtureSnapshot(path: string): Promise<{
+  fixture: ClusteringGoldenSetFixture;
+  sha256: string;
+}> {
+  const content = await readFile(path);
+  return {
+    fixture: parseClusteringGoldenSetFixture(content.toString("utf8")),
+    sha256: sha256Bytes(content),
   };
 }
 
@@ -244,8 +254,6 @@ function stamp(value: string): string {
   return value.replace(/[:.]/g, "-");
 }
 
-async function sha256File(path: string): Promise<string> {
-  return createHash("sha256")
-    .update(await readFile(path))
-    .digest("hex");
+function sha256Bytes(content: Buffer): string {
+  return createHash("sha256").update(content).digest("hex");
 }

@@ -173,7 +173,10 @@ async function runToolFreePlannerProcess(
       resolve(result);
     };
     child.once("error", rejectOnce);
-    child.stdin.once("error", rejectOnce);
+    child.stdin.once("error", (error) => {
+      if (timedOut) return;
+      rejectOnce(error);
+    });
     child.once("close", (code) => {
       if (timedOut) {
         resolveOnce({

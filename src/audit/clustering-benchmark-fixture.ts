@@ -92,14 +92,19 @@ export const ClusteringGoldenSetFixtureSchema = z
 export type ClusteringGoldenSetFixture = z.infer<
   typeof ClusteringGoldenSetFixtureSchema
 >;
+
+export function parseClusteringGoldenSetFixture(
+  content: string,
+): ClusteringGoldenSetFixture {
+  const fixture = ClusteringGoldenSetFixtureSchema.parse(JSON.parse(content));
+  validateFixtureReferences(fixture);
+  return fixture;
+}
+
 export async function loadClusteringGoldenSetFixture(
   path: string,
 ): Promise<ClusteringGoldenSetFixture> {
-  const fixture = ClusteringGoldenSetFixtureSchema.parse(
-    JSON.parse(await readFile(path, "utf8")),
-  );
-  validateFixtureReferences(fixture);
-  return fixture;
+  return parseClusteringGoldenSetFixture(await readFile(path, "utf8"));
 }
 
 export function reconstructFixtureAsOfCutoff(

@@ -189,6 +189,34 @@ describe("tool-free clustering planner runner", () => {
     ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("preserves timeouts when killing a non-reading child breaks stdin", async () => {
+    const root = await mkdtemp(join(tmpdir(), "clustering-tool-free-"));
+    roots.push(root);
+    const executable = join(root, "claude");
+    await writeFile(
+      executable,
+      ["#!/usr/bin/env node", "setTimeout(() => {}, 60_000);", ""].join("\n"),
+      "utf8",
+    );
+    await chmod(executable, 0o755);
+    const runner = createToolFreeClusteringPlannerRunner({
+      model: "opus",
+      workspace: root,
+      artifactDir: join(root, "artifacts"),
+      artifactName: "repeat-1",
+      env: { PATH: `${root}${delimiter}${process.env.PATH ?? ""}` },
+      timeoutMs: 10,
+    });
+
+    await expect(runner("x".repeat(16 * 1024 * 1024))).resolves.toEqual({
+      status: "unavailable",
+      detail: "tool-free Claude timed out after 10ms",
+    });
+    await expect(
+      readFile(join(root, "artifacts", "repeat-1.md"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("bounds an injected process rejection as unavailable", async () => {
     const root = await mkdtemp(join(tmpdir(), "clustering-tool-free-"));
     roots.push(root);
