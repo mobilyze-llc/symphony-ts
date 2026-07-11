@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { PlannerRunResult } from "../agent/triage-planner.js";
@@ -56,12 +56,13 @@ export function createToolFreeClusteringPlannerRunner(input: {
       "utf8",
     );
     const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const invocation = resolveToolFreeInvocation(input);
     let result: ToolFreePlannerProcessResult;
     try {
       result = await (input.runProcess ?? runToolFreePlannerProcess)({
-        command: "claude",
-        args: toolFreeClaudeArgs(input.model),
-        cwd: input.workspace,
+        command: invocation.command,
+        args: invocation.args,
+        cwd: invocation.cwd,
         env: withoutExternalToolCredentials(input.env),
         stdin: prompt,
         timeoutMs,
@@ -69,26 +70,26 @@ export function createToolFreeClusteringPlannerRunner(input: {
     } catch (error) {
       return {
         status: "unavailable",
-        detail: `tool-free Claude process failed: ${bounded(errorDetail(error))}`,
+        detail: `tool-free ${invocation.command} process failed: ${bounded(errorDetail(error))}`,
       };
     }
     if (result.status === "timed_out") {
       return {
         status: "unavailable",
-        detail: `tool-free Claude timed out after ${timeoutMs}ms`,
+        detail: `tool-free ${invocation.command} timed out after ${timeoutMs}ms`,
       };
     }
     if (result.exitCode !== 0) {
       return {
         status: "unavailable",
-        detail: `tool-free Claude exited ${result.exitCode}: ${bounded(result.stderr)}`,
+        detail: `tool-free ${invocation.command} exited ${result.exitCode}: ${bounded(result.stderr)}`,
       };
     }
-    const markdown = result.stdout.trim();
+    const markdown = (await invocation.readOutput(result)).trim();
     if (markdown === "") {
       return {
         status: "unavailable",
-        detail: "tool-free Claude returned empty output",
+        detail: `tool-free ${invocation.command} returned empty output`,
       };
     }
     await writeFile(
@@ -97,6 +98,73 @@ export function createToolFreeClusteringPlannerRunner(input: {
       "utf8",
     );
     return { status: "ok", markdown };
+  };
+}
+
+interface ToolFreeInvocation {
+  command: string;
+  args: string[];
+  cwd: string;
+  readOutput: (
+    result: Extract<ToolFreePlannerProcessResult, { status: "completed" }>,
+  ) => Promise<string>;
+}
+
+function resolveToolFreeInvocation(input: {
+  model: string;
+  workspace: string;
+  artifactDir: string;
+  artifactName: string;
+}): ToolFreeInvocation {
+  const openaiModel = input.model.startsWith("openai/")
+    ? input.model.slice("openai/".length)
+    : null;
+  if (openaiModel === null) {
+    return {
+      command: "claude",
+      args: toolFreeClaudeArgs(input.model),
+      cwd: input.workspace,
+      readOutput: async (result) => result.stdout,
+    };
+  }
+  // OpenAI models run through `codex exec`. This is a reduced-isolation
+  // approximation of the claude tool-free boundary: codex has no
+  // disable-all-tools flag, so isolation comes from the read-only sandbox, a
+  // neutral cwd (the artifact dir, which holds only this run's prompt and
+  // output), an ephemeral session, and ignored user config/rules. The final
+  // message is read from --output-last-message rather than stdout, which
+  // carries progress logs.
+  const lastMessagePath = join(
+    input.artifactDir,
+    `${input.artifactName}.codex-last-message.md`,
+  );
+  return {
+    command: "codex",
+    args: [
+      "exec",
+      "-m",
+      openaiModel,
+      "-s",
+      "read-only",
+      "-C",
+      input.artifactDir,
+      "--skip-git-repo-check",
+      "--ephemeral",
+      "--ignore-user-config",
+      "--ignore-rules",
+      "--color",
+      "never",
+      "--output-last-message",
+      lastMessagePath,
+    ],
+    cwd: input.artifactDir,
+    readOutput: async (result) => {
+      try {
+        return await readFile(lastMessagePath, "utf8");
+      } catch {
+        return result.stdout;
+      }
+    },
   };
 }
 

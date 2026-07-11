@@ -31,11 +31,12 @@ afterEach(async () => {
 
 function advisory(
   members: string[],
-  root = members[0] ?? "MOB-0",
+  root: string | null | undefined = members[0] ?? "MOB-0",
 ): StructuralAdvisory {
+  const rootLabel = root ?? members[0] ?? "MOB-0";
   return {
     memberIssueIdentifiers: members,
-    rootCauseHypothesis: `${root} is the shared root`,
+    rootCauseHypothesis: `${rootLabel} is the shared root`,
     structuralFix: "Fix the shared root once",
     confidenceNote: "Frozen-fixture test prediction",
   };
@@ -69,6 +70,64 @@ describe("clustering golden-set scoring", () => {
     expect(
       scoreStructuralAdvisories(fixture, predicted).rootIdentificationAccuracy,
     ).toBe(1);
+  });
+
+  it("counts an explicit in-corpus root as a cluster member for pairwise scoring (SYMPH-1124)", async () => {
+    const fixture = await loadClusteringGoldenSetFixture(positivePath);
+    const cluster = fixture.answer_key.clusters.find(
+      (candidate) => candidate.root_issue_identifier !== null,
+    );
+    expect(cluster).toBeDefined();
+    if (cluster === undefined || cluster.root_issue_identifier === null) {
+      return;
+    }
+    const nonRootMembers = cluster.member_issue_identifiers.filter(
+      (identifier) => identifier !== cluster.root_issue_identifier,
+    );
+    // Root named once, in the root field, per the schema — not repeated in
+    // members. Every root<->member pair must still count.
+    const prediction: StructuralAdvisory = {
+      ...advisory(nonRootMembers, cluster.root_issue_identifier),
+      rootIssueIdentifier: cluster.root_issue_identifier,
+    };
+    const score = scoreStructuralAdvisories(fixture, [prediction]);
+    const clusterPairs =
+      (cluster.member_issue_identifiers.length *
+        (cluster.member_issue_identifiers.length - 1)) /
+      2;
+    expect(score.truePositivePairs).toBe(clusterPairs);
+    expect(score.pairwisePrecision).toBe(1);
+  });
+
+  it("scores a null prediction as correct for a null-root answer-key cluster (SYMPH-1124)", async () => {
+    const fixture = await loadClusteringGoldenSetFixture(positivePath);
+    const nullRootCluster = fixture.answer_key.clusters.find(
+      (candidate) =>
+        candidate.root_issue_identifier === null &&
+        candidate.absorbed_equivalent_root_identifiers.length === 0,
+    );
+    expect(nullRootCluster).toBeDefined();
+    if (nullRootCluster === undefined) return;
+    const declined: StructuralAdvisory = {
+      memberIssueIdentifiers: nullRootCluster.member_issue_identifiers,
+      rootCauseHypothesis:
+        "These share a disposition family; no canonical root ticket exists.",
+      structuralFix: "Dispose as a family without a superseding root.",
+      confidenceNote: "test",
+    };
+    const declinedScore = scoreStructuralAdvisories(fixture, [declined]);
+    const clusterIndex = fixture.answer_key.clusters.indexOf(nullRootCluster);
+    expect(declinedScore.rootIdentificationAccuracy).toBeGreaterThanOrEqual(
+      1 / fixture.answer_key.clusters.length,
+    );
+    expect(clusterIndex).toBeGreaterThanOrEqual(0);
+    const named: StructuralAdvisory = {
+      ...declined,
+      rootIssueIdentifier:
+        nullRootCluster.member_issue_identifiers[0] ?? "MOB-0",
+    };
+    const namedScore = scoreStructuralAdvisories(fixture, [named]);
+    expect(namedScore.rootIdentificationAccuracy).toBe(0);
   });
 
   it("scores an explicit root identifier before falling back to hypothesis prose", async () => {

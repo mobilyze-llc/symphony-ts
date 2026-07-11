@@ -62,14 +62,22 @@ export function parseCapabilityRetestVerdictResponse(
   if (response.status !== "ok") {
     throw new Error(`${issueIdentifier}: crabrunner ${response.detail}`);
   }
-  const start = response.markdown.indexOf("{");
-  const end = response.markdown.lastIndexOf("}");
-  if (start === -1 || end < start) {
-    throw new Error(`${issueIdentifier}: model response did not contain JSON`);
+  // Match the exact verdict contract rather than slicing first-{ to last-}:
+  // a verbose-but-correct response containing any second brace region breaks
+  // the naive slice (observed with fable, 2026-07-11). The last match wins —
+  // models that reason first state their final answer last.
+  const matches = response.markdown.match(
+    /\{\s*"verdict"\s*:\s*"[a-z]+"\s*\}/gi,
+  );
+  const candidate = matches?.at(-1);
+  if (candidate === undefined) {
+    throw new Error(
+      `${issueIdentifier}: model response did not contain a verdict JSON object`,
+    );
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(response.markdown.slice(start, end + 1));
+    parsed = JSON.parse(candidate);
   } catch (error) {
     throw new Error(
       `${issueIdentifier}: invalid verdict JSON: ${formatError(error)}`,

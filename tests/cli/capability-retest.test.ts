@@ -390,18 +390,51 @@ describe("capability re-test CLI", () => {
         "SYMPH-957",
       ),
     ).toBe("reframe");
+    // The contract regex matches only the exact verdict shape: an object
+    // smuggling extra keys or a non-string verdict never matches.
     expect(() =>
       parseCapabilityRetestVerdictResponse(
         { status: "ok", markdown: '{"verdict":"kill","answer":"key"}' },
         "SYMPH-941",
       ),
-    ).toThrow(/invalid verdict object/);
+    ).toThrow(/did not contain a verdict JSON object/);
     expect(() =>
       parseCapabilityRetestVerdictResponse(
         { status: "ok", markdown: '{"verdict":17}' },
         "SYMPH-941",
       ),
+    ).toThrow(/did not contain a verdict JSON object/);
+    expect(() =>
+      parseCapabilityRetestVerdictResponse(
+        { status: "ok", markdown: '{"verdict":"maybe"}' },
+        "SYMPH-941",
+      ),
     ).toThrow(/invalid verdict object/);
+  });
+
+  it("extracts the final verdict from a verbose response with earlier brace regions (SYMPH-1124)", () => {
+    // Observed with fable 2026-07-11: prose reasoning containing JSON-ish
+    // examples broke the old first-{-to-last-} slice even though the final
+    // answer was contract-compliant. The last matching verdict object wins.
+    const verbose = [
+      "Considering the schema {'shape': 'example'} and the criteria:",
+      'an early illustration might be {"verdict":"keep"} for a valid ticket,',
+      "but this issue is symptomatic of a disproved premise.",
+      "",
+      '{"verdict":"kill"}',
+    ].join("\n");
+    expect(
+      parseCapabilityRetestVerdictResponse(
+        { status: "ok", markdown: verbose },
+        "SYMPH-944",
+      ),
+    ).toBe("kill");
+    expect(() =>
+      parseCapabilityRetestVerdictResponse(
+        { status: "ok", markdown: "No verdict here at all." },
+        "SYMPH-944",
+      ),
+    ).toThrow(/did not contain a verdict JSON object/);
   });
 
   it.each([

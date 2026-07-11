@@ -23,11 +23,11 @@ const negativePath = join(fixtureDir, "negative-symphony-t0.json");
 
 function advisory(
   members: string[],
-  root = members[0] ?? "MOB-0",
+  root: string | null | undefined = members[0] ?? "MOB-0",
 ): StructuralAdvisory {
   return {
     memberIssueIdentifiers: members,
-    rootCauseHypothesis: `${root} is the shared root`,
+    rootCauseHypothesis: `${root ?? members[0] ?? "MOB-0"} is the shared root`,
     structuralFix: "Fix the shared root once",
     confidenceNote: "Frozen-fixture test prediction",
   };

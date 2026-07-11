@@ -50,7 +50,10 @@ const IssueSnapshotSchema = z
 const AnswerKeyClusterSchema = z
   .object({
     id: z.string().min(1),
-    root_issue_identifier: z.string().min(1),
+    // Null asserts no canonical root exists for the cluster (e.g. the source
+    // document disposed the members without naming a primary); a null
+    // prediction is then the correct answer.
+    root_issue_identifier: z.string().min(1).nullable(),
     absorbed_equivalent_root_identifiers: z.array(z.string().min(1)),
     member_issue_identifiers: z.array(z.string().min(1)).min(2),
     rationale: z.string().min(1),
@@ -198,7 +201,9 @@ function validateFixtureReferences(fixture: ClusteringGoldenSetFixture): void {
   );
   const referenced = [
     ...fixture.answer_key.clusters.flatMap((cluster) => [
-      cluster.root_issue_identifier,
+      ...(cluster.root_issue_identifier === null
+        ? []
+        : [cluster.root_issue_identifier]),
       ...cluster.absorbed_equivalent_root_identifiers,
       ...cluster.member_issue_identifiers,
     ]),

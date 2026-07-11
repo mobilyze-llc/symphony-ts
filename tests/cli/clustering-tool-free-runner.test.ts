@@ -1,4 +1,11 @@
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
@@ -130,6 +137,69 @@ describe("tool-free clustering planner runner", () => {
     );
   });
 
+  it("routes openai/ models through codex exec with the reduced-isolation sandbox (SYMPH-1124)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "clustering-tool-free-codex-"));
+    roots.push(root);
+    const executable = join(root, "codex");
+    const capturePath = join(root, "codex-boundary.json");
+    await writeFile(
+      executable,
+      [
+        "#!/usr/bin/env node",
+        'const { writeFileSync } = require("node:fs");',
+        "const chunks = [];",
+        'process.stdin.on("data", (chunk) => chunks.push(chunk));',
+        'process.stdin.on("end", () => {',
+        "  const args = process.argv.slice(2);",
+        '  const outFlag = args.indexOf("--output-last-message");',
+        "  const outPath = outFlag === -1 ? null : args[outFlag + 1];",
+        "  writeFileSync(process.env.CAPTURE_PATH, JSON.stringify({",
+        "    args,",
+        "    cwd: process.cwd(),",
+        '    stdin: Buffer.concat(chunks).toString("utf8"),',
+        "  }));",
+        "  if (outPath) {",
+        '    writeFileSync(outPath, \'{"rationale":"from-last-message","batches":[]}\');',
+        "  }",
+        '  process.stdout.write("[progress] tokens used: 123\\n");',
+        "});",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await chmod(executable, 0o755);
+    const artifactDir = join(root, "artifacts");
+    const runner = createToolFreeClusteringPlannerRunner({
+      model: "openai/gpt-5.6-sol",
+      workspace: root,
+      artifactDir,
+      artifactName: "repeat-1",
+      env: {
+        PATH: `${root}${delimiter}${process.env.PATH ?? ""}`,
+        CAPTURE_PATH: capturePath,
+      },
+    });
+
+    const result = await runner("CLUSTER-PROMPT");
+    expect(result.status).toBe("ok");
+    if (result.status === "ok") {
+      expect(result.markdown).toBe(
+        '{"rationale":"from-last-message","batches":[]}',
+      );
+    }
+    const capture = JSON.parse(await readFile(capturePath, "utf8")) as {
+      args: string[];
+      cwd: string;
+      stdin: string;
+    };
+    expect(capture.args.slice(0, 3)).toEqual(["exec", "-m", "gpt-5.6-sol"]);
+    expect(capture.args).toContain("read-only");
+    expect(capture.args).toContain("--ephemeral");
+    expect(capture.args).toContain("--ignore-user-config");
+    expect(capture.cwd).toBe(await realpath(artifactDir));
+    expect(capture.stdin).toBe("CLUSTER-PROMPT");
+  });
+
   it("returns unavailable without publishing a response artifact on failure", async () => {
     const root = await mkdtemp(join(tmpdir(), "clustering-tool-free-"));
     roots.push(root);
@@ -149,7 +219,7 @@ describe("tool-free clustering planner runner", () => {
 
     await expect(runner("planner prompt")).resolves.toEqual({
       status: "unavailable",
-      detail: "tool-free Claude exited 7: runner unavailable",
+      detail: "tool-free claude exited 7: runner unavailable",
     });
     await expect(
       readFile(join(root, "artifacts", "repeat-1.md"), "utf8"),
@@ -174,7 +244,7 @@ describe("tool-free clustering planner runner", () => {
     expect(result.status).toBe("unavailable");
     if (result.status !== "unavailable") throw new Error("expected failure");
     expect(result.detail).toMatch(
-      /^tool-free Claude process failed: spawn failed/,
+      /^tool-free claude process failed: spawn failed/,
     );
     expect(result.detail.length).toBeLessThan(2_100);
     expect(result.detail.endsWith("…")).toBe(true);
@@ -202,7 +272,7 @@ describe("tool-free clustering planner runner", () => {
 
     await expect(runner("planner prompt")).resolves.toEqual({
       status: "unavailable",
-      detail: "tool-free Claude timed out after 17ms",
+      detail: "tool-free claude timed out after 17ms",
     });
     await expect(
       readFile(join(root, "artifacts", "repeat-1.md"), "utf8"),
