@@ -71,13 +71,20 @@ export function parseCapabilityRetestVerdictResponse(
   // contract-invalid wrapper like {"answer":{"verdict":"kill"},"extra":true}.
   const verdictObject = /^\{\s*"verdict"\s*:\s*"[a-z]+"\s*\}$/i;
   const whole = response.markdown.trim();
+  // The FINAL verdict attempt is authoritative: take the last line that
+  // looks like a verdict-object attempt (starts with "{" and names
+  // "verdict") and require it to match the strict contract — never fall
+  // back to an earlier valid line past an invalid final answer.
+  const lastAttempt = response.markdown
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("{") && /"verdict"/i.test(line))
+    .at(-1);
   const candidate = verdictObject.test(whole)
     ? whole
-    : response.markdown
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter((line) => verdictObject.test(line))
-        .at(-1);
+    : lastAttempt !== undefined && verdictObject.test(lastAttempt)
+      ? lastAttempt
+      : undefined;
   if (candidate === undefined) {
     throw new Error(
       `${issueIdentifier}: model response did not contain a verdict JSON object`,

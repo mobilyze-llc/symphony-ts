@@ -454,6 +454,18 @@ describe("capability re-test CLI", () => {
         "SYMPH-957",
       ),
     ).toBe("reframe");
+    // The FINAL attempt is authoritative: an invalid final verdict object
+    // must reject, never fall back to an earlier valid line.
+    expect(() =>
+      parseCapabilityRetestVerdictResponse(
+        {
+          status: "ok",
+          markdown:
+            '{"verdict":"keep"}\n…reconsidering…\n{"verdict":"kill","extra":true}',
+        },
+        "SYMPH-956",
+      ),
+    ).toThrow(/did not contain a verdict JSON object/);
   });
 
   it.each([
