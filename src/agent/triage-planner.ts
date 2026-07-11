@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { z } from "zod";
 
 import type { ClaudeRunnerResult } from "../claude-runner/claude-runner-contract.js";
+import type { ClaudeRunnerValidationConfig } from "../claude-runner/claude-runner-types.js";
 import {
   type ClaudeCrabrunnerRunnerInput,
   resolveClaudeCrabrunnerSchedulerOptions,
@@ -1535,6 +1536,12 @@ export interface CrabrunnerPlannerRunnerOptions {
   timeoutSeconds?: number;
   env?: NodeJS.ProcessEnv;
   artifactName?: string;
+  /**
+   * Per-caller artifact validation. The crabrunner default (200-byte minimum)
+   * assumes prose artifacts; callers with intentionally tiny contracts (e.g.
+   * exact-JSON verdicts) must override or compliant answers are rejected.
+   */
+  validation?: ClaudeRunnerValidationConfig;
   // Injected for tests.
   runCrabrunner?: (
     input: ClaudeCrabrunnerRunnerInput,
@@ -1583,6 +1590,9 @@ export function createCrabrunnerPlannerRunner(
           ? {}
           : { timeoutSeconds: options.timeoutSeconds }),
         ...(options.env === undefined ? {} : { env: options.env }),
+        ...(options.validation === undefined
+          ? {}
+          : { validation: options.validation }),
       });
     } catch (error) {
       return {
