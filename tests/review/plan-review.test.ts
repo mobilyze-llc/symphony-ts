@@ -90,7 +90,7 @@ function context(grounded: boolean): PlannerContext {
   };
 }
 
-function aggregator(): ReviewAggregator {
+function aggregator(includeUnavailableLane = false): ReviewAggregator {
   const runner: SpineCommandRunner = async (
     argv,
   ): Promise<SpineCommandResult> => {
@@ -109,16 +109,43 @@ function aggregator(): ReviewAggregator {
               none: false,
               fail_open: false,
             },
+            ...(includeUnavailableLane
+              ? [
+                  {
+                    reviewer: "opus-plan-review",
+                    file: "lane-2.md",
+                    verdict: "BLOCKED",
+                    parse_quality: "clean",
+                    finding_count: 1,
+                    none: false,
+                    fail_open: false,
+                  },
+                ]
+              : []),
           ],
           summary: {
-            lanes: 1,
-            track: 0,
+            lanes: includeUnavailableLane ? 2 : 1,
+            track: includeUnavailableLane ? 1 : 0,
             escalate: 1,
             unparseable_lanes: 0,
-            blocked_lanes: 0,
+            blocked_lanes: includeUnavailableLane ? 1 : 0,
             partial_lanes: 0,
           },
-          track: [],
+          track: includeUnavailableLane
+            ? [
+                {
+                  severity: "Track",
+                  location: "plan:review/tier-2",
+                  summary:
+                    "Plan review lane opus-plan-review unavailable: opus crashed",
+                  evidence: "Lane infrastructure failed.",
+                  failure: "opus crashed",
+                  test: "Lane failure is visible.",
+                  fp: "plan:review/tier-2::opus-unavailable",
+                  reviewer: "opus-plan-review",
+                },
+              ]
+            : [],
           escalate: [
             {
               severity: "P2",
@@ -220,6 +247,51 @@ describe("plan tier-2 review", () => {
       source: "tier-2",
       tags: ["misinterpretation"],
     });
+  });
+
+  it("preserves completed findings and separates a later thrown lane from misinterpretation telemetry", async () => {
+    const result = await runPlanTier2Review(
+      {
+        context: context(true),
+        body,
+        planId: "plan-1",
+        artifactDir: "/tmp/unused",
+        workspace: "/tmp/unused",
+        plannerGroundingEnabled: true,
+      },
+      {
+        aggregator: aggregator(true),
+        runLane: async ({ lane }) => {
+          if (lane.reviewer === "opus-plan-review") {
+            throw new Error("opus crashed");
+          }
+          return "## Verdict\nCHANGES_REQUESTED\n\n## Findings\n- [P2] plan:issue/MOB-1 - Scheduled superseded candidate";
+        },
+      },
+    );
+
+    expect(result.record.status).toBe("degraded");
+    expect(result.record.aggregateVerdict).toBe("fail");
+    expect(result.record.note).toContain(
+      "opus-plan-review unavailable: opus crashed",
+    );
+    expect(result.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: "Scheduled superseded candidate",
+          tags: ["misinterpretation"],
+        }),
+        expect.objectContaining({
+          title: "Plan review lane opus-plan-review unavailable: opus crashed",
+          tags: ["degraded", "lane-unavailable"],
+        }),
+      ]),
+    );
+    expect(
+      result.findings.filter((finding) =>
+        finding.tags?.includes("misinterpretation"),
+      ),
+    ).toHaveLength(1);
   });
 
   it("records per-lane telemetry joining triage verdicts with lane usage tokens (SYMPH-1068)", async () => {

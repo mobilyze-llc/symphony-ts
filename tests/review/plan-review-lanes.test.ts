@@ -145,5 +145,38 @@ describe("plan review lanes", () => {
       },
       { reviewer: "opus-plan-review", usage: null },
     ]);
+    expect(result.failures).toEqual([]);
+  });
+
+  it("contains a thrown lane and retains artifacts from lanes that already completed", async () => {
+    const result = await runPlanReviewLanes(
+      { context, body, artifactDir: "/tmp/unused", workspace: "/tmp/unused" },
+      {
+        runLane: async ({ lane }) => {
+          if (lane.reviewer === "opus-plan-review") {
+            throw new Error("opus crashed");
+          }
+          return "## Verdict\nPASS\n\n## Findings\nNone";
+        },
+      },
+    );
+
+    expect(result.artifacts[0]).toEqual({
+      reviewer: "codex-plan-review",
+      markdown: "## Verdict\nPASS\n\n## Findings\nNone",
+    });
+    expect(result.artifacts[1]).toMatchObject({
+      reviewer: "opus-plan-review",
+      markdown: expect.stringContaining(
+        "Plan review lane opus-plan-review unavailable: opus crashed",
+      ),
+    });
+    expect(result.laneUsage[1]).toEqual({
+      reviewer: "opus-plan-review",
+      usage: null,
+    });
+    expect(result.failures).toEqual([
+      { reviewer: "opus-plan-review", error: "opus crashed" },
+    ]);
   });
 });

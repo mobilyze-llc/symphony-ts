@@ -132,18 +132,33 @@ export async function runPlanTier2Review(
       laneArtifacts: laneResult.artifacts,
       currentDiffHash: diffHash,
     });
-    const structuredFindings = adaptAggregateFindings(aggregate);
-    const findings = structuredFindings.map(planFindingFromStructured);
+    const aggregateFindings = [
+      ...aggregate.blockingFindings,
+      ...aggregate.trackFindings,
+    ];
+    const structuredFindings = aggregateFindings.map(
+      structuredFindingFromTriage,
+    );
+    const failedReviewers = new Set(
+      laneResult.failures.map((failure) => failure.reviewer),
+    );
+    const findings = structuredFindings.map((finding, index) =>
+      planFindingFromStructured(
+        finding,
+        failedReviewers.has(aggregateFindings[index]?.reviewer ?? ""),
+      ),
+    );
+    const degradedNote = laneFailureNote(laneResult);
     return {
       findings,
       structuredFindings,
       record: {
         tier: "tier-2",
-        status: "reviewed",
+        status: degradedNote === null ? "reviewed" : "degraded",
         diffHash,
         gateReason: gate.reason,
         aggregateVerdict: aggregate.verdict,
-        note: null,
+        note: degradedNote,
         reviewedGroundingEvidence: coverage,
         findingFingerprints: structuredFindings.map(
           (finding) => finding.fingerprint,
@@ -299,14 +314,6 @@ function hasGroundedScheduledEvidence(
   return coverage.some((item) => item.status === "grounded");
 }
 
-function adaptAggregateFindings(
-  aggregate: AggregatedReview,
-): StructuredReviewFinding[] {
-  return [...aggregate.blockingFindings, ...aggregate.trackFindings].map(
-    structuredFindingFromTriage,
-  );
-}
-
 function structuredFindingFromTriage(
   finding: TriageFinding,
 ): StructuredReviewFinding {
@@ -349,15 +356,27 @@ function structuredFindingFromTriage(
 
 function planFindingFromStructured(
   finding: StructuredReviewFinding,
+  laneUnavailable = false,
 ): PlanReviewFinding {
   return {
     title: finding.title,
     planAnchor: finding.evidence[0]?.path ?? "plan:review/tier-2",
     severity: finding.severity,
     source: "tier-2",
-    tags: ["misinterpretation"],
+    tags: laneUnavailable
+      ? ["degraded", "lane-unavailable"]
+      : ["misinterpretation"],
     structuredFingerprint: finding.fingerprint,
   };
+}
+
+function laneFailureNote(laneResult: PlanReviewLanesResult): string | null {
+  if (laneResult.failures.length === 0) {
+    return null;
+  }
+  return `tier-2 review degraded: ${laneResult.failures
+    .map((failure) => `${failure.reviewer} unavailable: ${failure.error}`)
+    .join("; ")}`;
 }
 
 function normalizeSeverity(value: string): StructuredReviewFindingSeverity {

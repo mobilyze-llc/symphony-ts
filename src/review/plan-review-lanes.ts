@@ -41,6 +41,8 @@ export interface PlanReviewLaneRunnerInput {
 export interface PlanReviewLaneRunResult {
   markdown: string;
   usage?: Record<string, unknown> | null;
+  /** Infrastructure failure already converted into a report-only artifact. */
+  failure?: string | null;
 }
 
 export type PlanReviewLaneRunner = (
@@ -66,11 +68,18 @@ export interface PlanReviewLaneUsage {
   usage: Record<string, unknown> | null;
 }
 
+interface PlanReviewLaneFailure {
+  reviewer: string;
+  error: string;
+}
+
 export interface PlanReviewLanesResult {
   artifacts: ReviewLaneArtifact[];
   promptHashes: Array<{ reviewer: string; promptHash: string }>;
   /** One entry per executed lane, in lane order (SYMPH-1068). */
   laneUsage: PlanReviewLaneUsage[];
+  /** Report-only failures contained at the lane boundary, in lane order. */
+  failures: PlanReviewLaneFailure[];
 }
 
 export const DEFAULT_PLAN_REVIEW_LANES: readonly PlanReviewLaneConfig[] = [
@@ -100,35 +109,54 @@ export async function runPlanReviewLanes(
   const artifacts: ReviewLaneArtifact[] = [];
   const promptHashes: Array<{ reviewer: string; promptHash: string }> = [];
   const laneUsage: PlanReviewLaneUsage[] = [];
+  const failures: PlanReviewLaneFailure[] = [];
   for (const lane of lanes) {
     const prompt = buildPlanReviewLanePrompt(input, lane);
     promptHashes.push({
       reviewer: lane.reviewer,
       promptHash: createHash("sha256").update(prompt, "utf8").digest("hex"),
     });
-    const laneResult = normalizeLaneRunResult(
-      await runLane({
-        lane,
-        prompt,
-        artifactDir: input.artifactDir,
-        workspace: input.workspace,
-        ...(input.env === undefined ? {} : { env: input.env }),
-      }),
-    );
+    let laneResult: ReturnType<typeof normalizeLaneRunResult>;
+    try {
+      laneResult = normalizeLaneRunResult(
+        await runLane({
+          lane,
+          prompt,
+          artifactDir: input.artifactDir,
+          workspace: input.workspace,
+          ...(input.env === undefined ? {} : { env: input.env }),
+        }),
+      );
+    } catch (error) {
+      const message = singleLineError(error);
+      laneResult = {
+        markdown: unavailableLaneArtifact(lane.reviewer, message),
+        usage: null,
+        failure: message,
+      };
+    }
     artifacts.push({ reviewer: lane.reviewer, markdown: laneResult.markdown });
     laneUsage.push({ reviewer: lane.reviewer, usage: laneResult.usage });
+    if (laneResult.failure !== null) {
+      failures.push({ reviewer: lane.reviewer, error: laneResult.failure });
+    }
   }
-  return { artifacts, promptHashes, laneUsage };
+  return { artifacts, promptHashes, laneUsage, failures };
 }
 
 function normalizeLaneRunResult(result: string | PlanReviewLaneRunResult): {
   markdown: string;
   usage: Record<string, unknown> | null;
+  failure: string | null;
 } {
   if (typeof result === "string") {
-    return { markdown: result, usage: null };
+    return { markdown: result, usage: null, failure: null };
   }
-  return { markdown: result.markdown, usage: result.usage ?? null };
+  return {
+    markdown: result.markdown,
+    usage: result.usage ?? null,
+    failure: result.failure ?? null,
+  };
 }
 
 export function buildPlanReviewLanePrompt(
@@ -282,23 +310,34 @@ async function defaultPlanReviewLaneRunner(
     },
   );
   if (result.status !== "passed" || result.artifactPath === null) {
+    const failure = singleLineError(`${result.status} ${result.message}`);
     return {
-      markdown: [
-        "## Verdict",
-        "BLOCKED",
-        "",
-        "## Findings",
-        `- [Track] plan:review/tier-2 - Plan review lane ${input.lane.reviewer} unavailable: ${result.status} ${result.message}`,
-      ].join("\n"),
+      markdown: unavailableLaneArtifact(input.lane.reviewer, failure),
       // A blocked/failed lane can still have measured usage (the run happened,
       // it just did not pass validation) — carry it so cost-per-catch is honest.
       usage: result.usage,
+      failure,
     };
   }
   return {
     markdown: await readFile(result.artifactPath, "utf8"),
     usage: result.usage,
   };
+}
+
+function unavailableLaneArtifact(reviewer: string, error: string): string {
+  return [
+    "## Verdict",
+    "BLOCKED",
+    "",
+    "## Findings",
+    `- [Track] plan:review/tier-2 - Plan review lane ${reviewer} unavailable: ${error}`,
+  ].join("\n");
+}
+
+function singleLineError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/\s+/g, " ").trim() || "unknown error";
 }
 
 function sanitize(value: string): string {
