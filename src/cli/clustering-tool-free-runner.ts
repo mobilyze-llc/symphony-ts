@@ -44,7 +44,7 @@ export function createToolFreeClusteringPlannerRunner(input: {
   /**
    * Explicit reasoning/thinking level for this run (SYMPH-1128). Threaded to the
    * spawned CLI so the clustering score is not confounded by an inherited CLI
-   * default: `--effort <low|medium|high>` on the claude boundary, a
+   * default: `--effort <low|medium|high|xhigh|max>` on the claude boundary, a
    * `model_reasoning_effort` override on the codex boundary.
    */
   reasoningLevel: string;
