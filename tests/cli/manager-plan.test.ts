@@ -112,12 +112,15 @@ describe("parseManagerPlanCliArgs", () => {
       "parallel-isolated,canary-chain",
       "--model",
       "opus",
+      "--effort",
+      "high",
       "--prompt-only",
       "--json",
     ]);
     expect(opts.team).toBe("MOB");
     expect(opts.states).toEqual(["Backlog", "Todo"]);
     expect(opts.concurrencyCeiling).toBe(5);
+    expect(opts.effort).toBe("high");
     expect(opts.risk).toBe("high");
     expect(opts.modes).toEqual(["parallel-isolated", "canary-chain"]);
     expect(opts.model).toBe("opus");
@@ -128,6 +131,13 @@ describe("parseManagerPlanCliArgs", () => {
     expect(opts.inFlightStates).toEqual([
       ...DEFAULT_MANAGER_PLAN_IN_FLIGHT_STATES,
     ]);
+  });
+
+  it("defaults planner effort to max and rejects unsupported values", () => {
+    expect(parseManagerPlanCliArgs(["--team", "MOB"]).effort).toBe("max");
+    expect(() =>
+      parseManagerPlanCliArgs(["--team", "MOB", "--effort", "xhigh"]),
+    ).toThrow(ManagerPlanCliUsageError);
   });
 
   it("applies defaults and leaves modes unset when omitted", () => {
@@ -510,6 +520,7 @@ describe("runManagerPlanCli", () => {
     expect(seen[0]).toMatchObject({
       artifactDir: outDir,
       model: "opus",
+      effort: "max",
       workspace: process.cwd(),
     });
   });
@@ -1506,6 +1517,10 @@ describe("runManagerPlanCli", () => {
     );
     expect(code).toBe(0);
     const parsed = JSON.parse(out());
+    expect(parsed).toMatchObject({
+      plannerModel: "opus",
+      plannerEffort: "max",
+    });
     expect(parsed.batches[0].members[0].issueIdentifier).toBe("MOB-1");
     expect(parsed.structuralAdvisoryDisposition).toBe(
       "preview_only_not_journaled",

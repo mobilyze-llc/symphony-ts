@@ -1055,6 +1055,7 @@ function triageConfig(
     enabled: true,
     shadowMode: true,
     plannerModel: "opus",
+    plannerEffort: "max",
     heartbeatMs: 900_000,
     autoReleaseFrontier: 1,
     controlDoc: { enabled: false, teamId: null },
@@ -1572,14 +1573,16 @@ describe("runStandingPlanShadowTick", () => {
   it("runs the cycle when enabled and no prior plan exists", async () => {
     const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-"));
     let requestedModel: string | null = null;
+    let requestedEffort: string | null = null;
     try {
       const result = await runStandingPlanShadowTick({
         config: triageConfig(),
         workspaceRoot: root,
         fetchCandidates: async () => [issue("u1", "SYMPH-1")],
         getInFlight: () => [],
-        createPlannerRunner: (model) => {
+        createPlannerRunner: (model, effort) => {
           requestedModel = model;
+          requestedEffort = effort;
           return okPlanner().runClaude;
         },
         log: () => undefined,
@@ -1587,6 +1590,7 @@ describe("runStandingPlanShadowTick", () => {
       });
       expect(result.status).toBe("ok");
       expect(requestedModel).toBe("opus");
+      expect(requestedEffort).toBe("max");
       expect((await loadStandingPlan(root))?.revision).toBe(1);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -1620,6 +1624,10 @@ describe("runStandingPlanShadowTick", () => {
       const shadowLog = logs.find(
         (entry) => entry.event === "queue_triage_shadow_plan",
       );
+      expect(shadowLog?.fields).toMatchObject({
+        planner_model: "opus",
+        planner_effort: "max",
+      });
       expect(shadowLog?.fields).not.toHaveProperty("review_tier2");
     } finally {
       rmSync(root, { recursive: true, force: true });

@@ -563,6 +563,15 @@ export interface StagesConfig {
 }
 
 /** Queue Triage v2 Manager configuration (SYMPH-784). */
+export const QUEUE_TRIAGE_PLANNER_EFFORTS = [
+  "low",
+  "medium",
+  "high",
+  "max",
+] as const;
+export type QueueTriagePlannerEffort =
+  (typeof QUEUE_TRIAGE_PLANNER_EFFORTS)[number];
+
 export interface WorkflowQueueTriageConfig {
   enabled: boolean;
   shadowMode: boolean;
@@ -571,6 +580,8 @@ export interface WorkflowQueueTriageConfig {
   structuralAdvisoryRenderCap?: number;
   /** Version-floating planner model alias (do not pin). Default "opus". */
   plannerModel: string;
+  /** Explicit Anthropic thinking level. Default "max"; never lane-inherited. */
+  plannerEffort: QueueTriagePlannerEffort;
   /** Re-plan heartbeat cadence for the shadow/plan loop, in ms. */
   heartbeatMs: number;
   /**

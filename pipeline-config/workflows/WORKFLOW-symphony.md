@@ -27,6 +27,10 @@ code_grounding:
 queue_triage:
   enabled: true
   shadow_mode: true
+  planner_model: opus
+  # SYMPH-1131: frontier-first policy; pin explicitly instead of inheriting the
+  # mutable crabrunner lane default. The scheduler passes max through to thinking.
+  planner_effort: max
   plan_review:
     enabled: true
     planner_grounding_enabled: true

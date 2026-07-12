@@ -34,6 +34,24 @@
       "expires": "2026-08-15"
     },
     {
+      "path": "src/cli/manager-plan.ts",
+      "rule": "file_size.no_growth_over_threshold",
+      "reason": "SYMPH-1131 explicit planner-effort CLI contract; extraction tracked by SYMPH-1122",
+      "expires": "2026-08-15"
+    },
+    {
+      "path": "src/config/config-resolver.ts",
+      "rule": "file_size.no_growth_over_threshold",
+      "reason": "SYMPH-1131 explicit planner-effort config parsing; extraction tracked by SYMPH-1122",
+      "expires": "2026-08-15"
+    },
+    {
+      "path": "src/config/types.ts",
+      "rule": "file_size.no_growth_over_threshold",
+      "reason": "SYMPH-1131 explicit planner-effort config contract; extraction tracked by SYMPH-1122",
+      "expires": "2026-08-15"
+    },
+    {
       "path": "src/domain/model.ts",
       "rule": "file_size.no_growth_over_threshold",
       "reason": "SYMPH-1108 journal-kind registration; extraction tracked by SYMPH-1122",

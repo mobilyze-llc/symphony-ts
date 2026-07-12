@@ -89,6 +89,7 @@ import {
   DEFAULT_QUEUE_TRIAGE_CONTROL_DOC_ENABLED,
   DEFAULT_QUEUE_TRIAGE_ENABLED,
   DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS,
+  DEFAULT_QUEUE_TRIAGE_PLANNER_EFFORT,
   DEFAULT_QUEUE_TRIAGE_PLANNER_MODEL,
   DEFAULT_QUEUE_TRIAGE_PLAN_REVIEW_ENABLED,
   DEFAULT_QUEUE_TRIAGE_PLAN_REVIEW_PLANNER_GROUNDING_ENABLED,
@@ -120,6 +121,7 @@ import type {
   DispatchValidationResult,
   FastTrackConfig,
   GateType,
+  QueueTriagePlannerEffort,
   ResolvedWorkflowConfig,
   ReviewerDefinition,
   StageDefinition,
@@ -131,7 +133,11 @@ import type {
   WorkflowQueueTriageConfig,
   WorkflowStuckTriageConfig,
 } from "./types.js";
-import { GATE_TYPES, STAGE_TYPES } from "./types.js";
+import {
+  GATE_TYPES,
+  QUEUE_TRIAGE_PLANNER_EFFORTS,
+  STAGE_TYPES,
+} from "./types.js";
 
 // validateStagesConfig moved to config-contracts.ts (SYMPH-409); re-exported
 // here so existing importers keep working.
@@ -558,6 +564,7 @@ function resolveQueueTriageConfig(
     plannerModel:
       readString(queueTriage.planner_model) ??
       DEFAULT_QUEUE_TRIAGE_PLANNER_MODEL,
+    plannerEffort: readQueueTriagePlannerEffort(queueTriage.planner_effort),
     heartbeatMs:
       readPositiveInteger(queueTriage.heartbeat_ms) ??
       DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS,
@@ -616,6 +623,18 @@ function resolveQueueTriageConfig(
         : { allowedModes: allowedModes as PlanBatchMode[] }),
     }),
   };
+}
+
+function readQueueTriagePlannerEffort(
+  value: unknown,
+): QueueTriagePlannerEffort {
+  const effort = readString(value) ?? DEFAULT_QUEUE_TRIAGE_PLANNER_EFFORT;
+  if (!(QUEUE_TRIAGE_PLANNER_EFFORTS as readonly string[]).includes(effort)) {
+    throw new Error(
+      `queue_triage.planner_effort must be one of: ${QUEUE_TRIAGE_PLANNER_EFFORTS.join(", ")}.`,
+    );
+  }
+  return effort as QueueTriagePlannerEffort;
 }
 
 /** First hostname label, case-folded: "PRO14.local" and "pro14" compare equal. */

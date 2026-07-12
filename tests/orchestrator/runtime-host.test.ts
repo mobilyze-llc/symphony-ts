@@ -6432,6 +6432,7 @@ describe("startRuntimeService shutdown", () => {
         enabled: true,
         shadowMode: true,
         plannerModel: "opus",
+        plannerEffort: "max",
         heartbeatMs: 1,
         envelope: {
           version: 1,
@@ -6453,6 +6454,8 @@ describe("startRuntimeService shutdown", () => {
         planReview: { enabled: false, plannerGroundingEnabled: false },
       },
     } satisfies ResolvedWorkflowConfig;
+    let plannerModel: string | null = null;
+    let plannerEffort: string | null = null;
 
     const service = await startRuntimeService({
       config,
@@ -6460,19 +6463,23 @@ describe("startRuntimeService shutdown", () => {
       logger,
       workflowWatcher: null,
       runtimeHost,
-      createStandingPlanPlannerRunner: () => async (prompt: string) => {
-        const isReviewPrompt = prompt.startsWith(
-          "Review this already-produced standing plan.",
-        );
-        tickOrder.push(isReviewPrompt ? "review" : "planner");
-        if (!isReviewPrompt) {
-          capturedPrompt = prompt;
-          capturedPrompts.push(prompt);
-        }
-        return {
-          status: "ok",
-          markdown:
-            '# Plan\n```json\n{"rationale":"go","batches":[{"mode":"parallel-isolated","issueIdentifiers":["SYMPH-SHARED","SYMPH-KILLED"],"rationale":"first"}]}\n```\n',
+      createStandingPlanPlannerRunner: (model, effort) => {
+        plannerModel = model;
+        plannerEffort = effort;
+        return async (prompt: string) => {
+          const isReviewPrompt = prompt.startsWith(
+            "Review this already-produced standing plan.",
+          );
+          tickOrder.push(isReviewPrompt ? "review" : "planner");
+          if (!isReviewPrompt) {
+            capturedPrompt = prompt;
+            capturedPrompts.push(prompt);
+          }
+          return {
+            status: "ok",
+            markdown:
+              '# Plan\n```json\n{"rationale":"go","batches":[{"mode":"parallel-isolated","issueIdentifiers":["SYMPH-SHARED","SYMPH-KILLED"],"rationale":"first"}]}\n```\n',
+          };
         };
       },
     });
@@ -6481,6 +6488,8 @@ describe("startRuntimeService shutdown", () => {
       await vi.waitFor(() => {
         expect(hygieneIssues).not.toBeNull();
         expect(capturedPrompt).toContain("SYMPH-SHARED");
+        expect(plannerModel).toBe("opus");
+        expect(plannerEffort).toBe("max");
         expect(
           entries.filter((entry) => entry.event === "queue_triage_shadow_plan")
             .length,
@@ -6627,6 +6636,7 @@ describe("startRuntimeService shutdown", () => {
         enabled: true,
         shadowMode: true,
         plannerModel: "opus",
+        plannerEffort: "max",
         heartbeatMs: 1,
         envelope: {
           version: 1,

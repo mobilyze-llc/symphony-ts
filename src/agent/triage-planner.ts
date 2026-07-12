@@ -1515,8 +1515,9 @@ function isParseableJson(candidate: string): boolean {
 //
 // This is the same frontier-Claude path the council gate uses — NOT the
 // metered Anthropic API and NOT the weak local judge that the v1 backlog-audit
-// used. The model alias is version-floating ("opus"); effort rides the crabrunner
-// agent/profile. Anything other than a clean pass degrades to `unavailable`,
+// used. The model alias is version-floating ("opus"); callers explicitly pin
+// effort so planner behavior never inherits a mutable lane default. Anything
+// other than a clean pass degrades to `unavailable`,
 // which the caller turns into graceful degradation to the comparator.
 // ---------------------------------------------------------------------------
 

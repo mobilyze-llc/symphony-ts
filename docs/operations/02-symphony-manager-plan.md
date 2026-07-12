@@ -40,6 +40,7 @@ Options:
   --modes <csv>                Allowed batch modes (default parallel-isolated,canary-chain)
   --no-canary                  Drop canary-chain from the allowed modes (no canary runners)
   --model <name>               Planner model alias (default opus)
+  --effort <level>             Planner effort: low, medium, high, max (default max)
   --page-size <n>              Linear candidate page size
   --out-dir <path>             Directory for planner artifacts and prompt-only prompt output
   --runtime-state-base-url <url>

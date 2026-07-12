@@ -2253,6 +2253,28 @@ describe("createCrabrunnerPlannerRunner", () => {
     expect(captured[0]?.validation).toEqual({ minBytes: 1 });
   });
 
+  it("threads max planner effort through to the crabrunner input (SYMPH-1131)", async () => {
+    const captured: Array<{ reasoningEffort: unknown }> = [];
+    const runner = createCrabrunnerPlannerRunner({
+      workspace: "/ws",
+      artifactDir: "/artifacts",
+      artifactName: "plan",
+      reasoningEffort: "max",
+      runCrabrunner: async (input) => {
+        captured.push({ reasoningEffort: input.reasoningEffort });
+        return crabrunnerResult({ artifactPath: "/artifacts/plan.md" });
+      },
+      fs: {
+        mkdir: async () => undefined,
+        writeFile: async () => undefined,
+        readFile: async () => "# Plan\n",
+      },
+    });
+
+    expect((await runner("PROMPT-BODY")).status).toBe("ok");
+    expect(captured).toEqual([{ reasoningEffort: "max" }]);
+  });
+
   it("omits validation from the crabrunner input when the caller sets none", async () => {
     const captured: Array<Record<string, unknown>> = [];
     const runner = createCrabrunnerPlannerRunner({
