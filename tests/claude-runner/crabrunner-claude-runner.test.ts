@@ -682,6 +682,38 @@ describe("Claude crabrunner adapter", () => {
     });
   });
 
+  it("gives otherwise-identical low and high reasoning-effort submissions distinct idempotency keys", async () => {
+    const harness = await createHarness();
+    const submitWithEffort = async (
+      reasoningEffort: string,
+    ): Promise<string> => {
+      const scheduler = new RecordingScheduler({
+        terminal: {
+          state: "succeeded",
+          artifact: readyArtifact(validReviewArtifact()),
+        },
+      });
+
+      await runClaudeCrabrunner(
+        {
+          ...baseInput(harness),
+          reasoningEffort,
+        },
+        {
+          schedulerClient: scheduler,
+          now: fixedClock(),
+        },
+      );
+
+      return scheduler.submissions[0]!.identity.idempotencyKey;
+    };
+
+    const lowKey = await submitWithEffort("low");
+    const highKey = await submitWithEffort("high");
+
+    expect(lowKey).not.toBe(highKey);
+  });
+
   it("persists a ready collected artifact before validation", async () => {
     const harness = await createHarness();
     const artifactName = "job-1/attempts/01/artifact/opus.md";

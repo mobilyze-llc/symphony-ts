@@ -458,6 +458,7 @@ function buildCrabrunnerJobSpec(input: {
     input.profile,
   );
   const provider = resolveRunnerProvider(input.input, input.model);
+  const reasoningEffort = input.input.reasoningEffort ?? null;
   const idempotencyKey = createHash("sha256")
     .update(
       JSON.stringify({
@@ -472,6 +473,7 @@ function buildCrabrunnerJobSpec(input: {
         model: input.model,
         provider,
         profile: input.profile,
+        reasoningEffort,
       }),
     )
     .digest("hex");
@@ -496,7 +498,7 @@ function buildCrabrunnerJobSpec(input: {
       runnerKind: input.input.runnerKind ?? DEFAULT_RUNNER_KIND,
       model: input.model,
       provider,
-      reasoningEffort: input.input.reasoningEffort ?? null,
+      reasoningEffort,
     },
     enforcement: buildClaudeCrabrunnerLaneEnforcement(input.timeoutSeconds),
     role,
