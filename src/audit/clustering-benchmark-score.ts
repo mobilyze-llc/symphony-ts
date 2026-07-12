@@ -80,7 +80,25 @@ export function scoreStructuralAdvisories(
     ),
     allowed,
   );
-  const predictedClusters = validation.accepted
+  // An explicitly named in-corpus root belongs to the cluster it roots:
+  // scoring only memberIssueIdentifiers forfeited every root<->member pair
+  // when models followed the schema and named the root once, in the root
+  // field (recall 0.375 -> ~0.52 counterfactual on the 2026-07-11 runs).
+  const augmented = validation.accepted.map((advisory) => {
+    const root = normalizeIssueIdentifier(advisory.rootIssueIdentifier);
+    if (
+      root === null ||
+      !allowed.has(root) ||
+      advisory.memberIssueIdentifiers.includes(root)
+    ) {
+      return advisory;
+    }
+    return {
+      ...advisory,
+      memberIssueIdentifiers: [...advisory.memberIssueIdentifiers, root],
+    };
+  });
+  const predictedClusters = augmented
     .map((advisory) => [
       ...new Set(
         advisory.memberIssueIdentifiers.filter((identifier) =>
@@ -95,18 +113,34 @@ export function scoreStructuralAdvisories(
   );
   const rootAssignments = assignPredictionsByOverlap(
     fixture.answer_key.clusters,
-    validation.accepted,
+    augmented,
   );
   const matchedRoots = fixture.answer_key.clusters.map((cluster, index) => {
     const prediction = rootAssignments.get(index);
     if (prediction === undefined) return false;
-    const expectedRoots = new Set([
-      cluster.root_issue_identifier,
-      ...cluster.absorbed_equivalent_root_identifiers,
-    ]);
+    const expectedRoots = new Set(
+      [
+        cluster.root_issue_identifier,
+        ...cluster.absorbed_equivalent_root_identifiers,
+      ].filter((identifier): identifier is string => identifier !== null),
+    );
     const explicitRoot = normalizeIssueIdentifier(
       prediction.rootIssueIdentifier,
     );
+    const rawField = prediction.rootIssueIdentifier;
+    const fieldDeclined =
+      rawField === null || rawField === undefined || rawField.trim() === "";
+    if (expectedRoots.size === 0) {
+      // A null-root key cluster asserts no canonical root exists; correct
+      // means a true decline — the field is absent/null/empty (a malformed
+      // non-null value like "not-an-issue" still named a root) AND the
+      // hypothesis prose claims no identifier (mirroring the prose fallback
+      // used for named clusters, per the PR #765 review).
+      return (
+        fieldDeclined &&
+        extractIssueIdentifiers(prediction.rootCauseHypothesis).size === 0
+      );
+    }
     const predictedRoots =
       explicitRoot === null
         ? extractIssueIdentifiers(prediction.rootCauseHypothesis)
