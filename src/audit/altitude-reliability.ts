@@ -9,7 +9,7 @@ export type AltitudeReliabilityVerdict =
 
 export const ALTITUDE_RELIABILITY_PROTOCOL = "snapshot-v1" as const;
 
-export interface AltitudeReliabilitySnapshot {
+interface AltitudeReliabilitySnapshot {
   title: string;
   description: string;
   cutoff: string;

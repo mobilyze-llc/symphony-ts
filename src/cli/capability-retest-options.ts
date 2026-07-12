@@ -1,14 +1,14 @@
 import { isAbsolute, resolve } from "node:path";
 
 import { MIN_GATE_AUTHORITATIVE_CLUSTERING_REPEATS } from "../audit/clustering-benchmark.js";
-export const CAPABILITY_RETEST_REASONING_LEVELS = [
+const CAPABILITY_RETEST_REASONING_LEVELS = [
   "low",
   "medium",
   "high",
   "xhigh",
   "max",
 ] as const;
-export type CapabilityRetestReasoningLevel =
+type CapabilityRetestReasoningLevel =
   (typeof CAPABILITY_RETEST_REASONING_LEVELS)[number];
 
 /**
@@ -19,7 +19,7 @@ export type CapabilityRetestReasoningLevel =
  * lane-registry default, is supported across the claude and codex boundaries,
  * and avoids an altitude-vs-clustering mismatch.
  */
-export const DEFAULT_CAPABILITY_RETEST_REASONING_LEVEL: CapabilityRetestReasoningLevel =
+const DEFAULT_CAPABILITY_RETEST_REASONING_LEVEL: CapabilityRetestReasoningLevel =
   "high";
 
 export interface CapabilityRetestCliOptions {
