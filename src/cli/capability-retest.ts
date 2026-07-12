@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  ALTITUDE_RELIABILITY_PROTOCOL,
   type AltitudeReliabilityBar,
   type AltitudeReliabilityCase,
   type AltitudeReliabilityVerdictObservation,
@@ -214,6 +215,7 @@ export async function runCapabilityRetestCli(
       generated_at: generatedAt,
       model,
       reasoning_level: options.reasoningLevel,
+      protocol: ALTITUDE_RELIABILITY_PROTOCOL,
       result: ledger,
     });
     io.stdout(`${JSON.stringify(result, null, 2)}\n`);
@@ -237,14 +239,14 @@ export function renderUsage(): string {
     "",
     "Run either the fixed altitude-reliability corpus or the frozen clustering",
     "golden set, append the score to a non-compacting capability ledger, then",
-    "print the full result as JSON. Clustering runs at a tool-free boundary.",
+    "print the full result as JSON. Both benchmarks run at a tool-free boundary.",
     "",
     "Required:",
     "  --model <alias>       Planner model alias to score (for example, opus)",
     "",
     "Options:",
     "  --benchmark <name>  altitude (default) or clustering",
-    "  --reasoning-level <level>  Pinned model reasoning/thinking level: low, medium, or high (default high). Applied to the claude and codex tool-free clustering paths and the altitude lane, and recorded in every new ledger row.",
+    "  --reasoning-level <level>  Pinned model reasoning/thinking level: low, medium, high, xhigh, or max (default high). Applied to the claude and codex tool-free paths and recorded in every new ledger row.",
     "  --repeats <count>    Clustering repeats; gate-authoritative runs require >=3 (default 3)",
     "  --fixture-dir <path> Frozen clustering fixtures (default tests/fixtures/clustering-golden-set)",
     "  --workspace <path>    Source workspace and durable-ledger root (default current directory)",

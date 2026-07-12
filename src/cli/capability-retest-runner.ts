@@ -2,10 +2,7 @@ import { join } from "node:path";
 
 import { z } from "zod";
 
-import {
-  type PlannerRunResult,
-  createCrabrunnerPlannerRunner,
-} from "../agent/triage-planner.js";
+import type { PlannerRunResult } from "../agent/triage-planner.js";
 import {
   ALTITUDE_RELIABILITY_VERDICTS,
   type AltitudeReliabilityCase,
@@ -13,17 +10,7 @@ import {
   type AltitudeReliabilityVerdict,
   type AltitudeReliabilityVerdictObservation,
 } from "../audit/altitude-reliability.js";
-import type { ClaudeRunnerValidationConfig } from "../claude-runner/claude-runner-types.js";
-
-/**
- * The verdict contract is an intentionally tiny exact-JSON artifact
- * (`{"verdict":"kill"}` ~= 20 bytes). The crabrunner default 200-byte minimum
- * rejects compliant answers and rewards prose padding (SYMPH-1119), so the
- * altitude path overrides the floor; strict shape validation stays with the
- * Zod parser below.
- */
-export const CAPABILITY_RETEST_VERDICT_VALIDATION: ClaudeRunnerValidationConfig =
-  { minBytes: 1 };
+import { createToolFreeClusteringPlannerRunner } from "./clustering-tool-free-runner.js";
 
 export function createCrabrunnerVerdictRunner(input: {
   model: string;
@@ -38,14 +25,13 @@ export function createCrabrunnerVerdictRunner(input: {
 ) => Promise<AltitudeReliabilityVerdictObservation> {
   return async (testCase, _context) => {
     const artifactName = `altitude-reliability-${testCase.issueIdentifier.toLowerCase()}-${stamp(input.generatedAt)}`;
-    const runner = createCrabrunnerPlannerRunner({
+    const runner = createToolFreeClusteringPlannerRunner({
       workspace: input.workspace,
       artifactDir: join(input.outDir, testCase.issueIdentifier.toLowerCase()),
       artifactName,
       model: input.model,
-      reasoningEffort: input.reasoningLevel,
+      reasoningLevel: input.reasoningLevel,
       env: input.env,
-      validation: CAPABILITY_RETEST_VERDICT_VALIDATION,
     });
     const response = await runner(renderVerdictPrompt(testCase));
     return parseCapabilityRetestVerdictResponse(
@@ -86,7 +72,15 @@ export function renderVerdictPrompt(testCase: AltitudeReliabilityCase): string {
   return [
     "You are running an unattended altitude-reliability capability re-test for the Symphony backlog planner.",
     `Classify Linear issue ${testCase.issueIdentifier} from this prompt alone.`,
-    "This benchmark intentionally provides no live Linear access, git history, docs, tests, or answer-key context. Do not use tools, inspect files, or try to recover missing context.",
+    "This benchmark provides a frozen issue snapshot and no live Linear access, git history, docs, tests, or answer-key context. Do not use tools, inspect files, or try to recover other context.",
+    "",
+    "<issue_snapshot>",
+    `Identifier: ${testCase.issueIdentifier}`,
+    `Title: ${testCase.snapshot.title}`,
+    "Description:",
+    testCase.snapshot.description,
+    "</issue_snapshot>",
+    "",
     "Judge the issue at the correct product altitude:",
     '- "kill" means the issue should be closed because its premise is disproved, redundant, or merely symptomatic.',
     '- "keep" means it is a valid, correctly scoped unit of work.',

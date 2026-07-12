@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   CODEX_DISABLED_TOOL_FEATURES,
   createToolFreeClusteringPlannerRunner,
+  resolveToolFreeInvocation,
 } from "../../src/cli/clustering-tool-free-runner.js";
 
 const roots: string[] = [];
@@ -52,6 +53,21 @@ afterEach(async () => {
 });
 
 describe("tool-free clustering planner runner", () => {
+  it.each(["xhigh", "max"])(
+    "threads %s verbatim to both Claude and Codex",
+    (reasoningLevel) => {
+      const claude = resolveToolFreeInvocation("opus", reasoningLevel);
+      const codex = resolveToolFreeInvocation(
+        "openai/gpt-5.6-sol",
+        reasoningLevel,
+      );
+
+      expect(valueAfter(claude.args, "--effort")).toBe(reasoningLevel);
+      expect(codex.args).toContain(
+        `model_reasoning_effort="${reasoningLevel}"`,
+      );
+    },
+  );
   it("hard-disables tools and strips tracker credentials at the subprocess boundary", async () => {
     const root = await mkdtemp(join(tmpdir(), "clustering-tool-free-"));
     roots.push(root);

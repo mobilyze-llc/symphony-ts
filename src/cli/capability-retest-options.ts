@@ -1,7 +1,15 @@
 import { isAbsolute, resolve } from "node:path";
 
 import { MIN_GATE_AUTHORITATIVE_CLUSTERING_REPEATS } from "../audit/clustering-benchmark.js";
-import { REASONING_EFFORTS, type ReasoningEffort } from "../domain/model.js";
+const CAPABILITY_RETEST_REASONING_LEVELS = [
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
+type CapabilityRetestReasoningLevel =
+  (typeof CAPABILITY_RETEST_REASONING_LEVELS)[number];
 
 /**
  * Pinned reasoning/thinking level for a capability run. Explicitly set on every
@@ -11,7 +19,7 @@ import { REASONING_EFFORTS, type ReasoningEffort } from "../domain/model.js";
  * lane-registry default, is supported across the claude and codex boundaries,
  * and avoids an altitude-vs-clustering mismatch.
  */
-export const DEFAULT_CAPABILITY_RETEST_REASONING_LEVEL: ReasoningEffort =
+const DEFAULT_CAPABILITY_RETEST_REASONING_LEVEL: CapabilityRetestReasoningLevel =
   "high";
 
 export interface CapabilityRetestCliOptions {
@@ -21,7 +29,7 @@ export interface CapabilityRetestCliOptions {
   benchmark: "altitude" | "clustering";
   fixtureDir: string | null;
   repeats: number;
-  reasoningLevel: ReasoningEffort;
+  reasoningLevel: CapabilityRetestReasoningLevel;
   help: boolean;
 }
 
@@ -42,7 +50,7 @@ export function parseCapabilityRetestCliArgs(
   let benchmark: CapabilityRetestCliOptions["benchmark"] = "altitude";
   let fixtureDir: string | null = null;
   let repeats = MIN_GATE_AUTHORITATIVE_CLUSTERING_REPEATS;
-  let reasoningLevel: ReasoningEffort =
+  let reasoningLevel: CapabilityRetestReasoningLevel =
     DEFAULT_CAPABILITY_RETEST_REASONING_LEVEL;
   let help = false;
   for (let index = 0; index < argv.length; index += 1) {
@@ -91,7 +99,7 @@ export function parseCapabilityRetestCliArgs(
         const value = readValue("--reasoning-level");
         if (!isReasoningEffort(value)) {
           throw new CapabilityRetestUsageError(
-            `--reasoning-level must be one of ${REASONING_EFFORTS.join(", ")}`,
+            `--reasoning-level must be one of ${CAPABILITY_RETEST_REASONING_LEVELS.join(", ")}`,
           );
         }
         reasoningLevel = value;
@@ -113,8 +121,12 @@ export function parseCapabilityRetestCliArgs(
   };
 }
 
-function isReasoningEffort(value: string): value is ReasoningEffort {
-  return (REASONING_EFFORTS as readonly string[]).includes(value);
+function isReasoningEffort(
+  value: string,
+): value is CapabilityRetestReasoningLevel {
+  return (CAPABILITY_RETEST_REASONING_LEVELS as readonly string[]).includes(
+    value,
+  );
 }
 
 function resolvePath(cwd: string, value: string): string {

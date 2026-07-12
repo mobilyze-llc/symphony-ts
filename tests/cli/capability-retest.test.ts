@@ -11,10 +11,8 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { validateClaudeArtifact } from "../../src/claude-runner/claude-runner-contract.js";
 import { runClusteringCapabilityRetest } from "../../src/cli/capability-retest-clustering.js";
 import {
-  CAPABILITY_RETEST_VERDICT_VALIDATION,
   parseCapabilityRetestVerdictResponse,
   renderVerdictPrompt,
 } from "../../src/cli/capability-retest-runner.js";
@@ -26,6 +24,7 @@ import {
 } from "../../src/cli/capability-retest.js";
 import {
   getAltitudeReliabilityCapabilityLedgerPath,
+  isAuthoritativeAltitudeReliabilityCapabilityLedgerRow,
   readAltitudeReliabilityCapabilityLedger,
   readClusteringBenchmarkCapabilityLedger,
 } from "../../src/logging/capability-ledger.js";
@@ -43,19 +42,6 @@ afterEach(async () => {
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
   );
-});
-
-describe("CAPABILITY_RETEST_VERDICT_VALIDATION (SYMPH-1119)", () => {
-  it("accepts a contract-compliant tiny verdict artifact that the default policy rejects", async () => {
-    const compliant = '{"verdict":"reframe"}';
-    await expect(
-      validateClaudeArtifact(compliant, CAPABILITY_RETEST_VERDICT_VALIDATION),
-    ).resolves.toEqual([]);
-    // The regression this guards: the unparameterized default floor rejects
-    // exactly the artifact the verdict prompt demands.
-    const defaultErrors = await validateClaudeArtifact(compliant);
-    expect(defaultErrors.some((e) => e.includes("too small"))).toBe(true);
-  });
 });
 
 function captureIo() {
@@ -104,22 +90,25 @@ describe("capability re-test CLI", () => {
     expect(options.reasoningLevel).toBe("high");
   });
 
-  it("parses an explicit reasoning level", () => {
-    const options = parseCapabilityRetestCliArgs(
-      ["--model", "opus", "--reasoning-level", "low"],
-      "/repo",
-    );
+  it.each(["xhigh", "max"] as const)(
+    "parses the new %s reasoning level",
+    (reasoningLevel) => {
+      const options = parseCapabilityRetestCliArgs(
+        ["--model", "opus", "--reasoning-level", reasoningLevel],
+        "/repo",
+      );
 
-    expect(options.reasoningLevel).toBe("low");
-  });
+      expect(options.reasoningLevel).toBe(reasoningLevel);
+    },
+  );
 
   it("rejects an unsupported reasoning level", () => {
     expect(() =>
       parseCapabilityRetestCliArgs(
-        ["--model", "opus", "--reasoning-level", "max"],
+        ["--model", "opus", "--reasoning-level", "extreme"],
         "/repo",
       ),
-    ).toThrow("--reasoning-level must be one of low, medium, high");
+    ).toThrow("--reasoning-level must be one of low, medium, high, xhigh, max");
   });
 
   it("returns usage exit 1 when the model alias is missing", async () => {
@@ -390,8 +379,12 @@ describe("capability re-test CLI", () => {
       run_id: "run-success",
       model: "opus",
       reasoning_level: "medium",
-      result: { capability_arrived: true },
+      protocol: "snapshot-v1",
+      result: { protocol: "snapshot-v1", capability_arrived: true },
     });
+    expect(
+      isAuthoritativeAltitudeReliabilityCapabilityLedgerRow(durableRows[0]!),
+    ).toBe(true);
   });
 
   it("reads a legacy altitude ledger row without a reasoning level", async () => {
@@ -413,6 +406,9 @@ describe("capability re-test CLI", () => {
     const rows = await readAltitudeReliabilityCapabilityLedger(root);
     expect(rows).toEqual([legacyRow]);
     expect(rows[0]).not.toHaveProperty("reasoning_level");
+    expect(
+      isAuthoritativeAltitudeReliabilityCapabilityLedgerRow(rows[0]!),
+    ).toBe(false);
   });
 
   it("writes the scored ledger and exits non-zero when one false kill fails the bar", async () => {
@@ -497,7 +493,7 @@ describe("capability re-test CLI", () => {
     });
   });
 
-  it("keeps altitude on its verdict runner path when clustering uses a tool-free boundary", async () => {
+  it("keeps altitude independent from clustering inference injection", async () => {
     const root = await tempRoot();
     const runClusteringInference = vi.fn();
     const exit = await runCapabilityRetestCli(
@@ -652,7 +648,15 @@ describe("capability re-test CLI", () => {
     const prompt = renderVerdictPrompt({
       issueIdentifier: "SYMPH-941",
       expectedVerdict: "reframe",
-      source: "root-cause regression",
+      snapshot: {
+        title: "Frozen issue title",
+        description: "Frozen issue description",
+        cutoff: "2026-06-28T00:00:00.000Z",
+        answerIntroducedAt: "2026-06-28T00:00:00.001Z",
+        source: "Linear issue fixture",
+        reconstructedAt: "2026-07-12T00:00:00.000Z",
+        reconstructionNote: "Fixture reconstruction",
+      },
     });
 
     expect(prompt).toContain(
@@ -660,6 +664,9 @@ describe("capability re-test CLI", () => {
     );
     expect(prompt).toContain("no live Linear access");
     expect(prompt).toContain("Do not use tools");
+    expect(prompt).toContain("Title: Frozen issue title");
+    expect(prompt).toContain("Frozen issue description");
+    expect(prompt).not.toContain("reframe\n");
     expect(prompt).not.toContain("Independently investigate");
   });
 

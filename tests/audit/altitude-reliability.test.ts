@@ -23,6 +23,16 @@ describe("altitude reliability re-test protocol", () => {
         ALTITUDE_RELIABILITY_CORPUS.map((entry) => entry.expectedVerdict),
       ),
     ).toEqual(new Set(["kill", "keep", "reframe"]));
+    for (const entry of ALTITUDE_RELIABILITY_CORPUS) {
+      expect(entry.snapshot.title).not.toBe("");
+      expect(entry.snapshot.description).not.toBe("");
+      expect(Date.parse(entry.snapshot.cutoff)).toBeLessThan(
+        Date.parse(entry.snapshot.answerIntroducedAt),
+      );
+      expect(entry.snapshot.reconstructionNote).toContain(
+        "not claimed as a historical export",
+      );
+    }
   });
 
   it("scores unattended per-model verdicts with kill precision and false-kill pressure", async () => {
@@ -40,11 +50,32 @@ describe("altitude reliability re-test protocol", () => {
     expect(result.metrics.killPrecision).toBe(0.75);
     expect(result.capabilityArrived).toBe(false);
     expect(buildAltitudeReliabilityLedgerEntry(result)).toMatchObject({
+      protocol: "snapshot-v1",
       kind: "altitude_reliability_retest",
       model: "local-skeptic-v1",
       capability_arrived: false,
       metrics: { falseKills: 1 },
     });
+  });
+
+  it("rejects a snapshot whose cutoff includes answer-bearing content", async () => {
+    const fixture = ALTITUDE_RELIABILITY_CORPUS[0];
+    if (fixture === undefined) throw new Error("expected a corpus fixture");
+    await expect(
+      runAltitudeReliabilityRetest({
+        model: "x",
+        corpus: [
+          {
+            ...fixture,
+            snapshot: {
+              ...fixture.snapshot,
+              cutoff: "2026-06-28T06:30:27.656Z",
+            },
+          },
+        ],
+        runVerdict: async () => "kill",
+      }),
+    ).rejects.toThrow(/cutoff must precede answer-bearing content/);
   });
 
   it("denies capability to a model that makes no kills when the corpus expects them", async () => {
