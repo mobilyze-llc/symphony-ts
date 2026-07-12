@@ -6,7 +6,7 @@
 
 ## Purpose
 
-Run either the fixed SYMPH-968 altitude-reliability corpus or the SYMPH-1106 clustering golden set against one planner model alias. Both modes print a scored result and append to a dedicated non-compacting capability ledger. Altitude mode uses the planner's production crabrunner path and also records a non-authoritative dispatcher-journal observation. Clustering mode reconstructs committed issue snapshots as of their frozen cutoff and invokes the production structural-advisory prompt, context assembler, and parser through a one-shot Claude process that disables every built-in tool, supplies a strict empty MCP configuration, and removes tracker/tool credentials. It records pairwise precision/recall, root accuracy, negative-control false-cluster rate, invalid-member count/rate, and repeat spread. The command does not mutate Linear or dispatch work.
+Run either the fixed SYMPH-968 altitude-reliability corpus or the SYMPH-1106 clustering golden set against one planner model alias. Both modes print a scored result and append to a dedicated non-compacting capability ledger. Altitude mode renders frozen title-and-description snapshots and invokes the same tool-free Claude/Codex boundary used by clustering; only `snapshot-v1` altitude rows are authoritative, while every earlier row remains readable but non-authoritative. It also records a non-authoritative dispatcher-journal observation. Clustering mode reconstructs committed issue snapshots as of their frozen cutoff and invokes the production structural-advisory prompt, context assembler, and parser through a one-shot process that disables built-in tools, supplies a strict empty MCP configuration, and removes tracker/tool credentials. It records pairwise precision/recall, root accuracy, negative-control false-cluster rate, invalid-member count/rate, and repeat spread. The command does not mutate Linear or dispatch work.
 
 ## Installed location
 
@@ -24,14 +24,14 @@ Usage: symphony-capability-retest --model <alias> [--benchmark altitude|clusteri
 
 Run either the fixed altitude-reliability corpus or the frozen clustering
 golden set, append the score to a non-compacting capability ledger, then
-print the full result as JSON. Clustering runs at a tool-free boundary.
+print the full result as JSON. Both benchmarks run at a tool-free boundary.
 
 Required:
   --model <alias>       Planner model alias to score (for example, opus)
 
 Options:
   --benchmark <name>  altitude (default) or clustering
-  --reasoning-level <level>  Pinned model reasoning/thinking level: low, medium, or high (default high). Applied to the claude and codex tool-free clustering paths and the altitude lane, and recorded in every new ledger row.
+  --reasoning-level <level>  Pinned model reasoning/thinking level: low, medium, high, xhigh, or max (default high). Applied to the claude and codex tool-free paths and recorded in every new ledger row.
   --repeats <count>    Clustering repeats; gate-authoritative runs require >=3 (default 3)
   --fixture-dir <path> Frozen clustering fixtures (default tests/fixtures/clustering-golden-set)
   --workspace <path>    Source workspace and durable-ledger root (default current directory)
@@ -65,10 +65,10 @@ symphony-capability-retest --model opus --benchmark clustering --repeats 3 --wor
 - A failed capability bar is a completed measurement: the command writes the ledger row, prints the score, and exits `2`. Parseable model output-contract violations, such as prose after a valid verdict JSON object, are visible per case and score as wrong model behavior.
 - Runner failures, unrecoverable response parsing, journal-write, and capability-ledger-write failures exit `3` and do not claim a gate-authoritative scored run.
 - The command writes the non-authoritative dispatcher observation first. If the capability-ledger append then fails, the surviving journal row remains explicitly non-authoritative and the Phase-A gate stays unarmed.
-- Gate-authoritative capability evidence exists only in `.symphony/capability-ledger/altitude-reliability.jsonl` and survives dispatcher journal checkpoint compaction.
+- Gate-authoritative capability evidence exists only in `snapshot-v1` rows in `.symphony/capability-ledger/altitude-reliability.jsonl` and survives dispatcher journal checkpoint compaction. Rows without that protocol discriminator are legacy observations and cannot satisfy `capabilityArrived`.
 - Gate-authoritative clustering evidence exists only in `.symphony/capability-ledger/clustering-benchmark.jsonl`; the CLI rejects fewer than three repeats.
-- Clustering inference cannot query live Linear, browse the web, run shell commands, or call external tools: the Claude process receives `--tools ""`, a strict empty MCP configuration, no settings sources, and no tracker/tool credentials. Altitude mode keeps its existing crabrunner execution path.
-- This direct one-shot Claude path is intentional: the normal crabrunner lane owns a tool-capable agent workspace, so it cannot prove the clustering benchmark's answer-key and live-tracker isolation boundary. Clustering still reuses the production U4 prompt assembler and response parser; only process execution differs.
+- Altitude and clustering inference cannot query live Linear, browse the web, run shell commands, or call external tools: Claude receives `--tools ""`, a strict empty MCP configuration, and no settings sources; Codex receives the complete built-in-tool denylist and no project instructions. Both paths remove tracker/tool credentials.
+- The direct one-shot tool-free paths are intentional: the normal crabrunner lane owns a tool-capable agent workspace, so it cannot prove the benchmarks' answer-key and live-tracker isolation boundary. Clustering still reuses the production U4 prompt assembler and response parser; only process execution differs.
 - Root scoring prefers a valid explicit `rootIssueIdentifier` when inference supplies one, then falls back to issue identifiers named in `rootCauseHypothesis` for legacy or malformed output.
 - Clustering fixtures are versioned evidence. Never regenerate them from live Linear; update provenance, cutoff, source commit, issue snapshots, and re-adjudication together in review.
 - The corpus and bar are contract data restored from SYMPH-968. Change them only by superseding that contract.

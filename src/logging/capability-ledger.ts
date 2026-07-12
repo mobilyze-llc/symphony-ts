@@ -19,6 +19,9 @@ const AltitudeReliabilityCapabilityLedgerRowSchema = z
     // Effective reasoning/thinking level pinned for the run (SYMPH-1128).
     // Optional so pre-SYMPH-1128 rows without it remain readable as legacy.
     reasoning_level: z.string().min(1).optional(),
+    // Missing on all pre-snapshot rows, which remain readable but are never
+    // authoritative Phase-A gate evidence.
+    protocol: z.literal("snapshot-v1").optional(),
     result: z.record(z.string(), z.unknown()),
   })
   .strict();
@@ -26,6 +29,14 @@ const AltitudeReliabilityCapabilityLedgerRowSchema = z
 export type AltitudeReliabilityCapabilityLedgerRow = z.infer<
   typeof AltitudeReliabilityCapabilityLedgerRowSchema
 >;
+
+export function isAuthoritativeAltitudeReliabilityCapabilityLedgerRow(
+  row: AltitudeReliabilityCapabilityLedgerRow,
+): boolean {
+  return (
+    row.protocol === "snapshot-v1" && row.result.protocol === "snapshot-v1"
+  );
+}
 
 const ClusteringBenchmarkCapabilityLedgerRowSchema = z
   .object({
