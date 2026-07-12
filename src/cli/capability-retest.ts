@@ -127,6 +127,7 @@ export async function runCapabilityRetestCli(
       }
       const result = await runClusteringCapabilityRetest({
         model,
+        reasoningLevel: options.reasoningLevel,
         workspace: options.workspace,
         evaluationWorkspace: evaluationWorkspace?.path ?? options.workspace,
         outDir,
@@ -155,6 +156,7 @@ export async function runCapabilityRetestCli(
       dependencies.runVerdict ??
       createCrabrunnerVerdictRunner({
         model,
+        reasoningLevel: options.reasoningLevel,
         workspace: evaluationWorkspace?.path ?? options.workspace,
         outDir,
         env: dependencies.env ?? process.env,
@@ -189,6 +191,7 @@ export async function runCapabilityRetestCli(
       metadata: {
         ...ledger,
         run_id: invocationId,
+        reasoning_level: options.reasoningLevel,
         gate_authority: false,
         evidence_role: "operational_measurement_observation",
         authoritative_evidence_path:
@@ -210,6 +213,7 @@ export async function runCapabilityRetestCli(
       run_id: invocationId,
       generated_at: generatedAt,
       model,
+      reasoning_level: options.reasoningLevel,
       result: ledger,
     });
     io.stdout(`${JSON.stringify(result, null, 2)}\n`);
@@ -240,6 +244,7 @@ export function renderUsage(): string {
     "",
     "Options:",
     "  --benchmark <name>  altitude (default) or clustering",
+    "  --reasoning-level <level>  Pinned model reasoning/thinking level: low, medium, or high (default high). Applied to the claude and codex tool-free clustering paths and the altitude lane, and recorded in every new ledger row.",
     "  --repeats <count>    Clustering repeats; gate-authoritative runs require >=3 (default 3)",
     "  --fixture-dir <path> Frozen clustering fixtures (default tests/fixtures/clustering-golden-set)",
     "  --workspace <path>    Source workspace and durable-ledger root (default current directory)",

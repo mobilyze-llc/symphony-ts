@@ -1532,6 +1532,12 @@ export interface CrabrunnerPlannerRunnerOptions {
   artifactDir: string;
   /** Version-floating model alias; do not pin. Defaults to "opus". */
   model?: string;
+  /**
+   * Explicit reasoning/thinking level threaded to the crabrunner lane (mapped to
+   * `--thinking` where the manifest supports it). Left unset to inherit the lane
+   * default; capability re-tests pin it so scores are controlled (SYMPH-1128).
+   */
+  reasoningEffort?: string | null;
   profile?: string;
   timeoutSeconds?: number;
   env?: NodeJS.ProcessEnv;
@@ -1585,6 +1591,9 @@ export function createCrabrunnerPlannerRunner(
         artifactDir: options.artifactDir,
         artifactName,
         model,
+        ...(options.reasoningEffort === undefined
+          ? {}
+          : { reasoningEffort: options.reasoningEffort }),
         ...(options.profile === undefined ? {} : { profile: options.profile }),
         ...(options.timeoutSeconds === undefined
           ? {}

@@ -22,6 +22,7 @@ export interface ClusteringCapabilityRetestDependencies {
 
 export async function runClusteringCapabilityRetest(input: {
   model: string;
+  reasoningLevel: string;
   workspace: string;
   evaluationWorkspace: string;
   outDir: string;
@@ -42,6 +43,7 @@ export async function runClusteringCapabilityRetest(input: {
     input.dependencies?.runInference ??
     createProductionClusteringInference({
       model: input.model,
+      reasoningLevel: input.reasoningLevel,
       workspace: input.evaluationWorkspace,
       outDir: input.outDir,
       env: input.env,
@@ -67,6 +69,7 @@ export async function runClusteringCapabilityRetest(input: {
     run_id: input.runId,
     generated_at: input.generatedAt,
     model: input.model,
+    reasoning_level: input.reasoningLevel,
     result: result as unknown as Record<string, unknown>,
   });
   return result;

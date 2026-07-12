@@ -44,6 +44,7 @@ describe("tool-free clustering planner runner", () => {
     await chmod(executable, 0o755);
     const runner = createToolFreeClusteringPlannerRunner({
       model: "opus",
+      reasoningLevel: "high",
       workspace: root,
       artifactDir: join(root, "artifacts"),
       artifactName: "repeat-1",
@@ -88,6 +89,8 @@ describe("tool-free clustering planner runner", () => {
     ).toEqual({
       mcpServers: {},
     });
+    expect(valueAfter(processBoundary.args, "--model")).toBe("opus");
+    expect(valueAfter(processBoundary.args, "--thinking")).toBe("high");
     expect(valueAfter(processBoundary.args, "--setting-sources")).toBe("");
     expect(processBoundary.args).toEqual(
       expect.arrayContaining([
@@ -130,11 +133,99 @@ describe("tool-free clustering planner runner", () => {
     );
   });
 
+  it("pins the reasoning level on the claude boundary via --thinking", async () => {
+    const root = await mkdtemp(join(tmpdir(), "clustering-tool-free-"));
+    roots.push(root);
+    let captured: { command: string; args: readonly string[] } | null = null;
+    const runner = createToolFreeClusteringPlannerRunner({
+      model: "opus",
+      reasoningLevel: "low",
+      workspace: root,
+      artifactDir: join(root, "artifacts"),
+      artifactName: "repeat-1",
+      env: {},
+      runProcess: async ({ command, args }) => {
+        captured = { command, args };
+        return { status: "completed", exitCode: 0, stdout: "{}", stderr: "" };
+      },
+    });
+
+    await expect(runner("planner prompt")).resolves.toEqual({
+      status: "ok",
+      markdown: "{}",
+    });
+    if (captured === null) throw new Error("expected an invocation");
+    const invocation = captured as { command: string; args: readonly string[] };
+    expect(invocation.command).toBe("claude");
+    expect(valueAfter(invocation.args, "--thinking")).toBe("low");
+  });
+
+  it("routes openai/codex aliases to a codex exec run with a pinned reasoning effort", async () => {
+    const root = await mkdtemp(join(tmpdir(), "clustering-tool-free-"));
+    roots.push(root);
+    let captured: { command: string; args: readonly string[] } | null = null;
+    const runner = createToolFreeClusteringPlannerRunner({
+      model: "openai/gpt-5.6-sol",
+      reasoningLevel: "high",
+      workspace: root,
+      artifactDir: join(root, "artifacts"),
+      artifactName: "repeat-1",
+      env: {},
+      runProcess: async ({ command, args }) => {
+        captured = { command, args };
+        return {
+          status: "completed",
+          exitCode: 0,
+          stdout: '{"rationale":"measured","batches":[]}',
+          stderr: "",
+        };
+      },
+    });
+
+    await expect(runner("planner prompt")).resolves.toEqual({
+      status: "ok",
+      markdown: '{"rationale":"measured","batches":[]}',
+    });
+    if (captured === null) throw new Error("expected an invocation");
+    const invocation = captured as { command: string; args: readonly string[] };
+    expect(invocation.command).toBe("codex");
+    expect(invocation.args).toContain("exec");
+    expect(invocation.args).toContain("--ignore-user-config");
+    expect(invocation.args).toContain('model_reasoning_effort="high"');
+    // The provider prefix is stripped for the codex --model id.
+    expect(valueAfter(invocation.args, "--model")).toBe("gpt-5.6-sol");
+  });
+
+  it("reports codex boundary failures with the codex label", async () => {
+    const root = await mkdtemp(join(tmpdir(), "clustering-tool-free-"));
+    roots.push(root);
+    const runner = createToolFreeClusteringPlannerRunner({
+      model: "openai/gpt-5.6-sol",
+      reasoningLevel: "high",
+      workspace: root,
+      artifactDir: join(root, "artifacts"),
+      artifactName: "repeat-1",
+      env: {},
+      runProcess: async () => ({
+        status: "completed",
+        exitCode: 5,
+        stdout: "",
+        stderr: "codex unavailable",
+      }),
+    });
+
+    await expect(runner("planner prompt")).resolves.toEqual({
+      status: "unavailable",
+      detail: "tool-free Codex exited 5: codex unavailable",
+    });
+  });
+
   it("returns unavailable without publishing a response artifact on failure", async () => {
     const root = await mkdtemp(join(tmpdir(), "clustering-tool-free-"));
     roots.push(root);
     const runner = createToolFreeClusteringPlannerRunner({
       model: "opus",
+      reasoningLevel: "high",
       workspace: root,
       artifactDir: join(root, "artifacts"),
       artifactName: "repeat-1",
@@ -173,6 +264,7 @@ describe("tool-free clustering planner runner", () => {
     await chmod(executable, 0o755);
     const runner = createToolFreeClusteringPlannerRunner({
       model: "opus",
+      reasoningLevel: "high",
       workspace: root,
       artifactDir: join(root, "artifacts"),
       artifactName: "repeat-1",
@@ -201,6 +293,7 @@ describe("tool-free clustering planner runner", () => {
     await chmod(executable, 0o755);
     const runner = createToolFreeClusteringPlannerRunner({
       model: "opus",
+      reasoningLevel: "high",
       workspace: root,
       artifactDir: join(root, "artifacts"),
       artifactName: "repeat-1",
@@ -222,6 +315,7 @@ describe("tool-free clustering planner runner", () => {
     roots.push(root);
     const runner = createToolFreeClusteringPlannerRunner({
       model: "opus",
+      reasoningLevel: "high",
       workspace: root,
       artifactDir: join(root, "artifacts"),
       artifactName: "repeat-1",
@@ -249,6 +343,7 @@ describe("tool-free clustering planner runner", () => {
     roots.push(root);
     const runner = createToolFreeClusteringPlannerRunner({
       model: "opus",
+      reasoningLevel: "high",
       workspace: root,
       artifactDir: join(root, "artifacts"),
       artifactName: "repeat-1",

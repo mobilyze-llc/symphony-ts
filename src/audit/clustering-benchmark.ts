@@ -140,6 +140,7 @@ async function loadClusteringGoldenSetFixtureSnapshot(path: string): Promise<{
 
 export function createProductionClusteringInference(input: {
   model: string;
+  reasoningLevel: string;
   workspace: string;
   outDir: string;
   env: NodeJS.ProcessEnv;
@@ -148,6 +149,7 @@ export function createProductionClusteringInference(input: {
   return async ({ prompt, fixture, repeat }) => {
     const runner = createToolFreeClusteringPlannerRunner({
       model: input.model,
+      reasoningLevel: input.reasoningLevel,
       workspace: input.workspace,
       artifactDir: join(input.outDir, fixture.fixture_id, `repeat-${repeat}`),
       artifactName: `clustering-${stamp(input.generatedAt)}-${repeat}`,

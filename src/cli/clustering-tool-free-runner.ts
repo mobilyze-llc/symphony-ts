@@ -41,6 +41,13 @@ type ToolFreePlannerProcess = (
 
 export function createToolFreeClusteringPlannerRunner(input: {
   model: string;
+  /**
+   * Explicit reasoning/thinking level for this run (SYMPH-1128). Threaded to the
+   * spawned CLI so the clustering score is not confounded by an inherited CLI
+   * default: `--thinking <level>` on the claude boundary, a
+   * `model_reasoning_effort` override on the codex boundary.
+   */
+  reasoningLevel: string;
   workspace: string;
   artifactDir: string;
   artifactName: string;
@@ -48,6 +55,10 @@ export function createToolFreeClusteringPlannerRunner(input: {
   timeoutMs?: number;
   runProcess?: ToolFreePlannerProcess;
 }): (prompt: string) => Promise<PlannerRunResult> {
+  const invocation = resolveToolFreeInvocation(
+    input.model,
+    input.reasoningLevel,
+  );
   return async (prompt) => {
     await mkdir(input.artifactDir, { recursive: true });
     await writeFile(
@@ -59,8 +70,8 @@ export function createToolFreeClusteringPlannerRunner(input: {
     let result: ToolFreePlannerProcessResult;
     try {
       result = await (input.runProcess ?? runToolFreePlannerProcess)({
-        command: "claude",
-        args: toolFreeClaudeArgs(input.model),
+        command: invocation.command,
+        args: invocation.args,
         cwd: input.workspace,
         env: withoutExternalToolCredentials(input.env),
         stdin: prompt,
@@ -69,26 +80,26 @@ export function createToolFreeClusteringPlannerRunner(input: {
     } catch (error) {
       return {
         status: "unavailable",
-        detail: `tool-free Claude process failed: ${bounded(errorDetail(error))}`,
+        detail: `tool-free ${invocation.label} process failed: ${bounded(errorDetail(error))}`,
       };
     }
     if (result.status === "timed_out") {
       return {
         status: "unavailable",
-        detail: `tool-free Claude timed out after ${timeoutMs}ms`,
+        detail: `tool-free ${invocation.label} timed out after ${timeoutMs}ms`,
       };
     }
     if (result.exitCode !== 0) {
       return {
         status: "unavailable",
-        detail: `tool-free Claude exited ${result.exitCode}: ${bounded(result.stderr)}`,
+        detail: `tool-free ${invocation.label} exited ${result.exitCode}: ${bounded(result.stderr)}`,
       };
     }
     const markdown = result.stdout.trim();
     if (markdown === "") {
       return {
         status: "unavailable",
-        detail: "tool-free Claude returned empty output",
+        detail: `tool-free ${invocation.label} returned empty output`,
       };
     }
     await writeFile(
@@ -100,13 +111,68 @@ export function createToolFreeClusteringPlannerRunner(input: {
   };
 }
 
-function toolFreeClaudeArgs(model: string): string[] {
+interface ToolFreeInvocation {
+  command: string;
+  args: string[];
+  label: string;
+}
+
+const CODEX_PROVIDER_PREFIXES = new Set([
+  "codex",
+  "codex-cli",
+  "codex-app-server",
+  "openai",
+  "openai-codex",
+]);
+
+/**
+ * Pick the tool-free CLI for the model alias and pin its reasoning level.
+ * Anthropic aliases spawn `claude --print`; openai/codex aliases (for example
+ * `openai/gpt-5.6-sol`) spawn `codex exec`. Both paths receive the explicit
+ * level so clustering scores are controlled rather than inheriting a CLI default.
+ */
+export function resolveToolFreeInvocation(
+  model: string,
+  reasoningLevel: string,
+): ToolFreeInvocation {
+  if (isCodexModel(model)) {
+    return {
+      command: "codex",
+      args: toolFreeCodexArgs(codexModelId(model), reasoningLevel),
+      label: "Codex",
+    };
+  }
+  return {
+    command: "claude",
+    args: toolFreeClaudeArgs(model, reasoningLevel),
+    label: "Claude",
+  };
+}
+
+function isCodexModel(model: string): boolean {
+  const slash = model.indexOf("/");
+  if (slash < 0) {
+    return CODEX_PROVIDER_PREFIXES.has(model.trim().toLowerCase());
+  }
+  return CODEX_PROVIDER_PREFIXES.has(
+    model.slice(0, slash).trim().toLowerCase(),
+  );
+}
+
+function codexModelId(model: string): string {
+  const slash = model.indexOf("/");
+  return slash < 0 ? model : model.slice(slash + 1);
+}
+
+function toolFreeClaudeArgs(model: string, reasoningLevel: string): string[] {
   return [
     "--print",
     "--output-format",
     "text",
     "--model",
     model,
+    "--thinking",
+    reasoningLevel,
     "--tools",
     "",
     "--strict-mcp-config",
@@ -120,6 +186,17 @@ function toolFreeClaudeArgs(model: string): string[] {
     "--no-session-persistence",
     "--permission-mode",
     "dontAsk",
+  ];
+}
+
+function toolFreeCodexArgs(modelId: string, reasoningLevel: string): string[] {
+  return [
+    "exec",
+    "--ignore-user-config",
+    "--config",
+    `model_reasoning_effort="${reasoningLevel}"`,
+    "--model",
+    modelId,
   ];
 }
 

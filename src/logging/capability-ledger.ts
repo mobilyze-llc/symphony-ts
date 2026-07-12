@@ -16,6 +16,9 @@ const AltitudeReliabilityCapabilityLedgerRowSchema = z
     run_id: z.string().min(1),
     generated_at: z.string().min(1),
     model: z.string().min(1),
+    // Effective reasoning/thinking level pinned for the run (SYMPH-1128).
+    // Optional so pre-SYMPH-1128 rows without it remain readable as legacy.
+    reasoning_level: z.string().min(1).optional(),
     result: z.record(z.string(), z.unknown()),
   })
   .strict();
@@ -31,6 +34,9 @@ const ClusteringBenchmarkCapabilityLedgerRowSchema = z
     run_id: z.string().min(1),
     generated_at: z.string().min(1),
     model: z.string().min(1),
+    // Effective reasoning/thinking level pinned for the run (SYMPH-1128).
+    // Optional so pre-SYMPH-1128 rows without it remain readable as legacy.
+    reasoning_level: z.string().min(1).optional(),
     result: z.record(z.string(), z.unknown()),
   })
   .strict();
