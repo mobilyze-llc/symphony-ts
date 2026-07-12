@@ -11,9 +11,7 @@ import { promisify } from "node:util";
 import {
   type PlannerContext,
   type PlannerInFlight,
-  type PlannerRunResult,
   buildPlannerPrompt,
-  createCrabrunnerPlannerRunner,
   runTriagePlanner,
 } from "../agent/triage-planner.js";
 import {
@@ -23,12 +21,8 @@ import {
   DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_COMMENT_CHARS,
   DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_COMMENT_PAGES,
   DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_TOTAL_CHARS,
-  DEFAULT_QUEUE_TRIAGE_PLANNER_EFFORT,
 } from "../config/defaults.js";
-import {
-  QUEUE_TRIAGE_PLANNER_EFFORTS,
-  type QueueTriagePlannerEffort,
-} from "../config/types.js";
+import type { QueueTriagePlannerEffort } from "../config/planner-effort.js";
 import type { Issue } from "../domain/model.js";
 import {
   DEFAULT_ENVELOPE_ALLOWED_MODES,
@@ -77,14 +71,23 @@ import {
   renderManagerPlanAdvisoryPreview,
   withoutStructuralAdvisoryPreview,
 } from "./manager-plan-advisory-preview.js";
+import {
+  type CreateManagerPlanPlannerRunner,
+  DEFAULT_MANAGER_PLAN_EFFORT,
+  type ManagerPlanPersistenceSummary,
+  createDefaultManagerPlanPlannerRunner,
+  parseManagerPlanEffort,
+} from "./manager-plan-planner.js";
+export type {
+  CreateManagerPlanPlannerRunner,
+  ManagerPlanPlannerRunnerInput,
+} from "./manager-plan-planner.js";
 
-// symphony-manager-plan (SYMPH-837) — run the Queue Triage v2 backlog Manager
-// one-shot against eligible backlog. It reuses the live shadow planner core;
-// candidates come from standalone Linear reads and runtime-host context.
+// symphony-manager-plan (SYMPH-837) runs Queue Triage v2 one-shot against eligible backlog.
+// It reuses the live shadow planner core with standalone Linear/runtime-host context.
 
 export const DEFAULT_MANAGER_PLAN_CONCURRENCY_CEILING = 3;
 export const DEFAULT_MANAGER_PLAN_MODEL = "opus";
-export const DEFAULT_MANAGER_PLAN_EFFORT = DEFAULT_QUEUE_TRIAGE_PLANNER_EFFORT;
 export const DEFAULT_MANAGER_PLAN_STATE = "Backlog";
 export const DEFAULT_MANAGER_PLAN_IN_FLIGHT_STATES = [
   "In Progress",
@@ -172,23 +175,6 @@ export interface ManagerPlanPrContext {
   openPrs: PlannerContext["openPrs"];
   recentlyMerged: PlannerContext["recentlyMerged"];
 }
-
-interface ManagerPlanPersistenceSummary {
-  workspaceRoot: string;
-  recorded: boolean;
-  revision: number;
-}
-
-export interface ManagerPlanPlannerRunnerInput {
-  model: string;
-  effort: QueueTriagePlannerEffort;
-  artifactDir: string;
-  workspace: string;
-}
-
-export type CreateManagerPlanPlannerRunner = (
-  input: ManagerPlanPlannerRunnerInput,
-) => (prompt: string) => Promise<PlannerRunResult>;
 
 export type ManagerPlanGroundingInput = PlannerContextGroundingInput;
 export type ManagerPlanGroundingResult = PlannerContextGroundingResult;
@@ -346,15 +332,13 @@ export function parseManagerPlanCliArgs(
         model = readValue("--model");
         break;
       case "--effort": {
-        const value = readValue("--effort").toLowerCase();
-        if (
-          !(QUEUE_TRIAGE_PLANNER_EFFORTS as readonly string[]).includes(value)
-        ) {
+        const value = parseManagerPlanEffort(readValue("--effort"));
+        if (value === null) {
           throw new ManagerPlanCliUsageError(
-            `--effort must be one of: ${QUEUE_TRIAGE_PLANNER_EFFORTS.join(", ")}`,
+            "--effort must be one of: low, medium, high, max",
           );
         }
-        effort = value as QueueTriagePlannerEffort;
+        effort = value;
         break;
       }
       case "--page-size":
@@ -762,7 +746,8 @@ export async function runManagerPlanCli(
   }
 
   const createPlannerRunner =
-    dependencies.createPlannerRunner ?? defaultCreatePlannerRunner(now);
+    dependencies.createPlannerRunner ??
+    createDefaultManagerPlanPlannerRunner(`manager-plan-${stamp(now)}`);
   const artifactDir = options.outDir ?? defaultArtifactDir(now);
   const runClaude = createPlannerRunner({
     model: options.model,
@@ -1201,21 +1186,6 @@ function defaultFetchIssueComments(input: {
     ...(input.pageSize === null ? {} : { pageSize: input.pageSize }),
   });
   return (issueId, options) => client.fetchIssueComments(issueId, options);
-}
-
-function defaultCreatePlannerRunner(
-  now: () => Date,
-): CreateManagerPlanPlannerRunner {
-  return ({ model, effort, artifactDir, workspace }) =>
-    createCrabrunnerPlannerRunner({
-      workspace,
-      artifactDir,
-      model,
-      effort,
-      // Unique artifact name keeps a manual run from clobbering a live
-      // pipeline's standing-plan artifacts.
-      artifactName: `manager-plan-${stamp(now)}`,
-    });
 }
 
 export { toPlannerCandidateGroundingEvidence };

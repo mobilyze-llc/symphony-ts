@@ -1,6 +1,8 @@
 import type { ReasoningEffort } from "../domain/model.js";
 import type { PlanEnvelope } from "../domain/standing-plan.js";
 import type { ContractViolation } from "./config-contracts.js";
+import type { QueueTriagePlannerConfig } from "./planner-effort.js";
+export * from "./planner-effort.js";
 
 export interface WorkflowHooksConfig {
   afterCreate: string | null;
@@ -563,25 +565,12 @@ export interface StagesConfig {
 }
 
 /** Queue Triage v2 Manager configuration (SYMPH-784). */
-export const QUEUE_TRIAGE_PLANNER_EFFORTS = [
-  "low",
-  "medium",
-  "high",
-  "max",
-] as const;
-export type QueueTriagePlannerEffort =
-  (typeof QUEUE_TRIAGE_PLANNER_EFFORTS)[number];
-
-export interface WorkflowQueueTriageConfig {
+export interface WorkflowQueueTriageConfig extends QueueTriagePlannerConfig {
   enabled: boolean;
   shadowMode: boolean;
   structuralAdvisories?: boolean;
   structuralAdvisoryDormantOkTicks?: number;
   structuralAdvisoryRenderCap?: number;
-  /** Version-floating planner model alias (do not pin). Default "opus". */
-  plannerModel: string;
-  /** Explicit crabrunner thinking level. Default "max"; never lane-inherited. */
-  plannerEffort: QueueTriagePlannerEffort;
   /** Re-plan heartbeat cadence for the shadow/plan loop, in ms. */
   heartbeatMs: number;
   /**

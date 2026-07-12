@@ -1,9 +1,10 @@
-import { createHash } from "node:crypto";
-
+import {
+  planAttribution,
+  resolvePlanAttribution,
+} from "../domain/plan-attribution.js";
 import type {
   PlanDecision,
   PlanDecisionKind,
-  PlanPremiseRecord,
   PlanRevision,
   PlanRevisionJournalEntry,
   StandingPlan,
@@ -17,6 +18,7 @@ import {
   readStandingPlanJournal,
   withStandingPlanJournalWriteLock,
 } from "../logging/standing-plan-journal.js";
+import { planReportHash } from "./standing-plan-report-hash.js";
 import {
   type PlanBody,
   type RotateRevisionOptions,
@@ -66,12 +68,7 @@ export function projectStandingPlan(
     planId: revision.planId,
     revision: revision.revision,
     contentHash: revision.contentHash,
-    ...(revision.plannerModel === undefined
-      ? {}
-      : { plannerModel: revision.plannerModel }),
-    ...(revision.plannerEffort === undefined
-      ? {}
-      : { plannerEffort: revision.plannerEffort }),
+    ...planAttribution(revision),
     envelope: revision.envelope,
     batches: revision.batches,
     dependencyEdges: revision.dependencyEdges ?? [],
@@ -269,8 +266,7 @@ function refreshedReportRevision(
     persistedContentHash: latest.revision.contentHash,
     reviewRecords,
   });
-  const plannerModel = options.plannerModel ?? latest.revision.plannerModel;
-  const plannerEffort = options.plannerEffort ?? latest.revision.plannerEffort;
+  const attribution = resolvePlanAttribution(options, latest.revision);
   if (
     planReportHash(latest.revision) ===
     planReportHash({
@@ -279,8 +275,7 @@ function refreshedReportRevision(
       structuralAdvisories,
       findings,
       reviewRecords,
-      ...(plannerModel === undefined ? {} : { plannerModel }),
-      ...(plannerEffort === undefined ? {} : { plannerEffort }),
+      ...attribution,
     })
   ) {
     return null;
@@ -291,8 +286,7 @@ function refreshedReportRevision(
     structuralAdvisories,
     findings,
     reviewRecords,
-    ...(plannerModel === undefined ? {} : { plannerModel }),
-    ...(plannerEffort === undefined ? {} : { plannerEffort }),
+    ...attribution,
   };
 }
 
@@ -385,28 +379,6 @@ function planFindingKey(finding: PlanReviewFinding): string {
     planAnchor: finding.planAnchor,
     severity: finding.severity,
   });
-}
-
-function planReportHash(input: {
-  premises?: readonly PlanPremiseRecord[];
-  structuralAdvisories?: PlanRevision["structuralAdvisories"];
-  findings?: readonly PlanReviewFinding[];
-  reviewRecords?: NonNullable<PlanRevision["reviewRecords"]>;
-  plannerModel?: string;
-  plannerEffort?: string;
-}): string {
-  return createHash("sha256")
-    .update(
-      JSON.stringify({
-        premises: input.premises ?? [],
-        structuralAdvisories: input.structuralAdvisories ?? [],
-        findings: input.findings ?? [],
-        reviewRecords: input.reviewRecords ?? [],
-        plannerModel: input.plannerModel ?? null,
-        plannerEffort: input.plannerEffort ?? null,
-      }),
-    )
-    .digest("hex");
 }
 
 function reportRefreshIdempotencyKey(

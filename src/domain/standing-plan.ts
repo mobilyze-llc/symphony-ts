@@ -16,7 +16,17 @@
 
 import { createHash } from "node:crypto";
 
+import {
+  type PlanAttribution,
+  type PlanPremiseRecord,
+  type PlanRevisionSource,
+  validPlanAttribution,
+} from "./plan-attribution.js";
 import { isValidPlanBatch } from "./plan-batch.js";
+export type {
+  PlanPremiseRecord,
+  PlanRevisionSource,
+} from "./plan-attribution.js";
 import {
   type PlanReviewFinding,
   type PlanReviewRecord,
@@ -154,32 +164,21 @@ export interface PlanOptionIntent {
 
 export const PLAN_PREMISE_KINDS = ["verifiable", "judgment"] as const;
 
-export type PlanPremiseKind = (typeof PLAN_PREMISE_KINDS)[number];
-
-export interface PlanPremiseRecord {
-  decisionAnchor: string;
-  kind: PlanPremiseKind;
-  statement: string;
-}
+export type PlanPremiseKind = PlanPremiseRecord["kind"];
 
 export const PLAN_REVISION_SOURCES = [
   "planner", // produced by the Opus@max planner (SYMPH-786)
   "supersession", // produced by a supersession rotation (SYMPH-788)
   "manual", // produced by an operator modify_plan intent
-] as const;
-
-export type PlanRevisionSource = (typeof PLAN_REVISION_SOURCES)[number];
+] as const satisfies readonly PlanRevisionSource[];
 
 /** A journaled standing-plan revision; the latest entry is the read model. */
-export interface PlanRevision {
+export interface PlanRevision extends PlanAttribution {
   revision: number;
   planId: string;
   contentHash: string;
   supersedes: number | null;
   createdAt: string;
-  /** Effective model/effort attribution for this planner-produced revision. */
-  plannerModel?: string;
-  plannerEffort?: string;
   envelope: PlanEnvelope;
   batches: PlanBatch[];
   dependencyEdges: PlanDependencyEdge[];
@@ -240,12 +239,10 @@ export interface PlanOutcome {
  * The projected current standing plan — the read-model. Store is truth, this is
  * the view derived from the journal.
  */
-export interface StandingPlan {
+export interface StandingPlan extends PlanAttribution {
   planId: string;
   revision: number;
   contentHash: string;
-  plannerModel?: string;
-  plannerEffort?: string;
   envelope: PlanEnvelope;
   batches: PlanBatch[];
   dependencyEdges: PlanDependencyEdge[];
@@ -521,10 +518,7 @@ function isPlanRevision(value: unknown): value is PlanRevision {
     typeof value.contentHash === "string" &&
     (value.supersedes === null || typeof value.supersedes === "number") &&
     typeof value.createdAt === "string" &&
-    (value.plannerModel === undefined ||
-      typeof value.plannerModel === "string") &&
-    (value.plannerEffort === undefined ||
-      typeof value.plannerEffort === "string") &&
+    validPlanAttribution(value) &&
     isPlanEnvelope(value.envelope) &&
     Array.isArray(value.batches) &&
     value.batches.every(isValidPlanBatch) &&
