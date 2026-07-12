@@ -194,6 +194,55 @@ describe("tool-free clustering planner runner", () => {
     expect(invocation.args).toContain('model_reasoning_effort="high"');
     // The provider prefix is stripped for the codex --model id.
     expect(valueAfter(invocation.args, "--model")).toBe("gpt-5.6-sol");
+    // The built-in execution/agent/tool surfaces are hard-disabled so the codex
+    // boundary cannot inspect the evaluation workspace (SYMPH-1128).
+    for (const feature of [
+      "shell_tool",
+      "unified_exec",
+      "browser_use",
+      "computer_use",
+      "multi_agent",
+    ]) {
+      expect(flagValues(invocation.args, "--disable")).toContain(feature);
+    }
+  });
+
+  it("hard-disables codex built-in execution/agent surfaces before the config and model flags", async () => {
+    const root = await mkdtemp(join(tmpdir(), "clustering-tool-free-"));
+    roots.push(root);
+    let captured: { command: string; args: readonly string[] } | null = null;
+    const runner = createToolFreeClusteringPlannerRunner({
+      model: "codex/gpt-5.6-sol",
+      reasoningLevel: "medium",
+      workspace: root,
+      artifactDir: join(root, "artifacts"),
+      artifactName: "repeat-1",
+      env: {},
+      runProcess: async ({ command, args }) => {
+        captured = { command, args };
+        return { status: "completed", exitCode: 0, stdout: "{}", stderr: "" };
+      },
+    });
+
+    await expect(runner("planner prompt")).resolves.toEqual({
+      status: "ok",
+      markdown: "{}",
+    });
+    if (captured === null) throw new Error("expected an invocation");
+    const invocation = captured as { command: string; args: readonly string[] };
+    // Every disable pairs a `--disable <feature>` and precedes the pinned
+    // reasoning override and model selection so no tool surface leaks through.
+    expect(flagValues(invocation.args, "--disable")).toEqual([
+      "shell_tool",
+      "unified_exec",
+      "browser_use",
+      "computer_use",
+      "multi_agent",
+    ]);
+    const lastDisable = invocation.args.lastIndexOf("--disable");
+    expect(lastDisable).toBeGreaterThan(invocation.args.indexOf("exec"));
+    expect(lastDisable).toBeLessThan(invocation.args.indexOf("--config"));
+    expect(lastDisable).toBeLessThan(invocation.args.indexOf("--model"));
   });
 
   it("reports codex boundary failures with the codex label", async () => {
@@ -365,6 +414,17 @@ describe("tool-free clustering planner runner", () => {
     ).rejects.toMatchObject({ code: "ENOENT" });
   });
 });
+
+function flagValues(args: readonly string[], flag: string): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] !== flag) continue;
+    const value = args[index + 1];
+    if (value === undefined) throw new Error(`missing ${flag} value`);
+    values.push(value);
+  }
+  return values;
+}
 
 function valueAfter(args: readonly string[], flag: string): string {
   const index = args.indexOf(flag);

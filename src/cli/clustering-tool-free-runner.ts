@@ -117,6 +117,25 @@ interface ToolFreeInvocation {
   label: string;
 }
 
+/**
+ * Built-in Codex agent/tool surfaces that must stay off for the clustering
+ * boundary (SYMPH-1128). Codex 0.144.1 ships these as stable+enabled, which
+ * would let the OpenAI path inspect the evaluation workspace and contaminate the
+ * benchmark. Each name maps to a `features.<name>=false` override via the
+ * supported `--disable <FEATURE>` flag, mirroring the tool-free posture the
+ * Claude boundary gets from `--tools ""`. `shell_tool`/`unified_exec` are the
+ * built-in execution surfaces; `browser_use`/`computer_use`/`multi_agent` are
+ * the other built-in agent/tool surfaces that can reach outside a pure-reasoning
+ * clustering call.
+ */
+const CODEX_DISABLED_TOOL_FEATURES = [
+  "shell_tool",
+  "unified_exec",
+  "browser_use",
+  "computer_use",
+  "multi_agent",
+] as const;
+
 const CODEX_PROVIDER_PREFIXES = new Set([
   "codex",
   "codex-cli",
@@ -193,6 +212,10 @@ function toolFreeCodexArgs(modelId: string, reasoningLevel: string): string[] {
   return [
     "exec",
     "--ignore-user-config",
+    ...CODEX_DISABLED_TOOL_FEATURES.flatMap((feature) => [
+      "--disable",
+      feature,
+    ]),
     "--config",
     `model_reasoning_effort="${reasoningLevel}"`,
     "--model",
