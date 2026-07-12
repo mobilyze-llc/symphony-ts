@@ -126,6 +126,10 @@ interface ToolFreeInvocation {
  * Claude boundary gets from `--tools ""`. `shell_tool`/`unified_exec` are the
  * built-in execution surfaces; `browser_use`/`computer_use`/`multi_agent` are
  * the other built-in agent/tool surfaces that can reach outside a pure-reasoning
+ * clustering call. `apps`, `browser_use_external`, `goals`, `memories`, and
+ * `tool_call_mcp_elicitation` extend the same-surface Codex posture the
+ * repository already hardens: they are the remaining built-in app/browser/goal/
+ * memory/elicitation surfaces that could otherwise reach outside a pure-reasoning
  * clustering call.
  */
 const CODEX_DISABLED_TOOL_FEATURES = [
@@ -134,6 +138,11 @@ const CODEX_DISABLED_TOOL_FEATURES = [
   "browser_use",
   "computer_use",
   "multi_agent",
+  "apps",
+  "browser_use_external",
+  "goals",
+  "memories",
+  "tool_call_mcp_elicitation",
 ] as const;
 
 const CODEX_PROVIDER_PREFIXES = new Set([
@@ -212,6 +221,11 @@ function toolFreeCodexArgs(modelId: string, reasoningLevel: string): string[] {
   return [
     "exec",
     "--ignore-user-config",
+    // The capability retest evaluation workspace is intentionally history-free
+    // and has no `.git`, so codex's default git-repo guard would abort before
+    // inference. `--skip-git-repo-check` keeps the clustering call running in a
+    // non-Git workspace (SYMPH-1128).
+    "--skip-git-repo-check",
     ...CODEX_DISABLED_TOOL_FEATURES.flatMap((feature) => [
       "--disable",
       feature,

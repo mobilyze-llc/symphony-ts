@@ -202,9 +202,67 @@ describe("tool-free clustering planner runner", () => {
       "browser_use",
       "computer_use",
       "multi_agent",
+      "apps",
+      "browser_use_external",
+      "goals",
+      "memories",
+      "tool_call_mcp_elicitation",
     ]) {
       expect(flagValues(invocation.args, "--disable")).toContain(feature);
     }
+    // The evaluation workspace is history-free, so codex must skip its git-repo
+    // guard or it aborts before inference (SYMPH-1128).
+    expect(invocation.args).toContain("--skip-git-repo-check");
+  });
+
+  it("runs codex against a non-Git workspace via --skip-git-repo-check with the complete same-surface denylist", async () => {
+    const root = await mkdtemp(join(tmpdir(), "clustering-tool-free-"));
+    roots.push(root);
+    // A workspace sentinel: the capability retest evaluation workspace is
+    // intentionally history-free with no `.git`. Without `--skip-git-repo-check`
+    // codex aborts before inference (SYMPH-1128).
+    await expect(
+      readFile(join(root, ".git", "HEAD"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    let captured: { command: string; args: readonly string[] } | null = null;
+    const runner = createToolFreeClusteringPlannerRunner({
+      model: "openai/gpt-5.6-sol",
+      reasoningLevel: "high",
+      workspace: root,
+      artifactDir: join(root, "artifacts"),
+      artifactName: "repeat-1",
+      env: {},
+      runProcess: async ({ command, args }) => {
+        captured = { command, args };
+        return { status: "completed", exitCode: 0, stdout: "{}", stderr: "" };
+      },
+    });
+
+    await expect(runner("planner prompt")).resolves.toEqual({
+      status: "ok",
+      markdown: "{}",
+    });
+    if (captured === null) throw new Error("expected an invocation");
+    const invocation = captured as { command: string; args: readonly string[] };
+    expect(invocation.command).toBe("codex");
+    // Direct argv contract: the non-Git flag rides inside the exec run.
+    expect(invocation.args).toContain("--skip-git-repo-check");
+    expect(invocation.args.indexOf("--skip-git-repo-check")).toBeGreaterThan(
+      invocation.args.indexOf("exec"),
+    );
+    // Direct argv contract: the complete same-surface denylist, in order.
+    expect(flagValues(invocation.args, "--disable")).toEqual([
+      "shell_tool",
+      "unified_exec",
+      "browser_use",
+      "computer_use",
+      "multi_agent",
+      "apps",
+      "browser_use_external",
+      "goals",
+      "memories",
+      "tool_call_mcp_elicitation",
+    ]);
   });
 
   it("hard-disables codex built-in execution/agent surfaces before the config and model flags", async () => {
@@ -238,6 +296,11 @@ describe("tool-free clustering planner runner", () => {
       "browser_use",
       "computer_use",
       "multi_agent",
+      "apps",
+      "browser_use_external",
+      "goals",
+      "memories",
+      "tool_call_mcp_elicitation",
     ]);
     const lastDisable = invocation.args.lastIndexOf("--disable");
     expect(lastDisable).toBeGreaterThan(invocation.args.indexOf("exec"));
