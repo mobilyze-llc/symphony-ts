@@ -118,31 +118,58 @@ interface ToolFreeInvocation {
 }
 
 /**
- * Built-in Codex agent/tool surfaces that must stay off for the clustering
- * boundary (SYMPH-1128). Codex 0.144.1 ships these as stable+enabled, which
- * would let the OpenAI path inspect the evaluation workspace and contaminate the
- * benchmark. Each name maps to a `features.<name>=false` override via the
- * supported `--disable <FEATURE>` flag, mirroring the tool-free posture the
- * Claude boundary gets from `--tools ""`. `shell_tool`/`unified_exec` are the
- * built-in execution surfaces; `browser_use`/`computer_use`/`multi_agent` are
- * the other built-in agent/tool surfaces that can reach outside a pure-reasoning
- * clustering call. `apps`, `browser_use_external`, `goals`, `memories`, and
- * `tool_call_mcp_elicitation` extend the same-surface Codex posture the
- * repository already hardens: they are the remaining built-in app/browser/goal/
- * memory/elicitation surfaces that could otherwise reach outside a pure-reasoning
- * clustering call.
+ * Complete Codex 0.144.1 built-in tool/context surface inventory that must stay
+ * off for the clustering boundary (SYMPH-1128). Codex ships every one of these
+ * as a supported `--disable <FEATURE>` name (each maps to a
+ * `features.<name>=false` override), and the enabled ones would let the OpenAI
+ * path advertise a tool, reach outside the process, or fold workspace-derived
+ * context into the frozen benchmark prompt — mirroring the tool-free posture the
+ * Claude boundary gets from `--tools ""`. The names below were validated against
+ * the installed `codex features list` (v0.144.1): every entry is a known feature,
+ * so the invocation never aborts on an unknown flag.
+ *
+ * Grouped by surface:
+ * - execution: `shell_tool`, `unified_exec`, `shell_snapshot`
+ * - browser/computer: `browser_use`, `browser_use_external`,
+ *   `browser_use_full_cdp_access`, `computer_use`, `in_app_browser`
+ * - apps/plugins: `apps`, `plugins`, `plugin_sharing`, `remote_plugin`
+ * - multi-agent/goal/memory: `multi_agent`, `goals`, `memories`
+ * - image/code-mode host: `image_generation`, `code_mode_host`
+ * - elicitation: `auth_elicitation`, `tool_call_mcp_elicitation`
+ * - hooks/tool suggestion: `hooks`, `tool_suggest`
+ * - workspace/skill dependencies: `workspace_dependencies`,
+ *   `skill_mcp_dependency_install`
+ *
+ * Deliberately NOT disabled because they change model output or are pure
+ * transport/rendering rather than a reachable tool/context surface (disabling
+ * them would perturb the very reasoning the benchmark measures):
+ * `personality`, `fast_mode`, `guardian_approval`, `mentions_v2`,
+ * `enable_request_compression`, and `remote_compaction_v2`.
  */
-const CODEX_DISABLED_TOOL_FEATURES = [
+export const CODEX_DISABLED_TOOL_FEATURES = [
   "shell_tool",
   "unified_exec",
+  "shell_snapshot",
   "browser_use",
-  "computer_use",
-  "multi_agent",
-  "apps",
   "browser_use_external",
+  "browser_use_full_cdp_access",
+  "computer_use",
+  "in_app_browser",
+  "apps",
+  "plugins",
+  "plugin_sharing",
+  "remote_plugin",
+  "multi_agent",
   "goals",
   "memories",
+  "image_generation",
+  "code_mode_host",
+  "auth_elicitation",
   "tool_call_mcp_elicitation",
+  "hooks",
+  "tool_suggest",
+  "workspace_dependencies",
+  "skill_mcp_dependency_install",
 ] as const;
 
 const CODEX_PROVIDER_PREFIXES = new Set([

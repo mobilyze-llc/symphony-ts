@@ -4,9 +4,46 @@ import { delimiter, join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createToolFreeClusteringPlannerRunner } from "../../src/cli/clustering-tool-free-runner.js";
+import {
+  CODEX_DISABLED_TOOL_FEATURES,
+  createToolFreeClusteringPlannerRunner,
+} from "../../src/cli/clustering-tool-free-runner.js";
 
 const roots: string[] = [];
+
+/**
+ * The complete Codex 0.144.1 tool/context surface inventory the tool-free
+ * clustering boundary must disable, declared once as the single contract for
+ * the whole suite (SYMPH-1128). Every name is a supported `codex features`
+ * flag (validated against the installed CLI), so `--disable <name>` never aborts
+ * on an unknown feature. Any other assertion about the denylist references this
+ * list instead of re-listing a partial copy.
+ */
+const EXPECTED_CODEX_TOOL_FREE_DENYLIST = [
+  "shell_tool",
+  "unified_exec",
+  "shell_snapshot",
+  "browser_use",
+  "browser_use_external",
+  "browser_use_full_cdp_access",
+  "computer_use",
+  "in_app_browser",
+  "apps",
+  "plugins",
+  "plugin_sharing",
+  "remote_plugin",
+  "multi_agent",
+  "goals",
+  "memories",
+  "image_generation",
+  "code_mode_host",
+  "auth_elicitation",
+  "tool_call_mcp_elicitation",
+  "hooks",
+  "tool_suggest",
+  "workspace_dependencies",
+  "skill_mcp_dependency_install",
+] as const;
 
 afterEach(async () => {
   await Promise.all(
@@ -196,18 +233,7 @@ describe("tool-free clustering planner runner", () => {
     expect(valueAfter(invocation.args, "--model")).toBe("gpt-5.6-sol");
     // The built-in execution/agent/tool surfaces are hard-disabled so the codex
     // boundary cannot inspect the evaluation workspace (SYMPH-1128).
-    for (const feature of [
-      "shell_tool",
-      "unified_exec",
-      "browser_use",
-      "computer_use",
-      "multi_agent",
-      "apps",
-      "browser_use_external",
-      "goals",
-      "memories",
-      "tool_call_mcp_elicitation",
-    ]) {
+    for (const feature of EXPECTED_CODEX_TOOL_FREE_DENYLIST) {
       expect(flagValues(invocation.args, "--disable")).toContain(feature);
     }
     // The evaluation workspace is history-free, so codex must skip its git-repo
@@ -252,17 +278,64 @@ describe("tool-free clustering planner runner", () => {
     );
     // Direct argv contract: the complete same-surface denylist, in order.
     expect(flagValues(invocation.args, "--disable")).toEqual([
-      "shell_tool",
-      "unified_exec",
-      "browser_use",
-      "computer_use",
-      "multi_agent",
-      "apps",
-      "browser_use_external",
-      "goals",
-      "memories",
-      "tool_call_mcp_elicitation",
+      ...EXPECTED_CODEX_TOOL_FREE_DENYLIST,
     ]);
+  });
+
+  it("disables the complete Codex 0.144.1 tool/context surface inventory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "clustering-tool-free-"));
+    roots.push(root);
+    let captured: { command: string; args: readonly string[] } | null = null;
+    const runner = createToolFreeClusteringPlannerRunner({
+      model: "openai/gpt-5.6-sol",
+      reasoningLevel: "high",
+      workspace: root,
+      artifactDir: join(root, "artifacts"),
+      artifactName: "repeat-1",
+      env: {},
+      runProcess: async ({ command, args }) => {
+        captured = { command, args };
+        return { status: "completed", exitCode: 0, stdout: "{}", stderr: "" };
+      },
+    });
+
+    await expect(runner("planner prompt")).resolves.toEqual({
+      status: "ok",
+      markdown: "{}",
+    });
+    if (captured === null) throw new Error("expected an invocation");
+    const invocation = captured as { command: string; args: readonly string[] };
+    // Single source of truth: the source denylist and the invocation's
+    // `--disable` values are exactly the complete supported inventory, in the
+    // same order — no partial or duplicated list anywhere in the contract.
+    expect([...CODEX_DISABLED_TOOL_FEATURES]).toEqual([
+      ...EXPECTED_CODEX_TOOL_FREE_DENYLIST,
+    ]);
+    expect(flagValues(invocation.args, "--disable")).toEqual([
+      ...EXPECTED_CODEX_TOOL_FREE_DENYLIST,
+    ]);
+    // Every surface the reviewer flagged as missing is now covered, alongside
+    // the plugin/hook/shell-snapshot/tool-suggestion/workspace/skill-dependency
+    // surfaces called out for the complete inventory (SYMPH-1128).
+    for (const feature of [
+      "image_generation",
+      "in_app_browser",
+      "auth_elicitation",
+      "code_mode_host",
+      "plugins",
+      "plugin_sharing",
+      "hooks",
+      "shell_snapshot",
+      "tool_suggest",
+      "workspace_dependencies",
+      "skill_mcp_dependency_install",
+    ]) {
+      expect(EXPECTED_CODEX_TOOL_FREE_DENYLIST).toContain(feature);
+    }
+    // The denylist advertises no duplicate feature name.
+    expect(new Set(EXPECTED_CODEX_TOOL_FREE_DENYLIST).size).toBe(
+      EXPECTED_CODEX_TOOL_FREE_DENYLIST.length,
+    );
   });
 
   it("hard-disables codex built-in execution/agent surfaces before the config and model flags", async () => {
@@ -291,16 +364,7 @@ describe("tool-free clustering planner runner", () => {
     // Every disable pairs a `--disable <feature>` and precedes the pinned
     // reasoning override and model selection so no tool surface leaks through.
     expect(flagValues(invocation.args, "--disable")).toEqual([
-      "shell_tool",
-      "unified_exec",
-      "browser_use",
-      "computer_use",
-      "multi_agent",
-      "apps",
-      "browser_use_external",
-      "goals",
-      "memories",
-      "tool_call_mcp_elicitation",
+      ...EXPECTED_CODEX_TOOL_FREE_DENYLIST,
     ]);
     const lastDisable = invocation.args.lastIndexOf("--disable");
     expect(lastDisable).toBeGreaterThan(invocation.args.indexOf("exec"));
