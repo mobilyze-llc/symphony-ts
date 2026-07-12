@@ -26,6 +26,41 @@ const skillContent = readFileSync(SKILL_PATH, "utf-8");
 const scriptContent = readFileSync(SCRIPT_PATH, "utf-8");
 
 describe("spec-review-lane skill", () => {
+  it("triggers only for an explicit operator request", () => {
+    const frontmatterDescription =
+      skillContent.match(/^description: (.+)$/m)?.[1];
+
+    expect(frontmatterDescription).toContain(
+      "only when the operator explicitly requests spec review or explicitly names spec-review-lane",
+    );
+    expect(skillContent).toContain(
+      "only when the operator explicitly requests spec review or explicitly names `spec-review-lane`",
+    );
+    expect(skillContent).toContain("explicitly names `spec-review-lane`");
+    expect(skillContent).toContain("optional historical/shared tooling");
+    expect(skillContent).toContain(
+      "never a prerequisite for implementation, dispatch, review, merge,\n" +
+        "or closeout",
+    );
+    expect(skillContent).toContain(
+      "readiness state and failures do not block those activities",
+    );
+  });
+
+  it("does not mandate spec review during implementation intake", () => {
+    expect(skillContent).not.toMatch(
+      /before implementing a newly picked Symphony ticket/i,
+    );
+    expect(skillContent).not.toMatch(/before implementation/i);
+    expect(skillContent).not.toMatch(/use before implement/i);
+    expect(skillContent).not.toMatch(
+      /temporary (?:pre-implementation )?Symphony orchestrator/i,
+    );
+    expect(skillContent).not.toMatch(
+      /autonomous watcher is still being bootstrapped/i,
+    );
+  });
+
   it("documents the durable watcher as the default path", () => {
     expect(skillContent).toMatch(/^name: spec-review-lane$/m);
     expect(skillContent).toContain("symphony-spec-review-watch");
@@ -59,10 +94,7 @@ describe("spec-review-lane skill", () => {
     expect(skillContent).toContain("generated readiness marker");
   });
 
-  it("distinguishes interactive session review from autonomous Symphony worker review", () => {
-    expect(skillContent).toContain("interactive session");
-    expect(skillContent).toContain("not the autonomous Symphony worker");
-    expect(skillContent).toContain("out-of-band review process");
+  it("keeps manual review artifacts scoped to the invoking session", () => {
     expect(skillContent).toContain("session-scoped");
   });
 

@@ -1,17 +1,19 @@
 ---
 name: spec-review-lane
-description: Run Symphony's durable spec-time review lane for a targeted Linear ticket from a Codex orchestrator session. Use before implementing a newly picked Symphony ticket while the autonomous watcher is still being bootstrapped, or when an operator asks for an explicit spec review. Prefers symphony-spec-review-watch direct-ticket mode; prompt-only Claude runner fallback is manual reconciliation only.
+description: Run Symphony's durable spec-time review lane for a targeted Linear ticket only when the operator explicitly requests spec review or explicitly names spec-review-lane. This is optional historical/shared tooling; prompt-only Claude runner fallback is manual reconciliation only.
 ---
 
 # Symphony Spec Review Lane
 
-Use this skill when Codex is acting as the temporary Symphony orchestrator in an
-interactive session and needs to ask the spec-time review lane to review a
-specific Linear ticket before implementation.
+This skill is optional historical/shared tooling. Use it only when the operator explicitly requests spec review or explicitly names `spec-review-lane`.
+The request must target a specific Linear ticket. Do not select the skill from
+ordinary ticket implementation intake.
 
-This is not the autonomous Symphony worker ticket-review path. Symphony workers
-use Symphony's out-of-band review process; this skill exists for interactive
-Codex-led orchestration sessions.
+The skill is never a prerequisite for implementation, dispatch, review, merge,
+or closeout. Its readiness state and failures do not block those activities.
+Ordinary ticket understanding and refinement remain with Symphony's backlog
+Manager and ticket-rewrite governance, followed by the active
+`session-orchestrator` planning and implementation cells.
 
 This skill is the spec-review wrapper. For general Claude calls unrelated to
 durable ticket review, use the separate Claude-runner skill when it exists.
