@@ -6,9 +6,8 @@
 // `[in-flight committed batches] + [lookahead of undispatched batches]`.
 // The living control doc (SYMPH-790) is a *view* of this — never the reverse.
 //
-// These are pure declarations + small pure helpers (no I/O). The journal
-// (src/logging/standing-plan-journal.ts) and the store
-// (src/orchestrator/standing-plan-store.ts) build on them.
+// These are pure declarations + small pure helpers (no I/O). The journal and
+// standing-plan store build on them.
 //
 // NOTE on naming: this is deliberately "standing-plan" / "triage", NEVER
 // "manager*", to avoid collision with the unrelated existing ManagerRun journal
@@ -23,10 +22,8 @@ import {
   validPlanAttribution,
 } from "./plan-attribution.js";
 import { isValidPlanBatch } from "./plan-batch.js";
-export type {
-  PlanPremiseRecord,
-  PlanRevisionSource,
-} from "./plan-attribution.js";
+export type { PlanPremiseRecord } from "./plan-attribution.js";
+export type { PlanRevisionSource } from "./plan-attribution.js";
 import {
   type PlanReviewFinding,
   type PlanReviewRecord,
