@@ -27,7 +27,10 @@ function advisory(
 ): StructuralAdvisory {
   return {
     memberIssueIdentifiers: members,
-    rootCauseHypothesis: `${root ?? members[0] ?? "MOB-0"} is the shared root`,
+    rootCauseHypothesis:
+      root === null
+        ? "No canonical root exists for this disposition family."
+        : `${root ?? members[0] ?? "MOB-0"} is the shared root`,
     structuralFix: "Fix the shared root once",
     confidenceNote: "Frozen-fixture test prediction",
   };

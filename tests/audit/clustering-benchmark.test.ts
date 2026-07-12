@@ -33,10 +33,12 @@ function advisory(
   members: string[],
   root: string | null | undefined = members[0] ?? "MOB-0",
 ): StructuralAdvisory {
-  const rootLabel = root ?? members[0] ?? "MOB-0";
   return {
     memberIssueIdentifiers: members,
-    rootCauseHypothesis: `${rootLabel} is the shared root`,
+    rootCauseHypothesis:
+      root === null
+        ? "No canonical root exists for this disposition family."
+        : `${root ?? members[0] ?? "MOB-0"} is the shared root`,
     structuralFix: "Fix the shared root once",
     confidenceNote: "Frozen-fixture test prediction",
   };
@@ -228,7 +230,12 @@ describe("clustering golden-set scoring", () => {
     const predicted = [
       advisory(split.member_issue_identifiers.slice(0, 3)),
       advisory(split.member_issue_identifiers.slice(3)),
-      ...rest.map((cluster) => advisory(cluster.member_issue_identifiers)),
+      ...rest.map((cluster) =>
+        advisory(
+          cluster.member_issue_identifiers,
+          cluster.root_issue_identifier,
+        ),
+      ),
     ];
 
     const score = scoreStructuralAdvisories(fixture, predicted);
