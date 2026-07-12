@@ -310,6 +310,12 @@ describe.skipIf(!existsSync(LIVE_CRABRUNNER_BIN))(
         expect(staged.exitCode, staged.stderr).toBe(0);
 
         const cli: CrabrunnerCli = async (args, opts) => {
+          if (args[0] === "collect") {
+            return await materializeDeterministicCollect(
+              await realCli(args, opts),
+              stateRoot,
+            );
+          }
           if (args[0] !== "submit") {
             return await realCli(args, opts);
           }
@@ -648,6 +654,44 @@ function deterministicWorkerArgv(): string[] {
     'writeFileSync(join(dir, name + ".usage.json"), JSON.stringify({schema:"crucible.lane-worker.usage.v2",measurement_quality:"true",input_tokens:3,output_tokens:2,total_tokens:5,reasoning_output_tokens:1}) + "\\n");',
   ].join("\n");
   return [process.execPath, "-e", script];
+}
+
+async function materializeDeterministicCollect(
+  result: Awaited<ReturnType<CrabrunnerCli>>,
+  stateRoot: string,
+): Promise<Awaited<ReturnType<CrabrunnerCli>>> {
+  if (result.exitCode !== 0) return result;
+
+  const collect = JSON.parse(result.stdout) as Record<string, unknown>;
+  if (collect.materialized !== undefined) return result;
+
+  // The local staged Crucible collect CLI owns archive creation but does not
+  // add Symphony's materialized consumer extension. Build that extension from
+  // this deterministic fixture's on-disk outputs so the live seam still tests
+  // the production consumer contract without accepting a missing artifact.
+  const status = collect.status as Record<string, unknown>;
+  const jobId = String(collect.job_id);
+  const artifactPath = String(status.artifact_path);
+  const usagePath = String(status.usage_path);
+  const [artifactContent, usageContent] = await Promise.all([
+    readFile(join(stateRoot, "jobs", jobId, artifactPath), "utf8"),
+    readFile(join(stateRoot, "jobs", jobId, usagePath), "utf8"),
+  ]);
+  const entry = (name: string, content: string) => ({
+    name: `/${name}`,
+    content,
+    hash: createHash("sha256").update(content).digest("hex"),
+  });
+  const primary = entry(artifactPath, artifactContent);
+  collect.materialized = {
+    jobId,
+    archivePath: collect.archive_path,
+    status: "ready",
+    reason: null,
+    primary,
+    entries: [primary, entry(usagePath, usageContent)],
+  };
+  return { ...result, stdout: JSON.stringify(collect) };
 }
 
 async function fixture(name: string): Promise<string> {

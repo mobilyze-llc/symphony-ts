@@ -252,6 +252,11 @@ export interface ShadowPlanCycleDeps {
   workspaceRoot: string;
   context: PlannerContext;
   planner: TriagePlannerDeps;
+  /** Effective lane settings recorded with the live planner journal event. */
+  plannerAttribution?: {
+    model: string;
+    effort: WorkflowQueueTriageConfig["plannerEffort"];
+  };
   log: (
     event: string,
     message: string,
@@ -303,6 +308,7 @@ export async function runShadowPlanCycle(
       "Standing-plan planner unavailable; pipeline keeps using the deterministic comparator.",
       {
         outcome: "degraded",
+        ...plannerAttributionFields(deps.plannerAttribution),
         detail: planned.detail,
         attempts: planned.attempts,
       },
@@ -315,6 +321,7 @@ export async function runShadowPlanCycle(
       "Standing-plan planner produced unparseable output; no revision recorded.",
       {
         outcome: "degraded",
+        ...plannerAttributionFields(deps.plannerAttribution),
         detail: planned.detail,
         attempts: planned.attempts,
       },
@@ -413,6 +420,7 @@ export async function runShadowPlanCycle(
     "Standing-plan shadow cycle computed a plan (shadow mode — dispatch unchanged).",
     {
       outcome: "shadow",
+      ...plannerAttributionFields(deps.plannerAttribution),
       attempts: planned.attempts,
       recorded: record.recorded,
       revision: record.plan.revision,
@@ -463,6 +471,17 @@ export async function runShadowPlanCycle(
   };
 }
 
+function plannerAttributionFields(
+  attribution: ShadowPlanCycleDeps["plannerAttribution"],
+): Record<string, unknown> {
+  return attribution === undefined
+    ? {}
+    : {
+        planner_model: attribution.model,
+        planner_effort: attribution.effort,
+      };
+}
+
 export type StandingPlanShadowTickResult =
   | ShadowPlanCycleResult
   | {
@@ -500,6 +519,7 @@ export interface StandingPlanShadowTickDeps {
   /** Build a model runner for the configured planner model (crabrunner in prod). */
   createPlannerRunner: (
     model: string,
+    effort: WorkflowQueueTriageConfig["plannerEffort"],
   ) => (prompt: string) => Promise<PlannerRunResult>;
   log: (
     event: string,
@@ -898,7 +918,10 @@ export async function runStandingPlanShadowTick(
         );
       }
     }
-    const runClaude = deps.createPlannerRunner(config.plannerModel);
+    const runClaude = deps.createPlannerRunner(
+      config.plannerModel,
+      config.plannerEffort,
+    );
     const planReview = await buildShadowPlanReviewConfig({
       config,
       workspaceRoot: deps.workspaceRoot,
@@ -916,6 +939,10 @@ export async function runStandingPlanShadowTick(
       workspaceRoot: deps.workspaceRoot,
       context,
       planner: { runClaude },
+      plannerAttribution: {
+        model: config.plannerModel,
+        effort: config.plannerEffort,
+      },
       log: deps.log,
       now: () => now,
       ...(config.structuralAdvisories === true

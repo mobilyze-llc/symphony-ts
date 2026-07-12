@@ -548,6 +548,7 @@ export interface RuntimeServiceOptions {
    */
   createStandingPlanPlannerRunner?: (
     model: string,
+    effort: NonNullable<ResolvedWorkflowConfig["queueTriage"]>["plannerEffort"],
   ) => (prompt: string) => Promise<PlannerRunResult>;
   /**
    * Injectable continuous-feedback runner command (SYMPH-761), forwarded to the
@@ -7003,10 +7004,10 @@ export async function startRuntimeService(
           issueIdentifier: entry.issue.identifier,
           stage: entry.issue.state,
         })),
-      createPlannerRunner: (model) =>
+      createPlannerRunner: (model, effort) =>
         (
           options.createStandingPlanPlannerRunner ??
-          ((plannerModel: string) =>
+          ((plannerModel: string, plannerEffort: string) =>
             createCrabrunnerPlannerRunner({
               workspace: process.cwd(),
               artifactDir: join(
@@ -7015,8 +7016,9 @@ export async function startRuntimeService(
                 "standing-plan",
               ),
               model: plannerModel,
+              reasoningEffort: plannerEffort,
             }))
-        )(model),
+        )(model, effort),
       log: (event, message, fields) => {
         void logger.info(event, message, fields);
       },

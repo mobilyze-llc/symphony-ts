@@ -4,6 +4,7 @@ import { resolveWorkflowConfig } from "../../src/config/config-resolver.js";
 import {
   DEFAULT_QUEUE_TRIAGE_ENABLED,
   DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS,
+  DEFAULT_QUEUE_TRIAGE_PLANNER_EFFORT,
   DEFAULT_QUEUE_TRIAGE_PLANNER_MODEL,
   DEFAULT_QUEUE_TRIAGE_PLAN_REVIEW_ENABLED,
   DEFAULT_QUEUE_TRIAGE_PLAN_REVIEW_PLANNER_GROUNDING_ENABLED,
@@ -29,6 +30,11 @@ describe("config-resolver queue triage (SYMPH-784)", () => {
     expect(resolved.queueTriage?.plannerModel).toBe(
       DEFAULT_QUEUE_TRIAGE_PLANNER_MODEL,
     );
+    // An absent key is pinned to max rather than inheriting the lane registry.
+    expect(resolved.queueTriage?.plannerEffort).toBe(
+      DEFAULT_QUEUE_TRIAGE_PLANNER_EFFORT,
+    );
+    expect(resolved.queueTriage?.plannerEffort).toBe("max");
     expect(resolved.queueTriage?.heartbeatMs).toBe(
       DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS,
     );
@@ -189,6 +195,7 @@ describe("config-resolver queue triage (SYMPH-784)", () => {
           enabled: true,
           shadow_mode: false,
           planner_model: "opus-custom",
+          planner_effort: "high",
           heartbeat_ms: 120_000,
           envelope: {
             version: 3,
@@ -204,6 +211,7 @@ describe("config-resolver queue triage (SYMPH-784)", () => {
     expect(resolved.queueTriage?.enabled).toBe(true);
     expect(resolved.queueTriage?.shadowMode).toBe(false);
     expect(resolved.queueTriage?.plannerModel).toBe("opus-custom");
+    expect(resolved.queueTriage?.plannerEffort).toBe("high");
     expect(resolved.queueTriage?.heartbeatMs).toBe(120_000);
     expect(resolved.queueTriage?.envelope).toEqual({
       version: 3,
@@ -211,6 +219,18 @@ describe("config-resolver queue triage (SYMPH-784)", () => {
       allowedRisk: "high",
       allowedModes: ["parallel-isolated"],
     });
+  });
+
+  it("rejects an unsupported planner effort instead of inheriting a lane default", () => {
+    expect(() =>
+      resolveWorkflowConfig({
+        workflowPath: "/repo/WORKFLOW.md",
+        config: { queue_triage: { planner_effort: "xhigh" } },
+        promptTemplate: "Prompt",
+      }),
+    ).toThrow(
+      /queue_triage\.planner_effort must be one of: low, medium, high, max/,
+    );
   });
 
   it("throws on a malformed envelope rather than silently widening authority", () => {
