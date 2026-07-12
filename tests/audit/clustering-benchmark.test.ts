@@ -137,6 +137,18 @@ describe("clustering golden-set scoring", () => {
       scoreStructuralAdvisories(fixture, [malformed])
         .rootIdentificationAccuracy,
     ).toBe(0);
+    // Naming a root in prose with the field omitted is also not a decline —
+    // the prose fallback applies symmetrically (PR #765 review).
+    const proseNamed: StructuralAdvisory = {
+      memberIssueIdentifiers: nullRootCluster.member_issue_identifiers,
+      rootCauseHypothesis: `${nullRootCluster.member_issue_identifiers[0] ?? "MOB-0"} is the shared root`,
+      structuralFix: "Fix the named root once.",
+      confidenceNote: "test",
+    };
+    expect(
+      scoreStructuralAdvisories(fixture, [proseNamed])
+        .rootIdentificationAccuracy,
+    ).toBe(0);
   });
 
   it("scores an explicit root identifier before falling back to hypothesis prose", async () => {

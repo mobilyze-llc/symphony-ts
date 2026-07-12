@@ -127,17 +127,26 @@ export function scoreStructuralAdvisories(
     const explicitRoot = normalizeIssueIdentifier(
       prediction.rootIssueIdentifier,
     );
-    if (expectedRoots.size === 0) {
-      // A null-root key cluster asserts no canonical root exists; only an
-      // actual decline (absent/null/empty root field) is correct. A malformed
-      // non-null value ("null", "not-an-issue") named a root and is a miss.
-      const raw = prediction.rootIssueIdentifier;
-      return raw === null || raw === undefined || raw.trim() === "";
-    }
+    // The predicted-root claim is computed one way everywhere: the explicit
+    // field when present, else identifiers named in the hypothesis prose. A
+    // malformed non-null field ("null", "not-an-issue") still named a root,
+    // so it never counts as a decline for null-root clusters.
+    const rawField = prediction.rootIssueIdentifier;
+    const fieldDeclined =
+      rawField === null || rawField === undefined || rawField.trim() === "";
     const predictedRoots =
-      explicitRoot === null
-        ? extractIssueIdentifiers(prediction.rootCauseHypothesis)
-        : new Set([explicitRoot]);
+      explicitRoot !== null
+        ? new Set([explicitRoot])
+        : fieldDeclined
+          ? extractIssueIdentifiers(prediction.rootCauseHypothesis)
+          : new Set([prediction.rootIssueIdentifier ?? ""]);
+    if (expectedRoots.size === 0) {
+      // A null-root key cluster asserts no canonical root exists; correct
+      // means a true decline — no explicit root AND no identifier claimed in
+      // the hypothesis prose (mirroring the prose fallback used for named
+      // clusters, per the PR #765 review).
+      return fieldDeclined && predictedRoots.size === 0;
+    }
     return [...predictedRoots].some((identifier) =>
       expectedRoots.has(identifier),
     );
