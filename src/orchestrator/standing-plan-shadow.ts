@@ -258,6 +258,8 @@ export interface ShadowPlanCycleDeps {
     fields: Record<string, unknown>,
   ) => void | Promise<void>;
   now: () => Date;
+  plannerModel?: string;
+  plannerEffort?: string;
   planId?: string;
   planReview?: {
     enabled: boolean;
@@ -305,6 +307,12 @@ export async function runShadowPlanCycle(
         outcome: "degraded",
         detail: planned.detail,
         attempts: planned.attempts,
+        ...(deps.plannerModel === undefined
+          ? {}
+          : { planner_model: deps.plannerModel }),
+        ...(deps.plannerEffort === undefined
+          ? {}
+          : { planner_effort: deps.plannerEffort }),
       },
     );
     return { status: "unavailable", detail: planned.detail };
@@ -317,6 +325,12 @@ export async function runShadowPlanCycle(
         outcome: "degraded",
         detail: planned.detail,
         attempts: planned.attempts,
+        ...(deps.plannerModel === undefined
+          ? {}
+          : { planner_model: deps.plannerModel }),
+        ...(deps.plannerEffort === undefined
+          ? {}
+          : { planner_effort: deps.plannerEffort }),
       },
     );
     return { status: "invalid", detail: planned.detail };
@@ -394,6 +408,12 @@ export async function runShadowPlanCycle(
   const reviewOptions: RotateRevisionOptions = {
     createdAt,
     planId,
+    ...(deps.plannerModel === undefined
+      ? {}
+      : { plannerModel: deps.plannerModel }),
+    ...(deps.plannerEffort === undefined
+      ? {}
+      : { plannerEffort: deps.plannerEffort }),
     findings: review.findings,
     ...(review.reviewRecords.length === 0
       ? {}
@@ -414,6 +434,12 @@ export async function runShadowPlanCycle(
     {
       outcome: "shadow",
       attempts: planned.attempts,
+      ...(deps.plannerModel === undefined
+        ? {}
+        : { planner_model: deps.plannerModel }),
+      ...(deps.plannerEffort === undefined
+        ? {}
+        : { planner_effort: deps.plannerEffort }),
       recorded: record.recorded,
       revision: record.plan.revision,
       plan_id: record.plan.planId,
@@ -500,6 +526,7 @@ export interface StandingPlanShadowTickDeps {
   /** Build a model runner for the configured planner model (crabrunner in prod). */
   createPlannerRunner: (
     model: string,
+    effort: string,
   ) => (prompt: string) => Promise<PlannerRunResult>;
   log: (
     event: string,
@@ -898,7 +925,10 @@ export async function runStandingPlanShadowTick(
         );
       }
     }
-    const runClaude = deps.createPlannerRunner(config.plannerModel);
+    const runClaude = deps.createPlannerRunner(
+      config.plannerModel,
+      config.plannerEffort,
+    );
     const planReview = await buildShadowPlanReviewConfig({
       config,
       workspaceRoot: deps.workspaceRoot,
@@ -918,6 +948,8 @@ export async function runStandingPlanShadowTick(
       planner: { runClaude },
       log: deps.log,
       now: () => now,
+      plannerModel: config.plannerModel,
+      plannerEffort: config.plannerEffort,
       ...(config.structuralAdvisories === true
         ? {
             advisoryLifecycle: {

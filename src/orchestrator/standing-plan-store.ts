@@ -66,6 +66,12 @@ export function projectStandingPlan(
     planId: revision.planId,
     revision: revision.revision,
     contentHash: revision.contentHash,
+    ...(revision.plannerModel === undefined
+      ? {}
+      : { plannerModel: revision.plannerModel }),
+    ...(revision.plannerEffort === undefined
+      ? {}
+      : { plannerEffort: revision.plannerEffort }),
     envelope: revision.envelope,
     batches: revision.batches,
     dependencyEdges: revision.dependencyEdges ?? [],
@@ -263,6 +269,8 @@ function refreshedReportRevision(
     persistedContentHash: latest.revision.contentHash,
     reviewRecords,
   });
+  const plannerModel = options.plannerModel ?? latest.revision.plannerModel;
+  const plannerEffort = options.plannerEffort ?? latest.revision.plannerEffort;
   if (
     planReportHash(latest.revision) ===
     planReportHash({
@@ -271,6 +279,8 @@ function refreshedReportRevision(
       structuralAdvisories,
       findings,
       reviewRecords,
+      ...(plannerModel === undefined ? {} : { plannerModel }),
+      ...(plannerEffort === undefined ? {} : { plannerEffort }),
     })
   ) {
     return null;
@@ -281,6 +291,8 @@ function refreshedReportRevision(
     structuralAdvisories,
     findings,
     reviewRecords,
+    ...(plannerModel === undefined ? {} : { plannerModel }),
+    ...(plannerEffort === undefined ? {} : { plannerEffort }),
   };
 }
 
@@ -380,6 +392,8 @@ function planReportHash(input: {
   structuralAdvisories?: PlanRevision["structuralAdvisories"];
   findings?: readonly PlanReviewFinding[];
   reviewRecords?: NonNullable<PlanRevision["reviewRecords"]>;
+  plannerModel?: string;
+  plannerEffort?: string;
 }): string {
   return createHash("sha256")
     .update(
@@ -388,6 +402,8 @@ function planReportHash(input: {
         structuralAdvisories: input.structuralAdvisories ?? [],
         findings: input.findings ?? [],
         reviewRecords: input.reviewRecords ?? [],
+        plannerModel: input.plannerModel ?? null,
+        plannerEffort: input.plannerEffort ?? null,
       }),
     )
     .digest("hex");

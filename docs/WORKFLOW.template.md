@@ -111,6 +111,9 @@ queue_triage:
   # Version-floating planner model alias. Default: opus
   planner_model: opus
 
+  # Explicit crabrunner thinking level. Default: max
+  planner_effort: max
+
   # Re-plan cadence in milliseconds. Default: 900000 (15 min)
   heartbeat_ms: 900000
 

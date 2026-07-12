@@ -89,6 +89,7 @@ import {
   DEFAULT_QUEUE_TRIAGE_CONTROL_DOC_ENABLED,
   DEFAULT_QUEUE_TRIAGE_ENABLED,
   DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS,
+  DEFAULT_QUEUE_TRIAGE_PLANNER_EFFORT,
   DEFAULT_QUEUE_TRIAGE_PLANNER_MODEL,
   DEFAULT_QUEUE_TRIAGE_PLAN_REVIEW_ENABLED,
   DEFAULT_QUEUE_TRIAGE_PLAN_REVIEW_PLANNER_GROUNDING_ENABLED,
@@ -120,6 +121,7 @@ import type {
   DispatchValidationResult,
   FastTrackConfig,
   GateType,
+  QueueTriagePlannerEffort,
   ResolvedWorkflowConfig,
   ReviewerDefinition,
   StageDefinition,
@@ -131,7 +133,11 @@ import type {
   WorkflowQueueTriageConfig,
   WorkflowStuckTriageConfig,
 } from "./types.js";
-import { GATE_TYPES, STAGE_TYPES } from "./types.js";
+import {
+  GATE_TYPES,
+  QUEUE_TRIAGE_PLANNER_EFFORTS,
+  STAGE_TYPES,
+} from "./types.js";
 
 // validateStagesConfig moved to config-contracts.ts (SYMPH-409); re-exported
 // here so existing importers keep working.
@@ -558,6 +564,9 @@ function resolveQueueTriageConfig(
     plannerModel:
       readString(queueTriage.planner_model) ??
       DEFAULT_QUEUE_TRIAGE_PLANNER_MODEL,
+    plannerEffort:
+      readQueueTriagePlannerEffort(queueTriage.planner_effort) ??
+      DEFAULT_QUEUE_TRIAGE_PLANNER_EFFORT,
     heartbeatMs:
       readPositiveInteger(queueTriage.heartbeat_ms) ??
       DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS,
@@ -987,6 +996,21 @@ function readReasoningEffort(value: unknown): ReasoningEffort | null {
   const normalized = raw.trim().toLowerCase();
   return (REASONING_EFFORTS as readonly string[]).includes(normalized)
     ? (normalized as ReasoningEffort)
+    : null;
+}
+
+function readQueueTriagePlannerEffort(
+  value: unknown,
+): QueueTriagePlannerEffort | null {
+  const raw = readString(value);
+  if (raw === null) {
+    return null;
+  }
+  const normalized = raw.trim().toLowerCase();
+  return (QUEUE_TRIAGE_PLANNER_EFFORTS as readonly string[]).includes(
+    normalized,
+  )
+    ? (normalized as QueueTriagePlannerEffort)
     : null;
 }
 

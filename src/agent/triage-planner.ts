@@ -1532,6 +1532,8 @@ export interface CrabrunnerPlannerRunnerOptions {
   artifactDir: string;
   /** Version-floating model alias; do not pin. Defaults to "opus". */
   model?: string;
+  /** Explicit planner effort. Production Manager callers pin this to "max". */
+  effort?: string;
   /**
    * Explicit reasoning/thinking level threaded to the crabrunner lane (mapped to
    * `--thinking` where the manifest supports it). Left unset to inherit the lane
@@ -1576,6 +1578,7 @@ export function createCrabrunnerPlannerRunner(
       }));
   const artifactName = options.artifactName ?? "triage-plan";
   const model = options.model ?? DEFAULT_PLANNER_MODEL;
+  const reasoningEffort = options.effort ?? options.reasoningEffort;
 
   return async (prompt: string): Promise<PlannerRunResult> => {
     await fs.mkdir(options.artifactDir, { recursive: true });
@@ -1591,9 +1594,7 @@ export function createCrabrunnerPlannerRunner(
         artifactDir: options.artifactDir,
         artifactName,
         model,
-        ...(options.reasoningEffort === undefined
-          ? {}
-          : { reasoningEffort: options.reasoningEffort }),
+        ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
         ...(options.profile === undefined ? {} : { profile: options.profile }),
         ...(options.timeoutSeconds === undefined
           ? {}

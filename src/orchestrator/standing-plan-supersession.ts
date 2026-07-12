@@ -45,6 +45,8 @@ export interface RotateRevisionOptions {
   createdAt: string;
   /** Stable plan identity for the first revision; ignored once a prior exists. */
   planId?: string;
+  plannerModel?: string;
+  plannerEffort?: string;
   findings?: PlanRevision["findings"];
   reviewRecords?: PlanRevision["reviewRecords"];
 }
@@ -110,6 +112,12 @@ export function rotateRevision(
     contentHash,
     supersedes,
     createdAt: options.createdAt,
+    ...(options.plannerModel === undefined
+      ? {}
+      : { plannerModel: options.plannerModel }),
+    ...(options.plannerEffort === undefined
+      ? {}
+      : { plannerEffort: options.plannerEffort }),
     envelope: body.envelope,
     batches,
     dependencyEdges,

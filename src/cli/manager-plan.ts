@@ -23,7 +23,12 @@ import {
   DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_COMMENT_CHARS,
   DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_COMMENT_PAGES,
   DEFAULT_QUEUE_TRIAGE_COMMENT_ENRICHMENT_MAX_TOTAL_CHARS,
+  DEFAULT_QUEUE_TRIAGE_PLANNER_EFFORT,
 } from "../config/defaults.js";
+import {
+  QUEUE_TRIAGE_PLANNER_EFFORTS,
+  type QueueTriagePlannerEffort,
+} from "../config/types.js";
 import type { Issue } from "../domain/model.js";
 import {
   DEFAULT_ENVELOPE_ALLOWED_MODES,
@@ -79,6 +84,7 @@ import {
 
 export const DEFAULT_MANAGER_PLAN_CONCURRENCY_CEILING = 3;
 export const DEFAULT_MANAGER_PLAN_MODEL = "opus";
+export const DEFAULT_MANAGER_PLAN_EFFORT = DEFAULT_QUEUE_TRIAGE_PLANNER_EFFORT;
 export const DEFAULT_MANAGER_PLAN_STATE = "Backlog";
 export const DEFAULT_MANAGER_PLAN_IN_FLIGHT_STATES = [
   "In Progress",
@@ -115,6 +121,7 @@ export interface ManagerPlanCliOptions {
   risk: PlanRiskTier;
   modes: PlanBatchMode[] | null;
   model: string;
+  effort: QueueTriagePlannerEffort;
   pageSize: number | null;
   outDir: string | null;
   runtimeStateBaseUrl: string | null;
@@ -174,6 +181,7 @@ interface ManagerPlanPersistenceSummary {
 
 export interface ManagerPlanPlannerRunnerInput {
   model: string;
+  effort: QueueTriagePlannerEffort;
   artifactDir: string;
   workspace: string;
 }
@@ -244,6 +252,7 @@ export function parseManagerPlanCliArgs(
   let risk: PlanRiskTier = "medium";
   let modes: PlanBatchMode[] | null = null;
   let model = DEFAULT_MANAGER_PLAN_MODEL;
+  let effort: QueueTriagePlannerEffort = DEFAULT_MANAGER_PLAN_EFFORT;
   let pageSize: number | null = null;
   let outDir: string | null = null;
   let runtimeStateBaseUrl: string | null = null;
@@ -336,6 +345,18 @@ export function parseManagerPlanCliArgs(
       case "--model":
         model = readValue("--model");
         break;
+      case "--effort": {
+        const value = readValue("--effort").toLowerCase();
+        if (
+          !(QUEUE_TRIAGE_PLANNER_EFFORTS as readonly string[]).includes(value)
+        ) {
+          throw new ManagerPlanCliUsageError(
+            `--effort must be one of: ${QUEUE_TRIAGE_PLANNER_EFFORTS.join(", ")}`,
+          );
+        }
+        effort = value as QueueTriagePlannerEffort;
+        break;
+      }
       case "--page-size":
         pageSize = parsePositiveInt(readValue("--page-size"), "--page-size");
         break;
@@ -391,6 +412,7 @@ export function parseManagerPlanCliArgs(
     risk,
     modes,
     model,
+    effort,
     pageSize,
     outDir,
     runtimeStateBaseUrl,
@@ -744,6 +766,7 @@ export async function runManagerPlanCli(
   const artifactDir = options.outDir ?? defaultArtifactDir(now);
   const runClaude = createPlannerRunner({
     model: options.model,
+    effort: options.effort,
     artifactDir,
     workspace: process.cwd(),
   });
@@ -788,6 +811,8 @@ export async function runManagerPlanCli(
         {
           createdAt: now().toISOString(),
           planId: STANDING_PLAN_ID,
+          plannerModel: options.model,
+          plannerEffort: options.effort,
           findings: review.findings,
           reviewRecords: review.reviewRecords,
         },
@@ -851,6 +876,7 @@ function renderPlanJson(
       project: options.project,
       initiative: options.initiative,
       states: options.states,
+      planner: { model: options.model, effort: options.effort },
       candidateCount,
       portfolioHeldCount,
       envelope: body.envelope,
@@ -884,6 +910,7 @@ function renderPlanHuman(
   lines.push(
     `Manager plan — ${describeScope(options)}, state(s) [${options.states.join(", ")}], ${candidateCount} candidate(s)`,
   );
+  lines.push(`Planner: model=${options.model} effort=${options.effort}`);
   if (portfolioHeldCount > 0) {
     lines.push(
       `Portfolio classification held ${portfolioHeldCount} candidate(s) before planning.`,
@@ -1179,11 +1206,12 @@ function defaultFetchIssueComments(input: {
 function defaultCreatePlannerRunner(
   now: () => Date,
 ): CreateManagerPlanPlannerRunner {
-  return ({ model, artifactDir, workspace }) =>
+  return ({ model, effort, artifactDir, workspace }) =>
     createCrabrunnerPlannerRunner({
       workspace,
       artifactDir,
       model,
+      effort,
       // Unique artifact name keeps a manual run from clobbering a live
       // pipeline's standing-plan artifacts.
       artifactName: `manager-plan-${stamp(now)}`,
@@ -1224,6 +1252,7 @@ export function renderUsage(): string {
     "  --modes <csv>                Allowed batch modes (default parallel-isolated,canary-chain)",
     "  --no-canary                  Drop canary-chain from the allowed modes (no canary runners)",
     `  --model <name>               Planner model alias (default ${DEFAULT_MANAGER_PLAN_MODEL})`,
+    `  --effort <level>             Planner effort: low, medium, high, or max (default ${DEFAULT_MANAGER_PLAN_EFFORT})`,
     "  --page-size <n>              Linear candidate page size",
     "  --out-dir <path>             Directory for planner artifacts and prompt-only prompt output",
     "  --runtime-state-base-url <url>",

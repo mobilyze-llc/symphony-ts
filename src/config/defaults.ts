@@ -115,6 +115,7 @@ export const DEFAULT_VERDICTS_PAGE_AFTER_TICKS = 10;
 export const DEFAULT_QUEUE_TRIAGE_ENABLED = false;
 export const DEFAULT_QUEUE_TRIAGE_SHADOW_MODE = true;
 export const DEFAULT_QUEUE_TRIAGE_PLANNER_MODEL = "opus";
+export const DEFAULT_QUEUE_TRIAGE_PLANNER_EFFORT = "max" as const;
 export const DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS = 900_000; // 15 minutes
 // Posture-B: auto-dispatch only the plan's head batch unattended by default;
 // hold the rest for operator approval (SYMPH-789).

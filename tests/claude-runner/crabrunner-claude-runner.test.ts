@@ -651,7 +651,7 @@ describe("Claude crabrunner adapter", () => {
     });
   });
 
-  it("passes explicit provider and reasoning effort to crabrunner job specs", async () => {
+  it("passes anthropic opus at max effort to crabrunner job specs", async () => {
     const harness = await createHarness();
     const scheduler = new RecordingScheduler({
       terminal: {
@@ -663,9 +663,9 @@ describe("Claude crabrunner adapter", () => {
     await runClaudeCrabrunner(
       {
         ...baseInput(harness),
-        model: "codex",
-        runnerProvider: "openai",
-        reasoningEffort: "high",
+        model: "opus",
+        runnerProvider: "anthropic",
+        reasoningEffort: "max",
       },
       {
         schedulerClient: scheduler,
@@ -675,9 +675,9 @@ describe("Claude crabrunner adapter", () => {
 
     expect(scheduler.submissions[0]).toMatchObject({
       runner: {
-        model: "codex",
-        provider: "openai",
-        reasoningEffort: "high",
+        model: "opus",
+        provider: "anthropic",
+        reasoningEffort: "max",
       },
     });
   });

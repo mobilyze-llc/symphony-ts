@@ -27,6 +27,8 @@ code_grounding:
 queue_triage:
   enabled: true
   shadow_mode: true
+  planner_model: opus
+  planner_effort: max
   plan_review:
     enabled: true
     planner_grounding_enabled: true

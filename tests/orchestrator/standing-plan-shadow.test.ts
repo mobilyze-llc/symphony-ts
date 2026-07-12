@@ -746,6 +746,8 @@ describe("runShadowPlanCycle", () => {
         log: () => undefined,
         now: () => new Date("2026-06-18T01:00:00.000Z"),
         planId: "plan-1",
+        plannerModel: "opus",
+        plannerEffort: "max",
       });
       rootName = "Root B";
       const second = await runShadowPlanCycle({
@@ -810,6 +812,8 @@ describe("runShadowPlanCycle", () => {
         },
         now: () => new Date("2026-06-18T01:00:00.000Z"),
         planId: "plan-1",
+        plannerModel: "opus",
+        plannerEffort: "max",
       });
       expect(result.status).toBe("ok");
       if (result.status === "ok") {
@@ -821,10 +825,23 @@ describe("runShadowPlanCycle", () => {
       const shadowLog = logs.find(
         (l) => l.event === "queue_triage_shadow_plan",
       );
-      expect(shadowLog?.fields).toMatchObject({ attempts: 1 });
+      expect(shadowLog?.fields).toMatchObject({
+        attempts: 1,
+        planner_model: "opus",
+        planner_effort: "max",
+      });
       // Persisted + queryable after the cycle.
       const plan = await loadStandingPlan(root);
-      expect(plan?.revision).toBe(1);
+      expect(plan).toMatchObject({
+        revision: 1,
+        plannerModel: "opus",
+        plannerEffort: "max",
+      });
+      const journal = await readStandingPlanJournal(root);
+      expect(journal[0]).toMatchObject({
+        kind: "plan_revision",
+        revision: { plannerModel: "opus", plannerEffort: "max" },
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1055,6 +1072,7 @@ function triageConfig(
     enabled: true,
     shadowMode: true,
     plannerModel: "opus",
+    plannerEffort: "max",
     heartbeatMs: 900_000,
     autoReleaseFrontier: 1,
     controlDoc: { enabled: false, teamId: null },
@@ -1074,6 +1092,35 @@ function triageConfig(
 }
 
 describe("runStandingPlanShadowTick", () => {
+  it("pins the configured model and max effort on the live planner runner", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-effort-"));
+    const created: Array<{ model: string; effort: string }> = [];
+    try {
+      const result = await runStandingPlanShadowTick({
+        config: triageConfig({ plannerModel: "opus", plannerEffort: "max" }),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        createPlannerRunner: (model, effort) => {
+          created.push({ model, effort });
+          return plannerForBatches(["SYMPH-1"]).runClaude;
+        },
+        log: () => undefined,
+        now: () => new Date("2026-07-12T12:00:00.000Z"),
+        force: true,
+      });
+
+      expect(result.status).toBe("ok");
+      expect(created).toEqual([{ model: "opus", effort: "max" }]);
+      expect(await loadStandingPlan(root)).toMatchObject({
+        plannerModel: "opus",
+        plannerEffort: "max",
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("keeps absent or false structural-advisory wiring inert", async () => {
     for (const structuralAdvisories of [undefined, false]) {
       const root = mkdtempSync(join(tmpdir(), "symph-shadow-dark-advisory-"));

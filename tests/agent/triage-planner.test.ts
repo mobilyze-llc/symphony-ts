@@ -2230,6 +2230,28 @@ describe("createCrabrunnerPlannerRunner", () => {
     expect(writes[0]?.data).toBe("PROMPT-BODY");
   });
 
+  it("threads max effort to the crabrunner lane", async () => {
+    let reasoningEffort: string | null | undefined;
+    const runner = createCrabrunnerPlannerRunner({
+      workspace: "/ws",
+      artifactDir: "/artifacts",
+      artifactName: "plan",
+      effort: "max",
+      runCrabrunner: async (input) => {
+        reasoningEffort = input.reasoningEffort;
+        return crabrunnerResult({ artifactPath: "/artifacts/plan.md" });
+      },
+      fs: {
+        mkdir: async () => undefined,
+        writeFile: async () => undefined,
+        readFile: async () => "# Plan\n```json\n{}\n```\n",
+      },
+    });
+
+    await runner("PROMPT-BODY");
+    expect(reasoningEffort).toBe("max");
+  });
+
   it("threads per-caller validation through to the crabrunner input (SYMPH-1119)", async () => {
     const captured: Array<{ validation: unknown }> = [];
     const runner = createCrabrunnerPlannerRunner({

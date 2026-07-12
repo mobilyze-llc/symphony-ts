@@ -6432,6 +6432,7 @@ describe("startRuntimeService shutdown", () => {
         enabled: true,
         shadowMode: true,
         plannerModel: "opus",
+        plannerEffort: "max",
         heartbeatMs: 1,
         envelope: {
           version: 1,
@@ -6627,6 +6628,7 @@ describe("startRuntimeService shutdown", () => {
         enabled: true,
         shadowMode: true,
         plannerModel: "opus",
+        plannerEffort: "max",
         heartbeatMs: 1,
         envelope: {
           version: 1,

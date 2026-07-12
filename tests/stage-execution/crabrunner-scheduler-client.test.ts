@@ -245,6 +245,26 @@ describe("CrabrunnerCliSchedulerClient.submit", () => {
     expect(manifest).not.toHaveProperty("thinking");
   });
 
+  it("passes max thinking through to the crabrunner manifest", async () => {
+    let manifestContent: string | null = null;
+    const client = createClient(async (args) => {
+      const index = args.indexOf("--manifest-file");
+      manifestContent = await readFile(args[index + 1]!, "utf8");
+      return cliOk(
+        statusJson({
+          state: "queued",
+          job_id: "job-manifest-max-thinking",
+          collectible: false,
+        }),
+      );
+    });
+
+    await client.submit(createSpec({ reasoningEffort: "max" }));
+
+    const manifest = JSON.parse(manifestContent!) as Record<string, unknown>;
+    expect(manifest.thinking).toBe("max");
+  });
+
   it("rejects (fail closed) when the spec carries no promptFile (SYMPH-856)", async () => {
     const recorder = createCliRecorder({
       submit: () =>

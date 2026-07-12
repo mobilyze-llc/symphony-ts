@@ -177,6 +177,9 @@ export interface PlanRevision {
   contentHash: string;
   supersedes: number | null;
   createdAt: string;
+  /** Effective model/effort attribution for this planner-produced revision. */
+  plannerModel?: string;
+  plannerEffort?: string;
   envelope: PlanEnvelope;
   batches: PlanBatch[];
   dependencyEdges: PlanDependencyEdge[];
@@ -241,6 +244,8 @@ export interface StandingPlan {
   planId: string;
   revision: number;
   contentHash: string;
+  plannerModel?: string;
+  plannerEffort?: string;
   envelope: PlanEnvelope;
   batches: PlanBatch[];
   dependencyEdges: PlanDependencyEdge[];
@@ -516,6 +521,10 @@ function isPlanRevision(value: unknown): value is PlanRevision {
     typeof value.contentHash === "string" &&
     (value.supersedes === null || typeof value.supersedes === "number") &&
     typeof value.createdAt === "string" &&
+    (value.plannerModel === undefined ||
+      typeof value.plannerModel === "string") &&
+    (value.plannerEffort === undefined ||
+      typeof value.plannerEffort === "string") &&
     isPlanEnvelope(value.envelope) &&
     Array.isArray(value.batches) &&
     value.batches.every(isValidPlanBatch) &&

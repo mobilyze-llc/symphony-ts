@@ -112,6 +112,8 @@ describe("parseManagerPlanCliArgs", () => {
       "parallel-isolated,canary-chain",
       "--model",
       "opus",
+      "--effort",
+      "high",
       "--prompt-only",
       "--json",
     ]);
@@ -121,6 +123,7 @@ describe("parseManagerPlanCliArgs", () => {
     expect(opts.risk).toBe("high");
     expect(opts.modes).toEqual(["parallel-isolated", "canary-chain"]);
     expect(opts.model).toBe("opus");
+    expect(opts.effort).toBe("high");
     expect(opts.promptOnly).toBe(true);
     expect(opts.json).toBe(true);
     expect(opts.commentEnrichment).toBe(true);
@@ -140,6 +143,7 @@ describe("parseManagerPlanCliArgs", () => {
     expect(opts.concurrencyCeiling).toBe(3);
     expect(opts.risk).toBe("medium");
     expect(opts.model).toBe("opus");
+    expect(opts.effort).toBe("max");
     expect(opts.modes).toBeNull();
     expect(opts.promptOnly).toBe(false);
     expect(opts.json).toBe(false);
@@ -321,6 +325,12 @@ describe("parseManagerPlanCliArgs", () => {
     expect(() => parseManagerPlanCliArgs(["--page-size", "0"])).toThrow(
       ManagerPlanCliUsageError,
     );
+  });
+
+  it("rejects an unsupported planner effort", () => {
+    expect(() =>
+      parseManagerPlanCliArgs(["--team", "MOB", "--effort", "extreme"]),
+    ).toThrow(/--effort must be one of: low, medium, high, max/);
   });
 
   it("rejects an unknown flag", () => {
@@ -510,6 +520,7 @@ describe("runManagerPlanCli", () => {
     expect(seen[0]).toMatchObject({
       artifactDir: outDir,
       model: "opus",
+      effort: "max",
       workspace: process.cwd(),
     });
   });
@@ -1192,6 +1203,10 @@ describe("runManagerPlanCli", () => {
       expect(persistPlanRevision.mock.calls[0]?.[0]).toBe(
         join(outDir, "manager-plan-store"),
       );
+      expect(persistPlanRevision.mock.calls[0]?.[2]).toMatchObject({
+        plannerModel: "opus",
+        plannerEffort: "max",
+      });
       expect(out()).toContain("Persisted revision 1");
     } finally {
       await rm(outDir, { recursive: true, force: true });
