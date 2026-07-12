@@ -90,7 +90,7 @@ describe("tool-free clustering planner runner", () => {
       mcpServers: {},
     });
     expect(valueAfter(processBoundary.args, "--model")).toBe("opus");
-    expect(valueAfter(processBoundary.args, "--thinking")).toBe("high");
+    expect(valueAfter(processBoundary.args, "--effort")).toBe("high");
     expect(valueAfter(processBoundary.args, "--setting-sources")).toBe("");
     expect(processBoundary.args).toEqual(
       expect.arrayContaining([
@@ -133,7 +133,7 @@ describe("tool-free clustering planner runner", () => {
     );
   });
 
-  it("pins the reasoning level on the claude boundary via --thinking", async () => {
+  it("pins the reasoning level on the claude boundary via --effort", async () => {
     const root = await mkdtemp(join(tmpdir(), "clustering-tool-free-"));
     roots.push(root);
     let captured: { command: string; args: readonly string[] } | null = null;
@@ -157,7 +157,7 @@ describe("tool-free clustering planner runner", () => {
     if (captured === null) throw new Error("expected an invocation");
     const invocation = captured as { command: string; args: readonly string[] };
     expect(invocation.command).toBe("claude");
-    expect(valueAfter(invocation.args, "--thinking")).toBe("low");
+    expect(valueAfter(invocation.args, "--effort")).toBe("low");
   });
 
   it("routes openai/codex aliases to a codex exec run with a pinned reasoning effort", async () => {
