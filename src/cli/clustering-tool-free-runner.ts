@@ -41,6 +41,13 @@ type ToolFreePlannerProcess = (
 
 export function createToolFreeClusteringPlannerRunner(input: {
   model: string;
+  /**
+   * Explicit reasoning/thinking level for this run (SYMPH-1128). Threaded to the
+   * spawned CLI so the clustering score is not confounded by an inherited CLI
+   * default: `--effort <low|medium|high>` on the claude boundary, a
+   * `model_reasoning_effort` override on the codex boundary.
+   */
+  reasoningLevel: string;
   workspace: string;
   artifactDir: string;
   artifactName: string;
@@ -48,6 +55,10 @@ export function createToolFreeClusteringPlannerRunner(input: {
   timeoutMs?: number;
   runProcess?: ToolFreePlannerProcess;
 }): (prompt: string) => Promise<PlannerRunResult> {
+  const invocation = resolveToolFreeInvocation(
+    input.model,
+    input.reasoningLevel,
+  );
   return async (prompt) => {
     await mkdir(input.artifactDir, { recursive: true });
     await writeFile(
@@ -59,8 +70,8 @@ export function createToolFreeClusteringPlannerRunner(input: {
     let result: ToolFreePlannerProcessResult;
     try {
       result = await (input.runProcess ?? runToolFreePlannerProcess)({
-        command: "claude",
-        args: toolFreeClaudeArgs(input.model),
+        command: invocation.command,
+        args: invocation.args,
         cwd: input.workspace,
         env: withoutExternalToolCredentials(input.env),
         stdin: prompt,
@@ -69,26 +80,26 @@ export function createToolFreeClusteringPlannerRunner(input: {
     } catch (error) {
       return {
         status: "unavailable",
-        detail: `tool-free Claude process failed: ${bounded(errorDetail(error))}`,
+        detail: `tool-free ${invocation.label} process failed: ${bounded(errorDetail(error))}`,
       };
     }
     if (result.status === "timed_out") {
       return {
         status: "unavailable",
-        detail: `tool-free Claude timed out after ${timeoutMs}ms`,
+        detail: `tool-free ${invocation.label} timed out after ${timeoutMs}ms`,
       };
     }
     if (result.exitCode !== 0) {
       return {
         status: "unavailable",
-        detail: `tool-free Claude exited ${result.exitCode}: ${bounded(result.stderr)}`,
+        detail: `tool-free ${invocation.label} exited ${result.exitCode}: ${bounded(result.stderr)}`,
       };
     }
     const markdown = result.stdout.trim();
     if (markdown === "") {
       return {
         status: "unavailable",
-        detail: "tool-free Claude returned empty output",
+        detail: `tool-free ${invocation.label} returned empty output`,
       };
     }
     await writeFile(
@@ -100,13 +111,123 @@ export function createToolFreeClusteringPlannerRunner(input: {
   };
 }
 
-function toolFreeClaudeArgs(model: string): string[] {
+interface ToolFreeInvocation {
+  command: string;
+  args: string[];
+  label: string;
+}
+
+/**
+ * Complete Codex 0.144.1 built-in tool/context surface inventory that must stay
+ * off for the clustering boundary (SYMPH-1128). Codex ships every one of these
+ * as a supported `--disable <FEATURE>` name (each maps to a
+ * `features.<name>=false` override), and the enabled ones would let the OpenAI
+ * path advertise a tool, reach outside the process, or fold workspace-derived
+ * context into the frozen benchmark prompt — mirroring the tool-free posture the
+ * Claude boundary gets from `--tools ""`. The names below were validated against
+ * the installed `codex features list` (v0.144.1): every entry is a known feature,
+ * so the invocation never aborts on an unknown flag.
+ *
+ * Grouped by surface:
+ * - execution: `shell_tool`, `unified_exec`, `shell_snapshot`
+ * - browser/computer: `browser_use`, `browser_use_external`,
+ *   `browser_use_full_cdp_access`, `computer_use`, `in_app_browser`
+ * - apps/plugins: `apps`, `plugins`, `plugin_sharing`, `remote_plugin`
+ * - multi-agent/goal/memory: `multi_agent`, `goals`, `memories`
+ * - image/code-mode host: `image_generation`, `code_mode_host`
+ * - elicitation: `auth_elicitation`, `tool_call_mcp_elicitation`
+ * - hooks/tool suggestion: `hooks`, `tool_suggest`
+ * - workspace/skill dependencies: `workspace_dependencies`,
+ *   `skill_mcp_dependency_install`
+ *
+ * Deliberately NOT disabled because they change model output or are pure
+ * transport/rendering rather than a reachable tool/context surface (disabling
+ * them would perturb the very reasoning the benchmark measures):
+ * `personality`, `fast_mode`, `guardian_approval`, `mentions_v2`,
+ * `enable_request_compression`, and `remote_compaction_v2`.
+ */
+export const CODEX_DISABLED_TOOL_FEATURES = [
+  "shell_tool",
+  "unified_exec",
+  "shell_snapshot",
+  "browser_use",
+  "browser_use_external",
+  "browser_use_full_cdp_access",
+  "computer_use",
+  "in_app_browser",
+  "apps",
+  "plugins",
+  "plugin_sharing",
+  "remote_plugin",
+  "multi_agent",
+  "goals",
+  "memories",
+  "image_generation",
+  "code_mode_host",
+  "auth_elicitation",
+  "tool_call_mcp_elicitation",
+  "hooks",
+  "tool_suggest",
+  "workspace_dependencies",
+  "skill_mcp_dependency_install",
+] as const;
+
+const CODEX_PROVIDER_PREFIXES = new Set([
+  "codex",
+  "codex-cli",
+  "codex-app-server",
+  "openai",
+  "openai-codex",
+]);
+
+/**
+ * Pick the tool-free CLI for the model alias and pin its reasoning level.
+ * Anthropic aliases spawn `claude --print`; openai/codex aliases (for example
+ * `openai/gpt-5.6-sol`) spawn `codex exec`. Both paths receive the explicit
+ * level so clustering scores are controlled rather than inheriting a CLI default.
+ */
+export function resolveToolFreeInvocation(
+  model: string,
+  reasoningLevel: string,
+): ToolFreeInvocation {
+  if (isCodexModel(model)) {
+    return {
+      command: "codex",
+      args: toolFreeCodexArgs(codexModelId(model), reasoningLevel),
+      label: "Codex",
+    };
+  }
+  return {
+    command: "claude",
+    args: toolFreeClaudeArgs(model, reasoningLevel),
+    label: "Claude",
+  };
+}
+
+function isCodexModel(model: string): boolean {
+  const slash = model.indexOf("/");
+  if (slash < 0) {
+    return CODEX_PROVIDER_PREFIXES.has(model.trim().toLowerCase());
+  }
+  return CODEX_PROVIDER_PREFIXES.has(
+    model.slice(0, slash).trim().toLowerCase(),
+  );
+}
+
+function codexModelId(model: string): string {
+  const slash = model.indexOf("/");
+  return slash < 0 ? model : model.slice(slash + 1);
+}
+
+function toolFreeClaudeArgs(model: string, reasoningLevel: string): string[] {
   return [
     "--print",
     "--output-format",
     "text",
     "--model",
     model,
+    "--effort",
+    reasoningLevel,
     "--tools",
     "",
     "--strict-mcp-config",
@@ -120,6 +241,34 @@ function toolFreeClaudeArgs(model: string): string[] {
     "--no-session-persistence",
     "--permission-mode",
     "dontAsk",
+  ];
+}
+
+function toolFreeCodexArgs(modelId: string, reasoningLevel: string): string[] {
+  return [
+    "exec",
+    "--ignore-user-config",
+    // The capability retest evaluation workspace is intentionally history-free
+    // and has no `.git`, so codex's default git-repo guard would abort before
+    // inference. `--skip-git-repo-check` keeps the clustering call running in a
+    // non-Git workspace (SYMPH-1128).
+    "--skip-git-repo-check",
+    ...CODEX_DISABLED_TOOL_FEATURES.flatMap((feature) => [
+      "--disable",
+      feature,
+    ]),
+    // Freeze out workspace-derived context: `project_doc_max_bytes=0` stops Codex
+    // from loading repository instruction files (for example `AGENTS.md`) into the
+    // clustering prompt (SYMPH-1128). `--ignore-user-config` and `--tools`/`--disable`
+    // suppress user config and tool surfaces, but project docs are a separate,
+    // workspace-derived surface that would otherwise contaminate the frozen
+    // benchmark prompt.
+    "--config",
+    "project_doc_max_bytes=0",
+    "--config",
+    `model_reasoning_effort="${reasoningLevel}"`,
+    "--model",
+    modelId,
   ];
 }
 

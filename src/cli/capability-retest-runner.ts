@@ -27,6 +27,7 @@ export const CAPABILITY_RETEST_VERDICT_VALIDATION: ClaudeRunnerValidationConfig 
 
 export function createCrabrunnerVerdictRunner(input: {
   model: string;
+  reasoningLevel: string;
   workspace: string;
   outDir: string;
   env: NodeJS.ProcessEnv;
@@ -42,6 +43,7 @@ export function createCrabrunnerVerdictRunner(input: {
       artifactDir: join(input.outDir, testCase.issueIdentifier.toLowerCase()),
       artifactName,
       model: input.model,
+      reasoningEffort: input.reasoningLevel,
       env: input.env,
       validation: CAPABILITY_RETEST_VERDICT_VALIDATION,
     });

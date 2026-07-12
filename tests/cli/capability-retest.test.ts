@@ -98,6 +98,30 @@ describe("capability re-test CLI", () => {
     expect(options).toMatchObject({ benchmark: "clustering", repeats: 4 });
   });
 
+  it("defaults the reasoning level to the pinned high level", () => {
+    const options = parseCapabilityRetestCliArgs(["--model", "opus"], "/repo");
+
+    expect(options.reasoningLevel).toBe("high");
+  });
+
+  it("parses an explicit reasoning level", () => {
+    const options = parseCapabilityRetestCliArgs(
+      ["--model", "opus", "--reasoning-level", "low"],
+      "/repo",
+    );
+
+    expect(options.reasoningLevel).toBe("low");
+  });
+
+  it("rejects an unsupported reasoning level", () => {
+    expect(() =>
+      parseCapabilityRetestCliArgs(
+        ["--model", "opus", "--reasoning-level", "max"],
+        "/repo",
+      ),
+    ).toThrow("--reasoning-level must be one of low, medium, high");
+  });
+
   it("returns usage exit 1 when the model alias is missing", async () => {
     const capture = captureIo();
     const exit = await runCapabilityRetestCli([], { io: capture.io });
@@ -127,6 +151,7 @@ describe("capability re-test CLI", () => {
     await expect(
       runClusteringCapabilityRetest({
         model: "opus",
+        reasoningLevel: "high",
         workspace: root,
         evaluationWorkspace: root,
         outDir: join(root, "out"),
@@ -211,6 +236,7 @@ describe("capability re-test CLI", () => {
     expect(rows[0]).toMatchObject({
       run_id: "clustering-run-1",
       model: "opus",
+      reasoning_level: "high",
       result: {
         kind: "clustering_golden_set_benchmark",
         repeats: 3,
@@ -253,6 +279,7 @@ describe("capability re-test CLI", () => {
     const run = (generatedAt: string, runId: string) =>
       runClusteringCapabilityRetest({
         model: "opus",
+        reasoningLevel: "high",
         workspace: root,
         evaluationWorkspace: root,
         outDir: join(root, "out", runId),
@@ -313,7 +340,7 @@ describe("capability re-test CLI", () => {
     const root = await tempRoot();
     const capture = captureIo();
     const exit = await runCapabilityRetestCli(
-      ["--model", "opus", "--workspace", root],
+      ["--model", "opus", "--workspace", root, "--reasoning-level", "medium"],
       {
         cwd: root,
         io: capture.io,
@@ -343,6 +370,7 @@ describe("capability re-test CLI", () => {
       metadata: {
         kind: "altitude_reliability_retest",
         model: "opus",
+        reasoning_level: "medium",
         capability_arrived: true,
         gate_authority: false,
         evidence_role: "operational_measurement_observation",
@@ -361,8 +389,30 @@ describe("capability re-test CLI", () => {
     expect(durableRows[0]).toMatchObject({
       run_id: "run-success",
       model: "opus",
+      reasoning_level: "medium",
       result: { capability_arrived: true },
     });
+  });
+
+  it("reads a legacy altitude ledger row without a reasoning level", async () => {
+    const root = await tempRoot();
+    const ledgerPath = getAltitudeReliabilityCapabilityLedgerPath(root);
+    await mkdir(join(root, ".symphony", "capability-ledger"), {
+      recursive: true,
+    });
+    const legacyRow = {
+      schema_version: 1,
+      idempotency_key: "legacy",
+      run_id: "legacy-run",
+      generated_at: "2026-07-10T19:00:00.000Z",
+      model: "opus",
+      result: { capability_arrived: true },
+    };
+    await writeFile(ledgerPath, `${JSON.stringify(legacyRow)}\n`);
+
+    const rows = await readAltitudeReliabilityCapabilityLedger(root);
+    expect(rows).toEqual([legacyRow]);
+    expect(rows[0]).not.toHaveProperty("reasoning_level");
   });
 
   it("writes the scored ledger and exits non-zero when one false kill fails the bar", async () => {

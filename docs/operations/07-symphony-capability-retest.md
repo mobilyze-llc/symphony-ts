@@ -31,6 +31,7 @@ Required:
 
 Options:
   --benchmark <name>  altitude (default) or clustering
+  --reasoning-level <level>  Pinned model reasoning/thinking level: low, medium, or high (default high). Applied to the claude and codex tool-free clustering paths and the altitude lane, and recorded in every new ledger row.
   --repeats <count>    Clustering repeats; gate-authoritative runs require >=3 (default 3)
   --fixture-dir <path> Frozen clustering fixtures (default tests/fixtures/clustering-golden-set)
   --workspace <path>    Source workspace and durable-ledger root (default current directory)
