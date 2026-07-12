@@ -216,6 +216,14 @@ function toolFreeCodexArgs(modelId: string, reasoningLevel: string): string[] {
       "--disable",
       feature,
     ]),
+    // Freeze out workspace-derived context: `project_doc_max_bytes=0` stops Codex
+    // from loading repository instruction files (for example `AGENTS.md`) into the
+    // clustering prompt (SYMPH-1128). `--ignore-user-config` and `--tools`/`--disable`
+    // suppress user config and tool surfaces, but project docs are a separate,
+    // workspace-derived surface that would otherwise contaminate the frozen
+    // benchmark prompt.
+    "--config",
+    "project_doc_max_bytes=0",
     "--config",
     `model_reasoning_effort="${reasoningLevel}"`,
     "--model",

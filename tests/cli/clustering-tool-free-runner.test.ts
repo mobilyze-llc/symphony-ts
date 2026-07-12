@@ -245,6 +245,50 @@ describe("tool-free clustering planner runner", () => {
     expect(lastDisable).toBeLessThan(invocation.args.indexOf("--model"));
   });
 
+  it("freezes out repository instruction files via project_doc_max_bytes=0", async () => {
+    const root = await mkdtemp(join(tmpdir(), "clustering-tool-free-"));
+    roots.push(root);
+    // A workspace sentinel documenting why the override is required: without
+    // `project_doc_max_bytes=0`, codex would load this repository instruction
+    // file into the frozen clustering prompt, contaminating the benchmark with
+    // workspace-derived context (SYMPH-1128).
+    await writeFile(
+      join(root, "AGENTS.md"),
+      "# forbidden workspace-derived instructions\n",
+      "utf8",
+    );
+    let captured: { command: string; args: readonly string[] } | null = null;
+    const runner = createToolFreeClusteringPlannerRunner({
+      model: "codex/gpt-5.6-sol",
+      reasoningLevel: "high",
+      workspace: root,
+      artifactDir: join(root, "artifacts"),
+      artifactName: "repeat-1",
+      env: {},
+      runProcess: async ({ command, args }) => {
+        captured = { command, args };
+        return { status: "completed", exitCode: 0, stdout: "{}", stderr: "" };
+      },
+    });
+
+    await expect(runner("planner prompt")).resolves.toEqual({
+      status: "ok",
+      markdown: "{}",
+    });
+    if (captured === null) throw new Error("expected an invocation");
+    const invocation = captured as { command: string; args: readonly string[] };
+    expect(invocation.command).toBe("codex");
+    // The exact supported config override that disables project-doc loading.
+    expect(flagValues(invocation.args, "--config")).toContain(
+      "project_doc_max_bytes=0",
+    );
+    // It sits inside the tool-free contract without disturbing the other pins.
+    expect(invocation.args).toContain("--ignore-user-config");
+    expect(flagValues(invocation.args, "--config")).toContain(
+      'model_reasoning_effort="high"',
+    );
+  });
+
   it("reports codex boundary failures with the codex label", async () => {
     const root = await mkdtemp(join(tmpdir(), "clustering-tool-free-"));
     roots.push(root);
