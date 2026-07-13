@@ -68,6 +68,8 @@ export interface CreateCrabrunnerStageExecutionBackendOptions {
   provider?: string;
   /** SSH user for remote/non-local crabbox runs. Required once host is remote. */
   remoteUser?: string;
+  /** Literal slot pool forwarded to remote `crabrunner run`. */
+  remoteStaticSlots?: readonly string[];
   /** Optional SSH port for remote crabbox runs. */
   remotePort?: string;
   /** Optional remote crabbox static work root override. */
@@ -146,6 +148,9 @@ export function createCrabrunnerStageExecutionBackend(
     ...(options.remoteUser === undefined
       ? {}
       : { remoteUser: options.remoteUser }),
+    ...(options.remoteStaticSlots === undefined
+      ? {}
+      : { remoteStaticSlots: options.remoteStaticSlots }),
     ...(options.remotePort === undefined
       ? {}
       : { remotePort: options.remotePort }),
