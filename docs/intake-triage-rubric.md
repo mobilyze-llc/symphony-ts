@@ -21,6 +21,29 @@ Use `linear-pp-cli issues edit <id> --state-name <name> --agent` for state
 changes. Do not infer dispatch authority from a project, release, or other
 ambient field.
 
+## File review and runtime findings
+
+Agents file or accrete findings through the installed Crucible controller, not
+through ad hoc Linear create calls:
+
+```sh
+node "${CRUCIBLE_REPO_ROOT:-$HOME/.local/share/crucible/controller}/skills/session-orchestrator/scripts/file-finding.mjs" ... --team SYMPH
+```
+
+Provide the failure class, repeatable anchors or evidence, exact excerpt,
+source, and optional observed severity. The verb rejects prescriptive titles,
+derives the exact stable `(failure-class, anchor fingerprint)` key, and runs a
+fresh Printing Press Linear search. It comments new evidence on an open match;
+otherwise it creates an evidence-first ticket. A matching Done ticket is
+historical evidence, not a deduplication target: recurrence creates a fresh
+ticket with an explicit related link to the Done twin and adds a forward
+comment to that twin. Same-machine locking and post-create reconciliation
+control concurrent duplicate creation, and JSONL decision telemetry records
+the outcome.
+
+This filing path is report-only intake. It does not promote or dispatch work;
+the [state contract](#state-contract) remains authoritative.
+
 ## Select the pass
 
 Snapshot the union of:
