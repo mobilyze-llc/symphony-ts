@@ -27,7 +27,13 @@ Agents file or accrete findings through the installed Crucible controller, not
 through ad hoc Linear create calls:
 
 ```sh
-node "${CRUCIBLE_REPO_ROOT:-$HOME/.local/share/crucible/controller}/skills/session-orchestrator/scripts/file-finding.mjs" ... --team SYMPH
+node "${CRUCIBLE_REPO_ROOT:-$HOME/.local/share/crucible/controller}/skills/session-orchestrator/scripts/file-finding.mjs" \
+  --failure-class "<stable failure class>" \
+  --anchor "<repo-relative path:symbol-or-line>" \
+  --evidence "<repeatable observation with source refs>" \
+  --error-excerpt "<exact source excerpt>" \
+  --source "<PR URL, review artifact, or runtime report>" \
+  --team SYMPH
 ```
 
 Provide the failure class, repeatable anchors or evidence, exact excerpt,
