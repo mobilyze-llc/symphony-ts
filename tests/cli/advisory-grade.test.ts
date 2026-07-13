@@ -9,6 +9,7 @@ import {
   ADVISORY_GRADE_EXIT,
   runAdvisoryGradeCli,
 } from "../../src/cli/advisory-grade.js";
+import { journalCliStructuralAdvisories } from "../../src/logging/structural-advisory-cli-journal.js";
 
 function captureIo() {
   const out: string[] = [];
@@ -35,6 +36,13 @@ const BASE_ARGS = (root: string) => [
   "--journal-root",
   root,
 ];
+
+const MATCHING_ADVISORY = {
+  memberIssueIdentifiers: ["MOB-1", "MOB-2"],
+  rootCauseHypothesis: "Shared root",
+  structuralFix: "Centralize the fix",
+  confidenceNote: "High",
+};
 
 describe("symphony-advisory-grade (SYMPH-1140)", () => {
   it("rejects a missing member set with a usage error", async () => {
@@ -99,9 +107,29 @@ describe("symphony-advisory-grade (SYMPH-1140)", () => {
     expect(journalGrade).not.toHaveBeenCalled();
   });
 
-  it("journals a cli-session grade and reports a conflict on immutable re-grade", async () => {
+  it("rejects an unknown fingerprint in an empty journal without appending", async () => {
+    const root = await mkdtemp(join(tmpdir(), "advisory-grade-unknown-"));
+    try {
+      const { io, err } = captureIo();
+      const code = await runAdvisoryGradeCli(BASE_ARGS(root), { io });
+
+      expect(code).toBe(ADVISORY_GRADE_EXIT.failed);
+      expect(err()).toContain("unknown structural advisory");
+      expect(err()).toContain("exact --members and --root values");
+      expect(await readCalibrationJournal(root)).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a matching raw advisory and preserves immutable re-grading", async () => {
     const root = await mkdtemp(join(tmpdir(), "advisory-grade-"));
     try {
+      await journalCliStructuralAdvisories({
+        root,
+        advisories: [MATCHING_ADVISORY],
+        presentedIssueIdentifiers: new Set(["MOB-1", "MOB-2"]),
+      });
       const first = captureIo();
       const firstCode = await runAdvisoryGradeCli(BASE_ARGS(root), {
         io: first.io,

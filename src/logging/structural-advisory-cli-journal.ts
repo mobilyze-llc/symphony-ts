@@ -204,6 +204,12 @@ export async function journalCliStructuralAdvisoryGrade(
       "Cannot grade a structural advisory with an empty member set.",
     );
   }
+  const advisoryFingerprint = resolved.advisory.advisoryFingerprint;
+  if (advisoryFingerprint === undefined) {
+    throw new Error(
+      "Cannot grade a structural advisory without a fingerprint.",
+    );
+  }
   const now = input.now ?? (() => new Date());
   const source = input.source ?? CLI_STRUCTURAL_ADVISORY_SOURCE;
   const acceptedIdentifiers =
@@ -222,6 +228,16 @@ export async function journalCliStructuralAdvisoryGrade(
     withDispatcherRunJournalWriteLock(input.root, async () => {
       const journal = await readDispatcherRunJournal(input.root);
       const expanded = expandBacklogManagerCalibrationJournal(journal);
+      const matchingEmission = expanded.some(
+        (entry) =>
+          entry.kind === "structural_advisory" &&
+          entry.metadata.advisory_id === advisoryFingerprint,
+      );
+      if (!matchingEmission) {
+        throw new Error(
+          `Cannot grade unknown structural advisory ${advisoryFingerprint}: no matching structural_advisory emission exists in the dispatcher journal. Re-run the Manager plan that emitted the advisory, then grade using the exact --members and --root values.`,
+        );
+      }
       const draft = buildStructuralAdvisoryGradeJournalEntry({
         advisory: resolved.advisory,
         decision: input.decision,

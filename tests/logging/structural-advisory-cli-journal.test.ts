@@ -9,13 +9,17 @@ import { acquireDispatcherRunJournalRuntimeOwnership } from "../../src/logging/r
 import {
   appendDispatcherRunJournalEntry,
   appendDispatcherRunJournalEntryToDisk,
+  compactDispatcherRunJournalFileWithLock,
   readDispatcherRunJournal,
 } from "../../src/logging/run-journal.js";
 import {
   journalCliStructuralAdvisories,
   journalCliStructuralAdvisoryGrade,
 } from "../../src/logging/structural-advisory-cli-journal.js";
-import { projectStructuralAdvisoryRejections } from "../../src/orchestrator/structural-advisory-journal.js";
+import {
+  buildBacklogManagerCalibrationProjection,
+  projectStructuralAdvisoryRejections,
+} from "../../src/orchestrator/structural-advisory-journal.js";
 
 const advisory = {
   memberIssueIdentifiers: ["MOB-1", "MOB-2"],
@@ -125,6 +129,110 @@ describe("CLI structural-advisory journal safety", () => {
       expect(postGrade.advisories[0]).toMatchObject({
         previouslyRejectedWithNewEvidence: true,
       });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a grade when the matching advisory exists only in checkpoint projection", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cli-journal-grade-checkpoint-"));
+    try {
+      const emission = await journalCliStructuralAdvisories({
+        root,
+        advisories: [advisory],
+        presentedIssueIdentifiers: new Set(["MOB-1", "MOB-2"]),
+      });
+      const advisoryId = emission.appended[0]?.metadata.advisory_id;
+      await journalCliStructuralAdvisories({
+        root,
+        advisories: [
+          {
+            ...advisory,
+            memberIssueIdentifiers: ["MOB-3", "MOB-4"],
+            rootCauseHypothesis: "Filler root",
+          },
+          {
+            ...advisory,
+            memberIssueIdentifiers: ["MOB-5", "MOB-6"],
+            rootCauseHypothesis: "Second filler root",
+          },
+        ],
+        presentedIssueIdentifiers: new Set([
+          "MOB-3",
+          "MOB-4",
+          "MOB-5",
+          "MOB-6",
+        ]),
+      });
+
+      const journal = await readDispatcherRunJournal(root);
+      const compacted = await compactDispatcherRunJournalFileWithLock(
+        root,
+        {
+          idempotencyKey: "checkpoint-draft",
+          timestamp: "2026-07-13T13:00:00.000Z",
+          kind: "journal_checkpoint",
+          issueId: "__journal__",
+          issueIdentifier: "JOURNAL",
+          operation: "dispatcher",
+          stage: null,
+          attempt: null,
+          ownerId: null,
+          lease: null,
+          summary: "Checkpoint Manager calibration.",
+          metadata: {
+            backlogManagerCalibration:
+              buildBacklogManagerCalibrationProjection(journal),
+          },
+        },
+        { tailEntryCount: 1, minEntryCount: 2 },
+      );
+      expect(compacted.compacted).toBe(true);
+      expect(
+        compacted.journal.some(
+          (entry) =>
+            entry.kind === "structural_advisory" &&
+            entry.metadata.advisory_id === advisoryId,
+        ),
+      ).toBe(false);
+
+      const result = await journalCliStructuralAdvisoryGrade({
+        root,
+        advisory,
+        decision: "accept",
+        actor: { kind: "interactive-agent", host: "pro14" },
+        reason: "confirmed cluster",
+      });
+      expect(result.status).toBe("applied");
+      expect(result.entry.metadata.advisory_id).toBe(advisoryId);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not match an advisory by member-set hash when the root differs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cli-journal-grade-root-"));
+    try {
+      await journalCliStructuralAdvisories({
+        root,
+        advisories: [advisory],
+        presentedIssueIdentifiers: new Set(["MOB-1", "MOB-2"]),
+      });
+      const before = await readDispatcherRunJournal(root);
+
+      await expect(
+        journalCliStructuralAdvisoryGrade({
+          root,
+          advisory: {
+            ...advisory,
+            rootCauseHypothesis: "Different root",
+          },
+          decision: "reject",
+          actor: { kind: "interactive-agent", host: "pro14" },
+          reason: "wrong cluster",
+        }),
+      ).rejects.toThrow(/unknown structural advisory/);
+      expect(await readDispatcherRunJournal(root)).toEqual(before);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
