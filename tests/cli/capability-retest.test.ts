@@ -35,6 +35,10 @@ import {
   getDispatcherRunJournalPath,
   readDispatcherRunJournal,
 } from "../../src/logging/run-journal.js";
+import {
+  OPERATING_POLICY_PATH,
+  OPERATING_POLICY_PROVENANCE,
+} from "../../src/policy/operating-policy.js";
 
 const roots: string[] = [];
 
@@ -379,11 +383,55 @@ describe("capability re-test CLI", () => {
       run_id: "run-success",
       model: "opus",
       reasoning_level: "medium",
-      protocol: "snapshot-v1",
-      result: { protocol: "snapshot-v1", capability_arrived: true },
+      protocol: "snapshot-policy-v2",
+      result: { protocol: "snapshot-policy-v2", capability_arrived: true },
     });
     expect(
       isAuthoritativeAltitudeReliabilityCapabilityLedgerRow(durableRows[0]!),
+    ).toBe(true);
+  });
+
+  it("reads a legacy snapshot-v1 ledger row but demotes it from gate authority", async () => {
+    const root = await tempRoot();
+    const ledgerPath = getAltitudeReliabilityCapabilityLedgerPath(root);
+    await mkdir(join(root, ".symphony", "capability-ledger"), {
+      recursive: true,
+    });
+    const snapshotV1Row = {
+      schema_version: 1,
+      idempotency_key: "legacy-snapshot-v1",
+      run_id: "legacy-snapshot-v1-run",
+      generated_at: "2026-07-11T19:00:00.000Z",
+      model: "opus",
+      reasoning_level: "high",
+      protocol: "snapshot-v1",
+      result: { protocol: "snapshot-v1", capability_arrived: true },
+    };
+    const snapshotPolicyV2Row = {
+      schema_version: 1,
+      idempotency_key: "policy-v2",
+      run_id: "policy-v2-run",
+      generated_at: "2026-07-12T19:00:00.000Z",
+      model: "opus",
+      reasoning_level: "high",
+      protocol: "snapshot-policy-v2",
+      result: { protocol: "snapshot-policy-v2", capability_arrived: true },
+    };
+    await writeFile(
+      ledgerPath,
+      `${JSON.stringify(snapshotV1Row)}\n${JSON.stringify(snapshotPolicyV2Row)}\n`,
+    );
+
+    const rows = await readAltitudeReliabilityCapabilityLedger(root);
+    // The legacy row remains readable...
+    expect(rows).toEqual([snapshotV1Row, snapshotPolicyV2Row]);
+    // ...but discrimination demotes it from gate authority while the
+    // policy-aware row is authoritative.
+    expect(
+      isAuthoritativeAltitudeReliabilityCapabilityLedgerRow(rows[0]!),
+    ).toBe(false);
+    expect(
+      isAuthoritativeAltitudeReliabilityCapabilityLedgerRow(rows[1]!),
     ).toBe(true);
   });
 
@@ -668,6 +716,32 @@ describe("capability re-test CLI", () => {
     expect(prompt).toContain("Frozen issue description");
     expect(prompt).not.toContain("reframe\n");
     expect(prompt).not.toContain("Independently investigate");
+  });
+
+  it("renders the operating policy above the snapshot and cites the policy file path", () => {
+    const prompt = renderVerdictPrompt({
+      issueIdentifier: "SYMPH-941",
+      expectedVerdict: "reframe",
+      snapshot: {
+        title: "Frozen issue title",
+        description: "Frozen issue description",
+        cutoff: "2026-06-28T00:00:00.000Z",
+        answerIntroducedAt: "2026-06-28T00:00:00.001Z",
+        source: "Linear issue fixture",
+        reconstructedAt: "2026-07-12T00:00:00.000Z",
+        reconstructionNote: "Fixture reconstruction",
+      },
+    });
+
+    // The policy is cited by its versioned source path (single source of truth).
+    expect(prompt).toContain(OPERATING_POLICY_PATH);
+    expect(prompt).toContain("Trace to the root before accepting a remedy.");
+    expect(prompt).toContain("The best part is no part.");
+    expect(prompt).toContain(OPERATING_POLICY_PROVENANCE);
+    // The policy is rendered ABOVE the snapshot.
+    expect(prompt.indexOf(OPERATING_POLICY_PATH)).toBeLessThan(
+      prompt.indexOf("<issue_snapshot>"),
+    );
   });
 
   it.each([

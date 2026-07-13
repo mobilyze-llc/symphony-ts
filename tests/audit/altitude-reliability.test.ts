@@ -50,7 +50,7 @@ describe("altitude reliability re-test protocol", () => {
     expect(result.metrics.killPrecision).toBe(0.75);
     expect(result.capabilityArrived).toBe(false);
     expect(buildAltitudeReliabilityLedgerEntry(result)).toMatchObject({
-      protocol: "snapshot-v1",
+      protocol: "snapshot-policy-v2",
       kind: "altitude_reliability_retest",
       model: "local-skeptic-v1",
       capability_arrived: false,

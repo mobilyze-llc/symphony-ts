@@ -19,9 +19,11 @@ const AltitudeReliabilityCapabilityLedgerRowSchema = z
     // Effective reasoning/thinking level pinned for the run (SYMPH-1128).
     // Optional so pre-SYMPH-1128 rows without it remain readable as legacy.
     reasoning_level: z.string().min(1).optional(),
-    // Missing on all pre-snapshot rows, which remain readable but are never
-    // authoritative Phase-A gate evidence.
-    protocol: z.literal("snapshot-v1").optional(),
+    // Present on scored rows. "snapshot-policy-v2" is the current policy-aware
+    // protocol (SYMPH-1141); the legacy "snapshot-v1" and pre-snapshot rows
+    // (protocol absent) remain readable but are demoted from Phase-A gate
+    // authority — only "snapshot-policy-v2" is authoritative below.
+    protocol: z.enum(["snapshot-v1", "snapshot-policy-v2"]).optional(),
     result: z.record(z.string(), z.unknown()),
   })
   .strict();
@@ -34,7 +36,8 @@ export function isAuthoritativeAltitudeReliabilityCapabilityLedgerRow(
   row: AltitudeReliabilityCapabilityLedgerRow,
 ): boolean {
   return (
-    row.protocol === "snapshot-v1" && row.result.protocol === "snapshot-v1"
+    row.protocol === "snapshot-policy-v2" &&
+    row.result.protocol === "snapshot-policy-v2"
   );
 }
 
