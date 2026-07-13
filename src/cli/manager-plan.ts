@@ -2,9 +2,9 @@
 
 import { execFile } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -37,6 +37,11 @@ import {
   computeDependencyWaves,
   resolveStandingPlanEnvelope,
 } from "../domain/standing-plan.js";
+import {
+  type JournalCliStructuralAdvisoriesInput,
+  type JournalCliStructuralAdvisoriesResult,
+  journalCliStructuralAdvisories,
+} from "../logging/structural-advisory-cli-journal.js";
 import {
   type PlanPostEmitReviewDeps,
   type PlanPostEmitReviewResult,
@@ -74,6 +79,7 @@ import {
   LinearTrackerClient,
 } from "../tracker/linear-client.js";
 import {
+  type ManagerPlanAdvisoryJournalSummary,
   renderManagerPlanAdvisoryPreview,
   withoutStructuralAdvisoryPreview,
 } from "./manager-plan-advisory-preview.js";
@@ -130,6 +136,9 @@ export interface ManagerPlanCliOptions {
   ghPrContext: boolean;
   githubRepo: string | null;
   persist: boolean;
+  /** null = journal by default when a run-journal root exists; true/false force it. */
+  journal: boolean | null;
+  journalRoot: string | null;
   promptOnly: boolean;
   plannerGrounding: boolean;
   plannerGroundingRepoUrl: string | null;
@@ -231,6 +240,12 @@ export interface ManagerPlanCliDependencies {
   runPlanPostEmitReview?: (
     deps: PlanPostEmitReviewDeps,
   ) => Promise<PlanPostEmitReviewResult>;
+  /** Defaults to writing the dispatcher run journal; injected in tests. */
+  journalStructuralAdvisories?: (
+    input: JournalCliStructuralAdvisoriesInput,
+  ) => Promise<JournalCliStructuralAdvisoriesResult>;
+  /** Resolves the run-journal root; injected in tests. Defaults to process.cwd(). */
+  cwd?: string;
   now?: () => Date;
 }
 
@@ -261,6 +276,8 @@ export function parseManagerPlanCliArgs(
   let ghPrContext = false;
   let githubRepo: string | null = null;
   let persist = false;
+  let journal: boolean | null = null;
+  let journalRoot: string | null = null;
   let promptOnly = false;
   let plannerGrounding = false;
   let plannerGroundingRepoUrl: string | null = null;
@@ -306,6 +323,14 @@ export function parseManagerPlanCliArgs(
     }
     if (token === "--persist") {
       persist = true;
+      continue;
+    }
+    if (token === "--journal") {
+      journal = true;
+      continue;
+    }
+    if (token === "--no-journal") {
+      journal = false;
       continue;
     }
 
@@ -362,6 +387,9 @@ export function parseManagerPlanCliArgs(
         break;
       case "--out-dir":
         outDir = readValue("--out-dir");
+        break;
+      case "--journal-root":
+        journalRoot = readValue("--journal-root");
         break;
       case "--runtime-state-base-url":
         runtimeStateBaseUrl = readValue("--runtime-state-base-url");
@@ -421,6 +449,8 @@ export function parseManagerPlanCliArgs(
     ghPrContext,
     githubRepo,
     persist,
+    journal,
+    journalRoot,
     promptOnly,
     plannerGrounding,
     plannerGroundingRepoUrl,
@@ -480,6 +510,16 @@ export async function runManagerPlanCli(
   }
   if (options.outDir !== null && options.outDir.trim() === "") {
     io.stderr(`--out-dir must be non-empty.\n${renderUsage()}`);
+    return MANAGER_PLAN_EXIT.usage;
+  }
+  if (options.journalRoot !== null && options.journalRoot.trim() === "") {
+    io.stderr(`--journal-root must be non-empty.\n${renderUsage()}`);
+    return MANAGER_PLAN_EXIT.usage;
+  }
+  if (options.journal === true && options.promptOnly) {
+    io.stderr(
+      `--journal cannot be combined with --prompt-only (no plan is produced).\n${renderUsage()}`,
+    );
     return MANAGER_PLAN_EXIT.usage;
   }
   if (options.githubRepo !== null && options.githubRepo.trim() === "") {
@@ -784,6 +824,91 @@ export async function runManagerPlanCli(
     return MANAGER_PLAN_EXIT.invalid;
   }
 
+  // Journal emitted structural advisories as CLI (cli-session) evidence into
+  // the existing dispatcher run journal (SYMPH-1140). Default: journal when a
+  // run-journal root exists; --journal forces it; --no-journal preserves the
+  // preview-only behavior. This writes NOTHING to Linear, the standing-plan
+  // store, or dispatch — advisory evidence only, keyed by the existing
+  // fingerprint identity.
+  let advisoryJournal: ManagerPlanAdvisoryJournalSummary | null = null;
+  const emittedAdvisories = result.body.structuralAdvisories ?? [];
+  if (options.journal !== false && emittedAdvisories.length > 0) {
+    const journalRoot = resolve(
+      dependencies.cwd ?? process.cwd(),
+      options.journalRoot === null || options.journalRoot.trim() === ""
+        ? "."
+        : options.journalRoot.trim(),
+    );
+    const rootExists = await managerPlanRunJournalRootExists(journalRoot);
+    if (options.journal === true || rootExists) {
+      const journalStructuralAdvisories =
+        dependencies.journalStructuralAdvisories ??
+        journalCliStructuralAdvisories;
+      try {
+        const presentedIssueIdentifiers = new Set(
+          [...context.backlog, ...(context.advisoryInput ?? [])].map(
+            (candidate) => candidate.issueIdentifier,
+          ),
+        );
+        const issueByIdentifier = new Map(
+          portfolioPartition.eligible.map((issue) => [issue.identifier, issue]),
+        );
+        const memberActivityByIdentifier = new Map(
+          [...context.backlog, ...(context.advisoryInput ?? [])].map(
+            (candidate) => {
+              const issue = issueByIdentifier.get(candidate.issueIdentifier);
+              const latestCommentAt = (candidate.comments ?? []).reduce<
+                string | null
+              >(
+                (latest, comment) =>
+                  latest === null || comment.createdAt > latest
+                    ? comment.createdAt
+                    : latest,
+                null,
+              );
+              const stateUpdatedAt = issue?.updatedAt ?? null;
+              const activityAt =
+                latestCommentAt === null ||
+                (stateUpdatedAt !== null && stateUpdatedAt > latestCommentAt)
+                  ? stateUpdatedAt
+                  : latestCommentAt;
+              return [
+                candidate.issueIdentifier,
+                {
+                  identifier: candidate.issueIdentifier,
+                  state: issue?.state ?? candidate.state,
+                  stateUpdatedAt,
+                  latestCommentAt,
+                  activityAt,
+                },
+              ];
+            },
+          ),
+        );
+        const journaled = await journalStructuralAdvisories({
+          root: journalRoot,
+          advisories: emittedAdvisories,
+          presentedIssueIdentifiers,
+          memberActivityByIdentifier,
+          source: "cli-session",
+          now,
+        });
+        advisoryJournal = {
+          root: journalRoot,
+          source: "cli-session",
+          journaledCount: journaled.appended.length,
+          skippedCount:
+            journaled.skipped.length + journaled.invalidAdvisoryCount,
+        };
+      } catch (error) {
+        io.stderr(
+          `Failed to journal structural advisories: ${formatError(error)}\n`,
+        );
+        return MANAGER_PLAN_EXIT.loadFailed;
+      }
+    }
+  }
+
   let persistence: ManagerPlanPersistenceSummary | null = null;
   if (options.persist) {
     const postEmitReview =
@@ -834,6 +959,7 @@ export async function runManagerPlanCli(
           result.body,
           portfolioPartition.held.length,
           persistence,
+          advisoryJournal,
         )}\n`
       : `${renderPlanHuman(
           options,
@@ -841,9 +967,20 @@ export async function runManagerPlanCli(
           result.body,
           portfolioPartition.held.length,
           persistence,
+          advisoryJournal,
         )}\n`,
   );
   return MANAGER_PLAN_EXIT.ok;
+}
+
+/** A run-journal root "exists" when its `.symphony/run-journals/` dir is present. */
+async function managerPlanRunJournalRootExists(root: string): Promise<boolean> {
+  try {
+    const stats = await stat(join(root, ".symphony", "run-journals"));
+    return stats.isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 /** Human-readable descriptor of the active additive scope (SYMPH-858). */
@@ -867,6 +1004,7 @@ function renderPlanJson(
   body: PlanBody,
   portfolioHeldCount = 0,
   persistence: ManagerPlanPersistenceSummary | null = null,
+  advisoryJournal: ManagerPlanAdvisoryJournalSummary | null = null,
 ): string {
   return JSON.stringify(
     {
@@ -880,7 +1018,11 @@ function renderPlanJson(
       portfolioHeldCount,
       envelope: body.envelope,
       rationale: body.rationale,
-      structuralAdvisoryDisposition: "preview_only_not_journaled",
+      structuralAdvisoryDisposition:
+        advisoryJournal === null
+          ? "preview_only_not_journaled"
+          : "journaled_cli_session",
+      structuralAdvisoryJournal: advisoryJournal,
       structuralAdvisories: body.structuralAdvisories ?? [],
       batches: body.batches,
       dependencyEdges: body.dependencyEdges,
@@ -904,6 +1046,7 @@ function renderPlanHuman(
   body: PlanBody,
   portfolioHeldCount = 0,
   persistence: ManagerPlanPersistenceSummary | null = null,
+  advisoryJournal: ManagerPlanAdvisoryJournalSummary | null = null,
 ): string {
   const lines: string[] = [];
   lines.push(
@@ -970,7 +1113,12 @@ function renderPlanHuman(
       lines.push(`  ${option.marker} ${option.label}`);
     }
   }
-  lines.push(...renderManagerPlanAdvisoryPreview(body));
+  lines.push(...renderManagerPlanAdvisoryPreview(body, advisoryJournal));
+  if (advisoryJournal !== null) {
+    lines.push(
+      `Journaled ${advisoryJournal.journaledCount} structural advisory record(s) as ${advisoryJournal.source} evidence to ${advisoryJournal.root} (${advisoryJournal.skippedCount} skipped).`,
+    );
+  }
   if (persistence !== null) {
     lines.push("");
     lines.push(
@@ -1234,10 +1382,12 @@ export function renderUsage(): string {
     "Usage: symphony-manager-plan (--team <KEY> | --project <name-or-slugId> | --initiative <name|uuid>)... [--state <name>...] [options]",
     "",
     "Run the Queue Triage v2 backlog Manager (planner) ONE-SHOT against the scoped",
-    "eligible backlog and print the suggested batch plan. Output-only: it spends one",
-    "Opus planner pass unless --prompt-only, and writes NOTHING to Linear,",
-    "the live standing-plan store, or dispatch. --persist writes only to an isolated",
-    "manager-plan store under this run's artifact directory.",
+    "eligible backlog and print the suggested batch plan. It spends one Opus planner",
+    "pass unless --prompt-only, and writes NOTHING to Linear, the live standing-plan",
+    "store, or dispatch. --persist writes only to an isolated manager-plan store under",
+    "this run's artifact directory. By default it journals emitted structural",
+    "advisories as cli-session evidence into an existing dispatcher run journal when",
+    "one exists (--no-journal preserves preview-only; --journal forces it).",
     "",
     "Scope (provide at least one; additive — combine them to narrow):",
     "  --team <KEY>                 Linear team key whose backlog to plan (e.g. MOB)",
@@ -1268,6 +1418,9 @@ export function renderUsage(): string {
     "  --planner-grounding-repo-scope <symphony|non_symphony>",
     "                               Explicit grounding repo scope (defaults inferred from repo URL)",
     "  --persist                    Persist the plan revision to an isolated artifact store",
+    "  --journal                    Force journaling emitted advisories as cli-session evidence",
+    "  --no-journal                 Preview only — do not journal emitted advisories",
+    "  --journal-root <path>        Run-journal root (defaults to the working directory)",
     "  --prompt-only                Print the assembled planner prompt and exit (no Opus pass)",
     "  --json                       Emit the plan as JSON",
     "  --help                       Show this help text",

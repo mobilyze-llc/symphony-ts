@@ -3881,6 +3881,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       actor: input.actor,
       reason: input.reason,
       timestamp: this.now().toISOString(),
+      // The operator-intent grade channel is the manual escape hatch
+      // (symphonyctl grade-advisory); tag it so the digest keeps it distinct
+      // from the primary cli-session path (SYMPH-1140).
+      source: "symphonyctl",
     });
     const persisted = await recordStructuralAdvisoryState(
       this.workspaceManager.root,

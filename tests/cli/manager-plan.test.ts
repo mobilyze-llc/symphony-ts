@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { PlannerRunResult } from "../../src/agent/triage-planner.js";
 import { runTriagePlanner } from "../../src/agent/triage-planner.js";
+import { readCalibrationJournal } from "../../src/calibration/journal-reader.js";
 import {
   DEFAULT_MANAGER_PLAN_IN_FLIGHT_STATES,
   MANAGER_PLAN_RUNTIME_STATE_BASE_URL_ENV,
@@ -1139,6 +1140,160 @@ describe("runManagerPlanCli", () => {
       ).toBeUndefined();
     } finally {
       await rm(outDir, { recursive: true, force: true });
+    }
+  });
+
+  it("journals emitted advisories as cli-session evidence by default when a run-journal root exists (SYMPH-1140)", async () => {
+    const { io, out } = captureIo();
+    const root = await mkdtemp(join(tmpdir(), "manager-plan-journal-"));
+    await mkdir(join(root, ".symphony", "run-journals"), { recursive: true });
+    const journalStructuralAdvisories = vi.fn<
+      NonNullable<ManagerPlanCliDependencies["journalStructuralAdvisories"]>
+    >(async () => ({
+      appended: [{} as never],
+      skipped: [],
+      invalidAdvisoryCount: 0,
+    }));
+    try {
+      const code = await runManagerPlanCli(
+        ["--team", "MOB", "--state", "Backlog"],
+        {
+          io,
+          env: {},
+          cwd: root,
+          loadCandidates: async () => [
+            issue("u1", "MOB-1"),
+            issue("u2", "MOB-2"),
+          ],
+          createPlannerRunner: () => async () => ({
+            status: "ok",
+            markdown: ADVISORY_ARTIFACT,
+          }),
+          journalStructuralAdvisories,
+        },
+      );
+      expect(code).toBe(0);
+      expect(journalStructuralAdvisories).toHaveBeenCalledTimes(1);
+      const call = journalStructuralAdvisories.mock.calls[0]?.[0];
+      expect(call?.source).toBe("cli-session");
+      expect(call?.root).toBe(root);
+      expect(call?.advisories[0]?.memberIssueIdentifiers).toEqual([
+        "MOB-1",
+        "MOB-2",
+      ]);
+      expect(out()).toContain("journaled as cli-session evidence");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("skips an advisory containing a member outside the presented planner context (SYMPH-1140)", async () => {
+    const { io, out } = captureIo();
+    const root = await mkdtemp(join(tmpdir(), "manager-plan-invalid-member-"));
+    try {
+      const code = await runManagerPlanCli(
+        [
+          "--team",
+          "MOB",
+          "--state",
+          "Backlog",
+          "--journal",
+          "--journal-root",
+          root,
+          "--json",
+        ],
+        {
+          io,
+          env: {},
+          loadCandidates: async () => [issue("u1", "MOB-1")],
+          createPlannerRunner: () => async () => ({
+            status: "ok",
+            markdown: ADVISORY_ARTIFACT,
+          }),
+        },
+      );
+
+      expect(code).toBe(0);
+      expect(await readCalibrationJournal(root)).toEqual([]);
+      expect(JSON.parse(out()).structuralAdvisoryJournal).toMatchObject({
+        journaledCount: 0,
+        skippedCount: 1,
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("--no-journal preserves preview-only even when a run-journal root exists (SYMPH-1140)", async () => {
+    const { io, out } = captureIo();
+    const root = await mkdtemp(join(tmpdir(), "manager-plan-nojournal-"));
+    await mkdir(join(root, ".symphony", "run-journals"), { recursive: true });
+    const journalStructuralAdvisories = vi.fn();
+    try {
+      const code = await runManagerPlanCli(
+        ["--team", "MOB", "--state", "Backlog", "--no-journal", "--json"],
+        {
+          io,
+          env: {},
+          cwd: root,
+          loadCandidates: async () => [issue("u1", "MOB-1")],
+          createPlannerRunner: () => async () => ({
+            status: "ok",
+            markdown: ADVISORY_ARTIFACT,
+          }),
+          journalStructuralAdvisories,
+        },
+      );
+      expect(code).toBe(0);
+      expect(journalStructuralAdvisories).not.toHaveBeenCalled();
+      expect(JSON.parse(out()).structuralAdvisoryDisposition).toBe(
+        "preview_only_not_journaled",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("--journal forces journaling even when no run-journal root exists yet (SYMPH-1140)", async () => {
+    const { io } = captureIo();
+    const root = await mkdtemp(join(tmpdir(), "manager-plan-forcejournal-"));
+    const journalStructuralAdvisories = vi.fn<
+      NonNullable<ManagerPlanCliDependencies["journalStructuralAdvisories"]>
+    >(async () => ({
+      appended: [{} as never],
+      skipped: [],
+      invalidAdvisoryCount: 0,
+    }));
+    try {
+      const code = await runManagerPlanCli(
+        [
+          "--team",
+          "MOB",
+          "--state",
+          "Backlog",
+          "--journal",
+          "--journal-root",
+          root,
+        ],
+        {
+          io,
+          env: {},
+          loadCandidates: async () => [
+            issue("u1", "MOB-1"),
+            issue("u2", "MOB-2"),
+          ],
+          createPlannerRunner: () => async () => ({
+            status: "ok",
+            markdown: ADVISORY_ARTIFACT,
+          }),
+          journalStructuralAdvisories,
+        },
+      );
+      expect(code).toBe(0);
+      expect(journalStructuralAdvisories).toHaveBeenCalledTimes(1);
+      expect(journalStructuralAdvisories.mock.calls[0]?.[0].root).toBe(root);
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 
