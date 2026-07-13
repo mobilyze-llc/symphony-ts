@@ -138,6 +138,10 @@ export interface CrabrunnerReviewStageDispatchContext {
   baseRef: string | null;
   /** Previous reviewed head from the latest prior review-result/journal row. */
   previousReviewedHeadSha?: string | null;
+  /** Previous reviewed base from the latest prior review-result/journal row. */
+  previousReviewedBaseSha?: string | null;
+  /** Latest completed council round, even when its lane artifact was malformed. */
+  previousReviewRound?: number | null;
   /** Structured artifacts from prior review rounds for targeted convergence. */
   priorStructuredArtifacts?: readonly StructuredReviewerArtifact[];
   signal: AbortSignal;

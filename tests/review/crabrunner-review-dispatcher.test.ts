@@ -152,7 +152,13 @@ describe("createCrabrunnerReviewStageDispatcher", () => {
       await mkdir(artifactRoot, { recursive: true });
       const backend = new MarkdownArtifactBackend(artifactRoot);
       const issue = createIssue();
-      const dispatcher = createDispatcher({ runCommand: fakeGitCommand() });
+      const dispatcher = createDispatcher({
+        runCommand: fakeGitCommand({
+          diff: "diff --git a/src/full.ts b/src/full.ts\n+FULL_CUMULATIVE_DIFF\n",
+          deltaDiff:
+            "diff --git a/src/fix.ts b/src/fix.ts\n+ROUND_TWO_FIX_DELTA\n",
+        }),
+      });
 
       const result = await dispatcher(
         dispatchContext({
@@ -168,12 +174,44 @@ describe("createCrabrunnerReviewStageDispatcher", () => {
       expect(result.result.review_metadata.previous_reviewed_head_sha).toBe(
         PRIOR_HEAD_SHA,
       );
+      expect(result.result.review_metadata.round).toBe(2);
+      expect(result.result.review_metadata.mode).toBe("convergence");
       expect(backend.inputs[0]?.runnerInput.promptTemplate).toContain(
         "Prior adjudicated findings by fingerprint:",
       );
       expect(backend.inputs[0]?.runnerInput.promptTemplate).toContain(
         "prior-fingerprint",
       );
+      expect(backend.inputs[0]?.runnerInput.promptTemplate).toContain(
+        "Review payload scope: fix_delta (fix_delta_default)",
+      );
+      expect(backend.inputs[0]?.runnerInput.promptTemplate).toContain(
+        "DIFF_DATA +ROUND_TWO_FIX_DELTA",
+      );
+      expect(backend.inputs[0]?.runnerInput.promptTemplate).not.toContain(
+        "FULL_CUMULATIVE_DIFF",
+      );
+      expect(
+        await readFile(join(artifactRoot, "diff.patch"), "utf8"),
+      ).toContain("FULL_CUMULATIVE_DIFF");
+      const bundle = JSON.parse(
+        await readFile(join(artifactRoot, "review-bundle.json"), "utf8"),
+      ) as {
+        scope: {
+          reviewPayload: {
+            mode: string;
+            reason: string;
+            range: string;
+            path: string;
+          };
+        };
+      };
+      expect(bundle.scope.reviewPayload).toEqual({
+        mode: "fix_delta",
+        reason: "fix_delta_default",
+        range: `${PRIOR_HEAD_SHA}..${HEAD_SHA}`,
+        path: join(artifactRoot, "fix-delta.patch"),
+      });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -589,7 +627,7 @@ function dispatchContext(input: {
 }
 
 function fakeGitCommand(
-  input: { headSha?: string; diff?: string } = {},
+  input: { headSha?: string; diff?: string; deltaDiff?: string } = {},
 ): CommandRunner {
   const headSha = input.headSha ?? HEAD_SHA;
   const diff =
@@ -622,6 +660,17 @@ function fakeGitCommand(
       return {
         exitCode: 0,
         stdout: `${MERGE_BASE_SHA}\n`,
+        stderr: "",
+      };
+    }
+    if (
+      args[0] === "diff" &&
+      args[1] === PRIOR_HEAD_SHA &&
+      args[2] === headSha
+    ) {
+      return {
+        exitCode: 0,
+        stdout: input.deltaDiff ?? diff,
         stderr: "",
       };
     }

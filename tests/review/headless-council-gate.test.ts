@@ -1994,7 +1994,7 @@ describe("runHeadlessCouncilGate", () => {
       `Review bundle canonical hash: "${reviewBundle.bundleHash}"`,
     );
     expect(reviewerPrompt).toContain(
-      "Review only the frozen review bundle at the path above and the diff below.",
+      "Review only the frozen review bundle at the path above and the scoped patch below. Prefer concrete correctness, safety, contract, or operator-risk findings.",
     );
     expect(reviewerPrompt).not.toContain(
       "Review only the frozen review bundle and diff below.",
@@ -4386,7 +4386,9 @@ describe("runHeadlessCouncilGate", () => {
       roundsPerCycle: 1,
       thresholds: {
         roundWarning: 2,
-        roundCap: 3,
+        cleanRoundsRequired: 2,
+        reflagLimit: 3,
+        backstopRound: 15,
       },
     });
     const findings = result.lanes[0]!.structuredArtifact!.findings;
@@ -4398,7 +4400,7 @@ describe("runHeadlessCouncilGate", () => {
       relatedPaths: ["docs/operators.md"],
     });
     const report = await readFile(result.artifactPaths.councilReport, "utf-8");
-    expect(report).toContain("## Termination Ladder");
+    expect(report).toContain("## Termination Policy");
     expect(report).toContain("- Reason: disposition_exit");
     expect(report).toContain("- Track findings to file: 1");
     expect(report).toContain("- Track filing status: unfiled");
@@ -4646,6 +4648,11 @@ describe("runHeadlessCouncilGate", () => {
       "None",
     ].join("\n");
     const continuedAggregatorCapture: GateAggregatorCapture = async (input) => {
+      expect(input.convergencePolicy).toEqual({
+        n: 2,
+        k: 3,
+        maxRounds: 15,
+      });
       const blockingFinding = {
         severity: "P2",
         location: "src/review/headless-council-gate.ts:10",
@@ -4789,7 +4796,7 @@ describe("runHeadlessCouncilGate", () => {
       status: "continue",
       reason: "blocking_findings",
       action: "continue_fix_loop",
-      alertLevel: "operator",
+      alertLevel: "warning",
       blockingFindingCount: 1,
       familySynthesisCount: 0,
       synthesisAttached: false,
@@ -4948,7 +4955,7 @@ describe("runHeadlessCouncilGate", () => {
     });
   });
 
-  it("turns a cap-hit into an operator decision with synthesis attached", async () => {
+  it("keeps round 3 in the fix loop and uses round 15 as the sole backstop", async () => {
     const harness = await createHarness({
       laneBehavior: {
         "claude-opus": {
@@ -4972,7 +4979,7 @@ describe("runHeadlessCouncilGate", () => {
       },
     });
 
-    const result = await runHeadlessCouncilGate(
+    const roundThree = await runHeadlessCouncilGate(
       {
         issueId: "SYMPH-469",
         workspace: harness.workspace,
@@ -4986,19 +4993,42 @@ describe("runHeadlessCouncilGate", () => {
       { runCommand: harness.runCommand },
     );
 
-    expect(result.verdict).toBe("fail");
+    expect(roundThree.verdict).toBe("fail");
+    expect(roundThree.termination).toMatchObject({
+      status: "continue",
+      reason: "blocking_findings",
+      action: "continue_fix_loop",
+      alertLevel: "warning",
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-469",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+        mode: "convergence",
+        round: 15,
+      },
+      { runCommand: harness.runCommand },
+    );
+
     expect(result.termination).toMatchObject({
       status: "operator_decision",
-      reason: "round_cap_hit",
+      reason: "backstop_hit",
       action: "operator_decision_required_with_synthesis",
       alertLevel: "operator",
       blockingFindingCount: 1,
       familySynthesisCount: 0,
       synthesisAttached: false,
-      roundsPerCycle: 3,
+      roundsPerCycle: 15,
       thresholds: {
         roundWarning: 2,
-        roundCap: 3,
+        cleanRoundsRequired: 2,
+        reflagLimit: 3,
+        backstopRound: 15,
       },
     });
     const persisted = JSON.parse(
@@ -5006,13 +5036,15 @@ describe("runHeadlessCouncilGate", () => {
     ) as { termination: Record<string, unknown> };
     expect(persisted.termination).toMatchObject({
       status: "operator_decision",
-      reason: "round_cap_hit",
+      reason: "backstop_hit",
     });
     const report = await readFile(result.artifactPaths.councilReport, "utf-8");
     expect(report).toContain(
       "- Action: operator_decision_required_with_synthesis",
     );
-    expect(report).toContain("- Rounds per cycle: 3 (warning 2, cap 3)");
+    expect(report).toContain(
+      "- Rounds per cycle: 15 (warning 2, N=2 clean frozen-head rounds, K=3 re-flags, backstop 15)",
+    );
   });
 
   it("stops routing-only provenance failures as review substrate instead of product rework", async () => {
@@ -8136,6 +8168,11 @@ describe("runHeadlessCouncilGate", () => {
       expect(captured?.laneArtifacts.map((l) => l.reviewer)).toEqual([
         "claude-opus",
       ]);
+      expect(captured?.convergencePolicy).toEqual({
+        n: 2,
+        k: 3,
+        maxRounds: 15,
+      });
     });
 
     it("escalates a PASS gate to non-pass when an authoritative aggregator verdict is degraded", async () => {

@@ -2406,7 +2406,7 @@ describe("state-document enrichment (SYMPH-407)", () => {
     expect(review.finding_counts_by_disposition).toEqual({});
   });
 
-  it("projects Council termination ladder thresholds from review events", () => {
+  it("projects Council N/K/backstop thresholds from review events", () => {
     const state = makeState();
     const ladderMetadata = (metadata: Record<string, unknown>) =>
       reviewMetadata({
@@ -2416,7 +2416,9 @@ describe("state-document enrichment (SYMPH-407)", () => {
         head_sha: "head-ladder",
         rounds_per_cycle: 3,
         round_warning_threshold: 2,
-        round_cap: 3,
+        clean_rounds_required: 2,
+        finding_reflag_limit: 3,
+        round_backstop: 15,
         termination_alert_level: "operator",
         ...metadata,
       });
@@ -2463,7 +2465,9 @@ describe("state-document enrichment (SYMPH-407)", () => {
     expect(review.rounds_per_cycle).toEqual({
       current: 3,
       warning_threshold: 2,
-      cap: 3,
+      clean_rounds_required: 2,
+      finding_reflag_limit: 3,
+      backstop: 15,
       alert_level: "operator",
     });
     expect(review.termination).toEqual({
@@ -2488,7 +2492,9 @@ describe("state-document enrichment (SYMPH-407)", () => {
         head_sha: "head-continue",
         rounds_per_cycle: 2,
         round_warning_threshold: 2,
-        round_cap: 3,
+        clean_rounds_required: 2,
+        finding_reflag_limit: 3,
+        round_backstop: 15,
         termination_alert_level: "warning",
         ...metadata,
       });
@@ -3419,12 +3425,14 @@ describe("buildStateDelta (SYMPH-407)", () => {
         blocking_finding_count: 1,
         degraded_condition_count: 2,
         termination_status: "operator_decision",
-        termination_reason: "round_cap_hit",
+        termination_reason: "backstop_hit",
         termination_action: "operator_decision_required_with_synthesis",
         termination_alert_level: "operator",
         rounds_per_cycle: 3,
         round_warning_threshold: 2,
-        round_cap: 3,
+        clean_rounds_required: 2,
+        finding_reflag_limit: 3,
+        round_backstop: 15,
         synthesis_count: 1,
         non_blocking_finding_count: 0,
         track_finding_count: 0,
@@ -3457,12 +3465,14 @@ describe("buildStateDelta (SYMPH-407)", () => {
         blocking_finding_count: 1,
         degraded_condition_count: 2,
         termination_status: "operator_decision",
-        termination_reason: "round_cap_hit",
+        termination_reason: "backstop_hit",
         termination_action: "operator_decision_required_with_synthesis",
         termination_alert_level: "operator",
         rounds_per_cycle: 3,
         round_warning_threshold: 2,
-        round_cap: 3,
+        clean_rounds_required: 2,
+        finding_reflag_limit: 3,
+        round_backstop: 15,
         synthesis_count: 1,
         non_blocking_finding_count: 0,
         track_finding_count: 0,

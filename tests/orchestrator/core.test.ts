@@ -16757,7 +16757,12 @@ function trackFilingTermination(
     reason: "disposition_exit",
     action: "continue_pipeline",
     roundsPerCycle: 1,
-    thresholds: { roundWarning: 2, roundCap: 3 },
+    thresholds: {
+      roundWarning: 2,
+      cleanRoundsRequired: 2,
+      reflagLimit: 3,
+      backstopRound: 15,
+    },
     alertLevel: status === "unfiled" ? "warning" : "ok",
     blockingFindingCount: 0,
     nonBlockingFindingCount: required,
