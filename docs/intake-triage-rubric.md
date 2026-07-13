@@ -33,6 +33,7 @@ node "${CRUCIBLE_REPO_ROOT:-$HOME/.local/share/crucible/controller}/skills/sessi
   --evidence "<repeatable observation with source refs>" \
   --error-excerpt "<exact source excerpt>" \
   --source "<PR URL, review artifact, or runtime report>" \
+  --observed-severity "<observed severity>" \
   --team SYMPH
 ```
 
@@ -43,9 +44,9 @@ fresh Printing Press Linear search. It comments new evidence on an open match;
 otherwise it creates an evidence-first ticket. A matching Done ticket is
 historical evidence, not a deduplication target: recurrence creates a fresh
 ticket with an explicit related link to the Done twin and adds a forward
-comment to that twin. Same-machine locking and post-create reconciliation
-control concurrent duplicate creation, and JSONL decision telemetry records
-the outcome.
+comment to that twin. The lock is the same-machine control for concurrent
+duplicate creation, while post-create reconciliation is the cross-machine
+control. JSONL decision telemetry records the outcome.
 
 This filing path is report-only intake. It does not promote or dispatch work;
 the [state contract](#state-contract) remains authoritative.
