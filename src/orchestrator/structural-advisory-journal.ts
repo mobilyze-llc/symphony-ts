@@ -583,7 +583,8 @@ export function buildStructuralAdvisoryGradeJournalEntry(input: {
   advisory: StructuralAdvisory;
   decision: StructuralAdvisoryGradeDecision;
   acceptedIdentifiers: readonly string[];
-  membersAtGrade: readonly AdvisoryMemberActivitySnapshot[];
+  /** Real grade-time snapshots. Omit when the grading surface cannot fetch them. */
+  membersAtGrade?: readonly AdvisoryMemberActivitySnapshot[];
   droppedIdentifiers: readonly string[];
   actor: IntentActor;
   reason: string;
@@ -599,16 +600,17 @@ export function buildStructuralAdvisoryGradeJournalEntry(input: {
     input.advisory.memberSetHash,
     "member-set hash",
   );
-  const membersAtGrade = input.membersAtGrade.map(
-    (member) => member.identifier,
-  );
+  const originalMembers = [...new Set(input.advisory.memberIssueIdentifiers)];
+  const dropped = new Set(input.droppedIdentifiers);
+  const membersAtGrade =
+    input.membersAtGrade?.map((member) => member.identifier) ??
+    originalMembers.filter((identifier) => !dropped.has(identifier));
   const activityByIdentifier = new Map(
-    input.membersAtGrade.map((member) => [
+    (input.membersAtGrade ?? []).map((member) => [
       member.identifier,
       member.activityAt,
     ]),
   );
-  const originalMembers = [...new Set(input.advisory.memberIssueIdentifiers)];
   const accepted = [...new Set(input.acceptedIdentifiers)].sort();
   return {
     // First decision is immutable per fingerprint+actor. Deliberately exclude
@@ -643,13 +645,22 @@ export function buildStructuralAdvisoryGradeJournalEntry(input: {
       member_delta: originalMembers.filter(
         (identifier) => !accepted.includes(identifier),
       ),
-      member_activity: input.membersAtGrade,
-      member_activity_at_grade: Object.fromEntries(
-        originalMembers.map((identifier) => [
-          identifier,
-          activityByIdentifier.get(identifier) ?? null,
-        ]),
-      ),
+      ...(input.membersAtGrade === undefined
+        ? {
+            activity_baseline_at_grade: {
+              kind: "grade_timestamp",
+              timestamp: input.timestamp,
+            },
+          }
+        : {
+            member_activity: input.membersAtGrade,
+            member_activity_at_grade: Object.fromEntries(
+              originalMembers.map((identifier) => [
+                identifier,
+                activityByIdentifier.get(identifier) ?? null,
+              ]),
+            ),
+          }),
     },
   };
 }
@@ -663,17 +674,38 @@ export function projectStructuralAdvisoryRejections(
     const entry = expanded.find(
       (candidate) => candidate.sequence === grade.gradeSequence,
     );
+    const explicitActivity = stringNullableRecord(
+      entry?.metadata.member_activity_at_grade,
+    );
+    const timestampBaselineMembers =
+      gradeTimestampBaseline(entry?.metadata.activity_baseline_at_grade) ===
+      entry?.timestamp
+        ? stringArray(entry?.metadata.original_member_identifiers)
+        : [];
     return [
       {
         advisoryId: grade.advisoryId,
         memberSetHash: grade.memberSetHash,
-        memberActivityAtGrade: stringNullableRecord(
-          entry?.metadata.member_activity_at_grade,
-        ),
+        memberActivityAtGrade:
+          Object.keys(explicitActivity).length > 0
+            ? explicitActivity
+            : Object.fromEntries(
+                timestampBaselineMembers.map((identifier) => [
+                  identifier,
+                  entry?.timestamp ?? null,
+                ]),
+              ),
         gradeSequence: grade.gradeSequence,
       },
     ];
   });
+}
+
+function gradeTimestampBaseline(value: unknown): string | null {
+  if (!isRecord(value)) return null;
+  return value.kind === "grade_timestamp" && typeof value.timestamp === "string"
+    ? value.timestamp
+    : null;
 }
 
 /** Earliest grade globally is authoritative; later actors remain audit rows. */

@@ -12,9 +12,15 @@ import {
   ADVISORY_GRADE_EXIT,
   runAdvisoryGradeCli,
 } from "../../src/cli/advisory-grade.js";
-import { runManagerPlanCli } from "../../src/cli/manager-plan.js";
-import type { Issue } from "../../src/domain/model.js";
 import {
+  MANAGER_PLAN_EXIT,
+  runManagerPlanCli,
+} from "../../src/cli/manager-plan.js";
+import type { Issue } from "../../src/domain/model.js";
+import { acquireDispatcherRunJournalRuntimeOwnership } from "../../src/logging/run-journal-ownership.js";
+import {
+  appendDispatcherRunJournalEntry,
+  appendDispatcherRunJournalEntryToDisk,
   compactDispatcherRunJournalFileWithLock,
   readDispatcherRunJournal,
 } from "../../src/logging/run-journal.js";
@@ -135,6 +141,75 @@ async function compactCalibrationJournal(root: string) {
 }
 
 describe("CLI advisory evidence pipeline (SYMPH-1140)", () => {
+  it("rejects a CLI write before append while a runtime host owns the sequence allocator", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cli-advisory-owned-root-"));
+    const ownership = await acquireDispatcherRunJournalRuntimeOwnership(root);
+    try {
+      const hostAtN = appendDispatcherRunJournalEntry([], {
+        idempotencyKey: "host:at-n",
+        timestamp: "2026-07-13T10:00:00.000Z",
+        kind: "intent",
+        issueId: "host-issue",
+        issueIdentifier: "MOB-HOST",
+        operation: "dispatcher",
+        stage: null,
+        attempt: null,
+        ownerId: "runtime-host",
+        lease: null,
+        summary: "Host entry at N.",
+        metadata: {},
+      });
+      await appendDispatcherRunJournalEntryToDisk(root, hostAtN.entry);
+
+      const plan = captureIo();
+      const planCode = await runManagerPlanCli(
+        ["--team", "MOB", "--state", "Backlog", "--json"],
+        {
+          io: plan.io,
+          env: {},
+          cwd: root,
+          loadCandidates: async () => [
+            issue("u1", "MOB-1"),
+            issue("u2", "MOB-2"),
+          ],
+          createPlannerRunner: () => async (): Promise<PlannerRunResult> => ({
+            status: "ok",
+            markdown: ADVISORY_ARTIFACT,
+          }),
+        },
+      );
+      expect(planCode).toBe(MANAGER_PLAN_EXIT.loadFailed);
+      expect(plan.err()).toContain(
+        "Unsafe standalone dispatcher journal write",
+      );
+      expect(plan.err()).toContain("--no-journal");
+      expect(plan.err()).toContain("symphonyctl");
+      expect(await readDispatcherRunJournal(root)).toEqual([hostAtN.entry]);
+
+      const hostNext = appendDispatcherRunJournalEntry(hostAtN.journal, {
+        idempotencyKey: "host:next",
+        timestamp: "2026-07-13T10:01:00.000Z",
+        kind: "intent",
+        issueId: "host-issue",
+        issueIdentifier: "MOB-HOST",
+        operation: "dispatcher",
+        stage: null,
+        attempt: null,
+        ownerId: "runtime-host",
+        lease: null,
+        summary: "Host next entry.",
+        metadata: {},
+      });
+      await appendDispatcherRunJournalEntryToDisk(root, hostNext.entry);
+      expect(
+        (await readDispatcherRunJournal(root)).map((entry) => entry.sequence),
+      ).toEqual([1, 2]);
+    } finally {
+      await ownership.release();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("journals a CLI advisory, grades it via the session agent, and surfaces a cli-session decided row", async () => {
     const root = await mkdtemp(join(tmpdir(), "cli-advisory-e2e-"));
     try {
@@ -391,7 +466,7 @@ describe("CLI advisory evidence pipeline (SYMPH-1140)", () => {
     }
   });
 
-  it("keeps a checkpointed tick-first CLI rejection suppressed when member activity is unchanged", async () => {
+  it("uses the grade boundary instead of emission activity for suppression and revival", async () => {
     const root = await mkdtemp(join(tmpdir(), "cli-advisory-rejection-"));
     const activity = new Map<string, string | null>([
       ["MOB-1", "2026-07-13T10:00:00.000Z"],
@@ -480,6 +555,13 @@ describe("CLI advisory evidence pipeline (SYMPH-1140)", () => {
         }),
       ]);
 
+      // Both members advance after emission but before the reject grade. This
+      // evidence must be inside the immutable grade baseline, not mistaken for
+      // a later reason to revive the advisory.
+      activity.set("MOB-1", "2026-07-13T11:00:00.000Z");
+      activity.set("MOB-2", "2026-07-13T11:05:00.000Z");
+      const gradeTime = "2026-07-13T12:00:00.000Z";
+
       const grade = captureIo();
       expect(
         await runAdvisoryGradeCli(
@@ -495,15 +577,25 @@ describe("CLI advisory evidence pipeline (SYMPH-1140)", () => {
             "--journal-root",
             root,
           ],
-          { io: grade.io },
+          { io: grade.io, now: () => new Date(gradeTime) },
         ),
       ).toBe(0);
 
-      const rejections = projectStructuralAdvisoryRejections(
-        await readCalibrationJournal(root),
+      const gradedJournal = await readCalibrationJournal(root);
+      const gradeEntry = gradedJournal.find(
+        (entry) => entry.kind === "structural_advisory_grade",
       );
+      expect(gradeEntry?.metadata.member_activity_at_grade).toBeUndefined();
+      expect(gradeEntry?.metadata.activity_baseline_at_grade).toEqual({
+        kind: "grade_timestamp",
+        timestamp: gradeTime,
+      });
+      const rejections = projectStructuralAdvisoryRejections(gradedJournal);
       expect(rejections[0]?.memberActivityAtGrade).toEqual(
-        Object.fromEntries(activity),
+        Object.fromEntries([
+          ["MOB-1", gradeTime],
+          ["MOB-2", gradeTime],
+        ]),
       );
       const lifecycle = await applyAdvisoryLifecycle({
         emitted: [
@@ -524,6 +616,28 @@ describe("CLI advisory evidence pipeline (SYMPH-1140)", () => {
       expect(lifecycle.events).toEqual([
         expect.objectContaining({ kind: "suppressed" }),
       ]);
+
+      const revived = await applyAdvisoryLifecycle({
+        emitted: [
+          {
+            memberIssueIdentifiers: ["MOB-1", "MOB-2"],
+            rootCauseHypothesis: "Shared root",
+            structuralFix: "Centralize the fix",
+            confidenceNote: "High",
+          },
+        ],
+        previous: [],
+        presentedIssueIdentifiers: new Set(["MOB-1", "MOB-2"]),
+        config: { dormantOkTicks: 2, renderCap: 5 },
+        rejectedMemberSets: rejections,
+        issueActivity: new Map([
+          ["MOB-1", "2026-07-13T13:00:00.000Z"],
+          ["MOB-2", "2026-07-13T11:05:00.000Z"],
+        ]),
+      });
+      expect(revived.advisories[0]).toMatchObject({
+        previouslyRejectedWithNewEvidence: true,
+      });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

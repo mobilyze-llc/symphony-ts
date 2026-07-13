@@ -4,9 +4,9 @@
  * `symphony-advisory-grade` for the session agent's decision) journal into the
  * SAME dispatcher run journal the automated tick and the calibration digest
  * already use — this is NOT a parallel persistence system. It reuses the
- * existing structural-advisory fingerprint identity and the existing journal
- * writer (`appendDispatcherRunJournalEntriesWithLock`), tagging records with a
- * `source` discriminator so CLI evidence stays distinguishable from tick and
+ * existing structural-advisory fingerprint identity and journal writer,
+ * guarded by the runtime-host ownership boundary before the append lock. A
+ * `source` discriminator keeps CLI evidence distinguishable from tick and
  * symphonyctl evidence in the digest.
  */
 
@@ -26,6 +26,7 @@ import {
   buildStructuralAdvisoryJournalEntry,
   expandBacklogManagerCalibrationJournal,
 } from "../orchestrator/structural-advisory-journal.js";
+import { withDispatcherRunJournalStandaloneWriteAccess } from "./run-journal-ownership.js";
 import {
   appendDispatcherRunJournalEntry,
   appendDispatcherRunJournalEntryToDisk,
@@ -154,9 +155,10 @@ export async function journalCliStructuralAdvisories(
     return { appended: [], skipped: [], invalidAdvisoryCount };
   }
 
-  const result = await appendStructuralAdvisoryEntriesWithProjectionDedup(
+  const result = await withDispatcherRunJournalStandaloneWriteAccess(
     input.root,
-    drafts,
+    () =>
+      appendStructuralAdvisoryEntriesWithProjectionDedup(input.root, drafts),
   );
   return {
     appended: result.appendedEntries,
@@ -172,7 +174,7 @@ export interface JournalCliStructuralAdvisoryGradeInput {
   decision: StructuralAdvisoryGradeDecision;
   /** Required for a `partial` grade; ignored otherwise. */
   acceptedIdentifiers?: readonly string[];
-  /** Optional live member activity; defaults to the advisory's members. */
+  /** Optional real grade-time member activity; omit when unavailable. */
   membersAtGrade?: readonly AdvisoryMemberActivitySnapshot[];
   droppedIdentifiers?: readonly string[];
   actor: IntentActor;
@@ -216,45 +218,42 @@ export async function journalCliStructuralAdvisoryGrade(
     acceptedIdentifiers,
   );
 
-  return withDispatcherRunJournalWriteLock(input.root, async () => {
-    const journal = await readDispatcherRunJournal(input.root);
-    const expanded = expandBacklogManagerCalibrationJournal(journal);
-    const membersAtGrade =
-      input.membersAtGrade ??
-      activitySnapshotsFromJournal(
-        expanded,
-        resolved.advisory.advisoryFingerprint,
-        resolved.members,
-      );
-    const draft = buildStructuralAdvisoryGradeJournalEntry({
-      advisory: resolved.advisory,
-      decision: input.decision,
-      acceptedIdentifiers,
-      membersAtGrade,
-      droppedIdentifiers: input.droppedIdentifiers ?? [],
-      actor: input.actor,
-      reason: input.reason,
-      ownerId: input.ownerId ?? null,
-      timestamp: now().toISOString(),
-      source,
-    });
+  return withDispatcherRunJournalStandaloneWriteAccess(input.root, () =>
+    withDispatcherRunJournalWriteLock(input.root, async () => {
+      const journal = await readDispatcherRunJournal(input.root);
+      const expanded = expandBacklogManagerCalibrationJournal(journal);
+      const draft = buildStructuralAdvisoryGradeJournalEntry({
+        advisory: resolved.advisory,
+        decision: input.decision,
+        acceptedIdentifiers,
+        ...(input.membersAtGrade === undefined
+          ? {}
+          : { membersAtGrade: input.membersAtGrade }),
+        droppedIdentifiers: input.droppedIdentifiers ?? [],
+        actor: input.actor,
+        reason: input.reason,
+        ownerId: input.ownerId ?? null,
+        timestamp: now().toISOString(),
+        source,
+      });
 
-    // Compaction replaces covered rows with a checkpoint projection. Inspect
-    // that expanded view before allocating or writing so first-decision
-    // immutability survives checkpointing without opening a lock race.
-    const existing = expanded.find(
-      (entry) => entry.idempotencyKey === draft.idempotencyKey,
-    );
-    if (existing !== undefined) {
-      return { status: "conflict" as const, entry: existing };
-    }
-    const appended = appendDispatcherRunJournalEntry(journal, draft);
-    if (!appended.appended) {
-      return { status: "conflict" as const, entry: appended.entry };
-    }
-    await appendDispatcherRunJournalEntryToDisk(input.root, appended.entry);
-    return { status: "applied" as const, entry: appended.entry };
-  });
+      // Compaction replaces covered rows with a checkpoint projection. Inspect
+      // that expanded view before allocating or writing so first-decision
+      // immutability survives checkpointing without opening a lock race.
+      const existing = expanded.find(
+        (entry) => entry.idempotencyKey === draft.idempotencyKey,
+      );
+      if (existing !== undefined) {
+        return { status: "conflict" as const, entry: existing };
+      }
+      const appended = appendDispatcherRunJournalEntry(journal, draft);
+      if (!appended.appended) {
+        return { status: "conflict" as const, entry: appended.entry };
+      }
+      await appendDispatcherRunJournalEntryToDisk(input.root, appended.entry);
+      return { status: "applied" as const, entry: appended.entry };
+    }),
+  );
 }
 
 function validateAcceptedIdentifiers(
@@ -280,57 +279,6 @@ function validateAcceptedIdentifiers(
   }
 }
 
-function activitySnapshotsFromJournal(
-  journal: readonly DispatcherRunJournalEntry[],
-  advisoryId: string | undefined,
-  members: readonly string[],
-): AdvisoryMemberActivitySnapshot[] {
-  const observation = [...journal]
-    .reverse()
-    .find(
-      (entry) =>
-        entry.kind === "structural_advisory" &&
-        entry.metadata.advisory_id === advisoryId &&
-        Array.isArray(entry.metadata.member_activity),
-    );
-  const observed = new Map<string, AdvisoryMemberActivitySnapshot>();
-  if (Array.isArray(observation?.metadata.member_activity)) {
-    for (const value of observation.metadata.member_activity) {
-      const snapshot = parseMemberActivitySnapshot(value);
-      if (snapshot !== null) observed.set(snapshot.identifier, snapshot);
-    }
-  }
-  return members.map(
-    (identifier) =>
-      observed.get(identifier) ?? unknownMemberActivity(identifier),
-  );
-}
-
-function parseMemberActivitySnapshot(
-  value: unknown,
-): AdvisoryMemberActivitySnapshot | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return null;
-  }
-  const snapshot = value as Record<string, unknown>;
-  if (
-    typeof snapshot.identifier !== "string" ||
-    typeof snapshot.state !== "string" ||
-    !isNullableString(snapshot.stateUpdatedAt) ||
-    !isNullableString(snapshot.latestCommentAt) ||
-    !isNullableString(snapshot.activityAt)
-  ) {
-    return null;
-  }
-  return {
-    identifier: snapshot.identifier,
-    state: snapshot.state,
-    stateUpdatedAt: snapshot.stateUpdatedAt,
-    latestCommentAt: snapshot.latestCommentAt,
-    activityAt: snapshot.activityAt,
-  };
-}
-
 function unknownMemberActivity(
   identifier: string,
 ): AdvisoryMemberActivitySnapshot {
@@ -341,8 +289,4 @@ function unknownMemberActivity(
     latestCommentAt: null,
     activityAt: null,
   };
-}
-
-function isNullableString(value: unknown): value is string | null {
-  return value === null || typeof value === "string";
 }
