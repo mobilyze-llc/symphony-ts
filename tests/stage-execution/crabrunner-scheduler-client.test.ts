@@ -16,6 +16,7 @@ import {
   type CrabrunnerCliInvocation,
   CrabrunnerCliSchedulerClient,
 } from "../../src/stage-execution/crabrunner-scheduler-client.js";
+import { parseCrabrunnerStaticSlotsJson } from "../../src/stage-execution/crabrunner-static-slots.js";
 import {
   artifactEntry,
   materializedReady,
@@ -24,6 +25,30 @@ import {
 
 const CRUCIBLE_ROOT = "/tmp/crucible";
 const TARGET_REPO_ROOT = "/tmp/target-repo";
+
+describe("parseCrabrunnerStaticSlotsJson", () => {
+  it("preserves absent configuration", () => {
+    expect(parseCrabrunnerStaticSlotsJson(undefined)).toBeUndefined();
+    expect(parseCrabrunnerStaticSlotsJson("   ")).toBeUndefined();
+  });
+
+  it("parses and trims a non-empty slot list", () => {
+    expect(
+      parseCrabrunnerStaticSlotsJson(
+        '[" static_pro16-slot0 ","static_pro16-slot1"]',
+      ),
+    ).toEqual(["static_pro16-slot0", "static_pro16-slot1"]);
+  });
+
+  it.each(["not-json", "[]", '[" "]', "{}"])(
+    "rejects invalid configured slot JSON: %s",
+    (value) => {
+      expect(() => parseCrabrunnerStaticSlotsJson(value)).toThrow(
+        "SYMPHONY_CRABRUNNER_STATIC_SLOTS_JSON",
+      );
+    },
+  );
+});
 
 describe("CrabrunnerCliSchedulerClient.submit", () => {
   it("maps an accepted submit status to an admission with the job id", async () => {
@@ -356,6 +381,7 @@ describe("CrabrunnerCliSchedulerClient.submit", () => {
       targetRepoRoot: TARGET_REPO_ROOT,
       host: "crabbox-studio1",
       remoteUser: "ericlitman",
+      remoteStaticSlots: ["static_studio1-slot0", "static_studio1-slot1"],
       remotePort: "2222",
       remoteWorkRoot: "/Users/ericlitman/.crabbox-static-work",
       remoteStateRoot: "~/.crucible/crabrunner",
@@ -376,6 +402,9 @@ describe("CrabrunnerCliSchedulerClient.submit", () => {
       "crabbox-studio1",
     );
     expect(runCall.args[runCall.args.indexOf("--user") + 1]).toBe("ericlitman");
+    expect(runCall.args[runCall.args.indexOf("--static-slots-json") + 1]).toBe(
+      '["static_studio1-slot0","static_studio1-slot1"]',
+    );
     expect(runCall.args[runCall.args.indexOf("--repo-root") + 1]).toBe(
       CRUCIBLE_ROOT,
     );
