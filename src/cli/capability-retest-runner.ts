@@ -10,6 +10,7 @@ import {
   type AltitudeReliabilityVerdict,
   type AltitudeReliabilityVerdictObservation,
 } from "../audit/altitude-reliability.js";
+import { renderOperatingPolicy } from "../policy/operating-policy.js";
 import { createToolFreeClusteringPlannerRunner } from "./clustering-tool-free-runner.js";
 
 export function createCrabrunnerVerdictRunner(input: {
@@ -73,6 +74,8 @@ export function renderVerdictPrompt(testCase: AltitudeReliabilityCase): string {
     "You are running an unattended altitude-reliability capability re-test for the Symphony backlog planner.",
     `Classify Linear issue ${testCase.issueIdentifier} from this prompt alone.`,
     "This benchmark provides a frozen issue snapshot and no live Linear access, git history, docs, tests, or answer-key context. Do not use tools, inspect files, or try to recover other context.",
+    "",
+    renderOperatingPolicy(),
     "",
     "<issue_snapshot>",
     `Identifier: ${testCase.issueIdentifier}`,

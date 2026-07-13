@@ -13,6 +13,10 @@ import {
 } from "../../src/agent/triage-planner.js";
 import type { ClaudeRunnerResult } from "../../src/claude-runner/claude-runner-contract.js";
 import type { PlanEnvelope } from "../../src/domain/standing-plan.js";
+import {
+  OPERATING_POLICY_PATH,
+  OPERATING_POLICY_PROVENANCE,
+} from "../../src/policy/operating-policy.js";
 
 const ENVELOPE: PlanEnvelope = {
   version: 1,
@@ -137,6 +141,21 @@ const malformedNonCanaryBatchCases: Array<[string, unknown]> = [
 ];
 
 describe("buildPlannerPrompt", () => {
+  it("renders the operating policy in the trusted region and cites the shared policy file path", () => {
+    const prompt = buildPlannerPrompt(context());
+
+    // Same versioned source of truth as the altitude verdict prompt.
+    expect(prompt).toContain(OPERATING_POLICY_PATH);
+    expect(prompt).toContain("Trace to the root before accepting a remedy.");
+    expect(prompt).toContain("Measure before caps.");
+    expect(prompt).toContain(OPERATING_POLICY_PROVENANCE);
+    // The policy sits in the TRUSTED region, above the untrusted-data fence.
+    const policyAt = prompt.indexOf(OPERATING_POLICY_PATH);
+    const fenceAt = prompt.indexOf("<SYMPHONY_UNTRUSTED_CANDIDATES_");
+    expect(policyAt).toBeGreaterThanOrEqual(0);
+    expect(fenceAt).toBeGreaterThan(policyAt);
+  });
+
   it("includes the non-binding structural advisory instruction and schema", () => {
     const prompt = buildPlannerPrompt(context());
 

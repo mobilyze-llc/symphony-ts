@@ -1,3 +1,5 @@
+import { OPERATING_POLICY_PROTOCOL } from "../policy/operating-policy.js";
+
 export const ALTITUDE_RELIABILITY_VERDICTS = [
   "kill",
   "keep",
@@ -7,7 +9,12 @@ export const ALTITUDE_RELIABILITY_VERDICTS = [
 export type AltitudeReliabilityVerdict =
   (typeof ALTITUDE_RELIABILITY_VERDICTS)[number];
 
-export const ALTITUDE_RELIABILITY_PROTOCOL = "snapshot-v1" as const;
+// Policy-aware protocol identifier (SYMPH-1141). Bumped from the pre-policy
+// "snapshot-v1" to the policy-steered surface: verdicts are now produced under
+// the operating policy rendered above every snapshot, so ledger rows carry the
+// policy protocol. Legacy "snapshot-v1" rows remain readable but are demoted
+// from Phase-A gate authority (see capability-ledger.ts).
+export const ALTITUDE_RELIABILITY_PROTOCOL = OPERATING_POLICY_PROTOCOL;
 
 interface AltitudeReliabilitySnapshot {
   title: string;
