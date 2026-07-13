@@ -18,6 +18,7 @@ import {
   CrabrunnerCliSchedulerClient,
   type CrabrunnerCliSchedulerClientOptions,
 } from "../stage-execution/crabrunner-scheduler-client.js";
+import { crabrunnerStaticSlotsOption } from "../stage-execution/crabrunner-static-slots.js";
 import {
   type ClaudeRunnerAttempt,
   type ClaudeRunnerBoundedText,
@@ -40,13 +41,11 @@ import { isInside, realpathOrSelf } from "./path-utils.js";
 /**
  * Adapter-facing crabrunner boundary for Claude one-shot lanes.
  *
- * `input.workspace` is the authoritative target repo checkout for both source
- * visibility preflight and delegated execution. When production
- * `schedulerOptions` are used, `schedulerOptions.targetRepoRoot` must resolve to
- * the same canonical path or the adapter rejects before scheduler submission.
- * Crabrunner execution is intentionally one-shot here: CMUX
- * `retryOnInvalid` repair semantics are not supported, and validation failures
- * return `invalid_artifact`.
+ * `input.workspace` is authoritative for source visibility and execution.
+ * Production `schedulerOptions.targetRepoRoot` must resolve to the same path or
+ * the adapter rejects before scheduler submission.
+ * Execution is one-shot: CMUX `retryOnInvalid` is unsupported, and validation
+ * failures return `invalid_artifact`.
  *
  * This consumes the Crucible execution schemas documented in
  * `docs/crabrunner-execution-contract.md`: `crucible.crabrunner.scheduler.*`,
@@ -133,6 +132,7 @@ export function resolveClaudeCrabrunnerSchedulerOptions(
     env.SYMPHONY_CRABRUNNER_REMOTE_USER.trim() === ""
       ? {}
       : { remoteUser: env.SYMPHONY_CRABRUNNER_REMOTE_USER.trim() }),
+    ...crabrunnerStaticSlotsOption(env.SYMPHONY_CRABRUNNER_STATIC_SLOTS_JSON),
     ...(env.SYMPHONY_CRABRUNNER_REMOTE_PORT === undefined ||
     env.SYMPHONY_CRABRUNNER_REMOTE_PORT.trim() === ""
       ? {}

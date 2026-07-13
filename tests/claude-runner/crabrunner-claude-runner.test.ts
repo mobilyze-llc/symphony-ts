@@ -45,6 +45,8 @@ describe("Claude crabrunner adapter", () => {
           SYMPHONY_CRABRUNNER_HOST: " studio2.local ",
           SYMPHONY_CRABRUNNER_STATE_ROOT: " /state ",
           SYMPHONY_CRABRUNNER_REMOTE_USER: " eric ",
+          SYMPHONY_CRABRUNNER_STATIC_SLOTS_JSON:
+            '["static_studio2-slot0","static_studio2-slot1"]',
           SYMPHONY_CRABRUNNER_REMOTE_PORT: " 2222 ",
           SYMPHONY_CRABRUNNER_REMOTE_WORK_ROOT: " /remote/work ",
           SYMPHONY_CRABRUNNER_REMOTE_STATE_ROOT: " /remote/state ",
@@ -59,6 +61,7 @@ describe("Claude crabrunner adapter", () => {
       host: "studio2.local",
       stateRoot: "/state",
       remoteUser: "eric",
+      remoteStaticSlots: ["static_studio2-slot0", "static_studio2-slot1"],
       remotePort: "2222",
       remoteWorkRoot: "/remote/work",
       remoteStateRoot: "/remote/state",
@@ -66,6 +69,17 @@ describe("Claude crabrunner adapter", () => {
       crabboxBin: "/bin/crabbox",
       crabrunnerVersion: "2026.07.03",
     });
+  });
+
+  it("rejects malformed configured static slots", () => {
+    expect(() =>
+      resolveClaudeCrabrunnerSchedulerOptions({
+        env: {
+          SYMPHONY_CRABRUNNER_ROOT: "/crucible",
+          SYMPHONY_CRABRUNNER_STATIC_SLOTS_JSON: "[]",
+        },
+      }),
+    ).toThrow("SYMPHONY_CRABRUNNER_STATIC_SLOTS_JSON");
   });
 
   it("prefers explicit target repo input over the crabrunner target repo environment", () => {

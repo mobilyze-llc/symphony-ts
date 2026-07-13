@@ -25,6 +25,7 @@ import {
   type CrabrunnerPromptRenderingConfig,
   createCrabrunnerStageExecutionBackends,
 } from "../stage-execution/crabrunner-backend-factory.js";
+import { parseCrabrunnerStaticSlotsJson } from "../stage-execution/crabrunner-static-slots.js";
 import { getDisplayVersion } from "../version.js";
 
 export const CLI_ACKNOWLEDGEMENT_FLAG = "--acknowledge-high-trust-preview";
@@ -283,7 +284,9 @@ export async function startCliHost(
  * repo root). `SYMPHONY_CRABRUNNER_TARGET_REPO` selects the target repo root
  * (falls back to a non-empty `REPO_URL`, then cwd); `SYMPHONY_CRABRUNNER_HOST`
  * and `SYMPHONY_CRABRUNNER_STATE_ROOT` are optional local overrides. Remote
- * hosts additionally need `SYMPHONY_CRABRUNNER_REMOTE_USER`; optional remote
+ * hosts additionally need `SYMPHONY_CRABRUNNER_REMOTE_USER`; fixed-slot
+ * Crabrunner generations also need `SYMPHONY_CRABRUNNER_STATIC_SLOTS_JSON`.
+ * Optional remote
  * run knobs are `SYMPHONY_CRABRUNNER_REMOTE_PORT`,
  * `SYMPHONY_CRABRUNNER_REMOTE_WORK_ROOT`,
  * `SYMPHONY_CRABRUNNER_REMOTE_STATE_ROOT`,
@@ -308,6 +311,9 @@ export function buildCrabrunnerStageExecutionBackends(
   const host = env.SYMPHONY_CRABRUNNER_HOST;
   const stateRoot = env.SYMPHONY_CRABRUNNER_STATE_ROOT;
   const remoteUser = env.SYMPHONY_CRABRUNNER_REMOTE_USER;
+  const remoteStaticSlots = parseCrabrunnerStaticSlotsJson(
+    env.SYMPHONY_CRABRUNNER_STATIC_SLOTS_JSON,
+  );
   const remotePort = env.SYMPHONY_CRABRUNNER_REMOTE_PORT;
   const remoteWorkRoot = env.SYMPHONY_CRABRUNNER_REMOTE_WORK_ROOT;
   const remoteStateRoot = env.SYMPHONY_CRABRUNNER_REMOTE_STATE_ROOT;
@@ -325,6 +331,7 @@ export function buildCrabrunnerStageExecutionBackends(
     stateRootOverride: stateRoot !== undefined && stateRoot.trim() !== "",
     remoteUserConfigured:
       remoteUser !== undefined && remoteUser.trim().length > 0,
+    remoteStaticSlotCount: remoteStaticSlots?.length ?? 0,
     remoteStateRootOverride:
       remoteStateRoot !== undefined && remoteStateRoot.trim() !== "",
     remoteArtifactDirOverride:
@@ -341,6 +348,7 @@ export function buildCrabrunnerStageExecutionBackends(
     ...(remoteUser === undefined || remoteUser.trim() === ""
       ? {}
       : { remoteUser: remoteUser.trim() }),
+    ...(remoteStaticSlots === undefined ? {} : { remoteStaticSlots }),
     ...(remotePort === undefined || remotePort.trim() === ""
       ? {}
       : { remotePort: remotePort.trim() }),
