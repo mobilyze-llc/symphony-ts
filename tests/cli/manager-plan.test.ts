@@ -91,6 +91,11 @@ ${JSON.stringify({
 \`\`\`
 `;
 
+const ROOTED_ADVISORY_ARTIFACT = ADVISORY_ARTIFACT.replace(
+  '"confidenceNote":"High"',
+  '"confidenceNote":"High","rootIssueIdentifier":"MOB-10"',
+);
+
 const okRunner = () => async (): Promise<PlannerRunResult> => ({
   status: "ok",
   markdown: GOOD_ARTIFACT,
@@ -1187,6 +1192,50 @@ describe("runManagerPlanCli", () => {
     }
   });
 
+  it("journals a non-resolving Manager root as a proposed new root", async () => {
+    const { io } = captureIo();
+    const root = await mkdtemp(join(tmpdir(), "manager-plan-root-"));
+    const resolveRootIssueIdentifier = vi.fn(async () => false);
+    try {
+      const code = await runManagerPlanCli(
+        [
+          "--team",
+          "MOB",
+          "--state",
+          "Backlog",
+          "--journal",
+          "--journal-root",
+          root,
+          "--json",
+        ],
+        {
+          io,
+          env: {},
+          loadCandidates: async () => [
+            issue("u1", "MOB-1"),
+            issue("u2", "MOB-2"),
+          ],
+          resolveRootIssueIdentifier,
+          createPlannerRunner: () => async () => ({
+            status: "ok",
+            markdown: ROOTED_ADVISORY_ARTIFACT,
+          }),
+        },
+      );
+
+      expect(code).toBe(0);
+      expect(resolveRootIssueIdentifier).toHaveBeenCalledWith("MOB-10");
+      expect((await readCalibrationJournal(root))[0]?.metadata).toMatchObject({
+        source: "cli-session",
+        advisory_class: "2:proposed-new-root",
+        root_hypothesis_kind: "proposed-new-root",
+        root_issue_identifier: null,
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("skips an advisory containing a member outside the presented planner context (SYMPH-1140)", async () => {
     const { io, out } = captureIo();
     const root = await mkdtemp(join(tmpdir(), "manager-plan-invalid-member-"));
@@ -1229,6 +1278,7 @@ describe("runManagerPlanCli", () => {
     const root = await mkdtemp(join(tmpdir(), "manager-plan-nojournal-"));
     await mkdir(join(root, ".symphony", "run-journals"), { recursive: true });
     const journalStructuralAdvisories = vi.fn();
+    const resolveRootIssueIdentifier = vi.fn(async () => true);
     try {
       const code = await runManagerPlanCli(
         ["--team", "MOB", "--state", "Backlog", "--no-journal", "--json"],
@@ -1239,13 +1289,15 @@ describe("runManagerPlanCli", () => {
           loadCandidates: async () => [issue("u1", "MOB-1")],
           createPlannerRunner: () => async () => ({
             status: "ok",
-            markdown: ADVISORY_ARTIFACT,
+            markdown: ROOTED_ADVISORY_ARTIFACT,
           }),
           journalStructuralAdvisories,
+          resolveRootIssueIdentifier,
         },
       );
       expect(code).toBe(0);
       expect(journalStructuralAdvisories).not.toHaveBeenCalled();
+      expect(resolveRootIssueIdentifier).not.toHaveBeenCalled();
       expect(JSON.parse(out()).structuralAdvisoryDisposition).toBe(
         "preview_only_not_journaled",
       );

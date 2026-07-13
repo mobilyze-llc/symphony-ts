@@ -230,6 +230,8 @@ export interface ManagerPlanCliDependencies {
     issueId: string,
     options: { maxPages?: number },
   ) => Promise<LinearIssueComment[]>;
+  /** Authoritative Linear lookup for model-proposed advisory roots. */
+  resolveRootIssueIdentifier?: (identifier: string) => Promise<boolean>;
   /** Defaults to the production crabrunner/Opus runner; injected in tests. */
   createPlannerRunner?: CreateManagerPlanPlannerRunner;
   /** Defaults to local report-only code grounding when --planner-grounding is set. */
@@ -719,15 +721,21 @@ export async function runManagerPlanCli(
     }
   }
 
-  const fetchIssueComments =
-    dependencies.fetchIssueComments ??
-    (dependencies.loadCandidates === undefined
-      ? defaultFetchIssueComments({
+  const defaultIssueReader =
+    dependencies.loadCandidates === undefined
+      ? createDefaultIssueReader({
           endpoint,
           apiKey,
           pageSize: options.pageSize,
         })
-      : null);
+      : null;
+  const fetchIssueComments =
+    dependencies.fetchIssueComments ??
+    defaultIssueReader?.fetchIssueComments ??
+    null;
+  const resolveRootIssueIdentifier =
+    dependencies.resolveRootIssueIdentifier ??
+    defaultIssueReader?.resolveRootIssueIdentifier;
   if (
     options.commentEnrichment &&
     fetchIssueComments !== null &&
@@ -891,6 +899,9 @@ export async function runManagerPlanCli(
           presentedIssueIdentifiers,
           memberActivityByIdentifier,
           source: "cli-session",
+          ...(resolveRootIssueIdentifier === undefined
+            ? {}
+            : { resolveRootIssueIdentifier }),
           now,
         });
         advisoryJournal = {
@@ -1331,14 +1342,17 @@ async function writeManagerPlanPromptArtifact(
   await writeFile(join(outDir, "manager-plan-prompt.txt"), prompt, "utf8");
 }
 
-function defaultFetchIssueComments(input: {
+function createDefaultIssueReader(input: {
   endpoint: string;
   apiKey: string | null;
   pageSize: number | null;
-}): (
-  issueId: string,
-  options: { maxPages?: number },
-) => Promise<LinearIssueComment[]> {
+}): {
+  fetchIssueComments: (
+    issueId: string,
+    options: { maxPages?: number },
+  ) => Promise<LinearIssueComment[]>;
+  resolveRootIssueIdentifier: (identifier: string) => Promise<boolean>;
+} {
   const client = new LinearTrackerClient({
     endpoint: input.endpoint,
     apiKey: input.apiKey,
@@ -1347,7 +1361,12 @@ function defaultFetchIssueComments(input: {
     activeStates: [],
     ...(input.pageSize === null ? {} : { pageSize: input.pageSize }),
   });
-  return (issueId, options) => client.fetchIssueComments(issueId, options);
+  return {
+    fetchIssueComments: (issueId, options) =>
+      client.fetchIssueComments(issueId, options),
+    resolveRootIssueIdentifier: async (identifier) =>
+      (await client.fetchIssueByIdentifier(identifier)) !== null,
+  };
 }
 
 function defaultCreatePlannerRunner(

@@ -29,6 +29,65 @@ const advisory = {
 };
 
 describe("CLI structural-advisory journal safety", () => {
+  it("canonicalizes resolved and unresolved roots before identity, dedup, and grading", async () => {
+    const resolvedRoot = await mkdtemp(join(tmpdir(), "cli-journal-root-ok-"));
+    const proposedRoot = await mkdtemp(
+      join(tmpdir(), "cli-journal-root-proposed-"),
+    );
+    const rootedAdvisory = {
+      ...advisory,
+      rootIssueIdentifier: " MOB-10 ",
+    };
+    try {
+      const resolved = await journalCliStructuralAdvisories({
+        root: resolvedRoot,
+        advisories: [rootedAdvisory],
+        presentedIssueIdentifiers: new Set(["MOB-1", "MOB-2"]),
+        resolveRootIssueIdentifier: async (identifier) =>
+          identifier === "MOB-10",
+      });
+      expect(resolved.appended[0]?.metadata).toMatchObject({
+        advisory_class: "2:existing-root",
+        root_hypothesis_kind: "existing-root",
+        root_issue_identifier: "MOB-10",
+      });
+
+      const proposed = await journalCliStructuralAdvisories({
+        root: proposedRoot,
+        advisories: [rootedAdvisory],
+        presentedIssueIdentifiers: new Set(["MOB-1", "MOB-2"]),
+        resolveRootIssueIdentifier: async () => false,
+      });
+      const advisoryId = proposed.appended[0]?.metadata.advisory_id;
+      expect(proposed.appended[0]?.metadata).toMatchObject({
+        advisory_class: "2:proposed-new-root",
+        root_hypothesis_kind: "proposed-new-root",
+        root_issue_identifier: null,
+      });
+
+      const repeated = await journalCliStructuralAdvisories({
+        root: proposedRoot,
+        advisories: [rootedAdvisory],
+        presentedIssueIdentifiers: new Set(["MOB-1", "MOB-2"]),
+        resolveRootIssueIdentifier: async () => false,
+      });
+      expect(repeated.appended).toEqual([]);
+      expect(repeated.skipped[0]?.metadata.advisory_id).toBe(advisoryId);
+
+      const grade = await journalCliStructuralAdvisoryGrade({
+        root: proposedRoot,
+        advisory,
+        decision: "accept",
+        actor: { kind: "interactive-agent", host: "pro14" },
+        reason: "confirmed proposed root cluster",
+      });
+      expect(grade.entry.metadata.advisory_id).toBe(advisoryId);
+    } finally {
+      await rm(resolvedRoot, { recursive: true, force: true });
+      await rm(proposedRoot, { recursive: true, force: true });
+    }
+  });
+
   it("rejects the host-at-N CLI race before append", async () => {
     const root = await mkdtemp(join(tmpdir(), "cli-journal-owner-"));
     const ownership = await acquireDispatcherRunJournalRuntimeOwnership(root);

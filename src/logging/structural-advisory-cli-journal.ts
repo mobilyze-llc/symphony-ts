@@ -11,6 +11,7 @@
  */
 
 import {
+  resolveStructuralAdvisoryRoot,
   structuralAdvisoryFingerprint,
   structuralAdvisoryMemberSetHash,
   validateStructuralAdvisoryMembers,
@@ -85,6 +86,8 @@ export interface JournalCliStructuralAdvisoriesInput {
     string,
     AdvisoryMemberActivitySnapshot
   >;
+  /** Authoritative Linear lookup; absent or failed lookups remain proposals. */
+  resolveRootIssueIdentifier?: (identifier: string) => Promise<boolean>;
   /** Defaults to `cli-session`. */
   source?: StructuralAdvisorySource;
   ownerId?: string | null;
@@ -112,20 +115,27 @@ export async function journalCliStructuralAdvisories(
   const timestamp = now().toISOString();
   let invalidAdvisoryCount = 0;
 
-  const drafts = input.advisories.flatMap((advisory) => {
+  const drafts: Array<Omit<DispatcherRunJournalEntry, "sequence">> = [];
+  for (const advisory of input.advisories) {
     const validation = validateStructuralAdvisoryMembers(
       advisory.memberIssueIdentifiers,
       input.presentedIssueIdentifiers,
     );
     if (!validation.valid) {
       invalidAdvisoryCount += 1;
-      return [];
+      continue;
     }
+    const root = await resolveStructuralAdvisoryRoot(
+      advisory.rootIssueIdentifier,
+      input.resolveRootIssueIdentifier,
+    );
     const resolved = withFingerprintIdentity({
       ...advisory,
       memberIssueIdentifiers: validation.members,
+      rootIssueIdentifier: root.resolved,
+      proposedRootIssueIdentifier: root.proposed,
     });
-    if (resolved === null) return [];
+    if (resolved === null) continue;
     const membersAtObservation = input.memberActivityByIdentifier
       ? resolved.members.map(
           (identifier) =>
@@ -133,7 +143,7 @@ export async function journalCliStructuralAdvisories(
             unknownMemberActivity(identifier),
         )
       : undefined;
-    return [
+    drafts.push(
       buildStructuralAdvisoryJournalEntry({
         record: {
           advisory: { ...resolved.advisory, lifecycleState: "active" },
@@ -148,8 +158,8 @@ export async function journalCliStructuralAdvisories(
         source,
         ...(membersAtObservation === undefined ? {} : { membersAtObservation }),
       }),
-    ];
-  });
+    );
+  }
 
   if (drafts.length === 0) {
     return { appended: [], skipped: [], invalidAdvisoryCount };

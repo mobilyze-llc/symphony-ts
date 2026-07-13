@@ -168,7 +168,10 @@ export async function applyAdvisoryLifecycle(
     const conflicts = members.filter((identifier) =>
       input.conflictIssueIdentifiers?.has(identifier),
     );
-    const root = await validateRoot(emitted.rootIssueIdentifier, input);
+    const root = await resolveStructuralAdvisoryRoot(
+      emitted.rootIssueIdentifier,
+      input.resolveRootIssueIdentifier,
+    );
     const advisory: StructuralAdvisory = {
       ...emitted,
       memberIssueIdentifiers: members,
@@ -389,14 +392,16 @@ function normalizeRootSlug(value: string): string {
     .slice(0, ROOT_SLUG_LIMIT);
 }
 
-async function validateRoot(
+export async function resolveStructuralAdvisoryRoot(
   identifier: string | null | undefined,
-  input: ApplyAdvisoryLifecycleInput,
+  resolveRootIssueIdentifier:
+    | ((identifier: string) => Promise<boolean>)
+    | undefined,
 ): Promise<{ resolved: string | null; proposed: string | null }> {
   const proposed = identifier?.trim() ?? "";
   if (proposed === "") return { resolved: null, proposed: null };
   try {
-    if (await input.resolveRootIssueIdentifier?.(proposed)) {
+    if (await resolveRootIssueIdentifier?.(proposed)) {
       return { resolved: proposed, proposed: null };
     }
   } catch {
