@@ -117,6 +117,13 @@ export const DEFAULT_QUEUE_TRIAGE_SHADOW_MODE = true;
 export const DEFAULT_QUEUE_TRIAGE_PLANNER_MODEL = "opus";
 export const DEFAULT_QUEUE_TRIAGE_PLANNER_EFFORT = "max";
 export const DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS = 900_000; // 15 minutes
+// Planner candidate states (SYMPH-1142). Only issues in these Linear states are
+// eligible to seed the planner backlog. Defaults to Todo — moving an issue to
+// Todo is the deliberate "make it a candidate" signal. In Progress / In Review /
+// Resume are in-flight states and must NEVER seed a plan, even when the runtime
+// running set is momentarily empty; runtime running-subtraction stays as a belt.
+export const DEFAULT_QUEUE_TRIAGE_PLANNER_CANDIDATE_STATES: readonly string[] =
+  ["Todo"];
 // Posture-B: auto-dispatch only the plan's head batch unattended by default;
 // hold the rest for operator approval (SYMPH-789).
 export const DEFAULT_QUEUE_TRIAGE_AUTO_RELEASE_FRONTIER = 1;

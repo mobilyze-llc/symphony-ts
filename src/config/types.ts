@@ -585,6 +585,14 @@ export interface WorkflowQueueTriageConfig {
   /** Re-plan heartbeat cadence for the shadow/plan loop, in ms. */
   heartbeatMs: number;
   /**
+   * Linear states eligible to seed the planner backlog (SYMPH-1142). State
+   * filtering runs BEFORE planner prompt/lane creation and BEFORE comment
+   * enrichment, so in-flight states (In Progress, In Review, Resume) never seed a
+   * plan even when the runtime running set is momentarily empty. Runtime
+   * running-subtraction remains as a belt. Defaults to ["Todo"].
+   */
+  plannerCandidateStates: string[];
+  /**
    * Posture-B auto-release frontier (SYMPH-789): how many lookahead batches the
    * consumer may auto-dispatch unattended (within the envelope). The rest are
    * held until an operator approval releases them. Tunable; default 1.

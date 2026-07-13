@@ -31,6 +31,24 @@ queue_triage:
   # SYMPH-1131: frontier-first policy; pin explicitly instead of inheriting the
   # mutable crabrunner lane default. The scheduler passes max through to thinking.
   planner_effort: max
+  # SYMPH-1142: only issues in these Linear states seed the planner backlog.
+  # Filtering runs BEFORE prompt/lane creation and comment enrichment, so the
+  # in-flight states (In Progress, In Review, Resume) never seed a plan even when
+  # Symphony's runtime running set is momentarily empty; runtime running-subtraction
+  # stays as a belt. Moving an issue to Todo is the deliberate "make it a candidate"
+  # signal (mirrors tracker.active_states, where Backlog is NOT eligible).
+  planner_candidate_states:
+    - Todo
+  # SYMPH-1143: make the (already-parsed) re-plan heartbeat explicit. 3,600,000 ms
+  # = 1 hour between planner ticks; this is the sole cadence mechanism (no second
+  # timer). Empty Todo => empty plannable set => a deterministic skipped_empty_backlog
+  # tick (no prompt, no planner lane, no crabrunner call).
+  heartbeat_ms: 3600000
+  # SYMPH-1144: planner lane placement is explicit through the deploy-managed
+  # SYMPHONY_CRABRUNNER_HOST env var (production value pro16), NOT a workflow key.
+  # The resolved host is logged at startup and stamped on every planner tick
+  # journal record. Keep SYMPHONY_CRABRUNNER_HOST=pro16 in the durable SOPS env so
+  # it survives host moves (see docs/operations/05-deploy.md).
   plan_review:
     enabled: true
     planner_grounding_enabled: true

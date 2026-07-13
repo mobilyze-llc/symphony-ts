@@ -4,6 +4,7 @@ import { resolveWorkflowConfig } from "../../src/config/config-resolver.js";
 import {
   DEFAULT_QUEUE_TRIAGE_ENABLED,
   DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS,
+  DEFAULT_QUEUE_TRIAGE_PLANNER_CANDIDATE_STATES,
   DEFAULT_QUEUE_TRIAGE_PLANNER_EFFORT,
   DEFAULT_QUEUE_TRIAGE_PLANNER_MODEL,
   DEFAULT_QUEUE_TRIAGE_PLAN_REVIEW_ENABLED,
@@ -38,6 +39,12 @@ describe("config-resolver queue triage (SYMPH-784)", () => {
     expect(resolved.queueTriage?.heartbeatMs).toBe(
       DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS,
     );
+    // Planner candidate states default to Todo (SYMPH-1142) so in-flight states
+    // never seed a plan.
+    expect(resolved.queueTriage?.plannerCandidateStates).toEqual([
+      ...DEFAULT_QUEUE_TRIAGE_PLANNER_CANDIDATE_STATES,
+    ]);
+    expect(resolved.queueTriage?.plannerCandidateStates).toEqual(["Todo"]);
     expect(resolved.queueTriage).toMatchObject({
       structuralAdvisories: DEFAULT_QUEUE_TRIAGE_STRUCTURAL_ADVISORIES,
       structuralAdvisoryDormantOkTicks:
@@ -219,6 +226,39 @@ describe("config-resolver queue triage (SYMPH-784)", () => {
       allowedRisk: "high",
       allowedModes: ["parallel-isolated"],
     });
+  });
+
+  it("parses explicit planner_candidate_states and drops blank entries (SYMPH-1142)", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      config: {
+        queue_triage: {
+          enabled: true,
+          planner_candidate_states: ["Todo", "  ", "Resume"],
+        },
+      },
+      promptTemplate: "Prompt",
+    });
+    expect(resolved.queueTriage?.plannerCandidateStates).toEqual([
+      "Todo",
+      "Resume",
+    ]);
+  });
+
+  it("falls back to the Todo default when planner_candidate_states is absent, empty, or blank (SYMPH-1142)", () => {
+    for (const value of [undefined, [], ["", "   "]]) {
+      const resolved = resolveWorkflowConfig({
+        workflowPath: "/repo/WORKFLOW.md",
+        config: {
+          queue_triage: {
+            enabled: true,
+            ...(value === undefined ? {} : { planner_candidate_states: value }),
+          },
+        },
+        promptTemplate: "Prompt",
+      });
+      expect(resolved.queueTriage?.plannerCandidateStates).toEqual(["Todo"]);
+    }
   });
 
   it("rejects an unsupported planner effort instead of inheriting a lane default", () => {

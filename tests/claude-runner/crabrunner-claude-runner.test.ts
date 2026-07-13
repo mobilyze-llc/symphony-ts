@@ -9,6 +9,7 @@ import {
   resolveClaudeCrabrunnerSchedulerOptions,
   runClaudeCrabrunner,
 } from "../../src/claude-runner/crabrunner-claude-runner.js";
+import { resolveCrabrunnerHostLabel } from "../../src/claude-runner/crabrunner-host.js";
 import {
   type CrabrunnerAdmissionResult,
   type CrabrunnerJobSpec,
@@ -17,6 +18,21 @@ import {
   validateCrabrunnerLaneEnforcementContract,
 } from "../../src/stage-execution/crabrunner-backend.js";
 import { readyCollectedArtifact } from "../stage-execution/collected-artifact-fixtures.js";
+
+describe("resolveCrabrunnerHostLabel (SYMPH-1144)", () => {
+  it("returns the trimmed SYMPHONY_CRABRUNNER_HOST when set", () => {
+    expect(
+      resolveCrabrunnerHostLabel({ SYMPHONY_CRABRUNNER_HOST: " pro16 " }),
+    ).toBe("pro16");
+  });
+
+  it('returns "local" when the host is absent or blank', () => {
+    expect(resolveCrabrunnerHostLabel({})).toBe("local");
+    expect(
+      resolveCrabrunnerHostLabel({ SYMPHONY_CRABRUNNER_HOST: "   " }),
+    ).toBe("local");
+  });
+});
 
 describe("Claude crabrunner adapter", () => {
   it("resolves scheduler options from the Symphony crabrunner environment", () => {

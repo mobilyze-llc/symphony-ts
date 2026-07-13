@@ -292,6 +292,7 @@
       "name": "SYMPHONY_CRABRUNNER_HOST",
       "read_sites": [
         "src/claude-runner/crabrunner-claude-runner.ts",
+        "src/claude-runner/crabrunner-host.ts",
         "src/cli/main.ts"
       ]
     },
