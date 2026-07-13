@@ -6,14 +6,24 @@ export function withoutStructuralAdvisoryPreview(body: PlanBody): PlanBody {
   return persistedBody;
 }
 
-export function renderManagerPlanAdvisoryPreview(body: PlanBody): string[] {
+export interface ManagerPlanAdvisoryJournalSummary {
+  root: string;
+  source: string;
+  journaledCount: number;
+  skippedCount: number;
+}
+
+export function renderManagerPlanAdvisoryPreview(
+  body: PlanBody,
+  journal: ManagerPlanAdvisoryJournalSummary | null = null,
+): string[] {
   const details = renderStructuralAdvisoryDetails(body.structuralAdvisories);
   if (details.length === 0) {
     return [];
   }
-  return [
-    "",
-    "Structural advisories (preview only — not journaled by this command):",
-    ...details.map((line) => `  ${line}`),
-  ];
+  const heading =
+    journal === null
+      ? "Structural advisories (preview only — not journaled by this command):"
+      : `Structural advisories (journaled as ${journal.source} evidence — ${journal.journaledCount} new, ${journal.skippedCount} skipped; not a plan mutation):`;
+  return ["", heading, ...details.map((line) => `  ${line}`)];
 }

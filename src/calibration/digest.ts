@@ -79,12 +79,16 @@ interface StructuralAdvisoryDecisionJoinRow {
   advisoryClass: string;
   advisorySequence: number;
   decision: "accepted" | "partial" | "rejected" | "undecided";
+  /** Grade-evidence channel: cli-session, tick, symphonyctl (SYMPH-1140). */
+  source: string;
   gradeSequence: number | null;
   flipCount: number;
 }
 
 interface StructuralAdvisoryPrecisionRow {
   advisoryClass: string;
+  /** Grade-evidence channel this row is scoped to (SYMPH-1140). */
+  source: string;
   accepted: number;
   partial: number;
   rejected: number;
@@ -92,6 +96,9 @@ interface StructuralAdvisoryPrecisionRow {
   precision: number | null;
   cursors: Array<{ advisorySequence: number; gradeSequence: number | null }>;
 }
+
+/** Grade-evidence source discriminator; undecided/legacy rows default to tick. */
+const DEFAULT_DECIDED_SOURCE = "tick";
 
 interface StructuralAdvisoryStabilityRow {
   advisoryId: string;
@@ -865,6 +872,10 @@ export function computeCalibrationReport(
       advisoryClass: metaString(advisory, "advisory_class") ?? "unknown",
       advisorySequence: advisory.sequence,
       decision,
+      source:
+        grade === undefined
+          ? DEFAULT_DECIDED_SOURCE
+          : (metaString(grade, "source") ?? DEFAULT_DECIDED_SOURCE),
       gradeSequence: grade?.sequence ?? null,
       flipCount,
     };
@@ -952,15 +963,33 @@ export function computeCalibrationReport(
 function buildStructuralAdvisoryPrecisionRows(
   rows: readonly StructuralAdvisoryDecisionJoinRow[],
 ): StructuralAdvisoryPrecisionRow[] {
-  const byClass = new Map<string, StructuralAdvisoryDecisionJoinRow[]>();
+  // Split decided rows by (advisory class, source) so cli-session, tick, and
+  // symphonyctl evidence stay distinguishable in the digest (SYMPH-1140).
+  const byGroup = new Map<
+    string,
+    {
+      advisoryClass: string;
+      source: string;
+      rows: StructuralAdvisoryDecisionJoinRow[];
+    }
+  >();
   for (const row of rows) {
-    const bucket = byClass.get(row.advisoryClass) ?? [];
-    bucket.push(row);
-    byClass.set(row.advisoryClass, bucket);
+    const key = `${row.advisoryClass}::${row.source}`;
+    const bucket = byGroup.get(key) ?? {
+      advisoryClass: row.advisoryClass,
+      source: row.source,
+      rows: [],
+    };
+    bucket.rows.push(row);
+    byGroup.set(key, bucket);
   }
-  return [...byClass.entries()]
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([advisoryClass, grouped]) => {
+  return [...byGroup.values()]
+    .sort(
+      (left, right) =>
+        left.advisoryClass.localeCompare(right.advisoryClass) ||
+        left.source.localeCompare(right.source),
+    )
+    .map(({ advisoryClass, source, rows: grouped }) => {
       const accepted = grouped.filter(
         (row) => row.decision === "accepted",
       ).length;
@@ -976,6 +1005,7 @@ function buildStructuralAdvisoryPrecisionRows(
       const decided = accepted + partial + rejected;
       return {
         advisoryClass,
+        source,
         accepted,
         partial,
         rejected,
@@ -1069,12 +1099,12 @@ function formatStructuralAdvisoryPrecisionTable(
 ): string[] {
   if (rows.length === 0) return ["_No structural advisories in window._"];
   const lines = [
-    "| advisory class | accepted | partial | rejected | undecided | precision | cursors |",
-    "| --- | --- | --- | --- | --- | --- | --- |",
+    "| advisory class | source | accepted | partial | rejected | undecided | precision | cursors |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- |",
   ];
   for (const row of rows) {
     lines.push(
-      `| ${escapeMarkdownCell(row.advisoryClass)} | ${row.accepted} | ${row.partial} | ${row.rejected} | ${row.undecided} | ${formatPercent(row.precision)} | ${row.cursors.map((cursor) => formatCursorPair(cursor.advisorySequence, cursor.gradeSequence)).join(", ")} |`,
+      `| ${escapeMarkdownCell(row.advisoryClass)} | ${escapeMarkdownCell(row.source)} | ${row.accepted} | ${row.partial} | ${row.rejected} | ${row.undecided} | ${formatPercent(row.precision)} | ${row.cursors.map((cursor) => formatCursorPair(cursor.advisorySequence, cursor.gradeSequence)).join(", ")} |`,
     );
   }
   return lines;
@@ -1277,7 +1307,9 @@ export function renderCalibrationDigest(
   lines.push(
     "Transition-only advisory records join to the first grade by fingerprint.",
     "Partial grades count as accepted-with-member-delta. Class precision is",
-    "reported separately from per-fingerprint lifecycle stability.",
+    "reported separately from per-fingerprint lifecycle stability, and decided",
+    "rows split by grade-evidence source (cli-session, tick, symphonyctl) so the",
+    "interactive CLI channel stays distinguishable.",
   );
   lines.push("");
   lines.push(

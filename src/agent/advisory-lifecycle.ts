@@ -67,6 +67,29 @@ export function structuralAdvisoryFingerprint(
   return hash(`${memberSetHash}\n${normalizeRootSlug(rootCauseHypothesis)}`);
 }
 
+/**
+ * Normalize an emitted member set and validate it against the exact issue
+ * identifiers presented to the planner. Shared by the live lifecycle and
+ * standalone Manager journaling so out-of-context model identifiers never
+ * become lifecycle or calibration evidence.
+ */
+export function validateStructuralAdvisoryMembers(
+  identifiers: readonly string[],
+  presentedIssueIdentifiers: ReadonlySet<string>,
+): { members: string[]; invalidIdentifiers: string[]; valid: boolean } {
+  const members = [...new Set(identifiers.map((id) => id.trim()))]
+    .filter(Boolean)
+    .sort();
+  const invalidIdentifiers = members.filter(
+    (identifier) => !presentedIssueIdentifiers.has(identifier),
+  );
+  return {
+    members,
+    invalidIdentifiers,
+    valid: members.length > 0 && invalidIdentifiers.length === 0,
+  };
+}
+
 export async function applyAdvisoryLifecycle(
   input: ApplyAdvisoryLifecycleInput,
 ): Promise<ApplyAdvisoryLifecycleResult> {
@@ -91,20 +114,17 @@ export async function applyAdvisoryLifecycle(
   const active: StructuralAdvisory[] = [];
 
   for (const emitted of input.emitted) {
-    const members = [
-      ...new Set(emitted.memberIssueIdentifiers.map((id) => id.trim())),
-    ]
-      .filter(Boolean)
-      .sort();
-    const invalid = members.filter(
-      (identifier) => !input.presentedIssueIdentifiers.has(identifier),
+    const validation = validateStructuralAdvisoryMembers(
+      emitted.memberIssueIdentifiers,
+      input.presentedIssueIdentifiers,
     );
-    if (members.length === 0 || invalid.length > 0) {
+    const { members, invalidIdentifiers } = validation;
+    if (!validation.valid) {
       if (input.scanComplete !== false) {
         events.push({
           kind: "invalid_members",
           memberCount: members.length,
-          invalidMemberCount: invalid.length,
+          invalidMemberCount: invalidIdentifiers.length,
         });
       }
       continue;
@@ -148,7 +168,10 @@ export async function applyAdvisoryLifecycle(
     const conflicts = members.filter((identifier) =>
       input.conflictIssueIdentifiers?.has(identifier),
     );
-    const root = await validateRoot(emitted.rootIssueIdentifier, input);
+    const root = await resolveStructuralAdvisoryRoot(
+      emitted.rootIssueIdentifier,
+      input.resolveRootIssueIdentifier,
+    );
     const advisory: StructuralAdvisory = {
       ...emitted,
       memberIssueIdentifiers: members,
@@ -369,14 +392,16 @@ function normalizeRootSlug(value: string): string {
     .slice(0, ROOT_SLUG_LIMIT);
 }
 
-async function validateRoot(
+export async function resolveStructuralAdvisoryRoot(
   identifier: string | null | undefined,
-  input: ApplyAdvisoryLifecycleInput,
+  resolveRootIssueIdentifier:
+    | ((identifier: string) => Promise<boolean>)
+    | undefined,
 ): Promise<{ resolved: string | null; proposed: string | null }> {
   const proposed = identifier?.trim() ?? "";
   if (proposed === "") return { resolved: null, proposed: null };
   try {
-    if (await input.resolveRootIssueIdentifier?.(proposed)) {
+    if (await resolveRootIssueIdentifier?.(proposed)) {
       return { resolved: proposed, proposed: null };
     }
   } catch {

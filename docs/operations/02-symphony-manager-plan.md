@@ -6,7 +6,9 @@
 
 ## Purpose
 
-One-shot, **output-only** run of the Queue Triage v2 backlog **Manager (the planner)** against a Linear team / project / initiative's eligible backlog. It prints the suggested batch plan and exits. It spends **one Opus pass** (unless `--prompt-only`) and writes **nothing** to Linear, the live standing-plan store, or dispatch — so it is safe to run any time to preview what the Manager would propose. It reuses the exact planner core the live shadow tick uses; only the candidate *source* is a standalone read. (SYMPH-837 / SYMPH-858 / SYMPH-867.)
+One-shot run of the Queue Triage v2 backlog **Manager (the planner)** against a Linear team / project / initiative's eligible backlog. It prints the suggested batch plan and exits. It spends **one Opus pass** (unless `--prompt-only`) and writes **nothing** to Linear, the live standing-plan store, or dispatch. It reuses the exact planner core the live shadow tick uses; only the candidate *source* is a standalone read. (SYMPH-837 / SYMPH-858 / SYMPH-867.)
+
+By default it **journals the emitted structural advisories** as `cli-session` evidence into the existing dispatcher run journal (`.symphony/run-journals/dispatcher.jsonl`) whenever a run-journal root is present — the same journal the automated tick and the calibration digest already use. This is advisory *evidence only*, keyed by the existing structural-advisory fingerprint identity; it is **not** a plan mutation and is **not** a new persistence system. Use `--no-journal` to preserve the old preview-only behavior, or `--journal` to force journaling (and create the root) even when one does not exist yet. Advisory *grading* is a separate step — the interactive session agent records its decision with `symphony-advisory-grade` (source `cli-session`); `symphonyctl grade-advisory` remains the manual escape hatch. (SYMPH-1140.)
 
 ## Installed location
 
@@ -23,10 +25,12 @@ One-shot, **output-only** run of the Queue Triage v2 backlog **Manager (the plan
 Usage: symphony-manager-plan (--team <KEY> | --project <name-or-slugId> | --initiative <name|uuid>)... [--state <name>...] [options]
 
 Run the Queue Triage v2 backlog Manager (planner) ONE-SHOT against the scoped
-eligible backlog and print the suggested batch plan. Output-only: it spends one
-Opus planner pass unless --prompt-only, and writes NOTHING to Linear,
-the live standing-plan store, or dispatch. --persist writes only to an isolated
-manager-plan store under this run's artifact directory.
+eligible backlog and print the suggested batch plan. It spends one Opus planner
+pass unless --prompt-only, and writes NOTHING to Linear, the live standing-plan
+store, or dispatch. --persist writes only to an isolated manager-plan store under
+this run's artifact directory. By default it journals emitted structural
+advisories as cli-session evidence into an existing dispatcher run journal when
+one exists (--no-journal preserves preview-only; --journal forces it).
 
 Scope (provide at least one; additive — combine them to narrow):
   --team <KEY>                 Linear team key whose backlog to plan (e.g. MOB)
@@ -57,6 +61,9 @@ Options:
   --planner-grounding-repo-scope <symphony|non_symphony>
                                Explicit grounding repo scope (defaults inferred from repo URL)
   --persist                    Persist the plan revision to an isolated artifact store
+  --journal                    Force journaling emitted advisories as cli-session evidence
+  --no-journal                 Preview only — do not journal emitted advisories
+  --journal-root <path>        Run-journal root (defaults to the working directory)
   --prompt-only                Print the assembled planner prompt and exit (no Opus pass)
   --json                       Emit the plan as JSON
   --help                       Show this help text

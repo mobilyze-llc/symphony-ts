@@ -759,6 +759,7 @@ describe("calibration digest (SYMPH-411)", () => {
         advisoryClass: "3-5:existing-root",
         advisorySequence: 1,
         decision: "partial",
+        source: "tick",
         gradeSequence: 4,
         flipCount: 2,
       },
@@ -789,6 +790,60 @@ describe("calibration digest (SYMPH-411)", () => {
     ]);
   });
 
+  it("splits decided precision rows by grade-evidence source (SYMPH-1140)", () => {
+    const advisory = (sequence: number, id: string) =>
+      entry({
+        sequence,
+        kind: "structural_advisory",
+        metadata: {
+          advisory_id: id,
+          advisory_class: "2:existing-root",
+          lifecycle_from: null,
+          lifecycle_to: "active",
+        },
+      });
+    const grade = (sequence: number, id: string, source: string) =>
+      entry({
+        sequence,
+        kind: "structural_advisory_grade",
+        metadata: { advisory_id: id, decision: "accept", source },
+      });
+    const report = computeCalibrationReport([
+      advisory(1, "fp-cli"),
+      grade(2, "fp-cli", "cli-session"),
+      advisory(3, "fp-ctl"),
+      grade(4, "fp-ctl", "symphonyctl"),
+      advisory(5, "fp-legacy"),
+      // Legacy grade with no source defaults to tick.
+      entry({
+        sequence: 6,
+        kind: "structural_advisory_grade",
+        metadata: { advisory_id: "fp-legacy", decision: "accept" },
+      }),
+    ]);
+
+    expect(
+      report.structuralAdvisoryPrecisionByClass.map((row) => row.source),
+    ).toEqual(["cli-session", "symphonyctl", "tick"]);
+    for (const row of report.structuralAdvisoryPrecisionByClass) {
+      expect(row).toMatchObject({ accepted: 1, precision: 1 });
+    }
+
+    const digest = renderCalibrationDigest(report, {
+      generatedAt: "2026-06-01T00:00:00.000Z",
+      journalLabel: "test",
+    });
+    expect(digest).toContain(
+      "| advisory class | source | accepted | partial | rejected | undecided | precision | cursors |",
+    );
+    expect(digest).toContain(
+      "| 2:existing-root | cli-session | 1 | 0 | 0 | 0 |",
+    );
+    expect(digest).toContain(
+      "| 2:existing-root | symphonyctl | 1 | 0 | 0 | 0 |",
+    );
+  });
+
   it("projects graded-to-active revival without counting it as an active/dormant flip", () => {
     const advisory = (sequence: number, from: string | null, to: string) =>
       entry({
@@ -817,6 +872,7 @@ describe("calibration digest (SYMPH-411)", () => {
         advisoryClass: "3-5:existing-root",
         advisorySequence: 1,
         decision: "rejected",
+        source: "tick",
         gradeSequence: 2,
         flipCount: 0,
       },

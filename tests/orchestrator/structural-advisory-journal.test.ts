@@ -238,6 +238,15 @@ describe("structural advisory journal", () => {
             timestamp: "2026-06-12T00:00:01.000Z",
           },
           ownerId: "owner",
+          membersAtObservation: [
+            {
+              identifier: "SYMPH-1",
+              state: "Backlog",
+              stateUpdatedAt: "2026-06-12T00:00:01.000Z",
+              latestCommentAt: null,
+              activityAt: "2026-06-12T00:00:01.000Z",
+            },
+          ],
         }),
         1,
       ),
@@ -306,6 +315,22 @@ describe("structural advisory journal", () => {
     ]);
 
     const expanded = expandBacklogManagerCalibrationJournal(compacted.journal);
+    const projectedEmission = expanded.find(
+      (entry) =>
+        entry.kind === "structural_advisory" &&
+        entry.metadata.advisory_id === "fp-1",
+    );
+    expect(projectedEmission).toMatchObject({
+      idempotencyKey: raw[0]?.idempotencyKey,
+      metadata: {
+        member_activity: [
+          expect.objectContaining({
+            identifier: "SYMPH-1",
+            activityAt: "2026-06-12T00:00:01.000Z",
+          }),
+        ],
+      },
+    });
     expect(
       expanded.find(
         (entry) =>
