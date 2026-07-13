@@ -23,7 +23,7 @@ export const OPERATING_POLICY_PROTOCOL = "snapshot-policy-v2" as const;
  * as a 1-indexed numbered list; provenance for each rule is captured in
  * {@link OPERATING_POLICY_PROVENANCE}.
  */
-export const OPERATING_POLICY_RULES: readonly string[] = [
+const OPERATING_POLICY_RULES: readonly string[] = [
   'Trace to the root before accepting a remedy. A symptom\'s fix must name the generating cause; a "harden X" that leaves the generator running is deferral, not repair.',
   "Be skeptical of easy answers. An explanation that arrived without evidence, a fix that doesn't change the mechanism, or a result that confirms what was convenient — verify against the artifact before believing it.",
   "The best part is no part. Prefer deleting the need over adding machinery. Every mechanism you add will generate the edge cases that become tomorrow's tickets.",

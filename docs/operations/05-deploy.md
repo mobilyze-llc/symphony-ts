@@ -65,6 +65,29 @@ ops/symphony-ctl status
 ops/symphony-ctl restart
 ```
 
+## Deploy-managed crabrunner environment (planner/review lane placement)
+
+The crabrunner planner/review lanes read their configuration from the LaunchAgent
+environment, which `symphony-ctl install` bakes into the plist from the durable
+**SOPS** source (`.env` decrypted from `.env.enc`). `symphony-deploy` runs a
+review preflight that **refuses to deploy** when a required crabrunner var
+(`SYMPHONY_CRABRUNNER_ROOT`/`_VERSION`/`_STATE_ROOT`) is set only in the operator
+shell — an ambient-only value disappears when the LaunchAgent restarts.
+
+- **`SYMPHONY_CRABRUNNER_HOST`** (SYMPH-1144) selects where planner/review lanes
+  run. Unset/blank runs them locally; **production pins it to `pro16`**. It is the
+  *only* lever for planner lane placement (no fleet admission/capacity machinery).
+  The runtime logs the resolved host at startup (`queue_triage_planner_host_resolved`)
+  and stamps `planner_host` on every planner tick journal record, including
+  `queue_triage_skipped_empty_backlog`.
+- **Keep `SYMPHONY_CRABRUNNER_HOST=pro16` in the durable SOPS env source** so it
+  **survives host moves and LaunchAgent restarts**. Do not rely on an
+  operator-shell export. To set/rotate it: edit the decrypted `.env`, re-encrypt
+  to `.env.enc` (`sops --encrypt`), commit the encrypted file, then re-run
+  `ops/symphony-ctl install` (or `ops/symphony-deploy`) so the plist picks up the
+  new value. Confirm with `ops/symphony-ctl status` and the startup
+  `queue_triage_planner_host_resolved` log line showing `planner_host=pro16`.
+
 ## Edge cases & gotchas
 
 - **`deploy-train.sh` refuses the stable root.** If `SYMPHONY_RUNTIME_CHECKOUT` (or its default) resolves to the same path as the script's own checkout, it dies before touching anything (`Refusing to run the detached deploy train against the stable in-place checkout`). Use `symphony-deploy` for in-place deploys, or set `DEPLOY_TRAIN_ALLOW_STABLE_ROOT=1` only if you truly mean to `reset --hard` that checkout.

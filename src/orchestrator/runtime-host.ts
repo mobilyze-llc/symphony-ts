@@ -47,6 +47,7 @@ import {
   createCrabrunnerPlannerRunner,
 } from "../agent/triage-planner.js";
 import type { BacklogAuditConfig } from "../audit/backlog-audit.js";
+import { resolveCrabrunnerHostLabel } from "../claude-runner/crabrunner-host.js";
 import { validateDispatchConfig } from "../config/config-resolver.js";
 import {
   DEFAULT_CODEX_MAX_HEALTHY_COMPACTIONS_PER_STAGE,
@@ -7023,6 +7024,11 @@ export async function startRuntimeService(
         void logger.info(event, message, fields);
       },
       now: () => new Date(),
+      // SYMPH-1144: make planner lane placement explicit and observable. The lane
+      // itself is placed via SYMPHONY_CRABRUNNER_HOST (read by the crabrunner
+      // scheduler); this records the resolved host (or "local") on every planner
+      // tick journal record, including skipped_empty_backlog.
+      plannerHost: resolveCrabrunnerHostLabel(process.env),
       fetchTriageIssues: () => tracker.fetchIssuesByStates(["Triage"]),
       onTriageIntakeComputed: (intake) =>
         runtimeHost.recordTriageIntakeHealth(intake),
@@ -7083,9 +7089,17 @@ export async function startRuntimeService(
     })
       .then((result) => {
         // Re-arm a forced re-plan that did not actually land (transient
-        // tracker/planner failure or a skip): the modify_plan / predicate
-        // request must not evaporate (council R1, Codex P2).
-        if (force && result.status !== "ok") {
+        // tracker/planner failure or a non-terminal skip): the modify_plan /
+        // predicate request must not evaporate (council R1, Codex P2). An empty
+        // backlog is a successful terminal observation: its empty revision has
+        // revoked prior plan authority, so consuming force lets cadence resume.
+        const forceWasConsumedByEmptyObservation =
+          result.status === "skipped" && result.reason === "empty_backlog";
+        if (
+          force &&
+          result.status !== "ok" &&
+          !forceWasConsumedByEmptyObservation
+        ) {
           runtimeHost.requestStandingPlanReplan();
         }
       })
@@ -7417,6 +7431,17 @@ export async function startRuntimeService(
     max_concurrent_agents: currentConfig.agent.maxConcurrentAgents,
     ...(dashboard === null ? {} : { port: dashboard.port }),
   });
+
+  // SYMPH-1144: surface the resolved planner crabrunner lane host at startup so
+  // lane placement is explicit in the logs. "local" means SYMPHONY_CRABRUNNER_HOST
+  // is unset/blank and planner lanes run on this host; production is "pro16".
+  if (currentConfig.queueTriage?.enabled === true) {
+    await logger.info(
+      "queue_triage_planner_host_resolved",
+      "Resolved standing-plan planner crabrunner lane host.",
+      { planner_host: resolveCrabrunnerHostLabel(process.env) },
+    );
+  }
 
   const productName = extractProductName(currentConfig.workflowPath);
   runtimeHost.notifier?.notify({

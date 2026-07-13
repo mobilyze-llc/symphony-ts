@@ -77,6 +77,33 @@ export function assembleShadowPlannerContext(
   return assembleStandingPlanContext(input);
 }
 
+/**
+ * Filter fetched issues down to the operator-configured planner candidate states
+ * (SYMPH-1142). This is the PRIMARY, running-set-independent exclusion of
+ * in-flight states (In Progress, In Review, Resume): the planner backlog is seeded
+ * only from these states, so an issue that is In Progress but momentarily absent
+ * from the runtime running set can never leak into a plan. Comparison is
+ * case-insensitive and trims tracker whitespace. An empty configured list disables
+ * state filtering (pass-through) rather than emptying the backlog — the running
+ * subtraction belt and disposition exclusion still apply downstream.
+ */
+export function filterPlannerCandidateStates(
+  candidates: readonly Issue[],
+  states: readonly string[],
+): Issue[] {
+  const allowed = new Set(
+    states
+      .map((state) => state.trim().toLowerCase())
+      .filter((state) => state !== ""),
+  );
+  if (allowed.size === 0) {
+    return [...candidates];
+  }
+  return candidates.filter((issue) =>
+    allowed.has(issue.state.trim().toLowerCase()),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Shadow plan cycle (SYMPH-784 PR1)
 //
@@ -486,7 +513,7 @@ export type StandingPlanShadowTickResult =
   | ShadowPlanCycleResult
   | {
       status: "skipped";
-      reason: "disabled" | "heartbeat" | "cadence" | "error";
+      reason: "disabled" | "heartbeat" | "cadence" | "error" | "empty_backlog";
     };
 
 export interface StandingPlanShadowGroundingInput {
@@ -516,6 +543,13 @@ export interface StandingPlanShadowTickDeps {
     to: string;
   }) => Promise<void>;
   getInFlight: () => PlannerInFlight[];
+  /**
+   * Resolved crabrunner planner lane host (SYMPH-1144), e.g. "pro16", or "local"
+   * when no host is configured. Recorded on EVERY planner tick journal record
+   * (including skipped_empty_backlog) so lane placement is observable. Defaults to
+   * "local" when absent.
+   */
+  plannerHost?: string;
   /** Build a model runner for the configured planner model (crabrunner in prod). */
   createPlannerRunner: (
     model: string,
@@ -612,6 +646,14 @@ export async function runStandingPlanShadowTick(
   if (config === undefined || !config.enabled) {
     return { status: "skipped", reason: "disabled" };
   }
+  // Every planner tick journal record carries the resolved crabrunner planner
+  // lane host (SYMPH-1144) so lane placement is observable — including the
+  // skipped_empty_backlog marker below and the records the delegated plan cycle
+  // emits. Wrapping deps.log here (rather than threading the field into each
+  // call) guarantees the field on every record without a per-call opt-in.
+  const plannerHost = deps.plannerHost ?? "local";
+  const log: StandingPlanShadowTickDeps["log"] = (event, message, fields) =>
+    deps.log(event, message, { ...fields, planner_host: plannerHost });
   try {
     const now = deps.now();
     const nowMs = now.getTime();
@@ -660,7 +702,16 @@ export async function runStandingPlanShadowTick(
     // modes; shadowMode only gates whether the plan drives dispatch (in the
     // consumer), so there is nothing to warn about here.
 
-    const candidates = await deps.fetchCandidates();
+    const fetchedCandidates = await deps.fetchCandidates();
+    // SYMPH-1142: filter to the operator-configured planner candidate states
+    // BEFORE prompt/lane creation and comment enrichment. This is the PRIMARY
+    // exclusion of in-flight states (In Progress, In Review, Resume): it holds
+    // even when the runtime running set is momentarily empty. The in-flight
+    // (running) subtraction inside assembleShadowPlannerContext stays as a belt.
+    const candidates = filterPlannerCandidateStates(
+      fetchedCandidates,
+      config.plannerCandidateStates,
+    );
     const advisoryRejections = deps.getAdvisoryRejections?.() ?? [];
     const advisoryGradeEvidence = deps.getAdvisoryGradeEvidence?.() ?? [];
     let advisoryInputCandidates: Issue[] = [];
@@ -669,7 +720,7 @@ export async function runStandingPlanShadowTick(
     let issueActivity = new Map<string, string | null>();
     if (config.structuralAdvisories === true) {
       if (deps.fetchAdvisoryInput === undefined) {
-        await deps.log(
+        await log(
           "queue_triage_structural_advisory_input_failed",
           "Backlog advisory-input fetch is not wired; preserving lifecycle state.",
           { outcome: "degraded", detail: "fetch_not_wired" },
@@ -712,7 +763,7 @@ export async function runStandingPlanShadowTick(
                       activityIssues.set(identifier, resolved);
                     }
                   } catch (error) {
-                    await deps.log(
+                    await log(
                       "queue_triage_advisory_member_activity_resolve_failed",
                       "Advisory member activity could not be resolved; preserving available activity evidence.",
                       {
@@ -777,7 +828,7 @@ export async function runStandingPlanShadowTick(
                     latestIso(issue.updatedAt, latestCommentAt),
                   );
                 } catch (error) {
-                  await deps.log(
+                  await log(
                     "queue_triage_advisory_comment_activity_failed",
                     "Advisory member comment activity could not be read; using issue activity only.",
                     {
@@ -792,14 +843,14 @@ export async function runStandingPlanShadowTick(
             );
           }
           if (prepared.heldCount > 0) {
-            await deps.log(
+            await log(
               "queue_triage_structural_advisory_portfolio_held",
               "Portfolio-held Backlog issues were excluded from advisory input.",
               { outcome: "report_only", held_count: prepared.heldCount },
             );
           }
         } catch (error) {
-          await deps.log(
+          await log(
             "queue_triage_structural_advisory_input_failed",
             "Backlog advisory-input fetch failed; preserving lifecycle state.",
             { outcome: "degraded", detail: (error as Error).message },
@@ -861,6 +912,64 @@ export async function runStandingPlanShadowTick(
       ...(advisoryRejections.length === 0 ? {} : { advisoryRejections }),
       ...(advisoryGradeEvidence.length === 0 ? {} : { advisoryGradeEvidence }),
     });
+    // SYMPH-1143: after state filtering, disposition exclusion, and in-flight
+    // subtraction (all applied by assembleShadowPlannerContext), an empty
+    // plannable set short-circuits deterministically — no prompt, no planner
+    // lane, no runCrabrunner call. Emit a TYPED skipped_empty_backlog marker
+    // (distinct from the hygiene/cadence skips and from a real recorded plan) and
+    // return before any model runner is built. The structural-advisory lane is
+    // exempt: when advisories are armed the cycle must still run its lifecycle
+    // bookkeeping (e.g. withdrawing an advisory whose members went terminal) even
+    // with an empty backlog, so we preserve that path unchanged. Production
+    // (WORKFLOW-symphony.md) leaves structural advisories off, so the short-circuit
+    // is the live path there.
+    if (config.structuralAdvisories !== true && context.backlog.length === 0) {
+      // Persist the empty observation through the normal revision contract before
+      // returning. A prior non-empty revision may carry an honored approval; the
+      // deterministic empty revision supersedes it so journal-derived admission is
+      // revoked even though no model lane runs (SYMPH-1143 review fix).
+      const emptyRecord = await recordPlanRevision(
+        deps.workspaceRoot,
+        {
+          batches: [],
+          dependencyEdges: [],
+          options: [],
+          envelope: config.envelope,
+          rationale:
+            "Eligible backlog is empty; no standing-plan batches proposed.",
+          premises: [
+            {
+              decisionAnchor: "plan",
+              kind: "verifiable",
+              statement: "Eligible backlog is empty.",
+            },
+          ],
+          structuralAdvisories: [],
+          // Preserve the existing deterministic empty-plan body emitted by
+          // runTriagePlanner; only its prompt/lane-free persistence point moves.
+          source: "planner",
+        },
+        {
+          createdAt: now.toISOString(),
+          planId: STANDING_PLAN_ID,
+        },
+      );
+      await log(
+        "queue_triage_skipped_empty_backlog",
+        "Standing-plan tick finalized an empty current revision after state filtering, disposition exclusion, and in-flight subtraction; skipping deterministically (no prompt, no planner lane, no runner).",
+        {
+          outcome: "skipped",
+          reason: "empty_backlog",
+          candidates_fetched: fetchedCandidates.length,
+          candidates_after_state_filter: candidates.length,
+          plannable_after_exclusions: context.backlog.length,
+          planner_candidate_states: config.plannerCandidateStates,
+          empty_revision_recorded: emptyRecord.recorded,
+          revision: emptyRecord.plan.revision,
+        },
+      );
+      return { status: "skipped", reason: "empty_backlog" };
+    }
     // Curated-comment enrichment (SYMPH-896): default-off; when an operator opts
     // in AND a comment fetch is wired, inject curated comments into the planner
     // context and log a report-only cost measurement. Best-effort — never breaks
@@ -870,7 +979,7 @@ export async function runStandingPlanShadowTick(
         // Enabled but no comment fetch wired (e.g. a non-Linear tracker): the
         // feature is inert. Log it so an operator who flipped the flag is not
         // left guessing why no measurement appears (council Track).
-        await deps.log(
+        await log(
           "queue_triage_comment_enrichment_skipped",
           "Comment enrichment is enabled but no comment fetch is wired (non-Linear tracker?); the feature is inert.",
           { outcome: "shadow", reason: "no_comment_fetch_wired" },
@@ -885,7 +994,7 @@ export async function runStandingPlanShadowTick(
             : { operatorConfig: deps.operatorConfig }),
         });
         context = enriched.context;
-        await deps.log(
+        await log(
           "queue_triage_comment_enrichment_measure",
           "Planner comment enrichment measured (report-only; topology tuned from this).",
           { outcome: "shadow", ...enriched.measurement },
@@ -901,7 +1010,7 @@ export async function runStandingPlanShadowTick(
           now: deps.now,
         });
         context = grounded.context;
-        await deps.log(
+        await log(
           "queue_triage_planner_grounding_measure",
           "Planner code grounding measured (report-only; dispatch unaffected).",
           {
@@ -911,7 +1020,7 @@ export async function runStandingPlanShadowTick(
           },
         );
       } catch (error) {
-        await deps.log(
+        await log(
           "queue_triage_planner_grounding_failed",
           "Planner code grounding failed (report-only; continuing without grounding evidence).",
           { outcome: "degraded", detail: (error as Error).message },
@@ -927,7 +1036,7 @@ export async function runStandingPlanShadowTick(
       workspaceRoot: deps.workspaceRoot,
       loadLastReviewedContentHash:
         deps.loadLastReviewedContentHash ?? loadLastReviewedContentHash,
-      log: deps.log,
+      log,
       ...(deps.planReviewArtifactDir === undefined
         ? {}
         : { artifactDir: deps.planReviewArtifactDir }),
@@ -943,7 +1052,7 @@ export async function runStandingPlanShadowTick(
         model: config.plannerModel,
         effort: config.plannerEffort,
       },
-      log: deps.log,
+      log,
       now: () => now,
       ...(config.structuralAdvisories === true
         ? {
@@ -977,7 +1086,7 @@ export async function runStandingPlanShadowTick(
     });
     return result;
   } catch (error) {
-    await deps.log(
+    await log(
       "queue_triage_shadow_failed",
       "Standing-plan shadow tick failed (best-effort; dispatch unaffected).",
       { outcome: "degraded", detail: (error as Error).message },

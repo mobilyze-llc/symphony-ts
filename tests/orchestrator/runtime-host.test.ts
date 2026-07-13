@@ -6272,20 +6272,26 @@ describe("startRuntimeService shutdown", () => {
     chmodSync(fakeGit, 0o755);
     vi.stubEnv("PATH", `${fakeBin}:${originalPath}`);
 
+    // Todo so they survive the SYMPH-1142 planner candidate-state filter and reach
+    // the shadow planner (the default createIssue state is "In Progress", which the
+    // filter now correctly excludes).
     const sharedIssue = createIssue({
       id: "shared-1",
       identifier: "SYMPH-SHARED",
       title: "Shared candidate",
+      state: "Todo",
     });
     const killedIssue = createIssue({
       id: "killed-1",
       identifier: "SYMPH-KILLED",
       title: "Killed candidate",
+      state: "Todo",
     });
     const duplicateIssue = createIssue({
       id: "dup-1",
       identifier: "SYMPH-DUP",
       title: "Duplicate candidate",
+      state: "Todo",
     });
     const tracker = createTracker({
       candidates: [sharedIssue, killedIssue, duplicateIssue],
@@ -6434,6 +6440,7 @@ describe("startRuntimeService shutdown", () => {
         plannerModel: "opus",
         plannerEffort: "max",
         heartbeatMs: 1,
+        plannerCandidateStates: ["Todo"],
         envelope: {
           version: 1,
           concurrencyCeiling: 2,
@@ -6638,6 +6645,7 @@ describe("startRuntimeService shutdown", () => {
         plannerModel: "opus",
         plannerEffort: "max",
         heartbeatMs: 1,
+        plannerCandidateStates: ["Todo"],
         envelope: {
           version: 1,
           concurrencyCeiling: 2,
@@ -6684,6 +6692,141 @@ describe("startRuntimeService shutdown", () => {
     } finally {
       await service.shutdown();
       vi.unstubAllEnvs();
+    }
+  });
+
+  it("consumes a forced empty re-plan and cadence-skips the next poll", async () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), "symph-forced-empty-replan-"),
+    );
+    const tracker = createTracker({
+      candidates: [
+        createIssue({
+          id: "filtered-1",
+          identifier: "SYMPH-FILTERED",
+          title: "Already in flight",
+          state: "In Progress",
+        }),
+      ],
+    });
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    let forceRequested = true;
+    const consumeStandingPlanReplanRequest = vi.fn(() => {
+      const requested = forceRequested;
+      forceRequested = false;
+      return requested;
+    });
+    const requestStandingPlanReplan = vi.fn(() => {
+      forceRequested = true;
+    });
+    const state = {
+      running: {},
+      resumeRequired: new Set<string>(),
+      completed: new Set<string>(),
+      failed: new Set<string>(),
+    };
+    const runtimeHost = {
+      notifier: null,
+      runContinuousFeedbackModelPreflight: vi.fn(async () => null),
+      consumeStandingPlanReplanRequest,
+      requestStandingPlanReplan,
+      getState: vi.fn(() => state),
+      getRuntimeSnapshot: vi.fn(async () => ({})),
+      getStateDelta: vi.fn(async () => ({
+        as_of_sequence: 0,
+        count: 0,
+        entries: [],
+      })),
+      runControlSurfaceTick: vi.fn(async () => undefined),
+      pollOnce: vi.fn(async () => ({
+        validation: { ok: true, suppressedContractViolations: [] },
+        dispatchedIssueIds: [],
+        modeDecisions: [],
+        stopRequests: [],
+        trackerFetchFailed: false,
+        reconciliationFetchFailed: false,
+        runningCount: 0,
+      })),
+      abortAllWorkers: vi.fn(() => 0),
+      waitForIdle: vi.fn(async () => undefined),
+    } as unknown as OrchestratorRuntimeHost;
+    const config = {
+      ...createConfig(),
+      polling: { intervalMs: 5 },
+      workspace: { root: workspaceRoot },
+      queueTriage: {
+        enabled: true,
+        shadowMode: true,
+        plannerModel: "opus",
+        plannerEffort: "max",
+        heartbeatMs: 3_600_000,
+        plannerCandidateStates: ["Todo"],
+        envelope: {
+          version: 1,
+          concurrencyCeiling: 2,
+          allowedRisk: "medium",
+          allowedModes: ["parallel-isolated"],
+        },
+        autoReleaseFrontier: 1,
+        controlDoc: { enabled: false, teamId: null },
+        admissionGuardrail: { enabled: false },
+        commentEnrichment: {
+          enabled: false,
+          maxCandidates: 25,
+          maxCommentPages: 3,
+          maxComments: 6,
+          maxCommentChars: 400,
+          maxTotalChars: 1200,
+        },
+        planReview: { enabled: false, plannerGroundingEnabled: false },
+      },
+    } satisfies ResolvedWorkflowConfig;
+    const plannerRunner = vi.fn(async () => ({
+      status: "ok" as const,
+      markdown: "# Plan\n",
+    }));
+
+    const service = await startRuntimeService({
+      config,
+      tracker,
+      logger,
+      workflowWatcher: null,
+      runtimeHost,
+      createStandingPlanPlannerRunner: () => plannerRunner,
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(
+          consumeStandingPlanReplanRequest.mock.calls.length,
+        ).toBeGreaterThanOrEqual(2);
+        expect(
+          vi.mocked(runtimeHost.runControlSurfaceTick).mock.calls.length,
+        ).toBeGreaterThanOrEqual(2);
+      });
+      expect(consumeStandingPlanReplanRequest.mock.results[0]?.value).toBe(
+        true,
+      );
+      expect(consumeStandingPlanReplanRequest.mock.results[1]?.value).toBe(
+        false,
+      );
+      expect(requestStandingPlanReplan).not.toHaveBeenCalled();
+      expect(plannerRunner).not.toHaveBeenCalled();
+      expect(
+        entries.filter(
+          (entry) => entry.event === "queue_triage_skipped_empty_backlog",
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await service.shutdown();
+      rmSync(workspaceRoot, { recursive: true, force: true });
     }
   });
 

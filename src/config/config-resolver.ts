@@ -89,6 +89,7 @@ import {
   DEFAULT_QUEUE_TRIAGE_CONTROL_DOC_ENABLED,
   DEFAULT_QUEUE_TRIAGE_ENABLED,
   DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS,
+  DEFAULT_QUEUE_TRIAGE_PLANNER_CANDIDATE_STATES,
   DEFAULT_QUEUE_TRIAGE_PLANNER_EFFORT,
   DEFAULT_QUEUE_TRIAGE_PLANNER_MODEL,
   DEFAULT_QUEUE_TRIAGE_PLAN_REVIEW_ENABLED,
@@ -556,6 +557,10 @@ function resolveQueueTriageConfig(
   const allowedRisk = readString(envelope.allowed_risk);
   const commentEnrichment = asRecord(queueTriage.comment_enrichment);
   const planReview = asRecord(queueTriage.plan_review);
+  const configuredPlannerCandidateStates = readStringList(
+    queueTriage.planner_candidate_states,
+    DEFAULT_QUEUE_TRIAGE_PLANNER_CANDIDATE_STATES,
+  );
   return {
     enabled: readBoolean(queueTriage.enabled) ?? DEFAULT_QUEUE_TRIAGE_ENABLED,
     shadowMode:
@@ -568,6 +573,10 @@ function resolveQueueTriageConfig(
     heartbeatMs:
       readPositiveInteger(queueTriage.heartbeat_ms) ??
       DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS,
+    plannerCandidateStates:
+      configuredPlannerCandidateStates.length === 0
+        ? [...DEFAULT_QUEUE_TRIAGE_PLANNER_CANDIDATE_STATES]
+        : configuredPlannerCandidateStates,
     autoReleaseFrontier:
       readPositiveInteger(queueTriage.auto_release_frontier) ??
       DEFAULT_QUEUE_TRIAGE_AUTO_RELEASE_FRONTIER,

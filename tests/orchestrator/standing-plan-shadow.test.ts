@@ -32,12 +32,14 @@ import type {
   PlanPostEmitReviewDeps,
   PlanPostEmitReviewResult,
 } from "../../src/orchestrator/plan-post-emit-review.js";
+import { admittedIdentifiersFromJournal } from "../../src/orchestrator/standing-plan-admission.js";
 import { renderStandingPlanControlDoc } from "../../src/orchestrator/standing-plan-doc-render.js";
 import {
   assembleShadowPlannerContext,
   buildShadowPlannerAuditDispositions,
   buildShadowPlannerSupersessionRelationDispositions,
   enrichPlannerContextWithComments,
+  filterPlannerCandidateStates,
   runShadowPlanCycle,
   runStandingPlanShadowTick,
   shouldRunShadowPlanCycle,
@@ -45,6 +47,7 @@ import {
 import {
   loadLastReviewedContentHash,
   loadStandingPlan,
+  recordPlanDecision,
   recordPlanRevision,
 } from "../../src/orchestrator/standing-plan-store.js";
 import type { LinearIssueComment } from "../../src/tracker/linear-client.js";
@@ -1057,6 +1060,7 @@ function triageConfig(
     plannerModel: "opus",
     plannerEffort: "max",
     heartbeatMs: 900_000,
+    plannerCandidateStates: ["Todo"],
     autoReleaseFrontier: 1,
     controlDoc: { enabled: false, teamId: null },
     admissionGuardrail: { enabled: false },
@@ -1174,7 +1178,12 @@ describe("runStandingPlanShadowTick", () => {
       });
       expect(logs).toContainEqual({
         event: "queue_triage_structural_advisory_portfolio_held",
-        fields: { outcome: "report_only", held_count: 1 },
+        // planner_host (SYMPH-1144) is stamped on every tick record; default "local".
+        fields: {
+          outcome: "report_only",
+          held_count: 1,
+          planner_host: "local",
+        },
       });
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -3043,7 +3052,7 @@ describe("runStandingPlanShadowTick comment enrichment (SYMPH-896)", () => {
     }
   });
 
-  it("does not fetch or log a measurement on an empty backlog (council P2)", async () => {
+  it("short-circuits an empty backlog before fetching comments or a measurement (council P2 / SYMPH-1143)", async () => {
     const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-"));
     let commentFetches = 0;
     const events: string[] = [];
@@ -3072,8 +3081,12 @@ describe("runStandingPlanShadowTick comment enrichment (SYMPH-896)", () => {
         },
         now: () => new Date("2026-06-18T01:00:00.000Z"),
       });
-      expect(result.status).toBe("ok");
+      expect(result).toMatchObject({
+        status: "skipped",
+        reason: "empty_backlog",
+      });
       expect(commentFetches).toBe(0);
+      expect(events).toContain("queue_triage_skipped_empty_backlog");
       expect(events).not.toContain("queue_triage_comment_enrichment_measure");
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -3108,6 +3121,311 @@ describe("runStandingPlanShadowTick comment enrichment (SYMPH-896)", () => {
       expect(result.status).toBe("ok");
       expect(events).toContain("queue_triage_comment_enrichment_skipped");
       expect(events).not.toContain("queue_triage_comment_enrichment_measure");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("filterPlannerCandidateStates (SYMPH-1142)", () => {
+  const mixed = [
+    { ...issue("u1", "SYMPH-1"), state: "Todo" },
+    { ...issue("u2", "SYMPH-2"), state: "In Progress" },
+    { ...issue("u3", "SYMPH-3"), state: "In Review" },
+    { ...issue("u4", "SYMPH-4"), state: "Resume" },
+    { ...issue("u5", "SYMPH-5"), state: "todo" },
+  ];
+
+  it("keeps only the configured states (case-insensitive) and drops in-flight states", () => {
+    const kept = filterPlannerCandidateStates(mixed, ["Todo"]);
+    expect(kept.map((candidate) => candidate.identifier)).toEqual([
+      "SYMPH-1",
+      "SYMPH-5",
+    ]);
+  });
+
+  it("passes through unchanged when the configured list is empty or all-blank", () => {
+    for (const states of [[], ["", "   "]]) {
+      const kept = filterPlannerCandidateStates(mixed, states);
+      expect(kept).toHaveLength(mixed.length);
+    }
+  });
+});
+
+describe("runStandingPlanShadowTick — tick hygiene (SYMPH-1142/1143/1144)", () => {
+  it("excludes In Progress / In Review / Resume from the planner backlog even when the running set is empty", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-state-filter-"));
+    let prompt = "";
+    try {
+      const result = await runStandingPlanShadowTick({
+        config: triageConfig(),
+        workspaceRoot: root,
+        fetchCandidates: async () => [
+          { ...issue("u1", "SYMPH-1"), state: "Todo" },
+          { ...issue("u2", "SYMPH-2"), state: "In Progress" },
+          { ...issue("u3", "SYMPH-3"), state: "In Review" },
+          { ...issue("u4", "SYMPH-4"), state: "Resume" },
+        ],
+        // Empty running set: state filtering — not running-subtraction — is what
+        // keeps the in-flight states out of the plan.
+        getInFlight: () => [],
+        createPlannerRunner: () => async (renderedPrompt) => {
+          // Capture only the planner prompt, not the post-emit review prompt.
+          if (
+            !renderedPrompt.startsWith(
+              "Review this already-produced standing plan.",
+            )
+          ) {
+            prompt = renderedPrompt;
+          }
+          return plannerFor("SYMPH-1").runClaude();
+        },
+        log: () => undefined,
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+      });
+      expect(result.status).toBe("ok");
+      expect(prompt).toContain("SYMPH-1 [Todo");
+      expect(prompt).not.toContain("SYMPH-2 [In Progress");
+      expect(prompt).not.toContain("SYMPH-3 [In Review");
+      expect(prompt).not.toContain("SYMPH-4 [Resume");
+      const plan = await loadStandingPlan(root);
+      expect(
+        plan?.batches.flatMap((batch) =>
+          batch.members.map((member) => member.issueIdentifier),
+        ),
+      ).toEqual(["SYMPH-1"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("supersedes prior approval with an empty revision without starting a planner lane", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-empty-skip-"));
+    let runnerFactories = 0;
+    let runnerCalls = 0;
+    const logs: Array<{ event: string; fields: Record<string, unknown> }> = [];
+    try {
+      const seeded = await recordPlanRevision(
+        root,
+        {
+          batches: [batch("approved-batch", "SYMPH-2")],
+          dependencyEdges: [],
+          options: [],
+          envelope: ENVELOPE,
+          rationale: "Previously approved work",
+          source: "planner",
+        },
+        {
+          createdAt: "2026-06-18T00:00:00.000Z",
+          planId: "symphony-standing-plan",
+        },
+      );
+      await recordPlanDecision(root, {
+        decisionId: "approve-prior-revision",
+        planId: seeded.plan.planId,
+        revision: seeded.plan.revision,
+        batchId: "approved-batch",
+        kind: "approve",
+        actor: "operator@example.com",
+        optionMarker: null,
+        createdAt: "2026-06-18T00:01:00.000Z",
+        note: null,
+      });
+      expect([
+        ...admittedIdentifiersFromJournal(await readStandingPlanJournal(root)),
+      ]).toEqual(["SYMPH-2"]);
+
+      const result = await runStandingPlanShadowTick({
+        config: triageConfig(),
+        workspaceRoot: root,
+        plannerHost: "pro16",
+        // Only in-flight-state candidates, and the running set is empty: after
+        // state filtering the plannable set is empty.
+        fetchCandidates: async () => [
+          { ...issue("u2", "SYMPH-2"), state: "In Progress" },
+          { ...issue("u3", "SYMPH-3"), state: "In Review" },
+        ],
+        getInFlight: () => [],
+        createPlannerRunner: () => {
+          runnerFactories += 1;
+          return async () => {
+            runnerCalls += 1;
+            return okPlanner().runClaude();
+          };
+        },
+        log: (event, _message, fields) => {
+          logs.push({ event, fields });
+        },
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+      });
+      expect(result).toEqual({ status: "skipped", reason: "empty_backlog" });
+      // Neither the runner factory nor runner is called (no prompt/lane/model).
+      expect(runnerFactories).toBe(0);
+      expect(runnerCalls).toBe(0);
+      const skip = logs.find(
+        (entry) => entry.event === "queue_triage_skipped_empty_backlog",
+      );
+      expect(skip).toBeDefined();
+      expect(skip?.fields).toMatchObject({
+        outcome: "skipped",
+        reason: "empty_backlog",
+        candidates_fetched: 2,
+        candidates_after_state_filter: 0,
+        plannable_after_exclusions: 0,
+        planner_host: "pro16",
+        empty_revision_recorded: true,
+        revision: 2,
+      });
+      // Distinct from a real plan and from the hygiene/cadence skips.
+      expect(logs.map((entry) => entry.event)).not.toContain(
+        "queue_triage_shadow_plan",
+      );
+      expect(await loadStandingPlan(root)).toMatchObject({
+        revision: 2,
+        batches: [],
+      });
+      const journal = await readStandingPlanJournal(root);
+      const currentRevision = [...journal]
+        .reverse()
+        .find((entry) => entry.kind === "plan_revision");
+      expect(currentRevision).toMatchObject({
+        kind: "plan_revision",
+        revision: { supersedes: 1 },
+      });
+      expect(admittedIdentifiersFromJournal(journal).size).toBe(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("also short-circuits when every fetched candidate is subtracted as in-flight", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-empty-inflight-"));
+    let runnerCalls = 0;
+    const events: string[] = [];
+    try {
+      const result = await runStandingPlanShadowTick({
+        config: triageConfig(),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        // The single Todo candidate is currently running → belt subtraction empties
+        // the plannable set even though it passed the state filter.
+        getInFlight: () => [
+          { issueIdentifier: "SYMPH-1", stage: "In Progress" },
+        ],
+        createPlannerRunner: () => async () => {
+          runnerCalls += 1;
+          return okPlanner().runClaude();
+        },
+        log: (event) => {
+          events.push(event);
+        },
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+      });
+      expect(result).toEqual({ status: "skipped", reason: "empty_backlog" });
+      expect(runnerCalls).toBe(0);
+      expect(events).toContain("queue_triage_skipped_empty_backlog");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("counts comment enrichment over only the filtered plannable candidates", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-enrich-count-"));
+    const fetchedIds: string[] = [];
+    const logs: Array<{ event: string; fields: Record<string, unknown> }> = [];
+    try {
+      const result = await runStandingPlanShadowTick({
+        config: triageConfig({
+          commentEnrichment: {
+            enabled: true,
+            maxCandidates: 25,
+            maxCommentPages: 3,
+            maxComments: 6,
+            maxCommentChars: 400,
+            maxTotalChars: 1200,
+          },
+        }),
+        workspaceRoot: root,
+        fetchCandidates: async () => [
+          { ...issue("u1", "SYMPH-1"), state: "Todo" },
+          { ...issue("u2", "SYMPH-2"), state: "Todo" },
+          // Excluded by the state filter → must NOT be fetched or counted.
+          { ...issue("u3", "SYMPH-3"), state: "In Review" },
+        ],
+        getInFlight: () => [],
+        createPlannerRunner: () => okPlanner().runClaude,
+        fetchIssueComments: async (issueId) => {
+          fetchedIds.push(issueId);
+          return [];
+        },
+        log: (event, _message, fields) => {
+          logs.push({ event, fields });
+        },
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+      });
+      expect(result.status).toBe("ok");
+      expect(fetchedIds.sort()).toEqual(["u1", "u2"]);
+      const measure = logs.find(
+        (entry) => entry.event === "queue_triage_comment_enrichment_measure",
+      );
+      expect(measure?.fields).toMatchObject({
+        candidatesConsidered: 2,
+        candidatesFetched: 2,
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("stamps the resolved planner host on every planner tick journal record", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-host-stamp-"));
+    const logs: Array<{ event: string; fields: Record<string, unknown> }> = [];
+    try {
+      const result = await runStandingPlanShadowTick({
+        config: triageConfig(),
+        workspaceRoot: root,
+        plannerHost: "pro16",
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        createPlannerRunner: () => okPlanner().runClaude,
+        log: (event, _message, fields) => {
+          logs.push({ event, fields });
+        },
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+      });
+      expect(result.status).toBe("ok");
+      const planRecord = logs.find(
+        (entry) => entry.event === "queue_triage_shadow_plan",
+      );
+      expect(planRecord?.fields.planner_host).toBe("pro16");
+      // EVERY record the tick emitted carries the host.
+      for (const entry of logs) {
+        expect(entry.fields.planner_host).toBe("pro16");
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('defaults the planner host to "local" when none is wired', async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-host-local-"));
+    const logs: Array<{ event: string; fields: Record<string, unknown> }> = [];
+    try {
+      await runStandingPlanShadowTick({
+        config: triageConfig(),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        createPlannerRunner: () => okPlanner().runClaude,
+        log: (event, _message, fields) => {
+          logs.push({ event, fields });
+        },
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+      });
+      const planRecord = logs.find(
+        (entry) => entry.event === "queue_triage_shadow_plan",
+      );
+      expect(planRecord?.fields.planner_host).toBe("local");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
