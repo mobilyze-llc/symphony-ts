@@ -53,6 +53,10 @@ export const HELP_TARGETS = [
     ["symphony-calibration-digest", "dist/src/calibration/cli.js"],
     ["claude-runner", "dist/src/cli/claude-runner.js"],
     ["symphony-linear-portfolio", "dist/src/cli/linear-portfolio-write.js"],
+    [
+      "symphony-investigate-productivity-report",
+      "dist/src/cli/investigate-productivity-report.js",
+    ],
     ["symphony-spec-review-watch", "dist/src/cli/spec-review-watch.js"],
     ["symphonyctl", "dist/src/cli/symphonyctl.js"],
   ].map(([name, cli]) => ({
