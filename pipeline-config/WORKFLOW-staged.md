@@ -321,8 +321,6 @@ You are in the INVESTIGATE stage. Your job is to analyze the issue and create an
 Investigation is a routing and planning stage, not a full implementation rehearsal.
 
 - First inspect the latest Linear issue comments/workpad/resume notes. Do not trust repo-root scratch files such as `workpad.md` or `INVESTIGATION-BRIEF.md` unless they explicitly name the current issue and stage. If the Linear context already identifies the next implementation move, reuse that plan instead of rediscovering the repo.
-- Spend at most 6 shell/tool calls before posting the investigation workpad, unless a command fails and a single retry is necessary.
-- Use `max_output_tokens` of 800 or less in investigate-stage shell calls. Prefer 400 for Linear/comment reads and 800 for source snippets.
 - Do not run multi-file `sed` batches, broad `rg -n` over multiple top-level directories, full docs scans, or source dumps during investigate.
 - If more discovery is truly required, write the open questions into the workpad and output `[STAGE_COMPLETE]`; the implement stage can do targeted reads while making changes.
 

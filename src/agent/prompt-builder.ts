@@ -257,7 +257,7 @@ export function buildContinuationPrompt(input: {
       case "investigate":
         lines.push(
           "CONSTRAINT: You are in the INVESTIGATE stage. Do NOT implement code, create branches, or open PRs. Investigation and planning only.",
-          "Investigation Token Brake: first inspect latest Linear issue comments/workpad/resume notes. Do not trust repo-root scratch files such as `workpad.md` or `INVESTIGATION-BRIEF.md` unless they explicitly name the current issue and stage. If the Linear context already identifies the next implementation move, reuse that plan instead of rediscovering the repo. Spend at most 6 shell/tool calls before posting the workpad unless a command fails and one retry is necessary. Use `max_output_tokens` of 800 or less. Do not run multi-file `sed` batches, broad `rg -n` over multiple top-level directories, full docs scans, or source dumps.",
+          "Investigation Token Brake: first inspect latest Linear issue comments/workpad/resume notes. Do not trust repo-root scratch files such as `workpad.md` or `INVESTIGATION-BRIEF.md` unless they explicitly name the current issue and stage. If the Linear context already identifies the next implementation move, reuse that plan instead of rediscovering the repo. Do not run multi-file `sed` batches, broad `rg -n` over multiple top-level directories, full docs scans, or source dumps.",
         );
         if (isWorkpadPresentInvestigateRetry) {
           lines.push(
