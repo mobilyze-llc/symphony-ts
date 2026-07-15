@@ -252,8 +252,8 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
         promptPath.endsWith("/pipeline-config/prompts/investigate.liquid")
       ) {
         expect(prompt).toContain("Investigation Token Brake");
-        expect(prompt).toContain("at most 6 shell/tool calls");
-        expect(prompt).toContain("max_output_tokens` of 800 or less");
+        expect(prompt).not.toContain("at most 6 shell/tool calls");
+        expect(prompt).not.toContain("max_output_tokens` of 800 or less");
         expect(prompt).toContain(
           "latest Linear issue comments/workpad/resume notes",
         );
@@ -289,8 +289,10 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
       stageName: "investigate",
     });
     expect(investigateRendered).toContain("Investigation Token Brake");
-    expect(investigateRendered).toContain("at most 6 shell/tool calls");
-    expect(investigateRendered).toContain("max_output_tokens` of 800 or less");
+    expect(investigateRendered).not.toContain("at most 6 shell/tool calls");
+    expect(investigateRendered).not.toContain(
+      "max_output_tokens` of 800 or less",
+    );
     expect(investigateRendered).toContain(
       "latest Linear issue comments/workpad/resume notes",
     );
@@ -368,7 +370,12 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
       stageName: "investigate",
     });
     expect(primaryInvestigateRendered).toContain("Investigation Token Brake");
-    expect(primaryInvestigateRendered).toContain("at most 6 shell/tool calls");
+    expect(primaryInvestigateRendered).not.toContain(
+      "at most 6 shell/tool calls",
+    );
+    expect(primaryInvestigateRendered).not.toContain(
+      "max_output_tokens` of 800 or less",
+    );
 
     for (const configPath of [
       resolve(import.meta.dirname, "../../pipeline-config/WORKFLOW-staged.md"),
@@ -389,7 +396,10 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
         stageName: "investigate",
       });
       expect(investigateRendered).toContain("Investigation Token Brake");
-      expect(investigateRendered).toContain("at most 6 shell/tool calls");
+      expect(investigateRendered).not.toContain("at most 6 shell/tool calls");
+      expect(investigateRendered).not.toContain(
+        "max_output_tokens` of 800 or less",
+      );
       expect(investigateRendered).toContain(
         "Risk-Predicate State Contract Artifacts",
       );
