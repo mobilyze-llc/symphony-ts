@@ -5,7 +5,10 @@ import { join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
 import { withFreshCodeGroundingCheckout } from "./code-grounding-fresh-checkout.js";
-import { wordBoundedLiteralIndices } from "./triage-prep-literal.js";
+import {
+  containsAsciiIdentifierBoundedLiteral,
+  wordBoundedLiteralIndices,
+} from "./triage-prep-literal.js";
 import type {
   ExtractedTriageAnchor,
   TriageFailureClass,
@@ -56,18 +59,35 @@ async function inspectAnchor(input: {
   anchor: ExtractedTriageAnchor;
   filedAt: string | null;
 }): Promise<TriagePrepAnchorEvidence> {
-  const exists = await safeFileExists(input.checkoutPath, input.anchor.path);
+  const fileExists = await safeFileExists(
+    input.checkoutPath,
+    input.anchor.path,
+  );
+  const symbolExists =
+    fileExists &&
+    input.anchor.lineRange === null &&
+    input.anchor.fingerprint !== null
+      ? await fileContainsFingerprint(
+          input.checkoutPath,
+          input.anchor.path,
+          input.anchor.fingerprint,
+        )
+      : fileExists;
   const commits = await commitsSinceFiling(input);
-  let currentPath: string | null = exists ? input.anchor.path : null;
-  let status: TriagePrepAnchorEvidence["status"] = exists ? "exists" : "gone";
-  let reason = exists
+  let currentPath: string | null = fileExists ? input.anchor.path : null;
+  let status: TriagePrepAnchorEvidence["status"] = symbolExists
+    ? "exists"
+    : "gone";
+  let reason = symbolExists
     ? "cited path exists on fresh origin/main"
-    : "cited path is absent on fresh origin/main";
-  if (exists && input.anchor.lineRange !== null && commits.length > 0) {
+    : fileExists
+      ? "cited symbol is absent from the cited path on fresh origin/main"
+      : "cited path is absent on fresh origin/main";
+  if (fileExists && input.anchor.lineRange !== null && commits.length > 0) {
     status = "moved";
     reason =
       "cited lines were touched after filing; re-anchor before relying on the location";
-  } else if (!exists) {
+  } else if (!fileExists) {
     const movedPath = await findRenamedPath(
       input.checkoutPath,
       input.anchor.path,
@@ -93,6 +113,19 @@ async function inspectAnchor(input: {
       input.anchor.lineRange === null ? "cited_file" : "cited_lines",
     reason,
   };
+}
+
+async function fileContainsFingerprint(
+  root: string,
+  repoPath: string,
+  fingerprint: string,
+): Promise<boolean> {
+  try {
+    const content = await fs.readFile(resolve(root, repoPath), "utf8");
+    return containsAsciiIdentifierBoundedLiteral(content, fingerprint);
+  } catch {
+    return false;
+  }
 }
 
 async function commitsSinceFiling(input: {

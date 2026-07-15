@@ -459,6 +459,108 @@ describe("triage-prep evidence batch", () => {
 });
 
 describe("fresh origin/main inspection and artifact transform", () => {
+  it("reports a symbol-only anchor as live when the cited symbol remains", async () => {
+    const root = await mkdtemp(join(tmpdir(), "triage-prep-symbol-live-"));
+    cleanup.push(root);
+    const source = await createTriagePrepRepository(
+      root,
+      "export function classifyDrop() {}\n",
+    );
+
+    const result = await inspectTriagePrepRepository({
+      repository: {
+        key: "fixture",
+        target: {
+          repoUrl: pathToFileURL(source).href,
+          repoScope: "non_symphony",
+          sourcePath: source,
+        },
+      },
+      anchors: [
+        {
+          key: "scripts/reviewer-output-drop.mjs:classifyDrop",
+          raw: "scripts/reviewer-output-drop.mjs:classifyDrop",
+          path: "scripts/reviewer-output-drop.mjs",
+          fingerprint: "classifyDrop",
+          lineRange: null,
+        },
+      ],
+      failureClasses: [],
+      filedAtByAnchor: new Map(),
+      workspaceRoot: root,
+      runId: "symbol-live",
+      config: {
+        enabled: true,
+        baseDir: ".grounding",
+        ttlMs: 60_000,
+        maxCheckoutsPerRepo: 2,
+      },
+    });
+
+    expect(result.anchors[0]).toMatchObject({
+      status: "exists",
+      currentPath: "scripts/reviewer-output-drop.mjs",
+      historyPrecision: "cited_file",
+    });
+  });
+
+  it("reports a missing symbol-only anchor as gone and keeps its family from being fully live", async () => {
+    const root = await mkdtemp(join(tmpdir(), "triage-prep-symbol-gone-"));
+    cleanup.push(root);
+    const source = await createTriagePrepRepository(
+      root,
+      "export function classifyDropReplacement() {}\n",
+    );
+    const findings = [
+      issue("MOB-1301", findingsIntakeDescription("fkey1111111111111111")),
+      issue("MOB-1302", findingsIntakeDescription("fkey2222222222222222")),
+    ];
+    const extracted = findings.map((finding) => extractTriageFinding(finding));
+
+    const inspection = await inspectTriagePrepRepository({
+      repository: {
+        key: "fixture",
+        target: {
+          repoUrl: pathToFileURL(source).href,
+          repoScope: "non_symphony",
+          sourcePath: source,
+        },
+      },
+      anchors: extracted.flatMap((finding) => finding.anchors),
+      failureClasses: ["reviewer_output_dropped"],
+      filedAtByAnchor: new Map(),
+      workspaceRoot: root,
+      runId: "symbol-gone",
+      config: {
+        enabled: true,
+        baseDir: ".grounding",
+        ttlMs: 60_000,
+        maxCheckoutsPerRepo: 2,
+      },
+    });
+
+    expect(inspection.anchors[0]).toMatchObject({
+      status: "gone",
+      currentPath: "scripts/reviewer-output-drop.mjs",
+      reason: "cited symbol is absent from the cited path on fresh origin/main",
+    });
+
+    const batch = buildTriagePrepEvidenceBatch({
+      generatedAt: "2026-07-15T12:00:00.000Z",
+      sheetIssues: findings,
+      familyIssues: findings,
+      extracted,
+      inspections: [inspection],
+      ledger: { rows: [], available: true, reason: "fixture ledger" },
+    });
+
+    expect(
+      batch.families.find(
+        (family) => family.key === "class:reviewer_output_dropped",
+      )?.allAnchorsLive,
+    ).toBe(false);
+  });
+
   it("refreshes the managed checkout and records line-touch commits", async () => {
     const root = await mkdtemp(join(tmpdir(), "triage-prep-repo-"));
     cleanup.push(root);
@@ -669,4 +771,31 @@ fkeyfedcba9876543210
 
 async function git(cwd: string, args: readonly string[]): Promise<void> {
   await execFileAsync("git", [...args], { cwd });
+}
+
+async function createTriagePrepRepository(
+  root: string,
+  content: string,
+): Promise<string> {
+  const source = join(root, "source");
+  await mkdir(source);
+  await git(source, ["init", "-b", "main"]);
+  await git(source, ["config", "user.email", "test@example.com"]);
+  await git(source, ["config", "user.name", "Test"]);
+  await mkdir(join(source, "scripts"));
+  await writeFile(
+    join(source, "scripts", "reviewer-output-drop.mjs"),
+    content,
+    "utf8",
+  );
+  await git(source, ["add", "."]);
+  await git(source, ["commit", "-m", "Initial"]);
+  return source;
+}
+
+function findingsIntakeDescription(fkey: string): string {
+  return `<!-- findings-intake-metadata:v2
+{"schema":"crucible.findings-intake.v2","failure_class":"reviewer_output_dropped","anchor_fingerprint":"0123456789abcdef","anchors":["scripts/reviewer-output-drop.mjs:classifyDrop"]}
+${fkey}
+-->`;
 }
