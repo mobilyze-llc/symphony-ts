@@ -47,6 +47,18 @@ describe("investigate productivity report CLI", () => {
     expect(stderr).toContain("--workspace is required");
   });
 
+  it("rejects an empty workspace value", async () => {
+    const code = await runInvestigateProductivityReportCli(
+      ["--workspace", ""],
+      {
+        stdout: () => {},
+        stderr: () => {},
+      },
+    );
+
+    expect(code).toBe(2);
+  });
+
   it("emits an empty report for a workspace without a journal", async () => {
     let stdout = "";
     const code = await runInvestigateProductivityReportCli(

@@ -50,7 +50,11 @@ function parseArgs(argv: readonly string[], cwd = process.cwd()): ParsedArgs {
       return { ...parsed, help: true };
     }
     if (token === "--workspace") {
-      parsed.workspace = resolve(cwd, readValue(argv, ++index, token));
+      const workspace = readValue(argv, ++index, token);
+      if (workspace === "") {
+        throw new Error(`${token} requires a value`);
+      }
+      parsed.workspace = resolve(cwd, workspace);
       continue;
     }
     if (token === "--output") {
