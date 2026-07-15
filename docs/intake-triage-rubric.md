@@ -21,6 +21,36 @@ Use `linear-pp-cli issues edit <id> --state-name <name> --agent` for state
 changes. Do not infer dispatch authority from a project, release, or other
 ambient field.
 
+## File review and runtime findings
+
+Agents file or accrete findings through the installed Crucible controller, not
+through ad hoc Linear create calls:
+
+```sh
+node "${CRUCIBLE_REPO_ROOT:-$HOME/.local/share/crucible/controller}/skills/session-orchestrator/scripts/file-finding.mjs" \
+  --failure-class "<stable failure class>" \
+  --anchor "<repo-relative path:symbol-or-line>" \
+  --evidence "<repeatable observation with source refs>" \
+  --error-excerpt "<exact source excerpt>" \
+  --source "<PR URL, review artifact, or runtime report>" \
+  --observed-severity "<observed severity>" \
+  --team SYMPH
+```
+
+Provide the failure class, repeatable anchors or evidence, exact excerpt,
+source, and optional observed severity. The verb rejects prescriptive titles,
+derives the exact stable `(failure-class, anchor fingerprint)` key, and runs a
+fresh Printing Press Linear search. It comments new evidence on an open match;
+otherwise it creates an evidence-first ticket. A matching Done ticket is
+historical evidence, not a deduplication target: recurrence creates a fresh
+ticket with an explicit related link to the Done twin and adds a forward
+comment to that twin. The lock is the same-machine control for concurrent
+duplicate creation, while post-create reconciliation is the cross-machine
+control. JSONL decision telemetry records the outcome.
+
+This filing path is report-only intake. It does not promote or dispatch work;
+the [state contract](#state-contract) remains authoritative.
+
 ## Select the pass
 
 Snapshot the union of:
