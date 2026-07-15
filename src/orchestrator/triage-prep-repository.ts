@@ -5,6 +5,7 @@ import { join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
 import { withFreshCodeGroundingCheckout } from "./code-grounding-fresh-checkout.js";
+import { wordBoundedLiteralIndices } from "./triage-prep-literal.js";
 import type {
   ExtractedTriageAnchor,
   TriageFailureClass,
@@ -162,11 +163,10 @@ async function inspectClassEmissions(
       for (const failureClass of failureClasses) {
         const bucket = sites.get(failureClass);
         if (bucket === undefined || bucket.length >= 25) continue;
-        const pattern = new RegExp(`\\b${escapeRegExp(failureClass)}\\b`, "g");
-        for (const match of content.matchAll(pattern)) {
+        for (const index of wordBoundedLiteralIndices(content, failureClass)) {
           bucket.push({
             path: relative(checkoutPath, path).split(sep).join("/"),
-            line: content.slice(0, match.index ?? 0).split("\n").length,
+            line: content.slice(0, index).split("\n").length,
           });
           if (bucket.length >= 25) break;
         }
@@ -242,8 +242,4 @@ async function runGitRead(cwd: string, args: readonly string[]) {
       stderr: failure.stderr ?? failure.message,
     };
   }
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

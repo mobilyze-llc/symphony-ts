@@ -1,5 +1,6 @@
 import type { Issue } from "../domain/model.js";
 import { extractGroundingEvidenceCandidates } from "./code-grounding.js";
+import { containsAsciiIdentifierBoundedLiteral } from "./triage-prep-literal.js";
 import {
   type ExtractedFindingsIntakeV2Metadata,
   type ExtractedRecurrenceMetadata,
@@ -80,9 +81,7 @@ export function extractTriageFinding(
   const failureClasses = [
     ...new Set([
       ...SUPERVISOR_FAILURE_CLASSES.filter((failureClass) =>
-        new RegExp(
-          `(^|[^A-Za-z0-9_])${escapeRegExp(failureClass)}([^A-Za-z0-9_]|$)`,
-        ).test(text),
+        containsAsciiIdentifierBoundedLiteral(text, failureClass),
       ),
       ...(findingsIntakeV2 === null ? [] : [findingsIntakeV2.failureClass]),
     ]),
@@ -281,16 +280,34 @@ function extractRecurrenceMetadata(
 
 function readMetadataInteger(
   block: string,
-  keys: readonly string[],
+  keys: readonly MetadataIntegerKey[],
 ): number | null {
   for (const key of keys) {
-    const match = new RegExp(`["']?${key}["']?\\s*[:=]\\s*(\\d+)`, "i").exec(
-      block,
-    );
+    const match = METADATA_INTEGER_PATTERNS[key].exec(block);
     if (match?.[1] !== undefined) return Number(match[1]);
   }
   return null;
 }
+
+type MetadataIntegerKey = keyof typeof METADATA_INTEGER_PATTERNS;
+
+const METADATA_INTEGER_PATTERNS = {
+  recurrence_count:
+    /(?:^|[^A-Za-z0-9_])["']?recurrence_count["']?\s*[:=]\s*(\d+)/i,
+  recurrences: /(?:^|[^A-Za-z0-9_])["']?recurrences["']?\s*[:=]\s*(\d+)/i,
+  occurrences: /(?:^|[^A-Za-z0-9_])["']?occurrences["']?\s*[:=]\s*(\d+)/i,
+  session_count: /(?:^|[^A-Za-z0-9_])["']?session_count["']?\s*[:=]\s*(\d+)/i,
+  sessions: /(?:^|[^A-Za-z0-9_])["']?sessions["']?\s*[:=]\s*(\d+)/i,
+  distinct_sessions:
+    /(?:^|[^A-Za-z0-9_])["']?distinct_sessions["']?\s*[:=]\s*(\d+)/i,
+  post_done_recurrence_count:
+    /(?:^|[^A-Za-z0-9_])["']?post_done_recurrence_count["']?\s*[:=]\s*(\d+)/i,
+  post_done_recurrences:
+    /(?:^|[^A-Za-z0-9_])["']?post_done_recurrences["']?\s*[:=]\s*(\d+)/i,
+  done_twin_count:
+    /(?:^|[^A-Za-z0-9_])["']?done_twin_count["']?\s*[:=]\s*(\d+)/i,
+  done_twins: /(?:^|[^A-Za-z0-9_])["']?done_twins["']?\s*[:=]\s*(\d+)/i,
+} as const;
 
 function extractRelatedIssueIdentifiers(text: string): string[] {
   return [
@@ -309,8 +326,4 @@ function extractRelatedIssueIdentifiers(text: string): string[] {
 
 function readString(value: unknown): string | null {
   return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

@@ -102,6 +102,7 @@ describe("extractTriageFinding", () => {
         "MOB-1300",
         `scripts/supervisor-classify.mjs::attempt-boundary
 <!-- mob-1227 finding_metadata
+post_done_recurrence_count: 9
 recurrence_count: 4
 distinct_sessions: 3
 post_done_recurrences: 1
@@ -114,8 +115,47 @@ done_twins: 1
     expect(extracted.recurrenceMetadata).toEqual({
       recurrenceCount: 4,
       sessionCount: 3,
-      postDoneRecurrenceCount: 1,
+      postDoneRecurrenceCount: 9,
       doneTwinCount: 1,
+    });
+  });
+
+  it("matches failure classes only at ASCII identifier boundaries", () => {
+    for (const embedded of [
+      "xprovider_auth_unavailable",
+      "provider_auth_unavailablex",
+      "_provider_auth_unavailable",
+      "provider_auth_unavailable_",
+    ]) {
+      expect(
+        extractTriageFinding(issue("MOB-1300", embedded)).failureClasses,
+      ).not.toContain("provider_auth_unavailable");
+    }
+
+    expect(
+      extractTriageFinding(issue("MOB-1300", "éprovider_auth_unavailableé"))
+        .failureClasses,
+    ).toContain("provider_auth_unavailable");
+  });
+
+  it("reads quoted, case-insensitive numeric metadata aliases", () => {
+    const extracted = extractTriageFinding(
+      issue(
+        "MOB-1300",
+        `<!-- recurrence_metadata
+"RECURRENCES" = 12
+'Sessions': 7
+"post_done_recurrence_count"=3
+'DONE_TWIN_COUNT': 2
+-->`,
+      ),
+    );
+
+    expect(extracted.recurrenceMetadata).toEqual({
+      recurrenceCount: 12,
+      sessionCount: 7,
+      postDoneRecurrenceCount: 3,
+      doneTwinCount: 2,
     });
   });
 
@@ -434,7 +474,13 @@ describe("fresh origin/main inspection and artifact transform", () => {
     await git(source, ["commit", "-m", "Initial"]);
     await writeFile(
       sourceFile,
-      "export const value = 'provider_auth_unavailable';\n",
+      [
+        "export const value = 'provider_auth_unavailable';",
+        "export const lookalike = 'reviewXp2';",
+        "export const literal = 'review.p2';",
+        "export const suffixed = 'review.p2_suffix';",
+        "",
+      ].join("\n"),
       "utf8",
     );
     await git(source, ["add", "."]);
@@ -458,7 +504,7 @@ describe("fresh origin/main inspection and artifact transform", () => {
           lineRange: [1, 1],
         },
       ],
-      failureClasses: ["provider_auth_unavailable"],
+      failureClasses: ["provider_auth_unavailable", "review.p2"],
       filedAtByAnchor: new Map([
         ["scripts/supervisor-classify.mjs:1-1", "2000-01-01T00:00:00.000Z"],
       ]),
@@ -484,6 +530,10 @@ describe("fresh origin/main inspection and artifact transform", () => {
     expect(result.classEmissions[0]).toMatchObject({
       emittedInProduction: true,
       sites: [{ path: "scripts/supervisor-classify.mjs", line: 1 }],
+    });
+    expect(result.classEmissions[1]).toMatchObject({
+      emittedInProduction: true,
+      sites: [{ path: "scripts/supervisor-classify.mjs", line: 3 }],
     });
   });
 
