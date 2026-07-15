@@ -72,6 +72,12 @@ import type {
   PlanBody,
   RotateRevisionOptions,
 } from "../orchestrator/standing-plan-supersession.js";
+import {
+  TRIAGE_PREP_REPOSITORIES_ENV,
+  type TriagePrepRepository,
+  prepareTriagePlannerContext as defaultPrepareTriagePlannerContext,
+  parseTriagePrepRepositories,
+} from "../orchestrator/triage-prep.js";
 import { partitionPortfolioEligibleIssues } from "../portfolio/eligibility.js";
 import {
   type LinearIssueComment,
@@ -92,6 +98,16 @@ export const DEFAULT_MANAGER_PLAN_CONCURRENCY_CEILING = 3;
 export const DEFAULT_MANAGER_PLAN_MODEL = "opus";
 const DEFAULT_MANAGER_PLAN_EFFORT = DEFAULT_QUEUE_TRIAGE_PLANNER_EFFORT;
 export const DEFAULT_MANAGER_PLAN_STATE = "Backlog";
+const DEFAULT_TRIAGE_PREP_OPEN_STATES = [
+  "Triage",
+  "Backlog",
+  "Todo",
+  "In Progress",
+  "In Review",
+  "Resume",
+  "Blocked",
+  "Needs Spec",
+] as const;
 export const DEFAULT_MANAGER_PLAN_IN_FLIGHT_STATES = [
   "In Progress",
   "In Review",
@@ -144,6 +160,8 @@ export interface ManagerPlanCliOptions {
   plannerGroundingRepoUrl: string | null;
   plannerGroundingCommit: string | null;
   plannerGroundingRepoScope: "symphony" | "non_symphony" | null;
+  triagePrep: boolean;
+  triagePrepRepositories: TriagePrepRepository[];
   json: boolean;
   noCanary: boolean;
   help: boolean;
@@ -238,6 +256,12 @@ export interface ManagerPlanCliDependencies {
   groundPlannerContext?: (
     input: ManagerPlanGroundingInput,
   ) => Promise<ManagerPlanGroundingResult>;
+  /** Read-only family population for triage-prep; never used for dispatch. */
+  loadTriagePrepFamilyCandidates?: (
+    query: ManagerPlanCandidateQuery,
+  ) => Promise<Issue[]>;
+  /** Flag-gated context -> context triage-prep transform. */
+  prepareTriagePlannerContext?: typeof defaultPrepareTriagePlannerContext;
   /** Defaults to the production post-plan review hook; injected in tests. */
   runPlanPostEmitReview?: (
     deps: PlanPostEmitReviewDeps,
@@ -285,6 +309,8 @@ export function parseManagerPlanCliArgs(
   let plannerGroundingRepoUrl: string | null = null;
   let plannerGroundingCommit: string | null = null;
   let plannerGroundingRepoScope: "symphony" | "non_symphony" | null = null;
+  let triagePrep = false;
+  const triagePrepRepositories: TriagePrepRepository[] = [];
   let json = false;
   let noCanary = false;
   let help = false;
@@ -305,6 +331,10 @@ export function parseManagerPlanCliArgs(
     }
     if (token === "--planner-grounding") {
       plannerGrounding = true;
+      continue;
+    }
+    if (token === "--triage-prep") {
+      triagePrep = true;
       continue;
     }
     if (token === "--json") {
@@ -415,6 +445,11 @@ export function parseManagerPlanCliArgs(
         plannerGroundingRepoScope = value;
         break;
       }
+      case "--triage-prep-repo":
+        triagePrepRepositories.push(
+          parseTriagePrepRepositoryFlag(readValue("--triage-prep-repo")),
+        );
+        break;
       case "--in-flight-state":
         inFlightStates.push(readValue("--in-flight-state"));
         break;
@@ -458,6 +493,8 @@ export function parseManagerPlanCliArgs(
     plannerGroundingRepoUrl,
     plannerGroundingCommit,
     plannerGroundingRepoScope,
+    triagePrep,
+    triagePrepRepositories,
     json,
     noCanary,
     help,
@@ -644,6 +681,33 @@ export async function runManagerPlanCli(
     return MANAGER_PLAN_EXIT.loadFailed;
   }
 
+  let triagePrepFamilyCandidates: Issue[] = candidates;
+  if (options.triagePrep) {
+    const loadFamilyCandidates =
+      dependencies.loadTriagePrepFamilyCandidates ??
+      (dependencies.loadCandidates === undefined
+        ? defaultLoadCandidates
+        : null);
+    if (loadFamilyCandidates !== null) {
+      try {
+        triagePrepFamilyCandidates = await loadFamilyCandidates({
+          endpoint,
+          apiKey,
+          teamKeys,
+          projectSlug,
+          initiative,
+          activeStates: [...DEFAULT_TRIAGE_PREP_OPEN_STATES],
+          pageSize: options.pageSize,
+        });
+      } catch (error) {
+        io.stderr(
+          `Failed to load triage-prep family candidates: ${formatError(error)}\n`,
+        );
+        return MANAGER_PLAN_EXIT.loadFailed;
+      }
+    }
+  }
+
   let inFlight: PlannerInFlight[] = [];
   if (runtimeStateBaseUrl !== null) {
     const loadRuntimeInFlight =
@@ -788,6 +852,39 @@ export async function runManagerPlanCli(
     }
   }
 
+  const artifactDir = options.outDir ?? defaultArtifactDir(now);
+  if (options.triagePrep) {
+    let repositories: TriagePrepRepository[];
+    try {
+      repositories = resolveTriagePrepRepositories(options, env);
+    } catch (error) {
+      io.stderr(
+        `Invalid triage-prep repository config: ${formatError(error)}\n`,
+      );
+      return MANAGER_PLAN_EXIT.usage;
+    }
+    const prepareTriagePlannerContext =
+      dependencies.prepareTriagePlannerContext ??
+      defaultPrepareTriagePlannerContext;
+    try {
+      const prepared = await prepareTriagePlannerContext({
+        context,
+        candidates,
+        familyCandidates: triagePrepFamilyCandidates,
+        artifactDir,
+        workspaceRoot: process.cwd(),
+        repositories,
+        env,
+        ...(fetchIssueComments === null ? {} : { fetchIssueComments }),
+        now,
+      });
+      context = prepared.context;
+    } catch (error) {
+      io.stderr(`Failed to prepare triage evidence: ${formatError(error)}\n`);
+      return MANAGER_PLAN_EXIT.loadFailed;
+    }
+  }
+
   if (options.promptOnly) {
     const prompt = buildPlannerPrompt(context);
     if (options.outDir !== null) {
@@ -811,7 +908,6 @@ export async function runManagerPlanCli(
 
   const createPlannerRunner =
     dependencies.createPlannerRunner ?? defaultCreatePlannerRunner(now);
-  const artifactDir = options.outDir ?? defaultArtifactDir(now);
   const runClaude = createPlannerRunner({
     model: options.model,
     effort: options.effort,
@@ -1430,6 +1526,8 @@ export function renderUsage(): string {
     "  --gh-pr-context              Source open/recently merged PR context from gh",
     "  --github-repo <OWNER/REPO>   GitHub repo for --gh-pr-context",
     "  --planner-grounding          Add report-only code grounding evidence to the planner prompt",
+    "  --triage-prep                Emit fresh deterministic per-finding evidence and add its read-only prompt pointer",
+    "  --triage-prep-repo <key=url> Repository to inspect at fresh origin/main (repeatable; or use env JSON)",
     "  --planner-grounding-repo-url <url>",
     "                               Repository URL for planner grounding (defaults env/git remote)",
     "  --planner-grounding-commit <sha>",
@@ -1457,8 +1555,64 @@ export function renderUsage(): string {
     "                               Optional symphony/non_symphony scope for --planner-grounding",
     `  ${MANAGER_PLAN_RUNTIME_STATE_BASE_URL_ENV}`,
     "                               Optional runtime host base URL for live in-flight issues",
+    `  ${TRIAGE_PREP_REPOSITORIES_ENV}`,
+    '                               Optional JSON array of {"key","repoUrl"} repositories for --triage-prep',
     "",
   ].join("\n");
+}
+
+function parseTriagePrepRepositoryFlag(value: string): TriagePrepRepository {
+  const separator = value.indexOf("=");
+  if (separator <= 0 || separator === value.length - 1) {
+    throw new ManagerPlanCliUsageError(
+      "--triage-prep-repo must be <key>=<repository-url>",
+    );
+  }
+  const key = value.slice(0, separator).trim();
+  const repoUrl = value.slice(separator + 1).trim();
+  if (key === "" || repoUrl === "") {
+    throw new ManagerPlanCliUsageError(
+      "--triage-prep-repo must be <key>=<repository-url>",
+    );
+  }
+  return {
+    key,
+    target: {
+      repoUrl,
+      repoScope: inferPlannerGroundingRepoScope(repoUrl),
+    },
+  };
+}
+
+function resolveTriagePrepRepositories(
+  options: ManagerPlanCliOptions,
+  env: NodeJS.ProcessEnv,
+): TriagePrepRepository[] {
+  if (options.triagePrepRepositories.length > 0) {
+    return options.triagePrepRepositories;
+  }
+  const configured = parseTriagePrepRepositories(
+    env[TRIAGE_PREP_REPOSITORIES_ENV],
+  );
+  if (configured.length > 0) return configured;
+  const repoUrl =
+    options.plannerGroundingRepoUrl ??
+    env[MANAGER_PLAN_GROUNDING_REPO_URL_ENV] ??
+    env[MANAGER_PLAN_REPO_URL_ENV] ??
+    null;
+  if (repoUrl === null || repoUrl.trim() === "") return [];
+  return [
+    {
+      key:
+        inferPlannerGroundingRepoScope(repoUrl) === "symphony"
+          ? "symphony"
+          : "repository",
+      target: {
+        repoUrl,
+        repoScope: inferPlannerGroundingRepoScope(repoUrl),
+      },
+    },
+  ];
 }
 
 export function shouldRunAsCli(moduleUrl: string, argv1?: string): boolean {

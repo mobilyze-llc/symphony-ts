@@ -575,6 +575,8 @@ export type QueueTriagePlannerEffort =
 export interface WorkflowQueueTriageConfig {
   enabled: boolean;
   shadowMode: boolean;
+  /** Deterministic, ephemeral evidence transform; default disabled. */
+  triagePrep?: boolean;
   structuralAdvisories?: boolean;
   structuralAdvisoryDormantOkTicks?: number;
   structuralAdvisoryRenderCap?: number;

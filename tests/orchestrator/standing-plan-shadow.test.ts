@@ -3127,6 +3127,88 @@ describe("runStandingPlanShadowTick comment enrichment (SYMPH-896)", () => {
   });
 });
 
+describe("runStandingPlanShadowTick triage prep (SYMPH-1148)", () => {
+  it("runs the default-off context transform before the planner and logs only artifact evidence", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-triage-prep-"));
+    const events: string[] = [];
+    const prompts: string[] = [];
+    let transformCalls = 0;
+    let rawCommentReaderWired = false;
+    try {
+      const result = await runStandingPlanShadowTick({
+        config: triageConfig({ triagePrep: true }),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        fetchIssueComments: async () => [],
+        prepareTriagePlannerContext: async (input) => {
+          transformCalls += 1;
+          rawCommentReaderWired = input.fetchIssueComments !== undefined;
+          const artifactPath = join(root, "triage-prep-evidence.json");
+          return {
+            context: {
+              ...input.context,
+              triagePrepEvidence: {
+                artifactPath,
+                sheetCount: 1,
+                generatedAt: "2026-07-13T12:00:00.000Z",
+              },
+            },
+            artifactPath,
+            batch: { sheets: [{}] },
+          } as never;
+        },
+        createPlannerRunner: () => async (renderedPrompt) => {
+          prompts.push(renderedPrompt);
+          return okPlanner().runClaude();
+        },
+        log: (event) => {
+          events.push(event);
+        },
+        now: () => new Date("2026-07-13T12:00:00.000Z"),
+      });
+
+      expect(result.status).toBe("ok");
+      expect(transformCalls).toBe(1);
+      expect(rawCommentReaderWired).toBe(true);
+      expect(
+        prompts.some((prompt) =>
+          prompt.includes("Deterministic triage-prep evidence"),
+        ),
+      ).toBe(true);
+      expect(
+        prompts.some((prompt) => prompt.includes("triage-prep-evidence.json")),
+      ).toBe(true);
+      expect(events).toContain("queue_triage_prep_emitted");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not run the transform when the gate is absent", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-triage-prep-dark-"));
+    let transformCalls = 0;
+    try {
+      await runStandingPlanShadowTick({
+        config: triageConfig(),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        prepareTriagePlannerContext: async () => {
+          transformCalls += 1;
+          throw new Error("must stay dark");
+        },
+        createPlannerRunner: () => okPlanner().runClaude,
+        log: () => undefined,
+        now: () => new Date("2026-07-13T12:00:00.000Z"),
+      });
+      expect(transformCalls).toBe(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("filterPlannerCandidateStates (SYMPH-1142)", () => {
   const mixed = [
     { ...issue("u1", "SYMPH-1"), state: "Todo" },
