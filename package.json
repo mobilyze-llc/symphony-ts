@@ -22,6 +22,7 @@
     "symphony-manager-plan": "./dist/src/cli/manager-plan.js",
     "symphony-advisory-grade": "./dist/src/cli/advisory-grade.js",
     "symphony-linear-portfolio": "./dist/src/cli/linear-portfolio-write.js",
+    "symphony-investigate-productivity-report": "./dist/src/cli/investigate-productivity-report.js",
     "symphony-spec-review-watch": "./dist/src/cli/spec-review-watch.js",
     "symphonyctl": "./dist/src/cli/symphonyctl.js"
   },
