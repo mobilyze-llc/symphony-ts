@@ -9,6 +9,7 @@ import {
   DEFAULT_QUEUE_TRIAGE_PLANNER_MODEL,
   DEFAULT_QUEUE_TRIAGE_PLAN_REVIEW_ENABLED,
   DEFAULT_QUEUE_TRIAGE_PLAN_REVIEW_PLANNER_GROUNDING_ENABLED,
+  DEFAULT_QUEUE_TRIAGE_PREP_ENABLED,
   DEFAULT_QUEUE_TRIAGE_SHADOW_MODE,
   DEFAULT_QUEUE_TRIAGE_STRUCTURAL_ADVISORIES,
   DEFAULT_QUEUE_TRIAGE_STRUCTURAL_ADVISORY_DORMANT_OK_TICKS,
@@ -27,6 +28,9 @@ describe("config-resolver queue triage (SYMPH-784)", () => {
     expect(resolved.queueTriage?.enabled).toBe(false);
     expect(resolved.queueTriage?.shadowMode).toBe(
       DEFAULT_QUEUE_TRIAGE_SHADOW_MODE,
+    );
+    expect(resolved.queueTriage?.triagePrep).toBe(
+      DEFAULT_QUEUE_TRIAGE_PREP_ENABLED,
     );
     expect(resolved.queueTriage?.plannerModel).toBe(
       DEFAULT_QUEUE_TRIAGE_PLANNER_MODEL,
@@ -106,6 +110,15 @@ describe("config-resolver queue triage (SYMPH-784)", () => {
       structuralAdvisoryDormantOkTicks: 5,
       structuralAdvisoryRenderCap: 7,
     });
+  });
+
+  it("parses the default-off deterministic triage-prep gate", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      config: { queue_triage: { triage_prep: true } },
+      promptTemplate: "Prompt",
+    });
+    expect(resolved.queueTriage?.triagePrep).toBe(true);
   });
 
   it("honors explicit comment_enrichment overrides (SYMPH-896)", () => {

@@ -62,6 +62,10 @@ import {
   type TriageIntakePublisher,
   collectTriageIntakeHealth,
 } from "./triage-intake-reporting.js";
+import type {
+  PrepareTriagePlannerContextResult,
+  ShadowTriagePrepInput,
+} from "./triage-prep.js";
 
 export type { AssembleShadowPlannerContextInput };
 
@@ -579,6 +583,10 @@ export interface StandingPlanShadowTickDeps {
   groundPlannerContext?: (
     input: StandingPlanShadowGroundingInput,
   ) => Promise<StandingPlanShadowGroundingResult>;
+  /** Flag-gated deterministic evidence transform for backlog/advisory findings. */
+  prepareTriagePlannerContext?: (
+    input: ShadowTriagePrepInput,
+  ) => Promise<PrepareTriagePlannerContextResult>;
   /**
    * Operator/service-account sets for comment noise classification (SYMPH-896).
    * Service-account comments (Symphony's own writes) are dropped as noise.
@@ -1025,6 +1033,43 @@ export async function runStandingPlanShadowTick(
           "Planner code grounding failed (report-only; continuing without grounding evidence).",
           { outcome: "degraded", detail: (error as Error).message },
         );
+      }
+    }
+    if (config.triagePrep) {
+      if (deps.prepareTriagePlannerContext === undefined) {
+        await log(
+          "queue_triage_prep_skipped",
+          "Triage prep is enabled but its read-only context transform is not wired.",
+          { outcome: "shadow", reason: "transform_not_wired" },
+        );
+      } else {
+        try {
+          const prepared = await deps.prepareTriagePlannerContext({
+            context,
+            candidates: [...candidates, ...advisoryInputCandidates],
+            familyCandidates: [...candidates, ...advisoryInputCandidates],
+            ...(deps.fetchIssueComments === undefined
+              ? {}
+              : { fetchIssueComments: deps.fetchIssueComments }),
+            now: deps.now,
+          });
+          context = prepared.context;
+          await log(
+            "queue_triage_prep_emitted",
+            "Fresh deterministic triage evidence emitted as a run artifact (read-only; no verdict or Linear write).",
+            {
+              outcome: "shadow",
+              artifact_path: prepared.artifactPath,
+              sheet_count: prepared.batch.sheets.length,
+            },
+          );
+        } catch (error) {
+          await log(
+            "queue_triage_prep_failed",
+            "Deterministic triage prep failed; continuing without its report-only evidence.",
+            { outcome: "degraded", detail: (error as Error).message },
+          );
+        }
       }
     }
     const runClaude = deps.createPlannerRunner(

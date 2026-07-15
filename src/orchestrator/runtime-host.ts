@@ -352,6 +352,7 @@ import {
   TriageIntakeReportState,
   parseOptionalPositiveIntegerEnv,
 } from "./triage-intake-reporting.js";
+import { buildShadowTriagePrepDep } from "./triage-prep.js";
 
 const DEFAULT_RUNTIME_HARD_STOPS_CONFIG = {
   maxIterations: DEFAULT_HARD_STOP_MAX_ITERATIONS,
@@ -7118,6 +7119,12 @@ export async function startRuntimeService(
         env: process.env,
         workspaceRoot: workspaceManager.root,
         checkoutRoot: resolveRuntimeRepoRoot(),
+      }),
+      ...buildShadowTriagePrepDep({
+        workflowConfig: currentConfig,
+        env: process.env,
+        workspaceRoot: workspaceManager.root,
+        artifactDir: join(workspaceManager.root, ".symphony", "standing-plan"),
       }),
       ...(currentConfig.operatorAnchors === undefined
         ? {}

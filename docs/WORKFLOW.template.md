@@ -108,6 +108,10 @@ queue_triage:
   # Default: true
   shadow_mode: true
 
+  # Emit ephemeral deterministic evidence sheets before planner prompt build.
+  # Default: false. Repositories come from SYMPHONY_TRIAGE_PREP_REPOSITORIES.
+  triage_prep: false
+
   # Version-floating planner model alias. Default: opus
   planner_model: opus
 
