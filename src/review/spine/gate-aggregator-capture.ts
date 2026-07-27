@@ -59,6 +59,12 @@ export interface GateAggregatorCaptureInput {
   headSha?: string;
   round?: number;
   rounds?: readonly ReviewRoundRecord[];
+  /** Explicit mirror of Crucible's N/K/backstop convergence policy. */
+  convergencePolicy?: {
+    n: number;
+    k: number;
+    maxRounds: number;
+  };
   runId?: string;
   reviewTier?: string;
   /**
@@ -174,6 +180,9 @@ export function createGateAggregatorCapture(
         })),
         currentDiffHash: input.currentDiffHash,
         ...(input.rounds === undefined ? {} : { rounds: input.rounds }),
+        ...(input.convergencePolicy === undefined
+          ? {}
+          : { convergencePolicy: input.convergencePolicy }),
         // SYMPH-925: the judge-decorrelation author basis comes from EXPLICIT
         // provenance only (resolved by the caller), never ambient process env.
         judgeDecorrelation: {

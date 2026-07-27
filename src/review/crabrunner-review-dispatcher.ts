@@ -27,6 +27,7 @@ import {
   type CommandRunner,
   type HeadlessReviewerLaneConfig,
   type ReviewBundleProvenanceEntry,
+  type StructuredReviewerArtifact,
   buildHeadlessReviewerPrompt,
   headlessReviewerLaneIdentity,
   prepareHeadlessCouncilReviewForDispatch,
@@ -56,6 +57,11 @@ export function createCrabrunnerReviewStageDispatcher(
 ): CrabrunnerReviewStageDispatcher {
   return async (context) => {
     const env = options.env ?? process.env;
+    const round = nextReviewRound(
+      context.priorStructuredArtifacts ?? [],
+      context.previousReviewedHeadSha ?? null,
+      context.previousReviewRound ?? null,
+    );
     const plan = await prepareHeadlessCouncilReviewForDispatch(
       {
         issueId: context.issueIdentifier,
@@ -63,6 +69,8 @@ export function createCrabrunnerReviewStageDispatcher(
         artifactDir: context.artifactRoot,
         headRef: context.issue.branchName ?? "HEAD",
         codexLead: false,
+        round,
+        mode: round === 1 ? "full" : "convergence",
         provenance: authorProvenance(env),
         env,
         ...(context.baseRef === null ? {} : { baseRef: context.baseRef }),
@@ -70,6 +78,10 @@ export function createCrabrunnerReviewStageDispatcher(
         context.previousReviewedHeadSha === null
           ? {}
           : { previousReviewedHeadSha: context.previousReviewedHeadSha }),
+        ...(context.previousReviewedBaseSha === undefined ||
+        context.previousReviewedBaseSha === null
+          ? {}
+          : { previousReviewedBaseSha: context.previousReviewedBaseSha }),
         ...(context.priorStructuredArtifacts === undefined ||
         context.priorStructuredArtifacts.length === 0
           ? {}
@@ -111,6 +123,7 @@ export function createCrabrunnerReviewStageDispatcher(
         lane: requireLaneConfig(laneConfigs, laneId),
         reviewBundle: plan.reviewBundle,
         targetedConvergence: plan.targetedConvergence,
+        promptScope: plan.promptScope,
         priorStructuredArtifacts: context.priorStructuredArtifacts ?? [],
       });
       lanePrompts.set(laneId, prompt);
@@ -172,6 +185,21 @@ export function createCrabrunnerReviewStageDispatcher(
       },
     });
   };
+}
+
+function nextReviewRound(
+  priorArtifacts: readonly StructuredReviewerArtifact[],
+  previousReviewedHeadSha: string | null,
+  previousReviewRound: number | null,
+): number {
+  const latestPriorRound = priorArtifacts.reduce(
+    (latest, artifact) => Math.max(latest, artifact.routing.round),
+    previousReviewRound ?? 0,
+  );
+  if (latestPriorRound > 0) {
+    return latestPriorRound + 1;
+  }
+  return previousReviewedHeadSha === null ? 1 : 2;
 }
 
 async function maybeRunPreReviewVerifyGate(input: {

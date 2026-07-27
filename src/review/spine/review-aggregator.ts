@@ -210,6 +210,12 @@ export interface AggregateReviewInput {
   fixSizeLines?: number;
   /** Per-round history for convergence; omit to skip the convergence decision. */
   rounds?: readonly ReviewRoundRecord[];
+  /** Crucible-owned stop counters mirrored explicitly by Symphony. */
+  convergencePolicy?: {
+    n: number;
+    k: number;
+    maxRounds: number;
+  };
   /**
    * Scoped judge over the escalate bucket. When omitted, every escalated finding is
    * treated as blocking — fail-closed, never a silent pass.
@@ -296,6 +302,9 @@ export class ReviewAggregator {
                     : { cross_examined: round.crossExamined }),
                 })),
               ),
+              ...(input.convergencePolicy === undefined
+                ? {}
+                : input.convergencePolicy),
             });
 
       // SYMPH-926 — close the fail-open hole. The verdict previously derived ONLY

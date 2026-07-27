@@ -411,19 +411,21 @@ describe("review journal events", () => {
     expect(JSON.stringify(delta)).not.toContain("SECRET");
   });
 
-  it("emits termination ladder telemetry through review journal events", () => {
+  it("emits N/K/backstop telemetry through review journal events", () => {
     const result = reviewResult({
       verdict: "fail",
-      round: 3,
+      round: 15,
       mode: "convergence",
       termination: {
         status: "operator_decision",
-        reason: "round_cap_hit",
+        reason: "backstop_hit",
         action: "operator_decision_required_with_synthesis",
-        roundsPerCycle: 3,
+        roundsPerCycle: 15,
         thresholds: {
           roundWarning: 2,
-          roundCap: 3,
+          cleanRoundsRequired: 2,
+          reflagLimit: 3,
+          backstopRound: 15,
         },
         alertLevel: "operator",
         blockingFindingCount: 0,
@@ -462,17 +464,19 @@ describe("review journal events", () => {
     expect(
       entries.find((entry) => entry.kind === "review_round")?.metadata,
     ).toMatchObject({
-      rounds_per_cycle: 3,
+      rounds_per_cycle: 15,
       round_warning_threshold: 2,
-      round_cap: 3,
+      clean_rounds_required: 2,
+      finding_reflag_limit: 3,
+      round_backstop: 15,
       termination_alert_level: "operator",
     });
     expect(
       entries.find((entry) => entry.kind === "review_escalation")?.metadata,
     ).toMatchObject({
-      escalation_reason: "round_cap_hit",
+      escalation_reason: "backstop_hit",
       termination_status: "operator_decision",
-      termination_reason: "round_cap_hit",
+      termination_reason: "backstop_hit",
       termination_action: "operator_decision_required_with_synthesis",
       synthesis_count: 1,
       blocking_finding_count: 0,
@@ -481,11 +485,13 @@ describe("review journal events", () => {
       entries.find((entry) => entry.kind === "review_gate_result")?.metadata,
     ).toMatchObject({
       termination_status: "operator_decision",
-      termination_reason: "round_cap_hit",
+      termination_reason: "backstop_hit",
       termination_action: "operator_decision_required_with_synthesis",
-      rounds_per_cycle: 3,
+      rounds_per_cycle: 15,
       round_warning_threshold: 2,
-      round_cap: 3,
+      clean_rounds_required: 2,
+      finding_reflag_limit: 3,
+      round_backstop: 15,
       termination_alert_level: "operator",
       synthesis_count: 1,
       non_blocking_finding_count: 0,
@@ -504,7 +510,12 @@ describe("review journal events", () => {
         reason: "disposition_exit",
         action: "continue_pipeline",
         roundsPerCycle: 1,
-        thresholds: { roundWarning: 2, roundCap: 3 },
+        thresholds: {
+          roundWarning: 2,
+          cleanRoundsRequired: 2,
+          reflagLimit: 3,
+          backstopRound: 15,
+        },
         alertLevel: "warning",
         blockingFindingCount: 0,
         nonBlockingFindingCount: 1,
@@ -597,12 +608,14 @@ describe("review journal events", () => {
       verdict: "pass",
       termination: {
         status: "operator_decision",
-        reason: "round_cap_hit",
+        reason: "backstop_hit",
         action: "operator_decision_required_with_synthesis",
-        roundsPerCycle: 3,
+        roundsPerCycle: 15,
         thresholds: {
           roundWarning: 2,
-          roundCap: 3,
+          cleanRoundsRequired: 2,
+          reflagLimit: 3,
+          backstopRound: 15,
         },
         alertLevel: "operator",
         blockingFindingCount: 0,
@@ -647,9 +660,9 @@ describe("review journal events", () => {
     expect(
       entries.find((entry) => entry.kind === "review_escalation")?.metadata,
     ).toMatchObject({
-      escalation_reason: "round_cap_hit",
+      escalation_reason: "backstop_hit",
       termination_status: "operator_decision",
-      termination_reason: "round_cap_hit",
+      termination_reason: "backstop_hit",
       termination_action: "operator_decision_required_with_synthesis",
       gate_verdict: "pass",
       blocking_finding_count: 0,
@@ -971,9 +984,11 @@ function defaultTerminationAssessment(
     roundsPerCycle: round,
     thresholds: {
       roundWarning: 2,
-      roundCap: 3,
+      cleanRoundsRequired: 2,
+      reflagLimit: 3,
+      backstopRound: 15,
     },
-    alertLevel: round >= 3 ? "operator" : round >= 2 ? "warning" : "ok",
+    alertLevel: round >= 15 ? "operator" : round >= 2 ? "warning" : "ok",
     blockingFindingCount,
     nonBlockingFindingCount:
       (artifact?.findings.length ?? 0) - blockingFindingCount,

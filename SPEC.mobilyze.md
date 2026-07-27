@@ -70,6 +70,22 @@ Dispatcher journal write ownership is deliberately narrow. The runtime host is t
 
 Recovery must preserve pause and escalation decisions. A crash after deterministic supervision emits a finding must not forget the finding; a crash during a gate must not run a second gate while the first lease is live; a crash during a tracker write must either observe the completed idempotency key or retry only after the lease expires.
 
+## Council Round Policy
+
+Crucible owns council convergence policy and Symphony mirrors it. Round one
+reviews the frozen cumulative diff. Later rounds default to the materialized
+`previous_reviewed_head..HEAD` fix patch plus the full open finding history;
+the cumulative diff remains available as a bundle artifact but is not inlined.
+A base move, rewritten/conflicted history, unavailable delta, or explicit
+operator request restores a full-diff payload for that round.
+
+Termination is counter-based: two consecutive clean, rigorous rounds over the
+same frozen final head converge; three re-flags of one finding fingerprint
+escalate that finding; round 15 is the sole total-round backstop. Round counts
+may warn earlier, but round three is not a ceiling or an automatic operator
+decision. Frozen-diff identity, cross-exam freshness, and other fail-closed
+merge evidence remain mandatory throughout the clean window.
+
 ## Spec-Time Review Readiness Authority
 
 Spec-time Claude review readiness is durable dispatcher-journal state. For a

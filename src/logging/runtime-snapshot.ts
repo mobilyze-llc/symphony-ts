@@ -517,7 +517,9 @@ export interface RuntimeSnapshotCouncilReviewLane {
 export interface RuntimeSnapshotCouncilReviewRounds {
   current: number | null;
   warning_threshold: number | null;
-  cap: number | null;
+  clean_rounds_required: number | null;
+  finding_reflag_limit: number | null;
+  backstop: number | null;
   alert_level: string | null;
 }
 
@@ -1430,6 +1432,9 @@ function reviewRoundsFromMetadata(
   const hasTelemetry =
     numberFieldOrNull(metadata.rounds_per_cycle) !== null ||
     numberFieldOrNull(metadata.round_warning_threshold) !== null ||
+    numberFieldOrNull(metadata.clean_rounds_required) !== null ||
+    numberFieldOrNull(metadata.finding_reflag_limit) !== null ||
+    numberFieldOrNull(metadata.round_backstop) !== null ||
     numberFieldOrNull(metadata.round_cap) !== null ||
     stringField(metadata.termination_alert_level) !== null;
   if (!hasTelemetry) {
@@ -1438,12 +1443,18 @@ function reviewRoundsFromMetadata(
   const roundsPerCycle =
     numberFieldOrNull(metadata.rounds_per_cycle) ?? currentRound;
   const warningThreshold = numberFieldOrNull(metadata.round_warning_threshold);
-  const cap = numberFieldOrNull(metadata.round_cap);
+  const cleanRoundsRequired = numberFieldOrNull(metadata.clean_rounds_required);
+  const findingReflagLimit = numberFieldOrNull(metadata.finding_reflag_limit);
+  const backstop =
+    numberFieldOrNull(metadata.round_backstop) ??
+    numberFieldOrNull(metadata.round_cap);
   const alertLevel = stringField(metadata.termination_alert_level);
   if (
     roundsPerCycle === null &&
     warningThreshold === null &&
-    cap === null &&
+    cleanRoundsRequired === null &&
+    findingReflagLimit === null &&
+    backstop === null &&
     alertLevel === null
   ) {
     return null;
@@ -1451,7 +1462,9 @@ function reviewRoundsFromMetadata(
   return {
     current: roundsPerCycle,
     warning_threshold: warningThreshold,
-    cap,
+    clean_rounds_required: cleanRoundsRequired,
+    finding_reflag_limit: findingReflagLimit,
+    backstop,
     alert_level: alertLevel,
   };
 }
@@ -1944,6 +1957,9 @@ export interface StateDeltaEntryMetadata {
   rounds_per_cycle?: number;
   round_warning_threshold?: number;
   round_cap?: number;
+  clean_rounds_required?: number;
+  finding_reflag_limit?: number;
+  round_backstop?: number;
   synthesis_count?: number;
   non_blocking_finding_count?: number;
   track_finding_count?: number;
@@ -2080,6 +2096,9 @@ const STATE_DELTA_METADATA_NUMBER_FIELDS = [
   "rounds_per_cycle",
   "round_warning_threshold",
   "round_cap",
+  "clean_rounds_required",
+  "finding_reflag_limit",
+  "round_backstop",
   "synthesis_count",
   "non_blocking_finding_count",
   "track_finding_count",

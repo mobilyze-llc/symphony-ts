@@ -5571,6 +5571,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       artifactRoot: input.artifactRoot,
       baseRef: input.baseRef,
       previousReviewedHeadSha: priorReview.previousReviewedHeadSha,
+      previousReviewedBaseSha: priorReview.previousReviewedBaseSha,
+      previousReviewRound: priorReview.previousReviewRound,
       priorStructuredArtifacts: priorReview.priorStructuredArtifacts,
       signal: input.signal,
       onLaneJobId: input.onLaneJobId,
@@ -8551,6 +8553,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 interface PriorCrabrunnerReviewState {
   previousReviewedHeadSha: string | null;
+  previousReviewedBaseSha: string | null;
+  previousReviewRound: number | null;
   priorStructuredArtifacts: StructuredReviewerArtifact[];
 }
 
@@ -8575,12 +8579,15 @@ async function loadPriorCrabrunnerReviewState(input: {
   journal: readonly DispatcherRunJournalEntry[];
   issueId: string;
 }): Promise<PriorCrabrunnerReviewState> {
-  const priorGate = findLatestPriorReviewGateResult(
-    input.journal,
-    input.issueId,
-  );
+  const priorGates = findPriorReviewGateResults(input.journal, input.issueId);
+  const priorGate = priorGates.at(-1) ?? null;
   if (priorGate === null) {
-    return { previousReviewedHeadSha: null, priorStructuredArtifacts: [] };
+    return {
+      previousReviewedHeadSha: null,
+      previousReviewedBaseSha: null,
+      previousReviewRound: null,
+      priorStructuredArtifacts: [],
+    };
   }
 
   const journalReviewedHeadSha = stringMetadata(
@@ -8592,6 +8599,8 @@ async function loadPriorCrabrunnerReviewState(input: {
   if (reviewResultPath === null) {
     return {
       previousReviewedHeadSha: journalReviewedHeadSha,
+      previousReviewedBaseSha: stringMetadata(priorGate.metadata.base_sha),
+      previousReviewRound: positiveIntegerMetadata(priorGate.metadata.round),
       priorStructuredArtifacts: [],
     };
   }
@@ -8600,6 +8609,8 @@ async function loadPriorCrabrunnerReviewState(input: {
   if (reviewResult === null) {
     return {
       previousReviewedHeadSha: journalReviewedHeadSha,
+      previousReviewedBaseSha: stringMetadata(priorGate.metadata.base_sha),
+      previousReviewRound: positiveIntegerMetadata(priorGate.metadata.round),
       priorStructuredArtifacts: [],
     };
   }
@@ -8608,25 +8619,34 @@ async function loadPriorCrabrunnerReviewState(input: {
     previousReviewedHeadSha:
       stringMetadata(reviewResult.review_metadata.reviewed_head_sha) ??
       journalReviewedHeadSha,
-    priorStructuredArtifacts: collectPriorStructuredArtifacts(reviewResult),
+    previousReviewedBaseSha:
+      stringMetadata(reviewResult.review_metadata.base_sha) ??
+      stringMetadata(priorGate.metadata.base_sha),
+    previousReviewRound:
+      positiveIntegerMetadata(reviewResult.review_metadata.round) ??
+      positiveIntegerMetadata(priorGate.metadata.round),
+    priorStructuredArtifacts: (
+      await Promise.all(
+        priorGates.map(async (gate) => {
+          const path = stringMetadata(gate.metadata.review_result_path);
+          if (path === null) {
+            return [];
+          }
+          const result = await readPriorReviewResult(path);
+          return result === null ? [] : collectPriorStructuredArtifacts(result);
+        }),
+      )
+    ).flat(),
   };
 }
 
-function findLatestPriorReviewGateResult(
+function findPriorReviewGateResults(
   journal: readonly DispatcherRunJournalEntry[],
   issueId: string,
-): DispatcherRunJournalEntry | null {
-  for (let index = journal.length - 1; index >= 0; index -= 1) {
-    const entry = journal[index];
-    if (
-      entry !== undefined &&
-      entry.issueId === issueId &&
-      entry.kind === "review_gate_result"
-    ) {
-      return entry;
-    }
-  }
-  return null;
+): DispatcherRunJournalEntry[] {
+  return journal.filter(
+    (entry) => entry.issueId === issueId && entry.kind === "review_gate_result",
+  );
 }
 
 async function readPriorReviewResult(
@@ -9611,6 +9631,12 @@ function compareEffectiveCommentTimeDesc(
 
 function stringMetadata(value: unknown): string | null {
   return typeof value === "string" && value.trim() !== "" ? value : null;
+}
+
+function positiveIntegerMetadata(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value > 0
+    ? value
+    : null;
 }
 
 function summarizeContinuousFeedbackLoopTrace(

@@ -11313,7 +11313,7 @@ describe("stage execution backend boundary", () => {
 
       const seenContext = seenContexts.at(-1);
       expect(seenContext?.previousReviewedHeadSha).toBe("latest-head");
-      expect(seenContext?.priorStructuredArtifacts).toEqual([]);
+      expect(seenContext?.priorStructuredArtifacts).toEqual([olderArtifact]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -512,11 +512,11 @@ function escalationReasonFor(
 function isEscalatingTermination(
   termination: CouncilTerminationAssessment | undefined,
 ): termination is CouncilTerminationAssessment & {
-  reason: "spine_escalate" | "round_cap_hit";
+  reason: "spine_escalate" | "backstop_hit";
 } {
   return (
     termination?.reason === "spine_escalate" ||
-    termination?.reason === "round_cap_hit"
+    termination?.reason === "backstop_hit"
   );
 }
 
@@ -529,7 +529,9 @@ function terminationTelemetryMetadata(
   return compactMetadata({
     rounds_per_cycle: termination.roundsPerCycle,
     round_warning_threshold: termination.thresholds.roundWarning,
-    round_cap: termination.thresholds.roundCap,
+    clean_rounds_required: termination.thresholds.cleanRoundsRequired,
+    finding_reflag_limit: termination.thresholds.reflagLimit,
+    round_backstop: termination.thresholds.backstopRound,
     termination_alert_level: termination.alertLevel,
   });
 }
