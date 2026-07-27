@@ -86,6 +86,12 @@
       "rule": "file_size.new_file_line_cap",
       "reason": "SYMPH-1108/1109 coupled journal projection; split tracked by SYMPH-1122",
       "expires": "2026-08-15"
+    },
+    {
+      "path": "src/orchestrator/structural-advisory-journal.ts",
+      "rule": "file_size.no_growth_over_threshold",
+      "reason": "SYMPH-1140 advisory source discriminator on the shared journal builders; extraction tracked by SYMPH-1122",
+      "expires": "2026-08-15"
     }
   ]
 }

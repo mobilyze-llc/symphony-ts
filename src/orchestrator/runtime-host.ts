@@ -106,6 +106,10 @@ import {
 } from "../logging/loop-trace.js";
 import { readManagerRunJournal } from "../logging/manager-run-journal.js";
 import {
+  type DispatcherRunJournalRuntimeOwnership,
+  acquireDispatcherRunJournalRuntimeOwnership,
+} from "../logging/run-journal-ownership.js";
+import {
   type CompactDispatcherRunJournalOptions,
   type CompactDispatcherRunJournalResult,
   DISPATCHER_RUN_JOURNAL_DEFAULT_COMPACTION_TAIL_ENTRIES,
@@ -348,6 +352,7 @@ import {
   TriageIntakeReportState,
   parseOptionalPositiveIntegerEnv,
 } from "./triage-intake-reporting.js";
+import { buildShadowTriagePrepDep } from "./triage-prep.js";
 
 const DEFAULT_RUNTIME_HARD_STOPS_CONFIG = {
   maxIterations: DEFAULT_HARD_STOP_MAX_ITERATIONS,
@@ -3881,6 +3886,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       actor: input.actor,
       reason: input.reason,
       timestamp: this.now().toISOString(),
+      // The operator-intent grade channel is the manual escape hatch
+      // (symphonyctl grade-advisory); tag it so the digest keeps it distinct
+      // from the primary cli-session path (SYMPH-1140).
+      source: "symphonyctl",
     });
     const persisted = await recordStructuralAdvisoryState(
       this.workspaceManager.root,
@@ -6936,21 +6945,50 @@ export async function startRuntimeService(
     logger,
   });
 
-  const dashboard =
-    currentConfig.server.port === null
-      ? null
-      : await startDashboardServer({
-          host: runtimeHost,
-          port: currentConfig.server.port,
-          ...(currentConfig.server.host === null
-            ? {}
-            : { hostname: currentConfig.server.host }),
-          refreshMs: currentConfig.observability.refreshMs,
-          renderIntervalMs: currentConfig.observability.renderIntervalMs,
-          liveUpdatesEnabled: currentConfig.observability.dashboardEnabled,
-          anchorFieldEditSecret:
-            currentConfig.operatorAnchors?.ingestSecret ?? null,
-        });
+  // The runtime host owns sequence allocation in memory. Hold a separate,
+  // root-scoped ownership claim for the service lifetime so standalone CLI
+  // writers cannot mistake the short append lock for permission to race it.
+  const dispatcherJournalOwnerships = new Map<
+    string,
+    DispatcherRunJournalRuntimeOwnership
+  >();
+  const claimDispatcherJournalRoot = async (root: string): Promise<void> => {
+    if (dispatcherJournalOwnerships.has(root)) return;
+    dispatcherJournalOwnerships.set(
+      root,
+      await acquireDispatcherRunJournalRuntimeOwnership(root),
+    );
+  };
+  const releaseDispatcherJournalRoots = async (): Promise<void> => {
+    const ownerships = [...dispatcherJournalOwnerships.values()];
+    dispatcherJournalOwnerships.clear();
+    await Promise.allSettled(
+      ownerships.map((ownership) => ownership.release()),
+    );
+  };
+  await claimDispatcherJournalRoot(workspaceManager.root);
+
+  let dashboard: DashboardServerInstance | null;
+  try {
+    dashboard =
+      currentConfig.server.port === null
+        ? null
+        : await startDashboardServer({
+            host: runtimeHost,
+            port: currentConfig.server.port,
+            ...(currentConfig.server.host === null
+              ? {}
+              : { hostname: currentConfig.server.host }),
+            refreshMs: currentConfig.observability.refreshMs,
+            renderIntervalMs: currentConfig.observability.renderIntervalMs,
+            liveUpdatesEnabled: currentConfig.observability.dashboardEnabled,
+            anchorFieldEditSecret:
+              currentConfig.operatorAnchors?.ingestSecret ?? null,
+          });
+  } catch (error) {
+    await releaseDispatcherJournalRoots();
+    throw error;
+  }
 
   const stopController = new AbortController();
   const exitPromise = createExitPromise();
@@ -7083,6 +7121,12 @@ export async function startRuntimeService(
         env: process.env,
         workspaceRoot: workspaceManager.root,
         checkoutRoot: resolveRuntimeRepoRoot(),
+      }),
+      ...buildShadowTriagePrepDep({
+        workflowConfig: currentConfig,
+        env: process.env,
+        workspaceRoot: workspaceManager.root,
+        artifactDir: join(workspaceManager.root, ".symphony", "standing-plan"),
       }),
       ...(currentConfig.operatorAnchors === undefined
         ? {}
@@ -7302,18 +7346,19 @@ export async function startRuntimeService(
           logger,
           onReload: async (nextConfig) => {
             const previousConfig = currentConfig;
-            currentConfig = nextConfig;
+            const nextWorkspaceManager = usesManagedWorkspaceManager
+              ? createWorkspaceManagerFromConfig(nextConfig, logger)
+              : workspaceManager;
+            await claimDispatcherJournalRoot(nextWorkspaceManager.root);
 
             if (usesManagedTracker) {
               tracker = createLinearTrackerFromConfig(nextConfig);
             }
 
             if (usesManagedWorkspaceManager) {
-              workspaceManager = createWorkspaceManagerFromConfig(
-                nextConfig,
-                logger,
-              );
+              workspaceManager = nextWorkspaceManager;
             }
+            currentConfig = nextConfig;
 
             runtimeHost.updateConfig({
               config: nextConfig,
@@ -7358,9 +7403,23 @@ export async function startRuntimeService(
               );
             }
           },
+        }).catch(async (error) => {
+          await Promise.allSettled([
+            dashboard?.close() ?? Promise.resolve(),
+            releaseDispatcherJournalRoots(),
+          ]);
+          throw error;
         })
       : options.workflowWatcher;
-  workflowWatcher?.start();
+  try {
+    workflowWatcher?.start();
+  } catch (error) {
+    await Promise.allSettled([
+      dashboard?.close() ?? Promise.resolve(),
+      releaseDispatcherJournalRoots(),
+    ]);
+    throw error;
+  }
 
   const shutdownTimeoutMs =
     options.shutdownTimeoutMs ?? SHUTDOWN_IDLE_TIMEOUT_MS;
@@ -7405,6 +7464,7 @@ export async function startRuntimeService(
       dashboard?.close() ?? Promise.resolve(),
       workflowWatcher?.close() ?? Promise.resolve(),
     ]);
+    await releaseDispatcherJournalRoots();
 
     await logger.info("shutdown_complete", "Shutdown complete.", {
       workers_aborted: workersAborted,

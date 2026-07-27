@@ -87,7 +87,9 @@ _No hygiene proposals in window._
 
 Transition-only advisory records join to the first grade by fingerprint.
 Partial grades count as accepted-with-member-delta. Class precision is
-reported separately from per-fingerprint lifecycle stability.
+reported separately from per-fingerprint lifecycle stability, and decided
+rows split by grade-evidence source (cli-session, tick, symphonyctl) so the
+interactive CLI channel stays distinguishable.
 
 _No structural advisory stability rows._
 

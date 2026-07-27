@@ -27,6 +27,7 @@ import {
   parseCrabrunnerRunResult,
   parseCrabrunnerStatus,
 } from "./crabrunner-contract.js";
+import { appendCrabrunnerStaticSlotsArg } from "./crabrunner-static-slots.js";
 import {
   laneWorkerUsageSchema,
   mapLaneWorkerUsage,
@@ -61,24 +62,19 @@ export interface CrabrunnerCliSchedulerClientOptions {
   crucibleRoot: string;
   /** Target repo the lane operates on; written to manifest `workspace`. */
   targetRepoRoot: string;
-  /**
-   * Crabrunner state root. Passed via `--state-root` to every call when set, and
-   * used to resolve job-relative artifact/usage paths under
-   * `<stateRoot>/jobs/<jobId>/`. Defaults to `~/.crucible/crabrunner`.
-   */
+  /** Crabrunner state root for CLI calls and job-relative evidence paths. */
   stateRoot?: string;
   /** Host label written into the manifest (default "local"). */
   host?: string;
-  /**
-   * Manifest `provider`. Defaults to "local" when host==="local", else "ssh".
-   * Override for explicit transport selection.
-   */
+  /** Manifest provider; defaults to local for host=local, otherwise ssh. */
   provider?: string;
   /**
    * SSH user for `bin/crabrunner run` on remote/non-local hosts. Required for
    * remote workspace materialization; absent remote config fails closed.
    */
   remoteUser?: string;
+  /** Literal slot pool forwarded to remote `crabrunner run`. */
+  remoteStaticSlots?: readonly string[];
   /** Optional SSH port for remote crabbox runs (default is crabrunner's 22). */
   remotePort?: string;
   /** Optional remote crabbox static work root override. */
@@ -219,6 +215,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
   private readonly host: string;
   private readonly provider: string;
   private readonly remoteUser: string | null;
+  private readonly remoteStaticSlots: readonly string[] | null;
   private readonly remotePort: string | null;
   private readonly remoteWorkRoot: string | null;
   private readonly crabboxBin: string | null;
@@ -247,6 +244,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
     this.provider =
       options.provider ?? (this.host === "local" ? "local" : "ssh");
     this.remoteUser = normalizeOptionalString(options.remoteUser);
+    this.remoteStaticSlots = options.remoteStaticSlots ?? null;
     this.remotePort = normalizeOptionalString(options.remotePort);
     this.remoteWorkRoot = normalizeOptionalString(options.remoteWorkRoot);
     this.crabboxBin = normalizeOptionalString(options.crabboxBin);
@@ -672,6 +670,7 @@ export class CrabrunnerCliSchedulerClient implements CrabrunnerSchedulerClient {
       String(this.maxPollsForSpec(spec)),
     ];
     appendOptionalArg(args, "--port", this.remotePort);
+    appendCrabrunnerStaticSlotsArg(args, this.remoteStaticSlots);
     appendOptionalArg(args, "--work-root", this.remoteWorkRoot);
     appendOptionalArg(args, "--crabbox-bin", this.crabboxBin);
     appendOptionalArg(args, "--state-root", this.remoteStateRoot);

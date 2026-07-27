@@ -113,6 +113,64 @@ describe("createCrabrunnerStageExecutionBackends", () => {
     expect([...map.keys()]).toEqual(["crabrunner"]);
     expect(map.get("crabrunner")?.backend).toBe("crabrunner");
   });
+
+  it("forwards one literal slot pool argument through a built remote backend", async () => {
+    const invocations: string[][] = [];
+    const cli: CrabrunnerCli = async (args) => {
+      invocations.push([...args]);
+      const jobId = args[args.indexOf("--job-id") + 1]!;
+      const status = statusObject({
+        state: "complete",
+        job_id: jobId,
+        collectible: true,
+      });
+      return ok(
+        JSON.stringify({
+          schema: "crucible.crabrunner.run-result.v1",
+          job_id: jobId,
+          attempt_id: "0",
+          host: "pro16",
+          state: "complete",
+          status,
+          collect: {
+            schema: "crucible.crabrunner.collect.v1",
+            job_id: jobId,
+            attempt_id: "0",
+            state: "complete",
+            status,
+            archive_path: `/tmp/${jobId}.tgz`,
+            materialized: materializedReady(jobId),
+          },
+        }),
+      );
+    };
+    const map = createCrabrunnerStageExecutionBackends({
+      crucibleRoot: "/tmp/crucible",
+      targetRepoRoot: "/tmp/repo",
+      host: "pro16",
+      remoteUser: "operator",
+      remoteStaticSlots: ["static_pro16-slot0", "static_pro16-slot1"],
+      resolvePromptFile: () => "/tmp/prompt.md",
+      hashPromptFile: () => "a".repeat(64),
+      cli,
+    });
+
+    const result = await map.get("crabrunner")!.execute({
+      job: createJob(),
+      runnerInput: createRunnerInput(),
+    });
+
+    expect(result.result.runAttempt.status).toBe("succeeded");
+    expect(invocations).toHaveLength(1);
+    expect(invocations[0]?.[0]).toBe("run");
+    expect(
+      invocations[0]?.filter((arg) => arg === "--static-slots-json"),
+    ).toHaveLength(1);
+    const slotArgIndex = invocations[0]!.indexOf("--static-slots-json");
+    expect(invocations[0]?.[slotArgIndex + 1]).toBe(
+      '["static_pro16-slot0","static_pro16-slot1"]',
+    );
+  });
 });
 
 const neverCalledCli: CrabrunnerCli = async () => {

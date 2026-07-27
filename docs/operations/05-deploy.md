@@ -80,7 +80,15 @@ shell — an ambient-only value disappears when the LaunchAgent restarts.
   The runtime logs the resolved host at startup (`queue_triage_planner_host_resolved`)
   and stamps `planner_host` on every planner tick journal record, including
   `queue_triage_skipped_empty_backlog`.
-- **Keep `SYMPHONY_CRABRUNNER_HOST=pro16` in the durable SOPS env source** so it
+- **`SYMPHONY_CRABRUNNER_STATIC_SLOTS_JSON`** (SYMPH-1153) forwards the named
+  host's literal Crabbox slot pool to remote `crabrunner run`. Production pins
+  the ten `static_pro16-slot0` through `static_pro16-slot9` names as a JSON
+  string array. Symphony does not select or own slots; Crucible reserves one
+  configured literal slot and reports saturation. Invalid or empty configured
+  JSON fails at service startup instead of silently launching without capacity.
+- **Keep `SYMPHONY_CRABRUNNER_HOST=pro16`, the matching remote user, and the
+  pro16 `SYMPHONY_CRABRUNNER_STATIC_SLOTS_JSON` pool in the durable SOPS env
+  source** so they
   **survives host moves and LaunchAgent restarts**. Do not rely on an
   operator-shell export. To set/rotate it: edit the decrypted `.env`, re-encrypt
   to `.env.enc` (`sops --encrypt`), commit the encrypted file, then re-run

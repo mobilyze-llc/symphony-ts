@@ -285,11 +285,21 @@ describe("buildCrabrunnerStageExecutionBackends", () => {
       SYMPHONY_CRABRUNNER_ROOT: "/tmp/crucible",
       SYMPHONY_CRABRUNNER_TARGET_REPO: "/tmp/repo",
       SYMPHONY_CRABRUNNER_HOST: "crabbox-studio1",
+      SYMPHONY_CRABRUNNER_STATIC_SLOTS_JSON: '["static_studio1-slot0"]',
     });
 
     expect(map).not.toBeNull();
     expect([...map!.keys()]).toEqual(["crabrunner"]);
     expect(map!.get("crabrunner")?.backend).toBe("crabrunner");
+  });
+
+  it("rejects malformed configured remote static slots at startup", () => {
+    expect(() =>
+      buildCrabrunnerStageExecutionBackends({
+        SYMPHONY_CRABRUNNER_ROOT: "/tmp/crucible",
+        SYMPHONY_CRABRUNNER_STATIC_SLOTS_JSON: "[]",
+      }),
+    ).toThrow("SYMPHONY_CRABRUNNER_STATIC_SLOTS_JSON");
   });
 
   it("still enables with an empty REPO_URL falling through to cwd (DeepSeek P2-2)", () => {

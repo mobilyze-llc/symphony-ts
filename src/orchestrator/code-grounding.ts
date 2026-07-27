@@ -70,8 +70,7 @@ export interface CodeGroundingTarget {
   repoUrl: string;
   commitSha: string;
   repoScope: "symphony" | "non_symphony";
-  /**
-   * Test-fixture clone source override. Product callers should use repoUrl
+  /** Test-fixture clone source override. Product callers should use repoUrl
    * provenance; option-shaped/control-character values are rejected.
    */
   sourcePath?: string;
@@ -589,6 +588,7 @@ async function verifyFindingsAgainstCheckout(
   entries: CodeGroundingEvidenceEntry[];
   warnings: string[];
 }> {
+  if (input.findings.length === 0) return { entries: [], warnings: [] };
   const scanIndex = await buildScanIndex(paths.checkoutPath);
   const modelByFinding = new Map(
     (input.modelFindings ?? []).map((finding) => [finding.findingId, finding]),

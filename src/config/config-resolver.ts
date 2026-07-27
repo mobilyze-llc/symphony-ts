@@ -94,6 +94,7 @@ import {
   DEFAULT_QUEUE_TRIAGE_PLANNER_MODEL,
   DEFAULT_QUEUE_TRIAGE_PLAN_REVIEW_ENABLED,
   DEFAULT_QUEUE_TRIAGE_PLAN_REVIEW_PLANNER_GROUNDING_ENABLED,
+  DEFAULT_QUEUE_TRIAGE_PREP_ENABLED,
   DEFAULT_QUEUE_TRIAGE_SHADOW_MODE,
   DEFAULT_RATE_LIMIT_DEFER_JITTER_MS,
   DEFAULT_RATE_LIMIT_DEFER_UNTIL_RESET,
@@ -565,6 +566,8 @@ function resolveQueueTriageConfig(
     enabled: readBoolean(queueTriage.enabled) ?? DEFAULT_QUEUE_TRIAGE_ENABLED,
     shadowMode:
       readBoolean(queueTriage.shadow_mode) ?? DEFAULT_QUEUE_TRIAGE_SHADOW_MODE,
+    triagePrep:
+      readBoolean(queueTriage.triage_prep) ?? DEFAULT_QUEUE_TRIAGE_PREP_ENABLED,
     ...resolveStructuralAdvisoryConfig(queueTriage),
     plannerModel:
       readString(queueTriage.planner_model) ??

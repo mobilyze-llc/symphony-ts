@@ -149,6 +149,7 @@ export const DEFAULT_QUEUE_TRIAGE_PLAN_REVIEW_PLANNER_GROUNDING_ENABLED = false;
 export const DEFAULT_QUEUE_TRIAGE_STRUCTURAL_ADVISORIES = false;
 export const DEFAULT_QUEUE_TRIAGE_STRUCTURAL_ADVISORY_DORMANT_OK_TICKS = 3;
 export const DEFAULT_QUEUE_TRIAGE_STRUCTURAL_ADVISORY_RENDER_CAP = 3;
+export const DEFAULT_QUEUE_TRIAGE_PREP_ENABLED = false;
 
 // Watchdog L2 stuck-ticket triage defaults (SYMPH-399). Disabled until the
 // operator opts a product in (calibration gate).

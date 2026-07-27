@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { PlannerRunResult } from "../../src/agent/triage-planner.js";
 import { runTriagePlanner } from "../../src/agent/triage-planner.js";
+import { readCalibrationJournal } from "../../src/calibration/journal-reader.js";
 import {
   DEFAULT_MANAGER_PLAN_IN_FLIGHT_STATES,
   MANAGER_PLAN_RUNTIME_STATE_BASE_URL_ENV,
@@ -89,6 +90,11 @@ ${JSON.stringify({
 })}
 \`\`\`
 `;
+
+const ROOTED_ADVISORY_ARTIFACT = ADVISORY_ARTIFACT.replace(
+  '"confidenceNote":"High"',
+  '"confidenceNote":"High","rootIssueIdentifier":"MOB-10"',
+);
 
 const okRunner = () => async (): Promise<PlannerRunResult> => ({
   status: "ok",
@@ -208,6 +214,33 @@ describe("parseManagerPlanCliArgs", () => {
 
     expect(opts.inFlightStates).toEqual(["Implementing", "Review"]);
     expect(opts.commentEnrichment).toBe(false);
+  });
+
+  it("parses the flag-gated triage-prep transform and repeatable repositories", () => {
+    const opts = parseManagerPlanCliArgs([
+      "--team",
+      "MOB",
+      "--state",
+      "Triage",
+      "--triage-prep",
+      "--triage-prep-repo",
+      "crucible=https://example.com/crucible.git",
+      "--triage-prep-repo",
+      "symphony=https://example.com/symphony-ts.git",
+    ]);
+
+    expect(opts.triagePrep).toBe(true);
+    expect(opts.states).toEqual(["Triage"]);
+    expect(opts.triagePrepRepositories).toEqual([
+      expect.objectContaining({
+        key: "crucible",
+        target: expect.objectContaining({ repoScope: "non_symphony" }),
+      }),
+      expect.objectContaining({
+        key: "symphony",
+        target: expect.objectContaining({ repoScope: "symphony" }),
+      }),
+    ]);
   });
 
   it("parses gh PR context and opt-in persistence controls (SYMPH-838)", () => {
@@ -678,6 +711,97 @@ describe("runManagerPlanCli", () => {
     expect(out()).toContain("non-binding and report-only");
   });
 
+  it("runs triage-prep over Triage candidates, reads open family candidates, and points the prompt at the run artifact", async () => {
+    const { io, out } = captureIo();
+    const outDir = await mkdtemp(join(tmpdir(), "manager-triage-prep-test-"));
+    const familyQueries: ManagerPlanCandidateQuery[] = [];
+    const prepareInputs: Array<{
+      artifactDir: string;
+      candidateCount: number;
+      familyCount: number;
+      commentReaderWired: boolean;
+    }> = [];
+    try {
+      const code = await runManagerPlanCli(
+        [
+          "--team",
+          "MOB",
+          "--state",
+          "Triage",
+          "--triage-prep",
+          "--triage-prep-repo",
+          "crucible=https://example.com/crucible.git",
+          "--prompt-only",
+          "--out-dir",
+          outDir,
+        ],
+        {
+          io,
+          env: {},
+          loadCandidates: async () => [
+            issue("u1", "MOB-1148", 2, { state: "Triage" }),
+            issue("u3", "MOB-1301", 2, {
+              state: "Triage",
+              teamKey: "MOB",
+              projectId: null,
+              projectSlug: null,
+              projectName: null,
+            }),
+          ],
+          loadTriagePrepFamilyCandidates: async (query) => {
+            familyQueries.push(query);
+            return [
+              issue("u1", "MOB-1148", 2, { state: "Triage" }),
+              issue("u2", "MOB-1150"),
+            ];
+          },
+          fetchIssueComments: async () => [],
+          prepareTriagePlannerContext: async (input) => {
+            prepareInputs.push({
+              artifactDir: input.artifactDir,
+              candidateCount: input.candidates.length,
+              familyCount: input.familyCandidates?.length ?? 0,
+              commentReaderWired: input.fetchIssueComments !== undefined,
+            });
+            const artifactPath = join(
+              input.artifactDir,
+              "triage-prep-evidence.json",
+            );
+            return {
+              context: {
+                ...input.context,
+                triagePrepEvidence: {
+                  artifactPath,
+                  sheetCount: 1,
+                  generatedAt: "2026-07-13T12:00:00.000Z",
+                },
+              },
+              artifactPath,
+              batch: { sheets: [{}] },
+            } as never;
+          },
+          createPlannerRunner: okRunner,
+        },
+      );
+
+      expect(code).toBe(0);
+      expect(familyQueries[0]?.activeStates).toContain("Triage");
+      expect(familyQueries[0]?.activeStates).toContain("Backlog");
+      expect(prepareInputs).toEqual([
+        {
+          artifactDir: outDir,
+          candidateCount: 2,
+          familyCount: 2,
+          commentReaderWired: true,
+        },
+      ]);
+      expect(out()).toContain("Deterministic triage-prep evidence");
+      expect(out()).toContain(join(outDir, "triage-prep-evidence.json"));
+    } finally {
+      await rm(outDir, { recursive: true, force: true });
+    }
+  });
+
   it("--prompt-only writes the assembled prompt when --out-dir is provided (SYMPH-961)", async () => {
     const { io, out } = captureIo();
     const outDir = await mkdtemp(join(tmpdir(), "manager-plan-test-"));
@@ -1139,6 +1263,207 @@ describe("runManagerPlanCli", () => {
       ).toBeUndefined();
     } finally {
       await rm(outDir, { recursive: true, force: true });
+    }
+  });
+
+  it("journals emitted advisories as cli-session evidence by default when a run-journal root exists (SYMPH-1140)", async () => {
+    const { io, out } = captureIo();
+    const root = await mkdtemp(join(tmpdir(), "manager-plan-journal-"));
+    await mkdir(join(root, ".symphony", "run-journals"), { recursive: true });
+    const journalStructuralAdvisories = vi.fn<
+      NonNullable<ManagerPlanCliDependencies["journalStructuralAdvisories"]>
+    >(async () => ({
+      appended: [{} as never],
+      skipped: [],
+      invalidAdvisoryCount: 0,
+    }));
+    try {
+      const code = await runManagerPlanCli(
+        ["--team", "MOB", "--state", "Backlog"],
+        {
+          io,
+          env: {},
+          cwd: root,
+          loadCandidates: async () => [
+            issue("u1", "MOB-1"),
+            issue("u2", "MOB-2"),
+          ],
+          createPlannerRunner: () => async () => ({
+            status: "ok",
+            markdown: ADVISORY_ARTIFACT,
+          }),
+          journalStructuralAdvisories,
+        },
+      );
+      expect(code).toBe(0);
+      expect(journalStructuralAdvisories).toHaveBeenCalledTimes(1);
+      const call = journalStructuralAdvisories.mock.calls[0]?.[0];
+      expect(call?.source).toBe("cli-session");
+      expect(call?.root).toBe(root);
+      expect(call?.advisories[0]?.memberIssueIdentifiers).toEqual([
+        "MOB-1",
+        "MOB-2",
+      ]);
+      expect(out()).toContain("journaled as cli-session evidence");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("journals a non-resolving Manager root as a proposed new root", async () => {
+    const { io } = captureIo();
+    const root = await mkdtemp(join(tmpdir(), "manager-plan-root-"));
+    const resolveRootIssueIdentifier = vi.fn(async () => false);
+    try {
+      const code = await runManagerPlanCli(
+        [
+          "--team",
+          "MOB",
+          "--state",
+          "Backlog",
+          "--journal",
+          "--journal-root",
+          root,
+          "--json",
+        ],
+        {
+          io,
+          env: {},
+          loadCandidates: async () => [
+            issue("u1", "MOB-1"),
+            issue("u2", "MOB-2"),
+          ],
+          resolveRootIssueIdentifier,
+          createPlannerRunner: () => async () => ({
+            status: "ok",
+            markdown: ROOTED_ADVISORY_ARTIFACT,
+          }),
+        },
+      );
+
+      expect(code).toBe(0);
+      expect(resolveRootIssueIdentifier).toHaveBeenCalledWith("MOB-10");
+      expect((await readCalibrationJournal(root))[0]?.metadata).toMatchObject({
+        source: "cli-session",
+        advisory_class: "2:proposed-new-root",
+        root_hypothesis_kind: "proposed-new-root",
+        root_issue_identifier: null,
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("skips an advisory containing a member outside the presented planner context (SYMPH-1140)", async () => {
+    const { io, out } = captureIo();
+    const root = await mkdtemp(join(tmpdir(), "manager-plan-invalid-member-"));
+    try {
+      const code = await runManagerPlanCli(
+        [
+          "--team",
+          "MOB",
+          "--state",
+          "Backlog",
+          "--journal",
+          "--journal-root",
+          root,
+          "--json",
+        ],
+        {
+          io,
+          env: {},
+          loadCandidates: async () => [issue("u1", "MOB-1")],
+          createPlannerRunner: () => async () => ({
+            status: "ok",
+            markdown: ADVISORY_ARTIFACT,
+          }),
+        },
+      );
+
+      expect(code).toBe(0);
+      expect(await readCalibrationJournal(root)).toEqual([]);
+      expect(JSON.parse(out()).structuralAdvisoryJournal).toMatchObject({
+        journaledCount: 0,
+        skippedCount: 1,
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("--no-journal preserves preview-only even when a run-journal root exists (SYMPH-1140)", async () => {
+    const { io, out } = captureIo();
+    const root = await mkdtemp(join(tmpdir(), "manager-plan-nojournal-"));
+    await mkdir(join(root, ".symphony", "run-journals"), { recursive: true });
+    const journalStructuralAdvisories = vi.fn();
+    const resolveRootIssueIdentifier = vi.fn(async () => true);
+    try {
+      const code = await runManagerPlanCli(
+        ["--team", "MOB", "--state", "Backlog", "--no-journal", "--json"],
+        {
+          io,
+          env: {},
+          cwd: root,
+          loadCandidates: async () => [issue("u1", "MOB-1")],
+          createPlannerRunner: () => async () => ({
+            status: "ok",
+            markdown: ROOTED_ADVISORY_ARTIFACT,
+          }),
+          journalStructuralAdvisories,
+          resolveRootIssueIdentifier,
+        },
+      );
+      expect(code).toBe(0);
+      expect(journalStructuralAdvisories).not.toHaveBeenCalled();
+      expect(resolveRootIssueIdentifier).not.toHaveBeenCalled();
+      expect(JSON.parse(out()).structuralAdvisoryDisposition).toBe(
+        "preview_only_not_journaled",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("--journal forces journaling even when no run-journal root exists yet (SYMPH-1140)", async () => {
+    const { io } = captureIo();
+    const root = await mkdtemp(join(tmpdir(), "manager-plan-forcejournal-"));
+    const journalStructuralAdvisories = vi.fn<
+      NonNullable<ManagerPlanCliDependencies["journalStructuralAdvisories"]>
+    >(async () => ({
+      appended: [{} as never],
+      skipped: [],
+      invalidAdvisoryCount: 0,
+    }));
+    try {
+      const code = await runManagerPlanCli(
+        [
+          "--team",
+          "MOB",
+          "--state",
+          "Backlog",
+          "--journal",
+          "--journal-root",
+          root,
+        ],
+        {
+          io,
+          env: {},
+          loadCandidates: async () => [
+            issue("u1", "MOB-1"),
+            issue("u2", "MOB-2"),
+          ],
+          createPlannerRunner: () => async () => ({
+            status: "ok",
+            markdown: ADVISORY_ARTIFACT,
+          }),
+          journalStructuralAdvisories,
+        },
+      );
+      expect(code).toBe(0);
+      expect(journalStructuralAdvisories).toHaveBeenCalledTimes(1);
+      expect(journalStructuralAdvisories.mock.calls[0]?.[0].root).toBe(root);
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 

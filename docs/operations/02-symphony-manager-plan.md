@@ -6,7 +6,9 @@
 
 ## Purpose
 
-One-shot, **output-only** run of the Queue Triage v2 backlog **Manager (the planner)** against a Linear team / project / initiative's eligible backlog. It prints the suggested batch plan and exits. It spends **one Opus pass** (unless `--prompt-only`) and writes **nothing** to Linear, the live standing-plan store, or dispatch — so it is safe to run any time to preview what the Manager would propose. It reuses the exact planner core the live shadow tick uses; only the candidate *source* is a standalone read. (SYMPH-837 / SYMPH-858 / SYMPH-867.)
+One-shot run of the Queue Triage v2 backlog **Manager (the planner)** against a Linear team / project / initiative's eligible backlog. It prints the suggested batch plan and exits. It spends **one Opus pass** (unless `--prompt-only`) and writes **nothing** to Linear, the live standing-plan store, or dispatch. It reuses the exact planner core the live shadow tick uses; only the candidate *source* is a standalone read. (SYMPH-837 / SYMPH-858 / SYMPH-867.)
+
+By default it **journals the emitted structural advisories** as `cli-session` evidence into the existing dispatcher run journal (`.symphony/run-journals/dispatcher.jsonl`) whenever a run-journal root is present — the same journal the automated tick and the calibration digest already use. This is advisory *evidence only*, keyed by the existing structural-advisory fingerprint identity; it is **not** a plan mutation and is **not** a new persistence system. Use `--no-journal` to preserve the old preview-only behavior, or `--journal` to force journaling (and create the root) even when one does not exist yet. Advisory *grading* is a separate step — the interactive session agent records its decision with `symphony-advisory-grade` (source `cli-session`); `symphonyctl grade-advisory` remains the manual escape hatch. (SYMPH-1140.)
 
 ## Installed location
 
@@ -23,10 +25,12 @@ One-shot, **output-only** run of the Queue Triage v2 backlog **Manager (the plan
 Usage: symphony-manager-plan (--team <KEY> | --project <name-or-slugId> | --initiative <name|uuid>)... [--state <name>...] [options]
 
 Run the Queue Triage v2 backlog Manager (planner) ONE-SHOT against the scoped
-eligible backlog and print the suggested batch plan. Output-only: it spends one
-Opus planner pass unless --prompt-only, and writes NOTHING to Linear,
-the live standing-plan store, or dispatch. --persist writes only to an isolated
-manager-plan store under this run's artifact directory.
+eligible backlog and print the suggested batch plan. It spends one Opus planner
+pass unless --prompt-only, and writes NOTHING to Linear, the live standing-plan
+store, or dispatch. --persist writes only to an isolated manager-plan store under
+this run's artifact directory. By default it journals emitted structural
+advisories as cli-session evidence into an existing dispatcher run journal when
+one exists (--no-journal preserves preview-only; --journal forces it).
 
 Scope (provide at least one; additive — combine them to narrow):
   --team <KEY>                 Linear team key whose backlog to plan (e.g. MOB)
@@ -50,6 +54,8 @@ Options:
   --gh-pr-context              Source open/recently merged PR context from gh
   --github-repo <OWNER/REPO>   GitHub repo for --gh-pr-context
   --planner-grounding          Add report-only code grounding evidence to the planner prompt
+  --triage-prep                Emit fresh deterministic per-finding evidence and add its read-only prompt pointer
+  --triage-prep-repo <key=url> Repository to inspect at fresh origin/main (repeatable; or use env JSON)
   --planner-grounding-repo-url <url>
                                Repository URL for planner grounding (defaults env/git remote)
   --planner-grounding-commit <sha>
@@ -57,6 +63,9 @@ Options:
   --planner-grounding-repo-scope <symphony|non_symphony>
                                Explicit grounding repo scope (defaults inferred from repo URL)
   --persist                    Persist the plan revision to an isolated artifact store
+  --journal                    Force journaling emitted advisories as cli-session evidence
+  --no-journal                 Preview only — do not journal emitted advisories
+  --journal-root <path>        Run-journal root (defaults to the working directory)
   --prompt-only                Print the assembled planner prompt and exit (no Opus pass)
   --json                       Emit the plan as JSON
   --help                       Show this help text
@@ -74,6 +83,8 @@ Environment:
                                Optional symphony/non_symphony scope for --planner-grounding
   SYMPHONY_MANAGER_PLAN_RUNTIME_STATE_BASE_URL
                                Optional runtime host base URL for live in-flight issues
+  SYMPHONY_TRIAGE_PREP_REPOSITORIES
+                               Optional JSON array of {"key","repoUrl"} repositories for --triage-prep
 ```
 <!-- AUTOGEN:help END -->
 
@@ -106,6 +117,11 @@ symphony-manager-plan --initiative "Autonomous Work Selection & Dispatch" --prom
 
 # Additive scope + machine-readable output
 symphony-manager-plan --team SYMPH --project 9c1064215e8d --json
+
+# Triage rubric input: fresh read-only evidence, no model pass
+symphony-manager-plan --team MOB --state Triage --triage-prep --prompt-only \
+  --triage-prep-repo crucible=https://github.com/mobilyze-llc/crucible.git \
+  --out-dir /tmp/mob-triage
 ```
 
 ## Edge cases & gotchas
@@ -116,6 +132,7 @@ symphony-manager-plan --team SYMPH --project 9c1064215e8d --json
 - **Empty result** → exit 0 with `No eligible candidates for <scope> in state(s) [...]`. Usually means `--state` doesn't match the scope's real state names, or the scope is empty.
 - **`--page-size 0` (or any non-positive integer)** → exit 1; `--concurrency-ceiling` likewise must be a positive integer.
 - **Portfolio-held candidates** are excluded before planning (the human/JSON output reports how many were held).
+- **Triage-prep sheets are ephemeral.** `--triage-prep` writes `triage-prep-evidence.json` under the current `--out-dir` (or generated run directory), fetches every configured repository's fresh `origin/main`, and adds one read-only pointer to the prompt. It never attaches the sheet or writes a disposition to Linear. Use repeatable `--triage-prep-repo <key=url>` flags or `SYMPHONY_TRIAGE_PREP_REPOSITORIES` JSON for multi-repository findings.
 
 ## Exit codes
 

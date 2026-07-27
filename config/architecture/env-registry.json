@@ -346,6 +346,13 @@
       ]
     },
     {
+      "name": "SYMPHONY_CRABRUNNER_STATIC_SLOTS_JSON",
+      "read_sites": [
+        "src/claude-runner/crabrunner-claude-runner.ts",
+        "src/cli/main.ts"
+      ]
+    },
+    {
       "name": "SYMPHONY_CRABRUNNER_TARGET_REPO",
       "read_sites": [
         "src/claude-runner/crabrunner-claude-runner.ts",
@@ -472,6 +479,13 @@
       "read_sites": ["src/orchestrator/runtime-host.ts"]
     },
     {
+      "name": "SYMPHONY_TRIAGE_PREP_REPOSITORIES",
+      "read_sites": [
+        "src/cli/manager-plan.ts",
+        "src/orchestrator/triage-prep.ts"
+      ]
+    },
+    {
       "name": "SYMPHONY_REVIEW_AGGREGATOR_AUTHORITATIVE",
       "read_sites": ["src/review/headless-council-gate.ts"]
     },
@@ -485,7 +499,10 @@
     },
     {
       "name": "SYMPHONY_REVIEW_QUALITY_LEDGER",
-      "read_sites": ["src/review/spine/review-quality-ledger-client.ts"]
+      "read_sites": [
+        "src/orchestrator/triage-prep-ledger.ts",
+        "src/review/spine/review-quality-ledger-client.ts"
+      ]
     },
     {
       "name": "SYMPHONY_REVIEW_QUALITY_LEDGER_PATH",

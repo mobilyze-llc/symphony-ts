@@ -103,6 +103,21 @@ Usage:
 ```
 <!-- AUTOGEN:help:symphony-linear-portfolio END -->
 
+## symphony-investigate-productivity-report
+
+<!-- AUTOGEN:help:symphony-investigate-productivity-report START — managed by scripts/docs-sync.mjs -->
+```text
+Usage: symphony-investigate-productivity-report --workspace <repo-root> [--output <file>]
+
+Reads durable dispatcher stage_record telemetry and prints investigate productivity JSON.
+
+Options:
+  --workspace <dir>  Workspace containing .symphony/run-journals/dispatcher.jsonl
+  --output <file>    Also write the JSON report to this file
+  --help             Show this help
+```
+<!-- AUTOGEN:help:symphony-investigate-productivity-report END -->
+
 ## symphony-spec-review-watch
 
 <!-- AUTOGEN:help:symphony-spec-review-watch START — managed by scripts/docs-sync.mjs -->

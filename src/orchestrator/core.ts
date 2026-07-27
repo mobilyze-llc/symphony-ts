@@ -216,6 +216,7 @@ import { partitionByAdmission } from "./standing-plan-admission.js";
 import {
   type AdvisoryMemberActivitySnapshot,
   type StructuralAdvisoryGradeDecision,
+  type StructuralAdvisorySource,
   buildBacklogManagerCalibrationProjection,
   buildStructuralAdvisoryGradeJournalEntry,
   buildStructuralAdvisoryJournalEntry,
@@ -3436,6 +3437,7 @@ export class OrchestratorCore {
     actor: IntentActor;
     reason: string;
     timestamp?: string;
+    source?: StructuralAdvisorySource;
   }): Promise<{
     status: "applied" | "conflict";
     detail: string;
